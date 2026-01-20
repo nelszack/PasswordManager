@@ -1,5 +1,7 @@
+mod clpboard;
 mod password;
 use clap::{Args, Parser, Subcommand};
+use clpboard::*;
 use password::*;
 
 #[derive(Parser)]
@@ -11,6 +13,7 @@ struct Cli {
 enum Commands {
     Genpass(GenpassArgs),
     Passcheck(PasscheckArgs),
+    Clpb(ClpbArgs),
 }
 
 #[derive(Args)]
@@ -24,12 +27,17 @@ struct GenpassArgs {
 struct PasscheckArgs {
     password: String,
 }
-
+#[derive(Args)]
+struct ClpbArgs {
+    #[arg(short, long, default_value_t = 10)]
+    timeout: u8,
+}
 fn main() {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Genpass(command)) => gen_pass(command.length, command.stats),
-        Some(Commands::Passcheck(command)) => pass_str(command.password),
+        Some(Commands::Passcheck(command)) => pass_str(&command.password),
+        Some(Commands::Clpb(command)) => cpy("testpass", command.timeout),
         None => println!("no args todo gui"),
     }
 }

@@ -1,5 +1,6 @@
 use rand::{distributions::Uniform, prelude::*};
 use zxcvbn::{Score, zxcvbn};
+use crate::clpboard::cpy;
 
 pub fn gen_pass(len: u8,stats:bool) {
     if len<12{
@@ -18,10 +19,11 @@ pub fn gen_pass(len: u8,stats:bool) {
         .collect();
     println!("password: {}", pass);
     if !stats{
-        pass_str(pass);
+        pass_str(&pass);
     }
+    cpy(&pass, 10);
 }
-pub fn pass_str(pass: String) {
+pub fn pass_str(pass: &String) {
     println!("password stats:");
     let estimate = zxcvbn(&pass, &[]);
     let entropy = (estimate.guesses() as f64).log2();
