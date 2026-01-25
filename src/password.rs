@@ -1,9 +1,10 @@
-use rand::{distributions::Uniform, prelude::*};
-use zxcvbn::{Score, zxcvbn};
 use crate::clpboard::cpy;
+use rand::{distributions::Uniform, prelude::*};
+use zeroize::Zeroize;
+use zxcvbn::{Score, zxcvbn};
 
-pub fn gen_pass(len: u8,stats:bool) {
-    if len<12{
+pub fn gen_pass(len: u8, stats: bool) {
+    if len < 12 {
         println!("for better security the recomended password length at least 12")
     }
     const CHARSET: &[u8] =
@@ -11,17 +12,18 @@ pub fn gen_pass(len: u8,stats:bool) {
     let mut rng = rand::rngs::OsRng;
     let range = Uniform::from(0..CHARSET.len());
 
-    let pass: String = (0..len)
+    let mut pass: String = (0..len)
         .map(|_| {
             let idx = rng.sample(range);
             CHARSET[idx] as char
         })
         .collect();
     println!("password: {}", pass);
-    if !stats{
+    if stats {
         pass_str(&pass);
     }
     cpy(&pass, 10);
+    pass.zeroize();
 }
 pub fn pass_str(pass: &String) {
     println!("password stats:");

@@ -1,0 +1,4 @@
+
+thread 'main' (19904) panicked at src\background.rs:75:69:
+called `Result::unwrap()` on an `Err` value: Custom("invalid value: integer `2561`, expected variant index 0 <= i < 6")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

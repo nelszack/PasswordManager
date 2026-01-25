@@ -10,3 +10,13 @@ zxcvbn = "3"
 arboard ="3"
 serde={ version = "1.0", features = ["derive"] }
 toml="0.9"
+zeroize = { version = "1.7", features = ["derive"] }
+rmp-serde="1"
+hkdf="0.12"
+sha2="0.10"
+base64="0.22"
+argon2 = "0.5"
+password-hash="0.5"
+rpassword="7.4"
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+bincode = "1.3"

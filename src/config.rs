@@ -1,7 +1,7 @@
-use crate::ConfigArgs;
+use crate::{ConfigArgs, file_exists};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
-const CONFIG_PATH:&str="config.toml";
+use std::fs;
+const CONFIG_PATH: &str = "config.toml";
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -12,7 +12,7 @@ pub struct Config {
 #[derive(Serialize, Deserialize)]
 pub struct Genpassconf {
     pub length: u8,
-    pub no_stats: bool,
+    pub stats: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,7 +24,7 @@ fn default_config(write_to_file: bool) -> Config {
     let config = Config {
         genpass: Genpassconf {
             length: 12,
-            no_stats: false,
+            stats: true,
         },
         clpboard: Clpbconf { timeout: 10 },
     };
@@ -34,14 +34,9 @@ fn default_config(write_to_file: bool) -> Config {
     }
     return config;
 }
-fn is_config() -> bool {
-    if Path::new(CONFIG_PATH).exists() {
-        return true;
-    }
-    return false;
-}
+
 pub fn read_config() -> Config {
-    if !is_config() {
+    if !file_exists(CONFIG_PATH) {
         return default_config(true);
     }
     let text = std::fs::read_to_string(CONFIG_PATH).unwrap();
@@ -57,8 +52,8 @@ pub fn update(modify: ConfigArgs) {
     if let Some(i) = modify.genpass_length {
         config.genpass.length = i;
     }
-    if let Some(i) = modify.genpass_no_stats {
-        config.genpass.no_stats = i
+    if let Some(i) = modify.genpass_stats {
+        config.genpass.stats = i
     }
     if let Some(i) = modify.clpb_timeout {
         config.clpboard.timeout = i
