@@ -133,15 +133,15 @@ pub fn unlock_vault(mut vault: Vault, key_pass: &[u8]) -> OpenVault {
     }
 }
 
-pub fn lock_vault(open: OpenVault, key_wrap: KeyWrap) {
-    let vlt = Vault {
-        version: 1,
-        vault_metadata: open.meta_data,
-        key_wraps: key_wrap,
-        entries: encrypt_e(&open.master_key, open.entries),
-    };
-    save_vault(vlt);
-}
+// pub fn lock_vault(open: OpenVault, key_wrap: KeyWrap) {
+//     let vlt = Vault {
+//         version: 1,
+//         vault_metadata: open.meta_data,
+//         key_wraps: key_wrap,
+//         entries: encrypt_e(&open.master_key, open.entries),
+//     };
+//     save_vault(vlt);
+// }
 
 fn save_vault(vault: Vault) {
     let buf = rmp_serde::to_vec(&vault).unwrap();

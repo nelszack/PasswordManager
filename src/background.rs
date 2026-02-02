@@ -70,10 +70,9 @@ fn worker_loop(time: u64) {
 
         // Check for incoming connections
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 128];
+            let mut buf = [0u8; 1024];
             if let Ok(len) = stream.read(&mut buf) {
                 let msg:Message = bincode::deserialize(&buf[..len]).unwrap();
-
                 match msg {
                     Message::Command(k) => {
                         match k.as_str(){
@@ -140,7 +139,7 @@ fn send_command(command: Message) {
                 Message::Command(m)=>bincode::serialize(&m).unwrap()
             };
             let _ = stream.write_all(&msg);
-            let mut buf = [0u8; 256];
+            let mut buf = [0u8; 1024];
             if let Ok(len) = stream.read(&mut buf) {
                 print!("{}", String::from_utf8_lossy(&buf[..len]));
             }

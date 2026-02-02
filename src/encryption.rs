@@ -85,19 +85,19 @@ pub fn decrypt_e(master_key: &[u8], entries: Vec<Entry>) -> Vec<DecryptEntry> {
     }
     d_entries
 }
-pub fn encrypt_e(master_key: &[u8], entries: Vec<DecryptEntry>) -> Vec<Entry> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(master_key));
-    let mut enc_entrys = Vec::new();
-    for i in entries {
-        let nonce = gen_nonce();
-        let enc = cipher
-            .encrypt(Nonce::from_slice(&nonce), i.text.as_ref())
-            .unwrap();
-        enc_entrys.push(Entry {
-            id: i.id,
-            nonce: nonce.to_vec(),
-            ciphertext: enc,
-        });
-    }
-    enc_entrys
-}
+// pub fn encrypt_e(master_key: &[u8], entries: Vec<DecryptEntry>) -> Vec<Entry> {
+//     let cipher = ChaCha20Poly1305::new(Key::from_slice(master_key));
+//     let mut enc_entrys = Vec::new();
+//     for i in entries {
+//         let nonce = gen_nonce();
+//         let enc = cipher
+//             .encrypt(Nonce::from_slice(&nonce), i.text.as_ref())
+//             .unwrap();
+//         enc_entrys.push(Entry {
+//             id: i.id,
+//             nonce: nonce.to_vec(),
+//             ciphertext: enc,
+//         });
+//     }
+//     enc_entrys
+// }
