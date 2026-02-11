@@ -1,9 +1,9 @@
+use crate::clpboard::cpy;
 use rand::{distributions::Uniform, prelude::*};
 use zxcvbn::{Score, zxcvbn};
-use crate::clpboard::cpy;
 
-pub fn gen_pass(len: u8,stats:bool) {
-    if len<12{
+pub fn gen_pass(len: u8, stats: bool) {
+    if len < 12 {
         println!("for better security the recomended password length at least 12")
     }
     const CHARSET: &[u8] =
@@ -18,11 +18,12 @@ pub fn gen_pass(len: u8,stats:bool) {
         })
         .collect();
     println!("password: {}", pass);
-    if !stats{
+    if stats {
         pass_str(&pass);
     }
     cpy(&pass, 10);
 }
+
 pub fn pass_str(pass: &String) {
     println!("password stats:");
     let estimate = zxcvbn(&pass, &[]);
