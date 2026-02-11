@@ -1,28 +1,68 @@
-use arboard::Clipboard;
-use std::{io::Write, thread, time::Duration};
+use crate::cli::ConfigArgs;
+use serde::{Deserialize, Serialize};
+use std::{fs, path::Path};
+const CONFIG_PATH: &str = "config.toml";
 
-pub fn cpy(secret: &str, timeout: u8) {
-    let mut clipboard = Clipboard::new().unwrap();
-    clipboard.set_text(secret).unwrap();
-    println!("copyied to clipboard");
-    let secret = secret.to_owned();
-    let size = (timeout.ilog10() as usize) + 1;
-    println!("{}", size);
-    let t = thread::spawn(move || {
-        thread::sleep(Duration::from_secs(timeout as u64));
-        if let Ok(mut cb) = Clipboard::new() {
-            if cb.get_text().ok().as_deref() == Some(&secret) {
-                // let _ = cb.set_text("");
-                let _ = cb.clear();
-                let add_size = size + 12;
-                println!("\rclipboard cleared {:add_size$}", "")
-            }
-        }
-    });
-    for i in (1..=timeout).rev() {
-        print!("\rclear clipboard in {:^size$} seconds", i);
-        std::io::stdout().flush().unwrap();
-        thread::sleep(Duration::from_secs(1));
+#[derive(Serialize, Deserialize)]
+pub struct Config {
+    pub genpass: Genpassconf,
+    pub clpboard: Clpbconf,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Genpassconf {
+    pub length: u8,
+    pub stats: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Clpbconf {
+    pub timeout: u8,
+}
+
+fn default_config(write_to_file: bool) -> Config {
+    let config = Config {
+        genpass: Genpassconf {
+            length: 12,
+            stats: false,
+        },
+        clpboard: Clpbconf { timeout: 10 },
+    };
+    if write_to_file {
+        let toml_string = toml::to_string(&config).unwrap();
+        fs::write(CONFIG_PATH, &toml_string).unwrap();
     }
-    let _ = t.join();
+    return config;
+}
+fn is_config() -> bool {
+    if Path::new(CONFIG_PATH).exists() {
+        return true;
+    }
+    return false;
+}
+pub fn read_config() -> Config {
+    if !is_config() {
+        return default_config(true);
+    }
+    let text = std::fs::read_to_string(CONFIG_PATH).unwrap();
+    let config: Config = toml::from_str(&text).unwrap();
+    return config;
+}
+
+pub fn update(modify: ConfigArgs) {
+    let mut config: Config = read_config();
+    if modify.defalt {
+        config = default_config(false);
+    }
+    if let Some(i) = modify.genpass_length {
+        config.genpass.length = i;
+    }
+    if let Some(i) = modify.genpass_stats {
+        config.genpass.stats = i
+    }
+    if let Some(i) = modify.clpb_timeout {
+        config.clpboard.timeout = i
+    }
+    let toml_string = toml::to_string_pretty(&config).unwrap();
+    fs::write(CONFIG_PATH, &toml_string).unwrap();
 }
