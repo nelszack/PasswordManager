@@ -17,6 +17,7 @@ use crate::{
     server::{server, start},
     types::{DeleteType, PasswordEntry, PasswordType, ServerCommands, UnlockInfo, UpdateStruct},
     vault::create_vault,
+    encryption::create_password
 };
 
 fn main() {
@@ -66,13 +67,12 @@ fn main() {
             CliCommands::Add {
                 name,
                 username,
-                password,
                 url,
                 notes,
             } => manager(ServerCommands::Add(PasswordEntry {
                 name: name,
                 username: username,
-                password: password,
+                password: create_password(),
                 url: url,
                 notes: notes,
                 which: None,

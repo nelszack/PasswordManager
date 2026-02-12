@@ -13,7 +13,7 @@ use std::{
     path::Path,
 };
 
-fn create_password() -> String {
+pub fn create_password() -> String {
     loop {
         let p1 = rpassword::prompt_password("enter password ").unwrap();
         let p2 = rpassword::prompt_password("enter password again ").unwrap();

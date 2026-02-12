@@ -46,7 +46,7 @@ pub struct PasswordEntry {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum DeleteType {
-    Id(u64),
+    Id(usize),
     Name(String),
 }
 

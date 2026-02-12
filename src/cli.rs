@@ -53,8 +53,6 @@ pub enum CliCommands {
         #[arg(long)]
         username: Option<String>,
         #[arg(long)]
-        password: String,
-        #[arg(long)]
         url: Option<String>,
         #[arg(long)]
         notes: Option<String>,
@@ -96,8 +94,8 @@ pub struct UpdateArgs {
     pub name: Option<String>,
     #[arg(long)]
     pub username: Option<String>,
-    #[arg(long)]
-    pub password: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub password: bool,
     #[arg(long)]
     pub url: Option<String>,
     #[arg(long)]
@@ -111,7 +109,7 @@ pub struct DeleteArgs {
         conflicts_with = "entry_name",
         required_unless_present = "entry_name"
     )]
-    pub id: Option<u64>,
+    pub id: Option<usize>,
     #[arg(long, conflicts_with = "id", required_unless_present = "id")]
     pub entry_name: Option<String>,
 }

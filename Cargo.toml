@@ -14,15 +14,12 @@ rpassword="7.4"
 bincode = "1.3"
 zeroize = { version = "1.7", features = ["derive"] }
 rmp-serde="1"
-hkdf="0.12"
-sha2="0.10"
-base64="0.22"
 password-hash="0.5"
 argon2 = "0.5"
 chacha20poly1305 = { version = "0.10", features = ["alloc"] }
-bson = "2.9"
 rand_core = "0.6"
-secrecy = "0.8"
 blake3 = "1.5"
 hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
 

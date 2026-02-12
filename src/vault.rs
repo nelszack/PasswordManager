@@ -1,5 +1,5 @@
 use crate::{
-    encryption::{decrypt_file, encrypt_file, gen_master_key},
+    encryption::{create_password, decrypt_file, encrypt_file, gen_master_key},
     file::file_exists,
     types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
 };
@@ -7,17 +7,19 @@ use blake3;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, read, write},
-    path::Path,
+    path::Path
 };
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct VaultEnteries {
-    pub id: u64,
+    pub id: usize,
     pub name: String,
     pub username: Option<String>,
     pub password: String,
     pub url: Option<String>,
     pub notes: Option<String>,
+    pub created: String,
+    pub modified: String,
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct VaultMetadata {
@@ -59,16 +61,11 @@ pub fn create_vault(mut pass_type: PasswordType) {
             filename: fname.clone(),
         },
     };
-    lock_vault(pass_type, vault);
+    vault.lock_vault(pass_type);
     println!("Vault created");
 }
-pub fn lock_vault(key_pass: PasswordType, vlt: Vault) {
-    let fname = vlt.metadata.filename.clone();
-    let buf = rmp_serde::to_vec(&vlt).unwrap();
-    let txt = encrypt_file(key_pass, &buf[..]);
-    write(fname, txt).unwrap();
-}
-pub fn unlock_vault(mut key_pass: &mut PasswordType) -> Vault {
+
+fn unlock_vault(mut key_pass: &mut PasswordType) -> Vault {
     let fname = get_filename(&mut key_pass, false);
     let contents = read(fname).unwrap();
     let dec = decrypt_file(&mut key_pass, &contents);
@@ -76,121 +73,209 @@ pub fn unlock_vault(mut key_pass: &mut PasswordType) -> Vault {
     // println!("{:?}", vault);
     vault
 }
-pub fn add_entry(mut vlt: Vault, info: PasswordEntry) -> Vault {
-    let nid = vlt.enteries.len() + 1;
-    let nentrty = VaultEnteries {
-        id: nid as u64,
-        name: info.name,
-        username: info.username,
-        password: info.password,
-        url: info.url,
-        notes: info.notes,
-    };
-    vlt.enteries.append(&mut vec![nentrty]);
-    vlt
+
+impl Vault {
+    pub fn get_entry(&self, a: DeleteType) {
+        match a {
+            DeleteType::Id(i) => {
+                println!("{:?}", self.enteries[i - 1])
+            }
+            DeleteType::Name(n) => {
+                for i in 0..self.enteries.len() {
+                    if self.enteries[i].name == n {
+                        println!("{:?}", self.enteries[i - 1]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn add_entry(&mut self, info: PasswordEntry) {
+        let nid = self.enteries.len() + 1;
+
+        let mut exists = false;
+        for i in &self.enteries {
+            if i.name == info.name {
+                exists = true;
+            }
+        }
+        if exists {
+            println!("name already exists choose another name");
+            return;
+        }
+
+        let nentrty = VaultEnteries {
+            id: nid,
+            name: info.name,
+            username: info.username,
+            password: info.password,
+            url: info.url,
+            notes: info.notes,
+            created: chrono::Local::now().to_string(),
+            modified: chrono::Local::now().to_string(),
+        };
+        self.enteries.append(&mut vec![nentrty]);
+    }
+
+    pub fn delete_entry(&mut self, id: DeleteType) {
+        match id {
+            DeleteType::Id(i) => {
+                self.enteries.remove(i);
+                // for i in 0..self.enteries.len() {
+                //     if self.enteries[i].id == j {
+                //         self.enteries.remove(i);
+                //         break;
+                //     }
+                // }
+            }
+            DeleteType::Name(n) => {
+                for i in 0..self.enteries.len() {
+                    if self.enteries[i].name == n {
+                        self.enteries.remove(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        for i in 1..=self.enteries.len() {
+            self.enteries[i - 1].id = i;
+        }
+    }
+
+    pub fn update_entry(&mut self, add: UpdateStruct) {
+        match add.which {
+            DeleteType::Id(mut i) => {
+                if i == 0 || i > self.enteries.len() {
+                    panic!("not valid id");
+                }
+                i = i - 1;
+                let mut modified = false;
+                if add.update.name.is_some() {
+                    self.enteries[i].name = add.update.name.unwrap();
+                    modified = true;
+                }
+                if add.update.notes.is_some() {
+                    self.enteries[i].notes = add.update.notes;
+                    modified = true;
+                }
+                if add.update.password {
+                    self.enteries[i].password = create_password();
+                    modified = true;
+                }
+                if add.update.url.is_some() {
+                    self.enteries[i].url = add.update.url;
+                    modified = true;
+                }
+                if add.update.username.is_some() {
+                    self.enteries[i].username = add.update.username;
+                    modified = true;
+                }
+                if modified {
+                    self.enteries[i].modified = chrono::Local::now().to_string()
+                }
+            }
+            DeleteType::Name(n) => {
+                for i in 0..self.enteries.len() {
+                    if self.enteries[i].name == n {
+                        let mut modified = false;
+                        if add.update.name.is_some() {
+                            self.enteries[i].name = add.update.name.unwrap();
+                            modified = true;
+                        }
+                        if add.update.notes.is_some() {
+                            self.enteries[i].notes = add.update.notes;
+                            modified = true;
+                        }
+                        if add.update.password {
+                            self.enteries[i].password = create_password();
+                            modified = true;
+                        }
+                        if add.update.url.is_some() {
+                            self.enteries[i].url = add.update.url;
+                            modified = true;
+                        }
+                        if add.update.username.is_some() {
+                            self.enteries[i].username = add.update.username;
+                            modified = true;
+                        }
+                        if modified {
+                            self.enteries[i].modified = chrono::Local::now().to_string();
+                            
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn view_entries(&self) {
+        let enteries = &self.enteries[..];
+        if enteries.len() == 0 {
+            println!("No entries");
+        }
+        for i in enteries {
+            println!("{}. {} {:?}", i.id, i.name, i.username);
+        }
+    }
+
+    pub fn lock_vault(&self, key_pass: PasswordType) {
+        let fname = self.metadata.filename.clone();
+        let buf = rmp_serde::to_vec(&self).unwrap();
+        let txt = encrypt_file(key_pass, &buf[..]);
+        write(fname, txt).unwrap();
+    }
 }
-pub fn delete_entry(mut vlt: Vault, id: DeleteType) -> Vault {
-    match id {
-        DeleteType::Id(j) => {
-            for i in 0..vlt.enteries.len() {
-                if vlt.enteries[i].id == j {
-                    vlt.enteries.remove(i);
-                    break;
-                }
-            }
-        }
-        DeleteType::Name(n) => {
-            for i in 0..vlt.enteries.len() {
-                if vlt.enteries[i].name == n {
-                    vlt.enteries.remove(i);
-                    break;
-                }
-            }
-        }
-    }
 
-    for i in 1..=vlt.enteries.len() {
-        vlt.enteries[i - 1].id = i as u64;
-    }
-    vlt
+pub trait VaultFns {
+    fn get_entry(&self, a: DeleteType);
+    fn add_entry(&mut self, info: PasswordEntry);
+    fn delete_entry(&mut self, id: DeleteType);
+    fn update_entry(&mut self, add: UpdateStruct);
+    fn view_entries(&self);
+    fn lock_vault(&self, key_pass: PasswordType);
+    fn unlock_vault(&mut self, key_pass: &mut PasswordType);
 }
 
-pub fn view_entries(vlt: Vault) -> Vault {
-    for i in &vlt.enteries[..] {
-        println!("{}. {} {:?}", i.id, i.name, i.username);
-    }
-    vlt
-}
-
-pub fn update_entry(mut vlt: Vault, add: UpdateStruct) -> Vault {
-    match add.which {
-        DeleteType::Id(j) => {
-            for i in 0..vlt.enteries.len() {
-                if vlt.enteries[i].id == j {
-                    if add.update.name.is_some() {
-                        vlt.enteries[i].name = add.update.name.unwrap()
-                    }
-                    if add.update.notes.is_some() {
-                        vlt.enteries[i].notes = add.update.notes
-                    }
-                    if add.update.password.is_some() {
-                        vlt.enteries[i].password = add.update.password.unwrap()
-                    }
-                    if add.update.url.is_some() {
-                        vlt.enteries[i].url = add.update.url
-                    }
-                    if add.update.username.is_some() {
-                        vlt.enteries[i].username = add.update.username
-                    }
-
-                    break;
-                }
-            }
+impl VaultFns for Option<Vault> {
+    fn get_entry(&self, a: DeleteType) {
+        if let Some(vlt) = self {
+            vlt.get_entry(a)
         }
-        DeleteType::Name(n) => {
-            for i in 0..vlt.enteries.len() {
-                if vlt.enteries[i].name == n {
-                    if add.update.name.is_some() {
-                        vlt.enteries[i].name = add.update.name.unwrap()
-                    }
-                    if add.update.notes.is_some() {
-                        vlt.enteries[i].notes = add.update.notes
-                    }
-                    if add.update.password.is_some() {
-                        vlt.enteries[i].password = add.update.password.unwrap()
-                    }
-                    if add.update.url.is_some() {
-                        vlt.enteries[i].url = add.update.url
-                    }
-                    if add.update.username.is_some() {
-                        vlt.enteries[i].username = add.update.username
-                    }
-                    break;
-                }
-            }
+    }
+    fn add_entry(&mut self, info: PasswordEntry) {
+        if let Some(vlt) = self {
+            vlt.add_entry(info)
+        }
+    }
+    fn delete_entry(&mut self, id: DeleteType) {
+        if let Some(vlt) = self {
+            vlt.delete_entry(id);
         }
     }
 
-    vlt
-}
-pub fn get_entry(vlt: Vault, a: DeleteType) -> Vault {
-    match a {
-        DeleteType::Id(j) => {
-            for i in 0..vlt.enteries.len() {
-                if vlt.enteries[i].id == j {
-                    println!("{:?}", vlt.enteries[i]);
-                    break;
-                }
-            }
-        }
-        DeleteType::Name(n) => {
-            for i in 0..vlt.enteries.len() {
-                if vlt.enteries[i].name == n {
-                    println!("{:?}", vlt.enteries[i]);
-                    break;
-                }
-            }
+    fn update_entry(&mut self, add: UpdateStruct) {
+        if let Some(vlt) = self {
+            vlt.update_entry(add);
         }
     }
-    vlt
+    fn view_entries(&self) {
+        if let Some(vlt) = self {
+            vlt.view_entries();
+        }
+    }
+    fn lock_vault(&self, key_pass: PasswordType) {
+        if let Some(vlt) = self {
+            vlt.lock_vault(key_pass);
+        }
+    }
+    fn unlock_vault(&mut self, key_pass: &mut PasswordType) {
+        if let Some(_) = self {
+            panic!("A vault is already unlocked lock it before unlocking another one");
+        } else {
+            *self = Some(unlock_vault(key_pass))
+        }
+    }
 }
