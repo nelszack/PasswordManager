@@ -7,7 +7,7 @@ use blake3;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, read, write},
-    path::Path
+    path::Path,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -48,8 +48,8 @@ fn get_filename(mut key_pass: &mut PasswordType, new: bool) -> String {
     vault_filename_from_key(&filename_key)
 }
 
-pub fn create_vault(mut pass_type: PasswordType) {
-    let fname = get_filename(&mut pass_type, true);
+pub fn create_vault(pass_type: &mut PasswordType) {
+    let fname = get_filename(pass_type, true);
 
     if file_exists(&fname) {
         panic!("file already exists")
@@ -202,7 +202,6 @@ impl Vault {
                         }
                         if modified {
                             self.enteries[i].modified = chrono::Local::now().to_string();
-                            
                         }
                         break;
                     }
@@ -221,11 +220,20 @@ impl Vault {
         }
     }
 
-    pub fn lock_vault(&self, key_pass: PasswordType) {
+    pub fn lock_vault(&self, key_pass: &mut PasswordType) {
         let fname = self.metadata.filename.clone();
         let buf = rmp_serde::to_vec(&self).unwrap();
         let txt = encrypt_file(key_pass, &buf[..]);
         write(fname, txt).unwrap();
+    }
+    pub fn export(&self, path: String) {
+        let mut wtr = csv::Writer::from_path(path).unwrap();
+        for i in &self.enteries {
+            wtr.serialize(i).unwrap();
+        }
+    }
+    pub fn append(&mut self, ent: &mut Vec<VaultEnteries>) {
+        self.enteries.append(ent);
     }
 }
 
@@ -235,8 +243,10 @@ pub trait VaultFns {
     fn delete_entry(&mut self, id: DeleteType);
     fn update_entry(&mut self, add: UpdateStruct);
     fn view_entries(&self);
-    fn lock_vault(&self, key_pass: PasswordType);
+    fn lock_vault(&self, key_pass: &mut PasswordType);
     fn unlock_vault(&mut self, key_pass: &mut PasswordType);
+    fn export(&self, path: String);
+    fn append(&mut self, ent: &mut Vec<VaultEnteries>);
 }
 
 impl VaultFns for Option<Vault> {
@@ -266,7 +276,7 @@ impl VaultFns for Option<Vault> {
             vlt.view_entries();
         }
     }
-    fn lock_vault(&self, key_pass: PasswordType) {
+    fn lock_vault(&self, key_pass: &mut PasswordType) {
         if let Some(vlt) = self {
             vlt.lock_vault(key_pass);
         }
@@ -276,6 +286,16 @@ impl VaultFns for Option<Vault> {
             panic!("A vault is already unlocked lock it before unlocking another one");
         } else {
             *self = Some(unlock_vault(key_pass))
+        }
+    }
+    fn export(&self, path: String) {
+        if let Some(vlt) = self {
+            vlt.export(path);
+        }
+    }
+    fn append(&mut self, ent: &mut Vec<VaultEnteries>) {
+        if let Some(vlt) = self {
+            vlt.append(ent);
         }
     }
 }

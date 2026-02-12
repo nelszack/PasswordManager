@@ -75,7 +75,7 @@ fn encryption_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
     blake3::derive_key("vault-encryption-v1", master_key)
 }
 
-pub fn encrypt_file(mut key_pass: PasswordType, plaintext: &[u8]) -> Vec<u8> {
+pub fn encrypt_file(mut key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8> {
     let enc_key = encryption_key_from_master(&gen_master_key(&mut key_pass, false));
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);

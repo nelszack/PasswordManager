@@ -1,5 +1,6 @@
 use crate::client::manager;
 use crate::{
+    file::import,
     types::*,
     vault::{Vault, VaultFns},
 };
@@ -59,7 +60,7 @@ pub fn server(key: String) {
         match msg {
             ServerCommands::Kill => {
                 if !locked {
-                    vlt.lock_vault(key_pass.unwrap());
+                    vlt.lock_vault(&mut key_pass.unwrap());
                     vlt = None;
                     key_pass = None;
                     locked = true;
@@ -71,7 +72,7 @@ pub fn server(key: String) {
             }
             ServerCommands::Lock(send) => {
                 if !locked && vlt.is_some() {
-                    vlt.lock_vault(key_pass.unwrap());
+                    vlt.lock_vault(&mut key_pass.unwrap());
 
                     vlt = None;
                     key_pass = None;
@@ -143,6 +144,29 @@ pub fn server(key: String) {
                 } else {
                     stream1.write_all(b"vault locked\n").unwrap();
                 }
+            }
+            ServerCommands::Export(path) => vlt.export(path),
+            ServerCommands::Import(args) => {
+                if !locked {
+                    vlt.lock_vault(&mut key_pass.unwrap());
+                    vlt = None;
+                    key_pass = None;
+                    locked = true;
+                    let _ = format!("{:?} {}", key_pass, locked);
+                }
+                let key_pass1 = if args.key_path.is_some() {
+                    Some(PasswordType::Key(args.key_path.unwrap()))
+                } else {
+                    Some(PasswordType::Password(None))
+                };
+                key_pass = key_pass1.clone();
+                vlt.unlock_vault(&mut key_pass1.unwrap());
+                import(args.path, &mut vlt);
+                vlt.lock_vault(&mut key_pass.unwrap());
+                vlt = None;
+                key_pass = None;
+                locked = true;
+                let _ = format!("{:?}", key_pass);
             }
         }
     }

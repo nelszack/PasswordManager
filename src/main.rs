@@ -13,11 +13,14 @@ use crate::{
     client::manager,
     clpboard::cpy,
     config::{read_config, update},
+    encryption::create_password,
     password::{gen_pass, pass_str},
     server::{server, start},
-    types::{DeleteType, PasswordEntry, PasswordType, ServerCommands, UnlockInfo, UpdateStruct},
+    types::{
+        DeleteType, ImportArgs, PasswordEntry, PasswordType, ServerCommands, UnlockInfo,
+        UpdateStruct,
+    },
     vault::create_vault,
-    encryption::create_password
 };
 
 fn main() {
@@ -58,11 +61,12 @@ fn main() {
             CliCommands::Start => start(),
             CliCommands::Run { key } => server(key.unwrap_or("none".into())),
             CliCommands::New { key_path } => {
-                create_vault(if key_path.is_some() {
+                let mut keypass = if key_path.is_some() {
                     PasswordType::Key(key_path.unwrap())
                 } else {
                     PasswordType::Password(None)
-                });
+                };
+                create_vault(&mut keypass);
             }
             CliCommands::Add {
                 name,
@@ -96,6 +100,28 @@ fn main() {
             } else {
                 DeleteType::Name(which.entry_name.unwrap())
             })),
+            CliCommands::Export { path } => {
+                manager(ServerCommands::Export(path));
+            }
+            CliCommands::Import {
+                path,
+                new,
+                key_path,
+            } => {
+                if new {
+                    let mut keypass = if key_path.is_some() {
+                        PasswordType::Key(key_path.clone().unwrap())
+                    } else {
+                        PasswordType::Password(None)
+                    };
+                    create_vault(&mut keypass);
+                }
+                manager(ServerCommands::Import(ImportArgs {
+                    path: path,
+                    new: new,
+                    key_path: key_path,
+                }))
+            }
         };
     }
 }

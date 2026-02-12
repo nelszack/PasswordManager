@@ -68,6 +68,19 @@ pub enum CliCommands {
         #[command(flatten)]
         which: DeleteArgs,
     },
+    Import {
+        #[arg(long)]
+        path: String,
+
+        #[arg(long)]
+        new: bool,
+        #[arg(long)]
+        key_path: Option<String>,
+    },
+    Export {
+        #[arg(long)]
+        path: String,
+    },
 }
 
 #[derive(Args, Debug)]
