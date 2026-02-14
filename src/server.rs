@@ -1,13 +1,16 @@
-use crate::client::manager;
+// use crate::client::manager;
 use crate::{
-    file::import,
+    client::manager,
     types::*,
     vault::{Vault, VaultFns},
 };
 use bincode;
 use std::{
     fs::File,
-    io::{ErrorKind, Read, Write},
+    io::{
+        ErrorKind,
+        Read, // , Write
+    },
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
     thread,
@@ -55,32 +58,25 @@ pub fn server(key: String) {
     let mut key_pass: Option<PasswordType> = None;
     let mut vlt: Option<Vault> = None;
     for stream in listener.incoming() {
-        let mut stream1 = stream.unwrap();
+        let stream1 = stream.unwrap();
         let msg = handler(&stream1);
         match msg {
             ServerCommands::Kill => {
                 if !locked {
-                    vlt.lock_vault(&mut key_pass.unwrap());
-                    vlt = None;
-                    key_pass = None;
-                    locked = true;
-                    let _ = format!("{:?} {:?} {:?}", vlt, key_pass, locked);
+                    manager(ServerCommands::Lock(false));
                 }
-                stream1.write_all(b"server killed\n").unwrap();
-                stream1.flush().unwrap();
+                println!("server kiilled");
                 break;
             }
             ServerCommands::Lock(send) => {
                 if !locked && vlt.is_some() {
                     vlt.lock_vault(&mut key_pass.unwrap());
-
                     vlt = None;
                     key_pass = None;
                     locked = true;
 
                     if send {
-                        stream1.write_all(b"locked\n").unwrap();
-                        stream1.flush().unwrap();
+                        println!("Vault locked")
                     }
                 }
             }
@@ -93,80 +89,71 @@ pub fn server(key: String) {
                     locked = false;
                     key_pass = Some(info.key);
                     thread::spawn(move || auto_lock(info.timeout.unwrap_or(0)));
-                    stream1.write_all(b"vault unlocked\n").unwrap();
+                    println!("vault unlocked");
                 } else {
-                    stream1.write_all(b"A vault is already unlocked lock it before trying to unlock another one").unwrap();
+                    println!(
+                        "A vault is already unlocked lock it before trying to unlock another one"
+                    );
                 }
             }
             ServerCommands::Status => {
-                stream1
-                    .write_all(
-                        format!("status {}\n", if locked { "Locked" } else { "Unlocked" })
-                            .as_bytes(),
-                    )
-                    .unwrap();
+                println!(
+                    "{}",
+                    format!("status {}", if locked { "Locked" } else { "Unlocked" })
+                )
             }
             ServerCommands::Add(info) => {
                 if locked {
-                    stream1.write_all(b"vault locked\n").unwrap()
+                    println!("vault locked");
                 } else {
                     vlt.add_entry(info);
-
-                    stream1.write_all(b"entry added\n").unwrap();
+                    println!("entry added");
                 }
             }
             ServerCommands::Delete(id) => {
                 if locked {
-                    stream1.write_all(b"vault locked\n").unwrap()
+                    println!("vault locked");
                 } else {
                     vlt.delete_entry(id);
-                    stream1.write_all(b"entry deleted\n").unwrap();
+                    println!("entry deleted");
                 }
             }
             ServerCommands::View => {
                 if !locked {
                     vlt.view_entries();
                 } else {
-                    stream1.write_all(b"vault locked\n").unwrap();
+                    println!("vault locked");
                 }
             }
             ServerCommands::Get(a) => {
                 if !locked {
-                    // vlt = Some(get_entry(vlt.unwrap(), a));
                     vlt.get_entry(a);
                 } else {
-                    stream1.write_all(b"vault locked\n").unwrap();
+                    println!("vault locked");
                 }
             }
             ServerCommands::Update(a) => {
                 if !locked {
                     vlt.update_entry(a);
                 } else {
-                    stream1.write_all(b"vault locked\n").unwrap();
+                    println!("vault locked");
                 }
             }
             ServerCommands::Export(path) => vlt.export(path),
             ServerCommands::Import(args) => {
                 if !locked {
-                    vlt.lock_vault(&mut key_pass.unwrap());
-                    vlt = None;
-                    key_pass = None;
-                    locked = true;
-                    let _ = format!("{:?} {}", key_pass, locked);
+                    manager(ServerCommands::Lock(false));
                 }
-                let key_pass1 = if args.key_path.is_some() {
-                    Some(PasswordType::Key(args.key_path.unwrap()))
-                } else {
-                    Some(PasswordType::Password(None))
-                };
-                key_pass = key_pass1.clone();
-                vlt.unlock_vault(&mut key_pass1.unwrap());
-                import(args.path, &mut vlt);
-                vlt.lock_vault(&mut key_pass.unwrap());
-                vlt = None;
-                key_pass = None;
-                locked = true;
-                let _ = format!("{:?}", key_pass);
+                manager(ServerCommands::UnLock(UnlockInfo {
+                    key: if args.key_path.is_some() {
+                        PasswordType::Key(args.key_path.unwrap())
+                    } else {
+                        PasswordType::Password(None)
+                    },
+                    timeout: None,
+                }));
+                vlt.import(args.path);
+                manager(ServerCommands::Lock(false));
             }
         }
     }

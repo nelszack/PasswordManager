@@ -1,6 +1,6 @@
 use crate::{
     encryption::{create_password, decrypt_file, encrypt_file, gen_master_key},
-    file::file_exists,
+    file::{file_exists},
     types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
 };
 use blake3;
@@ -235,6 +235,14 @@ impl Vault {
     pub fn append(&mut self, ent: &mut Vec<VaultEnteries>) {
         self.enteries.append(ent);
     }
+    pub fn import(&mut self, path: String) {
+        let mut rdr = csv::Reader::from_path(path).unwrap();
+        for i in rdr.deserialize() {
+            let ent: VaultEnteries = i.unwrap();
+            // println!("{:?}",ent);
+            self.append(&mut vec![ent]);
+        }
+    }
 }
 
 pub trait VaultFns {
@@ -246,7 +254,8 @@ pub trait VaultFns {
     fn lock_vault(&self, key_pass: &mut PasswordType);
     fn unlock_vault(&mut self, key_pass: &mut PasswordType);
     fn export(&self, path: String);
-    fn append(&mut self, ent: &mut Vec<VaultEnteries>);
+    // fn append(&mut self, ent: &mut Vec<VaultEnteries>);
+    fn import(&mut self, path: String);
 }
 
 impl VaultFns for Option<Vault> {
@@ -293,9 +302,14 @@ impl VaultFns for Option<Vault> {
             vlt.export(path);
         }
     }
-    fn append(&mut self, ent: &mut Vec<VaultEnteries>) {
+    // fn append(&mut self, ent: &mut Vec<VaultEnteries>) {
+    //     if let Some(vlt) = self {
+    //         vlt.append(ent);
+    //     }
+    // }
+    fn import(&mut self, path: String) {
         if let Some(vlt) = self {
-            vlt.append(ent);
+            vlt.import(path)
         }
     }
 }
