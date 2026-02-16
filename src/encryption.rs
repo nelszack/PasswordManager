@@ -37,9 +37,7 @@ fn generate_key(path: &std::path::Path) -> [u8; 32] {
 
 fn master_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
     let params = Params::new(64 * 1024, 3, 1, Some(32)).unwrap();
-
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
     let mut key = [0u8; 32];
     argon2
         .hash_password_into(password.as_bytes(), salt, &mut key)
@@ -60,13 +58,7 @@ pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
             }
         }
         PasswordType::Password(pass) => {
-            if new {
-                *pass = Some(create_password());
-
-                master_key_from_password(&pass.as_ref().unwrap(), b"vault-master-key-salt-v1")
-            } else {
-                master_key_from_password(&pass.as_ref().unwrap(), b"vault-master-key-salt-v1")
-            }
+            master_key_from_password(&pass, b"vault-master-key-salt-v1")
         }
     }
 }
@@ -92,9 +84,7 @@ pub fn decrypt_file(mut key_pass: &mut PasswordType, encrypted: &[u8]) -> Option
 
     let enc_key = encryption_key_from_master(&gen_master_key(&mut key_pass, false));
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
-
     let (nonce_bytes, ciphertext) = encrypted.split_at(24);
     let nonce = XNonce::from_slice(nonce_bytes);
-
     cipher.decrypt(nonce, ciphertext).ok()
 }

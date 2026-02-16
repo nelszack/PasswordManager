@@ -1,16 +1,20 @@
 use crate::{
     encryption::{create_password, decrypt_file, encrypt_file, gen_master_key},
-    file::{file_exists},
+    file::file_exists,
+    server::ServerInfo,
     types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
 };
 use blake3;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, read, write},
+    io::Write,
+    net::TcpStream,
     path::Path,
 };
+use zeroize::Zeroize;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct VaultEnteries {
     pub id: usize,
     pub name: String,
@@ -21,15 +25,20 @@ pub struct VaultEnteries {
     pub created: String,
     pub modified: String,
 }
-#[derive(Serialize, Deserialize, Debug)]
-struct VaultMetadata {
-    filename: String,
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct VaultMetadata {
+    pub filename: String,
+}
+impl Zeroize for VaultMetadata {
+    fn zeroize(&mut self) {
+        self.filename.zeroize();
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Vault {
     pub enteries: Vec<VaultEnteries>,
-    metadata: VaultMetadata,
+    pub metadata: VaultMetadata,
 }
 
 fn filename_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
@@ -38,7 +47,7 @@ fn filename_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
 
 fn vault_filename_from_key(filename_key: &[u8; 32]) -> String {
     let hash = blake3::hash(filename_key);
-    let short = &hash.as_bytes()[..16]; // 128-bit filename
+    let short = &hash.as_bytes()[..16];
     format!("{}.enc", hex::encode(short))
 }
 
@@ -48,42 +57,48 @@ fn get_filename(mut key_pass: &mut PasswordType, new: bool) -> String {
     vault_filename_from_key(&filename_key)
 }
 
-pub fn create_vault(pass_type: &mut PasswordType) {
-    let fname = get_filename(pass_type, true);
-
+pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock: bool) {
+    let fname = get_filename(&mut server_info.keypass.as_mut().unwrap(), true);
     if file_exists(&fname) {
         panic!("file already exists")
     }
     File::create(Path::new(&fname)).unwrap();
-    let vault = Vault {
+    *vlt = Some(Vault {
         enteries: Vec::new(),
         metadata: VaultMetadata {
             filename: fname.clone(),
         },
-    };
-    vault.lock_vault(pass_type);
-    println!("Vault created");
+    });
+    if lock {
+        vlt.lock_vault(&mut ServerInfo {
+            locked: false,
+            keypass: server_info.keypass.clone(),
+        });
+        vlt.zeroize();
+        server_info.zeroize();
+    }
 }
 
-fn unlock_vault(mut key_pass: &mut PasswordType) -> Vault {
-    let fname = get_filename(&mut key_pass, false);
+
+fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
+    let fname = get_filename(&mut key_pass.keypass.as_mut().unwrap(), false);
     let contents = read(fname).unwrap();
-    let dec = decrypt_file(&mut key_pass, &contents);
+    let dec = decrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &contents);
     let vault: Vault = rmp_serde::from_slice(&dec.unwrap()).unwrap();
-    // println!("{:?}", vault);
+    key_pass.locked = false;
     vault
 }
 
 impl Vault {
-    pub fn get_entry(&self, a: DeleteType) {
+    pub fn get_entry(&self, a: DeleteType,stream:&mut TcpStream) {
         match a {
             DeleteType::Id(i) => {
-                println!("{:?}", self.enteries[i - 1])
+                stream.write_all(format!("{:?}\n", self.enteries[i - 1]).as_bytes()).unwrap()
             }
             DeleteType::Name(n) => {
                 for i in 0..self.enteries.len() {
                     if self.enteries[i].name == n {
-                        println!("{:?}", self.enteries[i - 1]);
+                        stream.write_all(format!("{:?}\n", self.enteries[i]).as_bytes()).unwrap();
                         break;
                     }
                 }
@@ -98,6 +113,7 @@ impl Vault {
         for i in &self.enteries {
             if i.name == info.name {
                 exists = true;
+                break;
             }
         }
         if exists {
@@ -121,13 +137,7 @@ impl Vault {
     pub fn delete_entry(&mut self, id: DeleteType) {
         match id {
             DeleteType::Id(i) => {
-                self.enteries.remove(i);
-                // for i in 0..self.enteries.len() {
-                //     if self.enteries[i].id == j {
-                //         self.enteries.remove(i);
-                //         break;
-                //     }
-                // }
+                self.enteries.remove(i - 1);
             }
             DeleteType::Name(n) => {
                 for i in 0..self.enteries.len() {
@@ -210,21 +220,30 @@ impl Vault {
         }
     }
 
-    pub fn view_entries(&self) {
+    pub fn view_entries(&self, stream: &mut TcpStream) {
         let enteries = &self.enteries[..];
         if enteries.len() == 0 {
-            println!("No entries");
+            stream.write_all(b"No entries").unwrap();
         }
         for i in enteries {
-            println!("{}. {} {:?}", i.id, i.name, i.username);
+            stream
+                .write_all(
+                    format!(
+                        "{}. {} {:?} {:?} {:?}\n",
+                        i.id, i.name, i.username, i.url, i.notes
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
         }
     }
 
-    pub fn lock_vault(&self, key_pass: &mut PasswordType) {
+    pub fn lock_vault(&self, key_pass: &mut ServerInfo) {
         let fname = self.metadata.filename.clone();
         let buf = rmp_serde::to_vec(&self).unwrap();
-        let txt = encrypt_file(key_pass, &buf[..]);
+        let txt = encrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &buf[..]);
         write(fname, txt).unwrap();
+        key_pass.zeroize();
     }
     pub fn export(&self, path: String) {
         let mut wtr = csv::Writer::from_path(path).unwrap();
@@ -239,29 +258,27 @@ impl Vault {
         let mut rdr = csv::Reader::from_path(path).unwrap();
         for i in rdr.deserialize() {
             let ent: VaultEnteries = i.unwrap();
-            // println!("{:?}",ent);
             self.append(&mut vec![ent]);
         }
     }
 }
 
 pub trait VaultFns {
-    fn get_entry(&self, a: DeleteType);
+    fn get_entry(&self, a: DeleteType,stream: &mut TcpStream);
     fn add_entry(&mut self, info: PasswordEntry);
     fn delete_entry(&mut self, id: DeleteType);
     fn update_entry(&mut self, add: UpdateStruct);
-    fn view_entries(&self);
-    fn lock_vault(&self, key_pass: &mut PasswordType);
-    fn unlock_vault(&mut self, key_pass: &mut PasswordType);
+    fn view_entries(&self, stream: &mut TcpStream);
+    fn lock_vault(&self, key_pass: &mut ServerInfo);
+    fn unlock_vault(&mut self, key_pass: &mut ServerInfo);
     fn export(&self, path: String);
-    // fn append(&mut self, ent: &mut Vec<VaultEnteries>);
     fn import(&mut self, path: String);
 }
 
 impl VaultFns for Option<Vault> {
-    fn get_entry(&self, a: DeleteType) {
+    fn get_entry(&self, a: DeleteType,stream: &mut TcpStream) {
         if let Some(vlt) = self {
-            vlt.get_entry(a)
+            vlt.get_entry(a,stream)
         }
     }
     fn add_entry(&mut self, info: PasswordEntry) {
@@ -280,17 +297,18 @@ impl VaultFns for Option<Vault> {
             vlt.update_entry(add);
         }
     }
-    fn view_entries(&self) {
+    fn view_entries(&self, stream: &mut TcpStream) {
         if let Some(vlt) = self {
-            vlt.view_entries();
+            vlt.view_entries(stream);
         }
     }
-    fn lock_vault(&self, key_pass: &mut PasswordType) {
+    fn lock_vault(&self, key_pass: &mut ServerInfo) {
         if let Some(vlt) = self {
             vlt.lock_vault(key_pass);
         }
+        key_pass.zeroize();
     }
-    fn unlock_vault(&mut self, key_pass: &mut PasswordType) {
+    fn unlock_vault(&mut self, key_pass: &mut ServerInfo) {
         if let Some(_) = self {
             panic!("A vault is already unlocked lock it before unlocking another one");
         } else {
@@ -302,11 +320,6 @@ impl VaultFns for Option<Vault> {
             vlt.export(path);
         }
     }
-    // fn append(&mut self, ent: &mut Vec<VaultEnteries>) {
-    //     if let Some(vlt) = self {
-    //         vlt.append(ent);
-    //     }
-    // }
     fn import(&mut self, path: String) {
         if let Some(vlt) = self {
             vlt.import(path)

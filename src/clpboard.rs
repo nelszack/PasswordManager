@@ -12,7 +12,6 @@ pub fn cpy(secret: &str, timeout: u8) {
         thread::sleep(Duration::from_secs(timeout as u64));
         if let Ok(mut cb) = Clipboard::new() {
             if cb.get_text().ok().as_deref() == Some(&secret) {
-                // let _ = cb.set_text("");
                 let _ = cb.clear();
                 let add_size = size + 12;
                 println!("\rclipboard cleared {:add_size$}", "")

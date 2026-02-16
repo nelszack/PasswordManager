@@ -1,10 +1,9 @@
-use serde::{Deserialize, Serialize};
-
 use crate::cli::UpdateArgs;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PasswordType {
-    Password(Option<String>),
+    Password(String),
     Key(String),
 }
 impl Clone for PasswordType {
@@ -28,6 +27,7 @@ pub enum ServerCommands {
     Update(UpdateStruct),
     Export(String),
     Import(ImportArgs),
+    New{key_path: PasswordType},
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -61,5 +61,5 @@ pub struct UpdateStruct {
 pub struct ImportArgs {
     pub path: String,
     pub new: bool,
-    pub key_path: Option<String>,
+    pub key_pass: PasswordType,
 }

@@ -6,5 +6,3 @@ pub fn file_exists(file_path: &str) -> bool {
     }
     return false;
 }
-
-

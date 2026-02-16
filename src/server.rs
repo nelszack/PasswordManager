@@ -1,21 +1,67 @@
-// use crate::client::manager;
 use crate::{
     client::manager,
     types::*,
-    vault::{Vault, VaultFns},
+    vault::{Vault, VaultEnteries, VaultFns,create_vault},
 };
 use bincode;
 use std::{
     fs::File,
-    io::{
-        ErrorKind,
-        Read, // , Write
-    },
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
+use zeroize::Zeroize;
+
+#[derive(Debug)]
+pub struct ServerInfo {
+    pub locked: bool,
+    pub keypass: Option<PasswordType>,
+}
+
+impl Default for ServerInfo {
+    fn default() -> Self {
+        Self {
+            locked: true,
+            keypass: None,
+        }
+    }
+}
+
+impl Zeroize for ServerInfo {
+    fn zeroize(&mut self) {
+        self.locked.zeroize();
+        self.keypass.zeroize();
+        *self = Self::default()
+    }
+}
+impl Zeroize for PasswordType {
+    fn zeroize(&mut self) {
+        match self {
+            PasswordType::Key(k) => k.zeroize(),
+            PasswordType::Password(p) => p.zeroize(),
+        }
+    }
+}
+impl Zeroize for Vault {
+    fn zeroize(&mut self) {
+        self.enteries.zeroize();
+        self.metadata.zeroize()
+    }
+}
+impl Zeroize for VaultEnteries {
+    fn zeroize(&mut self) {
+        self.created.zeroize();
+        self.id.zeroize();
+        self.modified.zeroize();
+        self.name.zeroize();
+        self.notes.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.username.zeroize();
+    }
+}
 
 pub const ADDR: &str = "127.0.0.1:7878";
 
@@ -54,106 +100,123 @@ pub fn server(key: String) {
         panic!("unotherized run");
     }
     let listener = TcpListener::bind(ADDR).unwrap();
-    let mut locked = true;
-    let mut key_pass: Option<PasswordType> = None;
+
+    let mut server_info = ServerInfo {
+        locked: true,
+        keypass: None,
+    };
     let mut vlt: Option<Vault> = None;
     for stream in listener.incoming() {
-        let stream1 = stream.unwrap();
+        let mut stream1 = stream.unwrap();
         let msg = handler(&stream1);
         match msg {
             ServerCommands::Kill => {
-                if !locked {
-                    manager(ServerCommands::Lock(false));
+                if !server_info.locked {
+                    lock_vlt(&mut vlt, &mut server_info);
                 }
-                println!("server kiilled");
+                stream1.write_all(b"server killed\n").unwrap();
                 break;
             }
             ServerCommands::Lock(send) => {
-                if !locked && vlt.is_some() {
-                    vlt.lock_vault(&mut key_pass.unwrap());
-                    vlt = None;
-                    key_pass = None;
-                    locked = true;
-
+                if !server_info.locked && vlt.is_some() {
                     if send {
-                        println!("Vault locked")
+                        lock_vlt(&mut vlt, &mut server_info);
+                        stream1.write_all(b"Vault locked\n").unwrap();
                     }
                 }
             }
-            ServerCommands::UnLock(mut info) => {
+            ServerCommands::UnLock(info) => {
                 // if locked{
-                //     vlt.lock_vault(key_pass.unwrap());
+                //     lock_vlt(&mut vlt, &mut server_info);
                 // }
-                if locked {
-                    vlt.unlock_vault(&mut info.key);
-                    locked = false;
-                    key_pass = Some(info.key);
+                if server_info.locked {
+                    server_info.keypass = Some(info.key);
+                    vlt.unlock_vault(&mut server_info);
                     thread::spawn(move || auto_lock(info.timeout.unwrap_or(0)));
-                    println!("vault unlocked");
+                    stream1.write_all(b"Vault unlocked\n").unwrap();
                 } else {
-                    println!(
-                        "A vault is already unlocked lock it before trying to unlock another one"
-                    );
+                    stream1.write_all(b"A vault is already unlocked lock it before trying to unlock another one\n").unwrap();
+
                 }
             }
             ServerCommands::Status => {
-                println!(
-                    "{}",
-                    format!("status {}", if locked { "Locked" } else { "Unlocked" })
-                )
+                stream1
+                    .write_all(
+                        format!(
+                            "status {}\n",
+                            if server_info.locked {
+                                "Locked"
+                            } else {
+                                "Unlocked"
+                            }
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+
+            }
+            ServerCommands::New { key_path } => {
+                if !server_info.locked {
+                    lock_vlt(&mut vlt, &mut server_info);
+                }
+                server_info.keypass = Some(key_path);
+                create_vault(&mut vlt, &mut server_info, true);
+                stream1.write_all(b"vault created").unwrap();
             }
             ServerCommands::Add(info) => {
-                if locked {
-                    println!("vault locked");
+                if server_info.locked {
+                    stream1.write_all(b"Vault locked\n").unwrap();
                 } else {
                     vlt.add_entry(info);
-                    println!("entry added");
+                    stream1.write_all(b"entry added\n").unwrap();
                 }
             }
             ServerCommands::Delete(id) => {
-                if locked {
-                    println!("vault locked");
+                if server_info.locked {
+                    stream1.write_all(b"Vault locked\n").unwrap();
                 } else {
                     vlt.delete_entry(id);
-                    println!("entry deleted");
+                    stream1.write_all(b"entry deleted\n").unwrap();
                 }
             }
             ServerCommands::View => {
-                if !locked {
-                    vlt.view_entries();
+                if !server_info.locked {
+                    vlt.view_entries(&mut stream1);
                 } else {
-                    println!("vault locked");
+                    stream1.write_all(b"Vault locked\n").unwrap();
                 }
             }
             ServerCommands::Get(a) => {
-                if !locked {
-                    vlt.get_entry(a);
+                if !server_info.locked {
+                    vlt.get_entry(a,&mut stream1);
                 } else {
-                    println!("vault locked");
+                    stream1.write_all(b"Vault locked\n").unwrap();
                 }
             }
             ServerCommands::Update(a) => {
-                if !locked {
+                if !server_info.locked {
                     vlt.update_entry(a);
                 } else {
-                    println!("vault locked");
+                    stream1.write_all(b"Vault locked\n").unwrap();
                 }
             }
             ServerCommands::Export(path) => vlt.export(path),
             ServerCommands::Import(args) => {
-                if !locked {
-                    manager(ServerCommands::Lock(false));
+                if !server_info.locked {
+                    lock_vlt(&mut vlt, &mut server_info);
                 }
-                manager(ServerCommands::UnLock(UnlockInfo {
-                    key: if args.key_path.is_some() {
-                        PasswordType::Key(args.key_path.unwrap())
-                    } else {
-                        PasswordType::Password(None)
-                    },
-                    timeout: None,
-                }));
+                if args.new{
+                    create_vault(&mut vlt, &mut server_info, false);
+                    stream1.write_all(b"vault created").unwrap();
+                }
+                else if server_info.locked {
+                    server_info.keypass = Some(args.key_pass);
+                    unlock_vlt(&mut vlt, &mut server_info);
+                }
+
                 vlt.import(args.path);
-                manager(ServerCommands::Lock(false));
+                lock_vlt(&mut vlt, &mut server_info);
+                stream1.write_all(b"finished import\n").unwrap();
             }
         }
     }
@@ -175,4 +238,14 @@ fn handler(mut message: &TcpStream) -> ServerCommands {
     };
     let msg: ServerCommands = bincode::deserialize(&buf).unwrap();
     msg
+}
+
+fn lock_vlt(vlt: &mut Option<Vault>, mut server_info: &mut ServerInfo) {
+    vlt.lock_vault(&mut server_info);
+    vlt.zeroize();
+    server_info.zeroize();
+}
+
+fn unlock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) {
+    vlt.unlock_vault(server_info);
 }

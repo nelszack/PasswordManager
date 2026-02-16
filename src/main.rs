@@ -20,7 +20,6 @@ use crate::{
         DeleteType, ImportArgs, PasswordEntry, PasswordType, ServerCommands, UnlockInfo,
         UpdateStruct,
     },
-    vault::create_vault,
 };
 
 fn main() {
@@ -50,9 +49,9 @@ fn main() {
                 key: if key.is_some() {
                     PasswordType::Key(key.unwrap())
                 } else {
-                    PasswordType::Password(Some(
+                    PasswordType::Password(
                         rpassword::prompt_password("enter password: ").unwrap(),
-                    ))
+                    )
                 },
                 timeout: timeout.timeout,
             })),
@@ -61,12 +60,14 @@ fn main() {
             CliCommands::Start => start(),
             CliCommands::Run { key } => server(key.unwrap_or("none".into())),
             CliCommands::New { key_path } => {
-                let mut keypass = if key_path.is_some() {
+                manager(ServerCommands::New { key_path:if key_path.is_some() {
                     PasswordType::Key(key_path.unwrap())
                 } else {
-                    PasswordType::Password(None)
-                };
-                create_vault(&mut keypass);
+                    PasswordType::Password(
+                        create_password(),
+                    )
+                }, });
+                
             }
             CliCommands::Add {
                 name,
@@ -108,18 +109,15 @@ fn main() {
                 new,
                 key_path,
             } => {
-                if new {
-                    let mut keypass = if key_path.is_some() {
+                let keypass = if key_path.is_some() {
                         PasswordType::Key(key_path.clone().unwrap())
                     } else {
-                        PasswordType::Password(None)
+                        PasswordType::Password(create_password())
                     };
-                    create_vault(&mut keypass);
-                }
                 manager(ServerCommands::Import(ImportArgs {
                     path: path,
                     new: new,
-                    key_path: key_path,
+                    key_pass:keypass,
                 }))
             }
         };
