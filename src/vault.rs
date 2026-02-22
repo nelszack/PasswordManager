@@ -1,14 +1,13 @@
 use crate::{
     encryption::{create_password, decrypt_file, encrypt_file, gen_master_key},
     file::file_exists,
-    server::ServerInfo,
+    server::{ServerInfo, respond},
     types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
 };
 use blake3;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, read, write},
-    io::Write,
     net::TcpStream,
     path::Path,
 };
@@ -79,7 +78,6 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
     }
 }
 
-
 fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
     let fname = get_filename(&mut key_pass.keypass.as_mut().unwrap(), false);
     let contents = read(fname).unwrap();
@@ -90,17 +88,41 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
 }
 
 impl Vault {
-    pub fn get_entry(&self, a: DeleteType,stream:&mut TcpStream) {
+    pub fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
         match a {
             DeleteType::Id(i) => {
-                stream.write_all(format!("{:?}\n", self.enteries[i - 1]).as_bytes()).unwrap()
+                if i < self.enteries.len() {
+                    respond(&format!("{:?}\n", self.enteries[i - 1]), stream, http);
+                } else {
+                    respond(&format!("id not found\n"), stream, http);
+                }
             }
             DeleteType::Name(n) => {
+                let mut found = false;
                 for i in 0..self.enteries.len() {
                     if self.enteries[i].name == n {
-                        stream.write_all(format!("{:?}\n", self.enteries[i]).as_bytes()).unwrap();
+                        respond(&format!("{:?}\n", self.enteries[i]), stream, http);
+                        found = true;
                         break;
                     }
+                }
+                if !found {
+                    respond(&format!("not found\n"), stream, http);
+                }
+            }
+            DeleteType::Url(u)=>{
+                let mut found=false;
+                for i in 0..self.enteries.len(){
+                    if let Some(url)=&self.enteries[i].url{
+                        println!("{} {}",url,u);
+                        if url==&u{
+                            respond("this is a test", stream, http);
+                            found=true
+                        }
+                    }
+                }
+                if !found{
+                    respond("not found\n", stream, http);
                 }
             }
         }
@@ -147,6 +169,7 @@ impl Vault {
                     }
                 }
             }
+            DeleteType::Url(_u)=>todo!()
         }
 
         for i in 1..=self.enteries.len() {
@@ -217,24 +240,25 @@ impl Vault {
                     }
                 }
             }
+            DeleteType::Url(_u)=>todo!()
         }
     }
 
-    pub fn view_entries(&self, stream: &mut TcpStream) {
+    pub fn view_entries(&self, stream: &mut TcpStream, http: bool) {
         let enteries = &self.enteries[..];
         if enteries.len() == 0 {
-            stream.write_all(b"No entries").unwrap();
+            respond("No entries", stream, http);
+            // stream.write_all(b"No entries").unwrap();
         }
         for i in enteries {
-            stream
-                .write_all(
-                    format!(
-                        "{}. {} {:?} {:?} {:?}\n",
-                        i.id, i.name, i.username, i.url, i.notes
-                    )
-                    .as_bytes(),
-                )
-                .unwrap();
+            respond(
+                &format!(
+                    "{}. {} {:?} {:?} {:?}\n",
+                    i.id, i.name, i.username, i.url, i.notes
+                ),
+                stream,
+                http,
+            );
         }
     }
 
@@ -264,11 +288,11 @@ impl Vault {
 }
 
 pub trait VaultFns {
-    fn get_entry(&self, a: DeleteType,stream: &mut TcpStream);
+    fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool);
     fn add_entry(&mut self, info: PasswordEntry);
     fn delete_entry(&mut self, id: DeleteType);
     fn update_entry(&mut self, add: UpdateStruct);
-    fn view_entries(&self, stream: &mut TcpStream);
+    fn view_entries(&self, stream: &mut TcpStream, http: bool);
     fn lock_vault(&self, key_pass: &mut ServerInfo);
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo);
     fn export(&self, path: String);
@@ -276,9 +300,9 @@ pub trait VaultFns {
 }
 
 impl VaultFns for Option<Vault> {
-    fn get_entry(&self, a: DeleteType,stream: &mut TcpStream) {
+    fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
         if let Some(vlt) = self {
-            vlt.get_entry(a,stream)
+            vlt.get_entry(a, stream, http)
         }
     }
     fn add_entry(&mut self, info: PasswordEntry) {
@@ -297,9 +321,9 @@ impl VaultFns for Option<Vault> {
             vlt.update_entry(add);
         }
     }
-    fn view_entries(&self, stream: &mut TcpStream) {
+    fn view_entries(&self, stream: &mut TcpStream, http: bool) {
         if let Some(vlt) = self {
-            vlt.view_entries(stream);
+            vlt.view_entries(stream, http);
         }
     }
     fn lock_vault(&self, key_pass: &mut ServerInfo) {

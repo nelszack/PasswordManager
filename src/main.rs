@@ -44,63 +44,82 @@ fn main() {
                 cpy("testpass", timeout.timeout.unwrap_or(conf.clpboard.timeout))
             }
             CliCommands::Config(command) => update(command),
-            CliCommands::Lock => manager(ServerCommands::Lock(true)),
-            CliCommands::Unlock { key, timeout } => manager(ServerCommands::UnLock(UnlockInfo {
-                key: if key.is_some() {
-                    PasswordType::Key(key.unwrap())
-                } else {
-                    PasswordType::Password(
-                        rpassword::prompt_password("enter password: ").unwrap(),
-                    )
-                },
-                timeout: timeout.timeout,
-            })),
-            CliCommands::Status => manager(ServerCommands::Status),
-            CliCommands::Kill => manager(ServerCommands::Kill),
+            CliCommands::Lock => {
+                manager(ServerCommands::Lock(true));
+            }
+            CliCommands::Unlock { key, timeout } => {
+                manager(ServerCommands::UnLock(UnlockInfo {
+                    key: if key.is_some() {
+                        PasswordType::Key(key.unwrap())
+                    } else {
+                        PasswordType::Password(
+                            rpassword::prompt_password("enter password: ").unwrap(),
+                        )
+                    },
+                    timeout: timeout.timeout,
+                }));
+            }
+            CliCommands::Status => {
+                manager(ServerCommands::Status);
+            }
+            CliCommands::Kill => {
+                manager(ServerCommands::Kill);
+            }
             CliCommands::Start => start(),
             CliCommands::Run { key } => server(key.unwrap_or("none".into())),
             CliCommands::New { key_path } => {
-                manager(ServerCommands::New { key_path:if key_path.is_some() {
-                    PasswordType::Key(key_path.unwrap())
-                } else {
-                    PasswordType::Password(
-                        create_password(),
-                    )
-                }, });
-                
+                manager(ServerCommands::New {
+                    key_path: if key_path.is_some() {
+                        PasswordType::Key(key_path.unwrap())
+                    } else {
+                        PasswordType::Password(create_password())
+                    },
+                });
             }
             CliCommands::Add {
                 name,
                 username,
                 url,
                 notes,
-            } => manager(ServerCommands::Add(PasswordEntry {
-                name: name,
-                username: username,
-                password: create_password(),
-                url: url,
-                notes: notes,
-                which: None,
-            })),
+            } => {
+                manager(ServerCommands::Add(PasswordEntry {
+                    name: name,
+                    username: username,
+                    password: create_password(),
+                    url: url,
+                    notes: notes,
+                    which: None,
+                }));
+            }
             CliCommands::Delete(DeleteArgs { id, entry_name }) => match (id, entry_name) {
-                (Some(i), None) => manager(ServerCommands::Delete(DeleteType::Id(i))),
-                (None, Some(n)) => manager(ServerCommands::Delete(DeleteType::Name(n))),
+                (Some(i), None) => {
+                    manager(ServerCommands::Delete(DeleteType::Id(i)));
+                }
+                (None, Some(n)) => {
+                    manager(ServerCommands::Delete(DeleteType::Name(n)));
+                }
                 _ => panic!("not good"),
             },
-            CliCommands::View => manager(ServerCommands::View),
-            CliCommands::Update { add, which } => manager(ServerCommands::Update(UpdateStruct {
-                which: if which.id.is_some() {
+            CliCommands::View => {
+                manager(ServerCommands::View);
+            }
+            CliCommands::Update { add, which } => {
+                manager(ServerCommands::Update(UpdateStruct {
+                    which: if which.id.is_some() {
+                        DeleteType::Id(which.id.unwrap())
+                    } else {
+                        DeleteType::Name(which.entry_name.unwrap())
+                    },
+                    update: add,
+                }));
+            }
+            CliCommands::Get { which } => {
+                manager(ServerCommands::Get(if which.id.is_some() {
                     DeleteType::Id(which.id.unwrap())
                 } else {
                     DeleteType::Name(which.entry_name.unwrap())
-                },
-                update: add,
-            })),
-            CliCommands::Get { which } => manager(ServerCommands::Get(if which.id.is_some() {
-                DeleteType::Id(which.id.unwrap())
-            } else {
-                DeleteType::Name(which.entry_name.unwrap())
-            })),
+                }));
+            }
             CliCommands::Export { path } => {
                 manager(ServerCommands::Export(path));
             }
@@ -110,15 +129,15 @@ fn main() {
                 key_path,
             } => {
                 let keypass = if key_path.is_some() {
-                        PasswordType::Key(key_path.clone().unwrap())
-                    } else {
-                        PasswordType::Password(create_password())
-                    };
+                    PasswordType::Key(key_path.clone().unwrap())
+                } else {
+                    PasswordType::Password(create_password())
+                };
                 manager(ServerCommands::Import(ImportArgs {
                     path: path,
                     new: new,
-                    key_pass:keypass,
-                }))
+                    key_pass: keypass,
+                }));
             }
         };
     }

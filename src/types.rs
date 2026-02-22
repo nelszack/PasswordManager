@@ -27,7 +27,7 @@ pub enum ServerCommands {
     Update(UpdateStruct),
     Export(String),
     Import(ImportArgs),
-    New{key_path: PasswordType},
+    New { key_path: PasswordType },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,6 +50,7 @@ pub struct PasswordEntry {
 pub enum DeleteType {
     Id(usize),
     Name(String),
+    Url(String),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
