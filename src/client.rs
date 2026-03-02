@@ -6,23 +6,17 @@ use std::{
     net::TcpStream,
 };
 
-pub fn manager(command: ServerCommands)
-// ->String
-{
+pub fn manager(command: ServerCommands) {
     send_command(command)
 }
-fn send_command(cmd: ServerCommands)
-// ->String
-{
+fn send_command(cmd: ServerCommands) {
     let mut con = TcpStream::connect(ADDR).unwrap();
     let data = bincode::serialize(&cmd).unwrap();
     con.write_all(&(data.len() as u32).to_be_bytes()).unwrap();
-    // println!("shere3");
     con.flush().unwrap();
     con.write_all(&data).unwrap();
     con.flush().unwrap();
     let mut responce: String = String::new();
     con.read_to_string(&mut responce).unwrap();
     print!("{}", responce);
-    // responce
 }

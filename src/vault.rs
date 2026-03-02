@@ -110,19 +110,22 @@ impl Vault {
                     respond(&format!("not found\n"), stream, http);
                 }
             }
-            DeleteType::Url(u)=>{
-                let mut found=false;
-                for i in 0..self.enteries.len(){
-                    if let Some(url)=&self.enteries[i].url{
-                        println!("{} {}",url,u);
-                        if url==&u{
-                            respond("this is a test", stream, http);
-                            found=true
+            DeleteType::Url(u) => {
+                let mut found = false;
+                let mut l1=Vec::<String>::new();
+                for i in 0..self.enteries.len() {
+                    if let Some(url) = &self.enteries[i].url {
+                        if url == &u {
+
+                            l1.append(&mut vec!(format!("{{\"username\": {:?}, \"password\": \"{}\"}}",self.enteries[i].username.clone().unwrap_or("None".to_string()),self.enteries[i].password)));
+                            found = true
                         }
                     }
                 }
-                if !found{
+                if !found {
                     respond("not found\n", stream, http);
+                }else{
+                    respond(&format!("[{}]",l1.join(",")), stream, http);
                 }
             }
         }
@@ -169,7 +172,7 @@ impl Vault {
                     }
                 }
             }
-            DeleteType::Url(_u)=>todo!()
+            DeleteType::Url(_u) => todo!(),
         }
 
         for i in 1..=self.enteries.len() {
@@ -240,7 +243,7 @@ impl Vault {
                     }
                 }
             }
-            DeleteType::Url(_u)=>todo!()
+            DeleteType::Url(_u) => todo!(),
         }
     }
 

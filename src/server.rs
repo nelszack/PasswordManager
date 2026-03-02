@@ -109,14 +109,19 @@ pub fn server(key: String) {
     let mut vlt: Option<Vault> = None;
     for stream in listener.incoming() {
         let mut stream1 = stream.unwrap();
-        let Some((msg, http)) = handler(&stream1) else{continue;};
+        let Some((msg, http)) = handler(&stream1) else {
+            stream1.flush().unwrap();
+            stream1.shutdown(Shutdown::Both).unwrap();
+            continue;
+        };
         match msg {
             ServerCommands::Kill => {
                 if !server_info.locked {
                     lock_vlt(&mut vlt, &mut server_info);
                 }
-
+                
                 respond("server killed", &mut stream1, http);
+                stream1.shutdown(Shutdown::Both).unwrap();
 
                 break;
             }
@@ -210,8 +215,9 @@ pub fn server(key: String) {
                     lock_vlt(&mut vlt, &mut server_info);
                 }
                 if args.new {
+                    server_info=ServerInfo { locked: true, keypass: Some(args.key_pass) };
                     create_vault(&mut vlt, &mut server_info, false);
-                    respond("Vault locked", &mut stream1, http);
+                    // respond("Vault locked", &mut stream1, http);
                 } else if server_info.locked {
                     server_info.keypass = Some(args.key_pass);
                     unlock_vlt(&mut vlt, &mut server_info);
@@ -266,7 +272,8 @@ fn handle_http(mut message: &TcpStream) -> ServerCommands {
             }
             val if val == "status".to_string() => ServerCommands::Status,
             val if val == "get".to_string() => {
-                ServerCommands::Get(DeleteType::Url(request.extra_info[0].clone().unwrap()))
+                let url=request.extra_info[0].clone().unwrap();
+                ServerCommands::Get(DeleteType::Url(url))
             }
             val if val == "kill".to_string() => ServerCommands::Kill,
             _ => panic!("not supported yet"),
@@ -280,9 +287,9 @@ fn handler(message: &TcpStream) -> Option<(ServerCommands, bool)> {
     let mut buff = [0u8; 1024];
     let n = message.peek(&mut buff).unwrap();
     if n > 400 {
-       return  Some((handle_http(message), true))
-    } else if n>0 {
-        return Some((handle_tcp(message), false))
+        return Some((handle_http(message), true));
+    } else if n > 0 {
+        return Some((handle_tcp(message), false));
     }
     None
 }
