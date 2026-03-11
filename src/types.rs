@@ -33,7 +33,7 @@ pub enum ServerCommands {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UnlockInfo {
     pub key: PasswordType,
-    pub timeout: Option<u8>,
+    pub timeout: u8,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -57,6 +57,7 @@ pub enum DeleteType {
 pub struct UpdateStruct {
     pub which: DeleteType,
     pub update: UpdateArgs,
+    pub password: Option<String>
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImportArgs {

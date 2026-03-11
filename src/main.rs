@@ -14,7 +14,7 @@ use crate::{
     clpboard::cpy,
     config::{read_config, update},
     encryption::create_password,
-    password::{gen_pass, pass_str},
+    password::{gen_pass, pass_str,pass_gen},
     server::{server, start},
     types::{
         DeleteType, ImportArgs, PasswordEntry, PasswordType, ServerCommands, UnlockInfo,
@@ -56,7 +56,7 @@ fn main() {
                             rpassword::prompt_password("enter password: ").unwrap(),
                         )
                     },
-                    timeout: timeout.timeout,
+                    timeout: timeout.timeout.unwrap_or(conf.unlock.timeout),
                 }));
             }
             CliCommands::Status => {
@@ -81,11 +81,12 @@ fn main() {
                 username,
                 url,
                 notes,
+                gen_password
             } => {
                 manager(ServerCommands::Add(PasswordEntry {
                     name: name,
                     username: username,
-                    password: create_password(),
+                    password: if !gen_password{create_password()} else{pass_gen(conf.genpass.length)} ,
                     url: url,
                     notes: notes,
                     which: None,
@@ -110,6 +111,7 @@ fn main() {
                     } else {
                         DeleteType::Name(which.entry_name.unwrap())
                     },
+                    password: if add.password{ if !add.gen_pass {Some(create_password())} else{Some(pass_gen(conf.genpass.length))}}else{None},
                     update: add,
                 }));
             }

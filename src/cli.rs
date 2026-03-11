@@ -56,6 +56,8 @@ pub enum CliCommands {
         url: Option<String>,
         #[arg(long)]
         notes: Option<String>,
+        #[arg(long)]
+        gen_password: bool
     },
     View,
     Update {
@@ -71,7 +73,6 @@ pub enum CliCommands {
     Import {
         #[arg(long)]
         path: String,
-
         #[arg(long)]
         new: bool,
         #[arg(long)]
@@ -99,6 +100,8 @@ pub struct ConfigArgs {
     pub genpass_stats: Option<bool>,
     #[arg(long("clpb-timeout"))]
     pub clpb_timeout: Option<u8>,
+    #[arg(long("unlock-timeout"))]
+    pub unlock_timeout: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Args)]
@@ -109,6 +112,8 @@ pub struct UpdateArgs {
     pub username: Option<String>,
     #[arg(long, default_value_t = false)]
     pub password: bool,
+    #[arg(long,default_value_t = false,requires ="password")]
+    pub gen_pass: bool,
     #[arg(long)]
     pub url: Option<String>,
     #[arg(long)]
