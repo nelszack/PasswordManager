@@ -36,7 +36,7 @@ pub struct UnlockInfo {
     pub timeout: Option<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PasswordEntry {
     pub which: Option<DeleteType>,
     pub name: String,
@@ -46,7 +46,7 @@ pub struct PasswordEntry {
     pub notes: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum DeleteType {
     Id(usize),
     Name(String),

@@ -40,15 +40,22 @@ impl Zeroize for ServerInfo {
 impl Zeroize for PasswordType {
     fn zeroize(&mut self) {
         match self {
-            PasswordType::Key(k) => k.zeroize(),
-            PasswordType::Password(p) => p.zeroize(),
+            PasswordType::Key(k) => {
+                k.zeroize();
+                *self = PasswordType::Key(String::new())
+            }
+            PasswordType::Password(p) => {
+                p.zeroize();
+                *self = PasswordType::Password(String::new())
+            }
         }
     }
 }
 impl Zeroize for Vault {
     fn zeroize(&mut self) {
         self.enteries.zeroize();
-        self.metadata.zeroize()
+        self.metadata.zeroize();
+        *self = Self::default();
     }
 }
 impl Zeroize for VaultEnteries {
@@ -61,6 +68,7 @@ impl Zeroize for VaultEnteries {
         self.password.zeroize();
         self.url.zeroize();
         self.username.zeroize();
+        *self = Self::default();
     }
 }
 
@@ -119,7 +127,7 @@ pub fn server(key: String) {
                 if !server_info.locked {
                     lock_vlt(&mut vlt, &mut server_info);
                 }
-                
+
                 respond("server killed", &mut stream1, http);
                 stream1.shutdown(Shutdown::Both).unwrap();
 
@@ -139,7 +147,7 @@ pub fn server(key: String) {
                 // }
                 if server_info.locked {
                     server_info.keypass = Some(info.key);
-                    vlt.unlock_vault(&mut server_info);
+                    unlock_vlt(&mut vlt, &mut server_info);
                     thread::spawn(move || auto_lock(info.timeout.unwrap_or(0)));
                     respond("Vault unlocked", &mut stream1, http);
                 } else {
@@ -215,7 +223,10 @@ pub fn server(key: String) {
                     lock_vlt(&mut vlt, &mut server_info);
                 }
                 if args.new {
-                    server_info=ServerInfo { locked: true, keypass: Some(args.key_pass) };
+                    server_info = ServerInfo {
+                        locked: true,
+                        keypass: Some(args.key_pass),
+                    };
                     create_vault(&mut vlt, &mut server_info, false);
                     // respond("Vault locked", &mut stream1, http);
                 } else if server_info.locked {
@@ -272,7 +283,7 @@ fn handle_http(mut message: &TcpStream) -> ServerCommands {
             }
             val if val == "status".to_string() => ServerCommands::Status,
             val if val == "get".to_string() => {
-                let url=request.extra_info[0].clone().unwrap();
+                let url = request.extra_info[0].clone().unwrap();
                 ServerCommands::Get(DeleteType::Url(url))
             }
             val if val == "kill".to_string() => ServerCommands::Kill,
@@ -320,3 +331,5 @@ pub fn respond(message: &str, stream: &mut TcpStream, http: bool) {
     }
     stream.flush().unwrap();
 }
+
+// add tests

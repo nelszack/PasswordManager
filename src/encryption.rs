@@ -88,3 +88,28 @@ pub fn decrypt_file(mut key_pass: &mut PasswordType, encrypted: &[u8]) -> Option
     let nonce = XNonce::from_slice(nonce_bytes);
     cipher.decrypt(nonce, ciphertext).ok()
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::fs;
+    #[test]
+    fn test_encrypt_decrept_pass() {
+        let plantext = "this is a test".as_bytes();
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypt = encrypt_file(&mut pass, plantext);
+        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
+        assert_eq!(decrypt, plantext)
+    }
+    #[test]
+    fn test_encrypt_decrept_key() {
+        let temp = Path::new("temp.enc");
+        gen_master_key(&mut PasswordType::Key("temp.enc".to_string()), true);
+        let plantext = "this is a test".as_bytes();
+        let mut pass = PasswordType::Key(temp.to_str().unwrap().to_string());
+        let encrypt = encrypt_file(&mut pass, plantext);
+        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
+        fs::remove_file(temp).unwrap();
+        assert_eq!(decrypt, plantext)
+    }
+}

@@ -66,3 +66,5 @@ pub fn update(modify: ConfigArgs) {
     let toml_string = toml::to_string_pretty(&config).unwrap();
     fs::write(CONFIG_PATH, &toml_string).unwrap();
 }
+
+// add tests

@@ -52,3 +52,5 @@ pub fn pass_str(pass: &String) {
         }
     }
 }
+
+// add tests

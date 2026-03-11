@@ -13,7 +13,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct VaultEnteries {
     pub id: usize,
     pub name: String,
@@ -24,17 +24,18 @@ pub struct VaultEnteries {
     pub created: String,
     pub modified: String,
 }
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct VaultMetadata {
     pub filename: String,
 }
 impl Zeroize for VaultMetadata {
     fn zeroize(&mut self) {
         self.filename.zeroize();
+        *self = Self::default();
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct Vault {
     pub enteries: Vec<VaultEnteries>,
     pub metadata: VaultMetadata,
@@ -112,20 +113,26 @@ impl Vault {
             }
             DeleteType::Url(u) => {
                 let mut found = false;
-                let mut l1=Vec::<String>::new();
+                let mut l1 = Vec::<String>::new();
                 for i in 0..self.enteries.len() {
                     if let Some(url) = &self.enteries[i].url {
                         if url == &u {
-
-                            l1.append(&mut vec!(format!("{{\"username\": {:?}, \"password\": \"{}\"}}",self.enteries[i].username.clone().unwrap_or("None".to_string()),self.enteries[i].password)));
+                            l1.append(&mut vec![format!(
+                                "{{\"username\": {:?}, \"password\": \"{}\"}}",
+                                self.enteries[i]
+                                    .username
+                                    .clone()
+                                    .unwrap_or("None".to_string()),
+                                self.enteries[i].password
+                            )]);
                             found = true
                         }
                     }
                 }
                 if !found {
                     respond("not found\n", stream, http);
-                }else{
-                    respond(&format!("[{}]",l1.join(",")), stream, http);
+                } else {
+                    respond(&format!("[{}]", l1.join(",")), stream, http);
                 }
             }
         }
@@ -351,5 +358,386 @@ impl VaultFns for Option<Vault> {
         if let Some(vlt) = self {
             vlt.import(path)
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::cli::UpdateArgs;
+    use chrono::FixedOffset;
+    use std::fs;
+    use tempfile::NamedTempFile;
+
+    fn time_close(time: String) -> bool {
+        let thing =
+            chrono::DateTime::<FixedOffset>::parse_from_str(&time, "%Y-%m-%d %H:%M:%S%.f %:z")
+                .unwrap();
+        let diff = chrono::Local::now().signed_duration_since(thing);
+        diff.num_seconds() < 1
+    }
+    #[test]
+    fn test_add_entry() {
+        let mut vault: Vault = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vault.add_entry(PasswordEntry {
+            which: None,
+            name: String::from("test"),
+            username: Some(String::from("test")),
+            password: String::from("test123"),
+            url: None,
+            notes: None,
+        });
+        let expected = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: vault.enteries[0].created.clone(),
+                modified: vault.enteries[0].modified.clone(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        assert_eq!(vault, expected);
+        assert!(time_close(vault.enteries[0].created.clone()));
+        assert!(time_close(vault.enteries[0].modified.clone()));
+    }
+    #[test]
+    fn test_delete_id() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.delete_entry(DeleteType::Id(1));
+        assert_eq!(
+            vlt,
+            Vault {
+                enteries: vec![],
+                metadata: VaultMetadata {
+                    filename: "test.enc".into(),
+                }
+            }
+        )
+    }
+    #[test]
+    fn test_delete_name() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.delete_entry(DeleteType::Name("test".into()));
+        assert_eq!(
+            vlt,
+            Vault {
+                enteries: vec![],
+                metadata: VaultMetadata {
+                    filename: "test.enc".into(),
+                }
+            }
+        )
+    }
+    #[test]
+    fn test_update_id() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(1),
+            update: UpdateArgs {
+                name: Some(String::from("test2")),
+                username: Some(String::from("test2")),
+                password: false,
+                url: None,
+                notes: None,
+            },
+        });
+        let expected = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test2"),
+                username: Some(String::from("test2")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: vlt.enteries[0].created.clone(),
+                modified: vlt.enteries[0].modified.clone(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        assert_eq!(vlt, expected);
+        assert!(time_close(vlt.enteries[0].modified.clone()))
+    }
+    #[test]
+    fn test_update_name() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Name(String::from("test")),
+            update: UpdateArgs {
+                name: Some(String::from("test2")),
+                username: Some(String::from("test2")),
+                password: false,
+                url: None,
+                notes: None,
+            },
+        });
+        let expected = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test2"),
+                username: Some(String::from("test2")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: vlt.enteries[0].created.clone(),
+                modified: vlt.enteries[0].modified.clone(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        assert_eq!(vlt, expected);
+        assert!(time_close(vlt.enteries[0].modified.clone()))
+    }
+    #[test]
+    fn test_export_import() {
+        let file = NamedTempFile::new().unwrap();
+
+        let vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.export(file.path().to_str().unwrap().to_string());
+        let mut vlt1 = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt1.import(file.path().to_str().unwrap().to_string());
+        assert_eq!(vlt, vlt1);
+    }
+    #[test]
+    fn test_lock_unlock_key() {
+        let temp = Path::new("test.pem");
+        gen_master_key(&mut PasswordType::Key("test.pem".to_string()), true);
+        let filename = get_filename(
+            &mut PasswordType::Key(temp.to_str().unwrap().to_string()),
+            false,
+        );
+        let vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: filename.clone(),
+            },
+        };
+        let pass = PasswordType::Key(temp.to_str().unwrap().to_string());
+        let pass1 = PasswordType::Key(temp.to_str().unwrap().to_string());
+        vlt.lock_vault(&mut ServerInfo {
+            locked: false,
+            keypass: Some(pass),
+        });
+        let vlt1 = unlock_vault(&mut ServerInfo {
+            locked: true,
+            keypass: Some(pass1),
+        });
+        fs::remove_file(temp).unwrap();
+        fs::remove_file(Path::new(&filename)).unwrap();
+        assert_eq!(vlt, vlt1)
+    }
+    #[test]
+    fn test_lock_unlock_password() {
+        let filename = get_filename(&mut PasswordType::Password("test1234!".to_string()), true);
+        let vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: filename.clone(),
+            },
+        };
+        let pass = PasswordType::Password("test1234!".to_string());
+        let pass1 = PasswordType::Password("test1234!".to_string());
+        vlt.lock_vault(&mut ServerInfo {
+            locked: false,
+            keypass: Some(pass),
+        });
+        let vlt1 = unlock_vault(&mut ServerInfo {
+            locked: true,
+            keypass: Some(pass1),
+        });
+        fs::remove_file(Path::new(&filename)).unwrap();
+        assert_eq!(vlt, vlt1)
+    }
+    #[test]
+    fn test_create_vault_key() {
+        let mut vlt = None;
+        create_vault(
+            &mut vlt,
+            &mut ServerInfo {
+                locked: true,
+                keypass: Some(PasswordType::Key("create_vault.enc".to_string())),
+            },
+            false,
+        );
+        let filename = get_filename(
+            &mut PasswordType::Key("create_vault.enc".to_string()),
+            false,
+        );
+        fs::remove_file(Path::new(&filename)).unwrap();
+        fs::remove_file(Path::new("create_vault.enc")).unwrap();
+        assert_eq!(
+            vlt,
+            Some(Vault {
+                enteries: Vec::new(),
+                metadata: VaultMetadata { filename: filename },
+            })
+        )
+    }
+    #[test]
+    fn test_create_vault_key_lock() {
+        let mut vlt = None;
+        create_vault(
+            &mut vlt,
+            &mut ServerInfo {
+                locked: true,
+                keypass: Some(PasswordType::Key("create_vault_lock.enc".to_string())),
+            },
+            true,
+        );
+        let filename = get_filename(
+            &mut PasswordType::Key("create_vault_lock.enc".to_string()),
+            false,
+        );
+        fs::remove_file(Path::new(&filename)).unwrap();
+        fs::remove_file(Path::new("create_vault_lock.enc")).unwrap();
+        assert_eq!(vlt, None)
+    }
+    #[test]
+    fn test_create_vault_password() {
+        let mut vlt = None;
+        create_vault(
+            &mut vlt,
+            &mut ServerInfo {
+                locked: true,
+                keypass: Some(PasswordType::Password("test123456!".to_string())),
+            },
+            false,
+        );
+        let filename = get_filename(
+            &mut PasswordType::Password("test123456!".to_string()),
+            false,
+        );
+        fs::remove_file(Path::new(&filename)).unwrap();
+        assert_eq!(
+            vlt,
+            Some(Vault {
+                enteries: Vec::new(),
+                metadata: VaultMetadata { filename: filename },
+            })
+        )
+    }
+    #[test]
+    fn test_create_vault_password_lock() {
+        let mut vlt = None;
+        create_vault(
+            &mut vlt,
+            &mut ServerInfo {
+                locked: true,
+                keypass: Some(PasswordType::Password("test1234567!".to_string())),
+            },
+            true,
+        );
+        let filename = get_filename(
+            &mut PasswordType::Password("test1234567!".to_string()),
+            false,
+        );
+        fs::remove_file(Path::new(&filename)).unwrap();
+        assert_eq!(vlt, None)
     }
 }
