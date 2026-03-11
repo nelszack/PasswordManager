@@ -496,9 +496,11 @@ mod test {
                 name: Some(String::from("test2")),
                 username: Some(String::from("test2")),
                 password: false,
+                gen_pass:false,
                 url: None,
                 notes: None,
             },
+            password:None
         });
         let expected = Vault {
             enteries: vec![VaultEnteries {
@@ -541,9 +543,11 @@ mod test {
                 name: Some(String::from("test2")),
                 username: Some(String::from("test2")),
                 password: false,
+                gen_pass:false,
                 url: None,
                 notes: None,
             },
+            password:None
         });
         let expected = Vault {
             enteries: vec![VaultEnteries {

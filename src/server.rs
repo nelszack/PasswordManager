@@ -231,7 +231,7 @@ pub fn server(key: String) {
                     // respond("Vault locked", &mut stream1, http);
                 } else if server_info.locked {
                     server_info.keypass = Some(args.key_pass);
-                    unlock_vlt(&mut vlt, &mut server_info);
+                    vlt.unlock_vault(&mut server_info);
                 }
 
                 vlt.import(args.path);
@@ -311,9 +311,7 @@ fn lock_vlt(vlt: &mut Option<Vault>, mut server_info: &mut ServerInfo) {
     server_info.zeroize();
 }
 
-fn unlock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) {
-    vlt.unlock_vault(server_info);
-}
+
 pub fn respond(message: &str, stream: &mut TcpStream, http: bool) {
     if http {
         stream
