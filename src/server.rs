@@ -147,8 +147,8 @@ pub fn server(key: String) {
                 // }
                 if server_info.locked {
                     server_info.keypass = Some(info.key);
-                    unlock_vlt(&mut vlt, &mut server_info);
-                    thread::spawn(move || auto_lock(info.timeout.unwrap_or(0)));
+                    vlt.unlock_vault(&mut server_info);
+                    thread::spawn(move || auto_lock(info.timeout));
                     respond("Vault unlocked", &mut stream1, http);
                 } else {
                     respond(

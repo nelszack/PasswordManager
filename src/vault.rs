@@ -1,5 +1,5 @@
 use crate::{
-    encryption::{create_password, decrypt_file, encrypt_file, gen_master_key},
+    encryption::{decrypt_file, encrypt_file, gen_master_key},
     file::file_exists,
     server::{ServerInfo, respond},
     types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
@@ -92,7 +92,10 @@ impl Vault {
     pub fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
         match a {
             DeleteType::Id(i) => {
-                if i < self.enteries.len() {
+                if i == 0 || i > self.enteries.len() {
+                    panic!("not valid id");
+                }
+                if i <= self.enteries.len() {
                     respond(&format!("{:?}\n", self.enteries[i - 1]), stream, http);
                 } else {
                     respond(&format!("id not found\n"), stream, http);
@@ -169,6 +172,9 @@ impl Vault {
     pub fn delete_entry(&mut self, id: DeleteType) {
         match id {
             DeleteType::Id(i) => {
+                if i == 0 || i > self.enteries.len() {
+                    panic!("not valid id");
+                }
                 self.enteries.remove(i - 1);
             }
             DeleteType::Name(n) => {
@@ -204,7 +210,7 @@ impl Vault {
                     modified = true;
                 }
                 if add.update.password {
-                    self.enteries[i].password = create_password();
+                    self.enteries[i].password = add.password.unwrap();
                     modified = true;
                 }
                 if add.update.url.is_some() {
@@ -232,7 +238,7 @@ impl Vault {
                             modified = true;
                         }
                         if add.update.password {
-                            self.enteries[i].password = create_password();
+                            self.enteries[i].password = add.password.unwrap();
                             modified = true;
                         }
                         if add.update.url.is_some() {

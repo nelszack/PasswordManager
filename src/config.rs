@@ -7,6 +7,7 @@ const CONFIG_PATH: &str = "config.toml";
 pub struct Config {
     pub genpass: Genpassconf,
     pub clpboard: Clpbconf,
+    pub unlock:Unlockconf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -19,6 +20,11 @@ pub struct Genpassconf {
 pub struct Clpbconf {
     pub timeout: u8,
 }
+#[derive(Serialize, Deserialize)]
+pub struct Unlockconf{
+    pub timeout:u8
+}
+
 
 fn default_config(write_to_file: bool) -> Config {
     let config = Config {
@@ -27,6 +33,7 @@ fn default_config(write_to_file: bool) -> Config {
             stats: false,
         },
         clpboard: Clpbconf { timeout: 10 },
+        unlock:Unlockconf { timeout: 0 }
     };
     if write_to_file {
         let toml_string = toml::to_string(&config).unwrap();
@@ -62,6 +69,9 @@ pub fn update(modify: ConfigArgs) {
     }
     if let Some(i) = modify.clpb_timeout {
         config.clpboard.timeout = i
+    }
+    if let Some(i) = modify.unlock_timeout {
+        config.unlock.timeout = i
     }
     let toml_string = toml::to_string_pretty(&config).unwrap();
     fs::write(CONFIG_PATH, &toml_string).unwrap();
