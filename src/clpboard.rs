@@ -7,12 +7,11 @@ pub fn cpy(secret: &str, timeout: u8) {
     println!("copyied to clipboard");
     let secret = secret.to_owned();
     let size = (timeout.ilog10() as usize) + 1;
-    println!("{}", size);
     let t = thread::spawn(move || {
         thread::sleep(Duration::from_secs(timeout as u64));
         if let Ok(mut cb) = Clipboard::new() {
             if cb.get_text().ok().as_deref() == Some(&secret) {
-                let _ = cb.clear();
+                cb.clear().unwrap();
                 let add_size = size + 12;
                 println!("\rclipboard cleared {:add_size$}", "")
             }
@@ -23,5 +22,17 @@ pub fn cpy(secret: &str, timeout: u8) {
         std::io::stdout().flush().unwrap();
         thread::sleep(Duration::from_secs(1));
     }
-    let _ = t.join();
+    t.join().unwrap();
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_clp() {
+        let mut clipboard = Clipboard::new().unwrap();
+        cpy("this is a test", 2);
+        let content = clipboard.get_text().ok();
+        assert_eq!(content, None);
+    }
 }
