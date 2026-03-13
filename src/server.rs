@@ -1,5 +1,6 @@
 use crate::{
     client::manager,
+    clpboard::cpy,
     types::*,
     vault::{Vault, VaultEnteries, VaultFns, create_vault},
 };
@@ -184,8 +185,11 @@ pub fn server(key: String) {
                 if server_info.locked {
                     respond("Vault locked", &mut stream1, http);
                 } else {
+                    let mut pass = info.password.clone();
                     vlt.add_entry(info);
                     respond("entry added", &mut stream1, http);
+                    cpy(&pass, 10);
+                    pass.zeroize();
                 }
             }
             ServerCommands::Delete(id) => {
@@ -310,7 +314,6 @@ fn lock_vlt(vlt: &mut Option<Vault>, mut server_info: &mut ServerInfo) {
     vlt.zeroize();
     server_info.zeroize();
 }
-
 
 pub fn respond(message: &str, stream: &mut TcpStream, http: bool) {
     if http {

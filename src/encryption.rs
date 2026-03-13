@@ -5,12 +5,12 @@ use chacha20poly1305::{
     AeadCore, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
+use directories::ProjectDirs;
 use rand::Rng;
 use rand_core::OsRng;
 use std::{
     fs::{File, read},
     io::Write,
-    path::Path,
 };
 
 pub fn create_password() -> String {
@@ -51,10 +51,13 @@ fn master_key_from_keyfile(keyfile_bytes: &[u8]) -> [u8; 32] {
 pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
     match key_pass {
         PasswordType::Key(key) => {
+            let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+            let data_dir = proj_dir.data_dir();
+            let file_path = data_dir.join(key);
             if new {
-                master_key_from_keyfile(&generate_key(&Path::new(&key)))
+                master_key_from_keyfile(&generate_key(&file_path))
             } else {
-                master_key_from_keyfile(&read(format!("{}", key)).unwrap())
+                master_key_from_keyfile(&read(&file_path).unwrap())
             }
         }
         PasswordType::Password(pass) => {
@@ -92,7 +95,7 @@ pub fn decrypt_file(mut key_pass: &mut PasswordType, encrypted: &[u8]) -> Option
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs;
+    use std::{fs, path::Path};
     #[test]
     fn test_encrypt_decrept_pass() {
         let plantext = "this is a test".as_bytes();
@@ -109,7 +112,10 @@ mod test {
         let mut pass = PasswordType::Key(temp.to_str().unwrap().to_string());
         let encrypt = encrypt_file(&mut pass, plantext);
         let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        fs::remove_file(temp).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_dir = proj_dir.data_dir();
+        let file_path = data_dir.join(temp);
+        fs::remove_file(file_path).unwrap();
         assert_eq!(decrypt, plantext)
     }
 }

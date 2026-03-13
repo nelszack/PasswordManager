@@ -57,7 +57,7 @@ pub enum DeleteType {
 pub struct UpdateStruct {
     pub which: DeleteType,
     pub update: UpdateArgs,
-    pub password: Option<String>
+    pub password: Option<String>,
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImportArgs {

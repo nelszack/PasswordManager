@@ -14,17 +14,24 @@ use crate::{
     clpboard::cpy,
     config::{read_config, update},
     encryption::create_password,
-    password::{gen_pass, pass_str,pass_gen},
+    password::{gen_pass, pass_gen, pass_str},
     server::{server, start},
     types::{
         DeleteType, ImportArgs, PasswordEntry, PasswordType, ServerCommands, UnlockInfo,
         UpdateStruct,
     },
 };
-
+use directories::ProjectDirs;
+use std::fs;
 fn main() {
+    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let config_path = proj_dir.config_dir();
+    let data_path = proj_dir.data_dir();
+    fs::create_dir_all(config_path).unwrap();
+    fs::create_dir_all(data_path).unwrap();
+    let config_file = config_path.join("config.toml");
     let cli = cli_parse();
-    let conf = read_config();
+    let conf = read_config(&config_file);
     if let Some(command) = cli.command {
         match command {
             CliCommands::Genpass {
@@ -43,7 +50,7 @@ fn main() {
             CliCommands::Clpb { timeout } => {
                 cpy("testpass", timeout.timeout.unwrap_or(conf.clpboard.timeout))
             }
-            CliCommands::Config(command) => update(command),
+            CliCommands::Config(command) => update(command, config_path),
             CliCommands::Lock => {
                 manager(ServerCommands::Lock(true));
             }
@@ -81,12 +88,16 @@ fn main() {
                 username,
                 url,
                 notes,
-                gen_password
+                gen_password,
             } => {
                 manager(ServerCommands::Add(PasswordEntry {
                     name: name,
                     username: username,
-                    password: if !gen_password{create_password()} else{pass_gen(conf.genpass.length)} ,
+                    password: if !gen_password {
+                        create_password()
+                    } else {
+                        pass_gen(conf.genpass.length)
+                    },
                     url: url,
                     notes: notes,
                     which: None,
@@ -111,7 +122,15 @@ fn main() {
                     } else {
                         DeleteType::Name(which.entry_name.unwrap())
                     },
-                    password: if add.password{ if !add.gen_pass {Some(create_password())} else{Some(pass_gen(conf.genpass.length))}}else{None},
+                    password: if add.password {
+                        if !add.gen_pass {
+                            Some(create_password())
+                        } else {
+                            Some(pass_gen(conf.genpass.length))
+                        }
+                    } else {
+                        None
+                    },
                     update: add,
                 }));
             }

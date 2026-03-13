@@ -5,11 +5,11 @@ use crate::{
     types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
 };
 use blake3;
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, read, write},
     net::TcpStream,
-    path::Path,
 };
 use zeroize::Zeroize;
 
@@ -59,10 +59,13 @@ fn get_filename(mut key_pass: &mut PasswordType, new: bool) -> String {
 
 pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock: bool) {
     let fname = get_filename(&mut server_info.keypass.as_mut().unwrap(), true);
-    if file_exists(&fname) {
+    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let data_path = proj_dir.data_dir();
+    let file_path = data_path.join(&fname);
+    if file_exists(&file_path.to_str().unwrap()) {
         panic!("file already exists")
     }
-    File::create(Path::new(&fname)).unwrap();
+    File::create(file_path).unwrap();
     *vlt = Some(Vault {
         enteries: Vec::new(),
         metadata: VaultMetadata {
@@ -81,7 +84,10 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
 
 fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
     let fname = get_filename(&mut key_pass.keypass.as_mut().unwrap(), false);
-    let contents = read(fname).unwrap();
+    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let data_path = proj_dir.data_dir();
+    let file_path = data_path.join(&fname);
+    let contents = read(file_path).unwrap();
     let dec = decrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &contents);
     let vault: Vault = rmp_serde::from_slice(&dec.unwrap()).unwrap();
     key_pass.locked = false;
@@ -160,7 +166,7 @@ impl Vault {
             id: nid,
             name: info.name,
             username: info.username,
-            password: info.password,
+            password: info.password.clone(),
             url: info.url,
             notes: info.notes,
             created: chrono::Local::now().to_string(),
@@ -280,9 +286,12 @@ impl Vault {
 
     pub fn lock_vault(&self, key_pass: &mut ServerInfo) {
         let fname = self.metadata.filename.clone();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&fname);
         let buf = rmp_serde::to_vec(&self).unwrap();
         let txt = encrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &buf[..]);
-        write(fname, txt).unwrap();
+        write(file_path, txt).unwrap();
         key_pass.zeroize();
     }
     pub fn export(&self, path: String) {
@@ -372,7 +381,7 @@ mod test {
     use super::*;
     use crate::cli::UpdateArgs;
     use chrono::FixedOffset;
-    use std::fs;
+    use std::{fs, path::Path};
     use tempfile::NamedTempFile;
 
     fn time_close(time: String) -> bool {
@@ -496,11 +505,11 @@ mod test {
                 name: Some(String::from("test2")),
                 username: Some(String::from("test2")),
                 password: false,
-                gen_pass:false,
+                gen_pass: false,
                 url: None,
                 notes: None,
             },
-            password:None
+            password: None,
         });
         let expected = Vault {
             enteries: vec![VaultEnteries {
@@ -543,11 +552,11 @@ mod test {
                 name: Some(String::from("test2")),
                 username: Some(String::from("test2")),
                 password: false,
-                gen_pass:false,
+                gen_pass: false,
                 url: None,
                 notes: None,
             },
-            password:None
+            password: None,
         });
         let expected = Vault {
             enteries: vec![VaultEnteries {
@@ -629,8 +638,12 @@ mod test {
             locked: true,
             keypass: Some(pass1),
         });
-        fs::remove_file(temp).unwrap();
-        fs::remove_file(Path::new(&filename)).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&filename);
+        let file_path2 = data_path.join(temp);
+        fs::remove_file(file_path2).unwrap();
+        fs::remove_file(file_path).unwrap();
         assert_eq!(vlt, vlt1)
     }
     #[test]
@@ -661,7 +674,10 @@ mod test {
             locked: true,
             keypass: Some(pass1),
         });
-        fs::remove_file(Path::new(&filename)).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&filename);
+        fs::remove_file(file_path).unwrap();
         assert_eq!(vlt, vlt1)
     }
     #[test]
@@ -679,8 +695,12 @@ mod test {
             &mut PasswordType::Key("create_vault.enc".to_string()),
             false,
         );
-        fs::remove_file(Path::new(&filename)).unwrap();
-        fs::remove_file(Path::new("create_vault.enc")).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&filename);
+        let file_path2 = data_path.join("create_vault.enc");
+        fs::remove_file(file_path).unwrap();
+        fs::remove_file(file_path2).unwrap();
         assert_eq!(
             vlt,
             Some(Vault {
@@ -704,8 +724,12 @@ mod test {
             &mut PasswordType::Key("create_vault_lock.enc".to_string()),
             false,
         );
-        fs::remove_file(Path::new(&filename)).unwrap();
-        fs::remove_file(Path::new("create_vault_lock.enc")).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&filename);
+        let file_path2 = data_path.join("create_vault_lock.enc");
+        fs::remove_file(file_path).unwrap();
+        fs::remove_file(file_path2).unwrap();
         assert_eq!(vlt, None)
     }
     #[test]
@@ -723,7 +747,10 @@ mod test {
             &mut PasswordType::Password("test123456!".to_string()),
             false,
         );
-        fs::remove_file(Path::new(&filename)).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&filename);
+        fs::remove_file(file_path).unwrap();
         assert_eq!(
             vlt,
             Some(Vault {
@@ -747,7 +774,10 @@ mod test {
             &mut PasswordType::Password("test1234567!".to_string()),
             false,
         );
-        fs::remove_file(Path::new(&filename)).unwrap();
+        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+        let data_path = proj_dir.data_dir();
+        let file_path = data_path.join(&filename);
+        fs::remove_file(file_path).unwrap();
         assert_eq!(vlt, None)
     }
 }
