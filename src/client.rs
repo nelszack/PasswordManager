@@ -1,4 +1,4 @@
-use crate::server::{ADDR};
+use crate::server::ADDR;
 use crate::types::*;
 use bincode;
 use std::{

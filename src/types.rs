@@ -27,7 +27,7 @@ pub enum ServerCommands {
     Update(UpdateStruct),
     Export(String),
     Import(ImportArgs),
-    New { key_path: PasswordType },
+    New(PasswordType),
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -85,13 +85,11 @@ fn main() {
             (CliCommands::Start, false) => start(),
             (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())),
             (CliCommands::New { key_path }, true) => {
-                manager(ServerCommands::New {
-                    key_path: if key_path.is_some() {
-                        PasswordType::Key(key_path.unwrap())
-                    } else {
-                        PasswordType::Password(create_password())
-                    },
-                });
+                manager(ServerCommands::New(if key_path.is_some() {
+                    PasswordType::Key(key_path.unwrap())
+                } else {
+                    PasswordType::Password(create_password())
+                }));
             }
             (
                 CliCommands::Add {

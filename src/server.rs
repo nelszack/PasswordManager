@@ -173,7 +173,7 @@ pub fn server(key: String) {
                     http,
                 );
             }
-            ServerCommands::New { key_path } => {
+            ServerCommands::New(key_path) => {
                 if !server_info.locked {
                     lock_vlt(&mut vlt, &mut server_info);
                 }
