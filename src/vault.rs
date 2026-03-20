@@ -8,7 +8,7 @@ use blake3;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{File, read, write},
+    fs::{self, File, read, write},
     net::TcpStream,
 };
 use zeroize::Zeroize;
@@ -144,6 +144,7 @@ impl Vault {
                     respond(&format!("[{}]", l1.join(",")), stream, http);
                 }
             }
+            DeleteType::Vault(_) => unreachable!(),
         }
     }
 
@@ -192,6 +193,7 @@ impl Vault {
                 }
             }
             DeleteType::Url(_u) => todo!(),
+            DeleteType::Vault(_) => unreachable!(),
         }
 
         for i in 1..=self.enteries.len() {
@@ -263,6 +265,7 @@ impl Vault {
                 }
             }
             DeleteType::Url(_u) => todo!(),
+            DeleteType::Vault(_) => unreachable!(),
         }
     }
 
@@ -375,7 +378,19 @@ impl VaultFns for Option<Vault> {
         }
     }
 }
-
+pub fn delete_vault(mut key: PasswordType) {
+    use directories::ProjectDirs;
+    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let data = proj_dir.data_dir();
+    let filename = get_filename(&mut key, false);
+    fs::remove_file(data.join(filename)).unwrap();
+    match key {
+        PasswordType::Key(key) => {
+            fs::remove_file(data.join(key)).unwrap();
+        }
+        _ => {}
+    }
+}
 #[cfg(test)]
 mod test {
     use super::*;

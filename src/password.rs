@@ -17,7 +17,7 @@ pub fn pass_gen(len: u8) -> String {
     pass
 }
 
-pub fn gen_pass(len: u8, stats: bool) {
+pub fn gen_pass(len: u8, stats: bool, copy: bool, copy_time: u8) {
     if len < 12 {
         println!("for better security the recomended password length at least 12")
     }
@@ -26,7 +26,9 @@ pub fn gen_pass(len: u8, stats: bool) {
     if stats {
         pass_str(&pass);
     }
-    cpy(&pass, 10);
+    if copy {
+        cpy(&pass, copy_time);
+    }
 }
 
 pub fn pass_str(pass: &String) {

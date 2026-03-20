@@ -11,11 +11,11 @@ mod vault;
 use crate::{
     cli::{CliCommands, DeleteArgs, cli_parse},
     client::manager,
-    clpboard::cpy,
+    // clpboard::cpy,
     config::{read_config, update},
     encryption::create_password,
     password::{gen_pass, pass_gen, pass_str},
-    server::{server, start},
+    server::{is_running, server, start},
     types::{
         DeleteType, ImportArgs, PasswordEntry, PasswordType, ServerCommands, UnlockInfo,
         UpdateStruct,
@@ -32,29 +32,39 @@ fn main() {
     let config_file = config_path.join("config.toml");
     let cli = cli_parse();
     let conf = read_config(&config_file);
+    let server_running = is_running();
     if let Some(command) = cli.command {
-        match command {
-            CliCommands::Genpass {
-                length,
-                no_stats,
-                stats,
-            } => gen_pass(
+        match (command, server_running) {
+            (
+                CliCommands::Genpass {
+                    length,
+                    no_stats,
+                    stats,
+                    copy,
+                    no_copy,
+                    copy_time,
+                },
+                _,
+            ) => gen_pass(
                 length.unwrap_or(conf.genpass.length),
                 if !stats && !no_stats {
                     conf.genpass.stats
                 } else {
                     if stats { true } else { false }
                 },
+                if !copy && !no_copy {
+                    conf.genpass.copy
+                } else {
+                    if copy { true } else { false }
+                },
+                copy_time.unwrap_or(conf.clpboard.clp_timeout),
             ),
-            CliCommands::Passcheck { password } => pass_str(&password),
-            CliCommands::Clpb { timeout } => {
-                cpy("testpass", timeout.timeout.unwrap_or(conf.clpboard.timeout))
-            }
-            CliCommands::Config(command) => update(command, config_path),
-            CliCommands::Lock => {
+            (CliCommands::Passcheck { password }, _) => pass_str(&password),
+            (CliCommands::Config(command), _) => update(conf, command, &config_file),
+            (CliCommands::Lock, true) => {
                 manager(ServerCommands::Lock(true));
             }
-            CliCommands::Unlock { key, timeout } => {
+            (CliCommands::Unlock { key, timeout }, true) => {
                 manager(ServerCommands::UnLock(UnlockInfo {
                     key: if key.is_some() {
                         PasswordType::Key(key.unwrap())
@@ -63,18 +73,18 @@ fn main() {
                             rpassword::prompt_password("enter password: ").unwrap(),
                         )
                     },
-                    timeout: timeout.timeout.unwrap_or(conf.unlock.timeout),
+                    timeout: timeout.timeout.unwrap_or(conf.unlock.unlock_timeout),
                 }));
             }
-            CliCommands::Status => {
+            (CliCommands::Status, true) => {
                 manager(ServerCommands::Status);
             }
-            CliCommands::Kill => {
+            (CliCommands::Kill, true) => {
                 manager(ServerCommands::Kill);
             }
-            CliCommands::Start => start(),
-            CliCommands::Run { key } => server(key.unwrap_or("none".into())),
-            CliCommands::New { key_path } => {
+            (CliCommands::Start, false) => start(),
+            (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())),
+            (CliCommands::New { key_path }, true) => {
                 manager(ServerCommands::New {
                     key_path: if key_path.is_some() {
                         PasswordType::Key(key_path.unwrap())
@@ -83,13 +93,16 @@ fn main() {
                     },
                 });
             }
-            CliCommands::Add {
-                name,
-                username,
-                url,
-                notes,
-                gen_password,
-            } => {
+            (
+                CliCommands::Add {
+                    name,
+                    username,
+                    url,
+                    notes,
+                    gen_password,
+                },
+                true,
+            ) => {
                 manager(ServerCommands::Add(PasswordEntry {
                     name: name,
                     username: username,
@@ -103,19 +116,36 @@ fn main() {
                     which: None,
                 }));
             }
-            CliCommands::Delete(DeleteArgs { id, entry_name }) => match (id, entry_name) {
-                (Some(i), None) => {
+            (
+                CliCommands::Delete(DeleteArgs {
+                    id,
+                    entry_name,
+                    vault,
+                    key,
+                }),
+                true,
+            ) => match (id, entry_name, vault) {
+                (Some(i), None, _) => {
                     manager(ServerCommands::Delete(DeleteType::Id(i)));
                 }
-                (None, Some(n)) => {
+                (None, Some(n), _) => {
                     manager(ServerCommands::Delete(DeleteType::Name(n)));
+                }
+                (None, None, true) => {
+                    manager(ServerCommands::Delete(DeleteType::Vault(
+                        if key.is_some() {
+                            PasswordType::Key(key.unwrap())
+                        } else {
+                            PasswordType::Password(create_password())
+                        },
+                    )));
                 }
                 _ => panic!("not good"),
             },
-            CliCommands::View => {
+            (CliCommands::View, true) => {
                 manager(ServerCommands::View);
             }
-            CliCommands::Update { add, which } => {
+            (CliCommands::Update { add, which }, true) => {
                 manager(ServerCommands::Update(UpdateStruct {
                     which: if which.id.is_some() {
                         DeleteType::Id(which.id.unwrap())
@@ -134,21 +164,24 @@ fn main() {
                     update: add,
                 }));
             }
-            CliCommands::Get { which } => {
+            (CliCommands::Get { which }, true) => {
                 manager(ServerCommands::Get(if which.id.is_some() {
                     DeleteType::Id(which.id.unwrap())
                 } else {
                     DeleteType::Name(which.entry_name.unwrap())
                 }));
             }
-            CliCommands::Export { path } => {
+            (CliCommands::Export { path }, true) => {
                 manager(ServerCommands::Export(path));
             }
-            CliCommands::Import {
-                path,
-                new,
-                key_path,
-            } => {
+            (
+                CliCommands::Import {
+                    path,
+                    new,
+                    key_path,
+                },
+                true,
+            ) => {
                 let keypass = if key_path.is_some() {
                     PasswordType::Key(key_path.clone().unwrap())
                 } else {
@@ -160,6 +193,8 @@ fn main() {
                     key_pass: keypass,
                 }));
             }
+            (_, false) => println!("server not running"),
+            (_, true) => unreachable!(),
         };
     }
 }

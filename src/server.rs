@@ -2,12 +2,12 @@ use crate::{
     client::manager,
     clpboard::cpy,
     types::*,
-    vault::{Vault, VaultEnteries, VaultFns, create_vault},
+    vault::{Vault, VaultEnteries, VaultFns, create_vault, delete_vault},
 };
 use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::File,
+    // fs::File,
     io::{ErrorKind, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     process::{Command, Stdio},
@@ -75,7 +75,7 @@ impl Zeroize for VaultEnteries {
 
 pub const ADDR: &str = "127.0.0.1:7878";
 
-fn is_running() -> bool {
+pub fn is_running() -> bool {
     if TcpStream::connect_timeout(&ADDR.parse().unwrap(), Duration::from_secs(1)).is_ok() {
         return true;
     }
@@ -87,12 +87,12 @@ pub fn start() {
         return;
     }
     // let stdout = File::create("worker.out").expect("couldnt create file out");
-    let stderr = File::create("worker.err").expect("couldnt create file err");
+    // let stderr = File::create("worker.err").expect("couldnt create file err");
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["run", "--key", "master_key"])
         .stdin(Stdio::null())
         // .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        // .stderr(Stdio::from(stderr))
         .spawn()
         .expect("failed to start background process");
     println!("Started (PID {})", child.id());
@@ -192,14 +192,18 @@ pub fn server(key: String) {
                     pass.zeroize();
                 }
             }
-            ServerCommands::Delete(id) => {
-                if server_info.locked {
-                    respond("Vault locked", &mut stream1, http);
-                } else {
+            ServerCommands::Delete(id) => match id {
+                DeleteType::Vault(k) => {
+                    lock_vlt(&mut vlt, &mut server_info);
+                    delete_vault(k);
+                    respond("vault deleted", &mut stream1, http)
+                }
+                _ if !server_info.locked => {
                     vlt.delete_entry(id);
                     respond("entry deleted", &mut stream1, http);
                 }
-            }
+                _ => respond("Vault locked", &mut stream1, http),
+            },
             ServerCommands::View => {
                 if !server_info.locked {
                     vlt.view_entries(&mut stream1, http);

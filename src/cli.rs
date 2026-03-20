@@ -17,14 +17,15 @@ pub enum CliCommands {
         no_stats: bool,
         #[arg(long("stats"), default_value_t = false)]
         stats: bool,
+        #[arg(long("no-copy"), default_value_t = false, conflicts_with = "copy")]
+        no_copy: bool,
+        #[arg(long("copy"), default_value_t = false)]
+        copy: bool,
+        copy_time: Option<u8>,
     },
     Passcheck {
         #[arg(short, long)]
         password: String,
-    },
-    Clpb {
-        #[command(flatten)]
-        timeout: Timeout,
     },
     Config(ConfigArgs),
     Unlock {
@@ -37,6 +38,7 @@ pub enum CliCommands {
     Lock,
     Status,
     Start,
+    #[command(hide = true)]
     Run {
         #[arg(long)]
         key: Option<String>,
@@ -98,12 +100,12 @@ pub struct ConfigArgs {
     pub genpass_length: Option<u8>,
     #[arg(long("genpass-stats"))]
     pub genpass_stats: Option<bool>,
+    #[arg(long("genpass-copy"))]
+    pub genpass_copy: Option<bool>,
     #[arg(long("clpb-timeout"))]
     pub clpb_timeout: Option<u8>,
     #[arg(long("unlock-timeout"))]
     pub unlock_timeout: Option<u8>,
-    #[arg(long("unlock-timeout"))]
-    pub copy_time: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Args)]
@@ -126,10 +128,14 @@ pub struct UpdateArgs {
 pub struct DeleteArgs {
     #[arg(
         long,
-        conflicts_with = "entry_name",
-        required_unless_present = "entry_name"
+        conflicts_with_all = ["vault", "entry_name"],
+       required_unless_present_any=["vault", "vault" ]
     )]
     pub id: Option<usize>,
-    #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+    #[arg(long, conflicts_with_all = ["id","vault"], required_unless_present_any=["id", "vault" ])]
     pub entry_name: Option<String>,
+    #[arg(long, conflicts_with_all = ["id","entry_name"], required_unless_present_any=["id", "entry_name" ])]
+    pub vault: bool,
+    #[arg(long, requires = "vault")]
+    pub key: Option<String>,
 }

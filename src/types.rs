@@ -1,7 +1,7 @@
 use crate::cli::UpdateArgs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum PasswordType {
     Password(String),
     Key(String),
@@ -51,6 +51,7 @@ pub enum DeleteType {
     Id(usize),
     Name(String),
     Url(String),
+    Vault(PasswordType),
 }
 
 #[derive(Serialize, Deserialize, Debug)]

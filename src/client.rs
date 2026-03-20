@@ -1,4 +1,4 @@
-use crate::server::ADDR;
+use crate::server::{ADDR};
 use crate::types::*;
 use bincode;
 use std::{
@@ -9,6 +9,7 @@ use std::{
 pub fn manager(command: ServerCommands) {
     send_command(command)
 }
+
 fn send_command(cmd: ServerCommands) {
     let mut con = TcpStream::connect(ADDR).unwrap();
     let data = bincode::serialize(&cmd).unwrap();
