@@ -1,4 +1,5 @@
 use crate::{
+    cli::UpdateArgs,
     client::manager,
     clpboard::cpy,
     types::*,
@@ -6,8 +7,8 @@ use crate::{
 };
 use bincode;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
-    // fs::File,
     io::{ErrorKind, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     process::{Command, Stdio},
@@ -162,7 +163,7 @@ pub fn server(key: String) {
             ServerCommands::Status => {
                 respond(
                     &format!(
-                        "status {}\n",
+                        "status {}",
                         if server_info.locked {
                             "Locked"
                         } else {
@@ -185,10 +186,13 @@ pub fn server(key: String) {
                 if server_info.locked {
                     respond("Vault locked", &mut stream1, http);
                 } else {
+                    let copy = info.copy.clone();
                     let mut pass = info.password.clone();
                     vlt.add_entry(info);
                     respond("entry added", &mut stream1, http);
-                    cpy(&pass, 10);
+                    if copy {
+                        cpy(&pass, 10);
+                    }
                     pass.zeroize();
                 }
             }
@@ -236,7 +240,6 @@ pub fn server(key: String) {
                         keypass: Some(args.key_pass),
                     };
                     create_vault(&mut vlt, &mut server_info, false);
-                    // respond("Vault locked", &mut stream1, http);
                 } else if server_info.locked {
                     server_info.keypass = Some(args.key_pass);
                     vlt.unlock_vault(&mut server_info);
@@ -295,6 +298,57 @@ fn handle_http(mut message: &TcpStream) -> ServerCommands {
                 ServerCommands::Get(DeleteType::Url(url))
             }
             val if val == "kill".to_string() => ServerCommands::Kill,
+            val if val == "add".to_string() => {
+                if let (Some(url), Some(username), Some(password), Some(name)) = (
+                    request.extra_info[0].clone(),
+                    request.extra_info[1].clone(),
+                    request.extra_info[2].clone(),
+                    request.extra_info[3].clone(),
+                ) {
+                    ServerCommands::Add(PasswordEntry {
+                        which: None,
+                        name: name.clone(),
+                        username: Some(username),
+                        password: password,
+                        url: Some(url),
+                        notes: None,
+                        copy: false,
+                    })
+                } else {
+                    panic!("bad args")
+                }
+            }
+            val if val == "update" => {
+                if let (Some(url), Some(username), Some(password), Some(name)) = (
+                    request.extra_info[0].clone(),
+                    request.extra_info[1].clone(),
+                    request.extra_info[2].clone(),
+                    request.extra_info[3].clone(),
+                ) {
+                    ServerCommands::Update(UpdateStruct {
+                        which: DeleteType::Name(name),
+                        update: UpdateArgs {
+                            name: None,
+                            username: Some(username),
+                            password: true,
+                            gen_pass: false,
+                            url: Some(url),
+                            notes: None,
+                        },
+                        password: Some(password),
+                    })
+                } else {
+                    panic!(
+                        "bad args {:?}",
+                        (
+                            request.extra_info[0].clone(),
+                            request.extra_info[1].clone(),
+                            request.extra_info[2].clone(),
+                            request.extra_info[3].clone()
+                        )
+                    )
+                }
+            }
             _ => panic!("not supported yet"),
         }
     } else {
@@ -321,18 +375,21 @@ fn lock_vlt(vlt: &mut Option<Vault>, mut server_info: &mut ServerInfo) {
 
 pub fn respond(message: &str, stream: &mut TcpStream, http: bool) {
     if http {
+        let msg = json!(message);
         stream
             .write_all(
                 format!(
                     "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                    message.len(),
-                    message
+                    serde_json::to_vec(&msg).unwrap().len(),
+                    msg
                 )
                 .as_bytes(),
             )
             .unwrap()
     } else {
-        stream.write_all(message.as_bytes()).unwrap()
+        stream
+            .write_all(format!("{}\n", message).as_bytes())
+            .unwrap()
     }
     stream.flush().unwrap();
 }

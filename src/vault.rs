@@ -125,14 +125,15 @@ impl Vault {
                 let mut l1 = Vec::<String>::new();
                 for i in 0..self.enteries.len() {
                     if let Some(url) = &self.enteries[i].url {
-                        if url == &u {
+                        if url == &u || url.contains(&u) {
                             l1.append(&mut vec![format!(
-                                "{{\"username\": {:?}, \"password\": \"{}\"}}",
+                                "{{\"username\": {:?}, \"password\": \"{}\", \"name\": \"{}\"}}",
                                 self.enteries[i]
                                     .username
                                     .clone()
                                     .unwrap_or("None".to_string()),
-                                self.enteries[i].password
+                                self.enteries[i].password,
+                                self.enteries[i].name
                             )]);
                             found = true
                         }
@@ -141,7 +142,7 @@ impl Vault {
                 if !found {
                     respond("not found\n", stream, http);
                 } else {
-                    respond(&format!("[{}]", l1.join(",")), stream, http);
+                    respond(&format!("{}", l1.join(",")), stream, http);
                 }
             }
             DeleteType::Vault(_) => unreachable!(),
@@ -192,8 +193,7 @@ impl Vault {
                     }
                 }
             }
-            DeleteType::Url(_u) => todo!(),
-            DeleteType::Vault(_) => unreachable!(),
+            _ => unreachable!(),
         }
 
         for i in 1..=self.enteries.len() {
@@ -264,8 +264,7 @@ impl Vault {
                     }
                 }
             }
-            DeleteType::Url(_u) => todo!(),
-            DeleteType::Vault(_) => unreachable!(),
+            _=> unreachable!(),
         }
     }
 
@@ -421,6 +420,7 @@ mod test {
             password: String::from("test123"),
             url: None,
             notes: None,
+            copy: false,
         });
         let expected = Vault {
             enteries: vec![VaultEnteries {
@@ -622,8 +622,8 @@ mod test {
     }
     #[test]
     fn test_lock_unlock_key() {
-        let temp = Path::new("test.pem");
-        gen_master_key(&mut PasswordType::Key("test.pem".to_string()), true);
+        let temp = Path::new("test_lock_unlock_key.pem");
+        gen_master_key(&mut PasswordType::Key("test_lock_unlock_key.pem".to_string()), true);
         let filename = get_filename(
             &mut PasswordType::Key(temp.to_str().unwrap().to_string()),
             false,
@@ -663,7 +663,7 @@ mod test {
     }
     #[test]
     fn test_lock_unlock_password() {
-        let filename = get_filename(&mut PasswordType::Password("test1234!".to_string()), true);
+        let filename = get_filename(&mut PasswordType::Password("test_password1234!".to_string()), true);
         let vlt = Vault {
             enteries: vec![VaultEnteries {
                 id: 1,
@@ -679,8 +679,8 @@ mod test {
                 filename: filename.clone(),
             },
         };
-        let pass = PasswordType::Password("test1234!".to_string());
-        let pass1 = PasswordType::Password("test1234!".to_string());
+        let pass = PasswordType::Password("test_password1234!".to_string());
+        let pass1 = PasswordType::Password("test_password1234!".to_string());
         vlt.lock_vault(&mut ServerInfo {
             locked: false,
             keypass: Some(pass),

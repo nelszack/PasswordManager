@@ -11,7 +11,6 @@ mod vault;
 use crate::{
     cli::{CliCommands, DeleteArgs, cli_parse},
     client::manager,
-    // clpboard::cpy,
     config::{read_config, update},
     encryption::create_password,
     password::{gen_pass, pass_gen, pass_str},
@@ -98,6 +97,8 @@ fn main() {
                     url,
                     notes,
                     gen_password,
+                    copy,
+                    no_copy,
                 },
                 true,
             ) => {
@@ -112,6 +113,11 @@ fn main() {
                     url: url,
                     notes: notes,
                     which: None,
+                    copy: if !copy && !no_copy {
+                        conf.copy.copy_pass
+                    } else {
+                        if copy { true } else { false }
+                    },
                 }));
             }
             (

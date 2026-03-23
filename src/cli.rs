@@ -60,6 +60,11 @@ pub enum CliCommands {
         notes: Option<String>,
         #[arg(long)]
         gen_password: bool,
+        #[arg(long)]
+        #[arg(long("no-copy"), default_value_t = false, conflicts_with = "copy")]
+        no_copy: bool,
+        #[arg(long("copy"), default_value_t = false)]
+        copy: bool,
     },
     View,
     Update {

@@ -44,6 +44,7 @@ pub struct PasswordEntry {
     pub password: String,
     pub url: Option<String>,
     pub notes: Option<String>,
+    pub copy: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
