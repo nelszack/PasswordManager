@@ -312,7 +312,7 @@ fn handle_http(mut message: &TcpStream) -> ServerCommands {
                         password: password,
                         url: Some(url),
                         notes: None,
-                        copy: false,
+                        copy:false,
                     })
                 } else {
                     panic!("bad args")

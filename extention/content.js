@@ -24,6 +24,7 @@ function createDropdownButton(input, accounts) {
         const rect = input.getBoundingClientRect();
         button.style.left = rect.right - 22 + "px";
         button.style.top = rect.top + rect.height / 2 - 15 + "px";
+        button.style.top = rect.top + rect.height / 2 - 15 + "px";
     }
 
     positionButton();
@@ -226,7 +227,7 @@ let modalOpen = false;
 function showPromptModal(title, message, showUpdateOption = false, oldUsername = "", oldPassword = "", showNameInput = false, existingName = "") {
     modalOpen = true;
     const originalSubmit = HTMLFormElement.prototype.submit;
-    HTMLFormElement.prototype.submit = function () {
+    HTMLFormElement.prototype.submit = function() {
         if (modalOpen) return;
         return originalSubmit.call(this);
     };
@@ -359,12 +360,13 @@ function isPopupPending() {
 // ===============================
 async function initExtension(accounts) {
     observeInputs(accounts);
+
     const pendingPopup = await isPopupPending();
     if (pendingPopup && !modalOpen) {
         modalOpen = true;
         const result = await showPromptModal(
             pendingPopup.hasAccounts ? "Credentials Mismatch" : "Save Credentials",
-            pendingPopup.hasAccounts
+            pendingPopup.hasAccounts 
                 ? `This doesn't match saved account "${pendingPopup.accountName || pendingPopup.username}". What would you like to do?`
                 : "Would you like to save these credentials?",
             pendingPopup.hasAccounts,
@@ -419,7 +421,7 @@ async function initExtension(accounts) {
 
             const result = await showPromptModal(
                 accounts.length > 0 ? "Credentials Mismatch" : "Save Credentials",
-                accounts.length > 0
+                accounts.length > 0 
                     ? `This doesn't match saved account "${accounts[0].username}". What would you like to do?`
                     : "Would you like to save these credentials?",
                 accounts.length > 0,
