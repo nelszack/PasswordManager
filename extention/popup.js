@@ -5,7 +5,7 @@ async function sendCommand(command, extra_info = []) {
         const response = await fetch(SERVER_URL, {
             method: "POST",
             headers: {
-                "Content-Type": "text/plain",
+                "Content-Type": "application/json",
                 "Connection": "close"
             },
             body: JSON.stringify({
@@ -14,11 +14,11 @@ async function sendCommand(command, extra_info = []) {
             })
         });
 
-        const data = await response.text();
+        const data = await response.json();
         return data;
     } catch (error) {
         console.log(error)
-        return "Server not reachable"
+        return ["Server not reachable"]
     }
 }
 

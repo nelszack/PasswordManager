@@ -7,6 +7,7 @@ pub struct Config {
     pub genpass: Genpassconf,
     pub clpboard: Clpbconf,
     pub unlock: Unlockconf,
+    pub copy: Copyconf,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -14,6 +15,10 @@ pub struct Genpassconf {
     pub length: u8,
     pub stats: bool,
     pub copy: bool,
+}
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct Copyconf {
+    pub copy_pass: bool,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -38,6 +43,7 @@ fn default_config(write_to_file: bool, config_path: &Path) -> Config {
         },
         clpboard: Clpbconf { clp_timeout: 15 },
         unlock: Unlockconf { unlock_timeout: 0 },
+        copy: Copyconf { copy_pass: true },
     };
     if write_to_file {
         write_file(&config, config_path)
@@ -153,6 +159,7 @@ mod test {
                 },
                 clpboard: Clpbconf { clp_timeout: 15 },
                 unlock: Unlockconf { unlock_timeout: 0 },
+                copy: Copyconf { copy_pass: true }
             }
         );
         write_file(&conf1, config_path);
@@ -183,6 +190,7 @@ mod test {
                 },
                 clpboard: Clpbconf { clp_timeout: 12 },
                 unlock: Unlockconf { unlock_timeout: 15 },
+                copy: Copyconf { copy_pass: true }
             }
         );
         write_file(&conf1, config_path);
