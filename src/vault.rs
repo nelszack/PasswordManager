@@ -264,7 +264,7 @@ impl Vault {
                     }
                 }
             }
-            _=> unreachable!(),
+            _ => unreachable!(),
         }
     }
 
@@ -395,7 +395,7 @@ mod test {
     use super::*;
     use crate::cli::UpdateArgs;
     use chrono::FixedOffset;
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, thread};
     use tempfile::NamedTempFile;
 
     fn time_close(time: String) -> bool {
@@ -623,7 +623,10 @@ mod test {
     #[test]
     fn test_lock_unlock_key() {
         let temp = Path::new("test_lock_unlock_key.pem");
-        gen_master_key(&mut PasswordType::Key("test_lock_unlock_key.pem".to_string()), true);
+        gen_master_key(
+            &mut PasswordType::Key("test_lock_unlock_key.pem".to_string()),
+            true,
+        );
         let filename = get_filename(
             &mut PasswordType::Key(temp.to_str().unwrap().to_string()),
             false,
@@ -663,7 +666,10 @@ mod test {
     }
     #[test]
     fn test_lock_unlock_password() {
-        let filename = get_filename(&mut PasswordType::Password("test_password1234!".to_string()), true);
+        let filename = get_filename(
+            &mut PasswordType::Password("test_password1234!".to_string()),
+            true,
+        );
         let vlt = Vault {
             enteries: vec![VaultEnteries {
                 id: 1,
@@ -794,5 +800,501 @@ mod test {
         let file_path = data_path.join(&filename);
         fs::remove_file(file_path).unwrap();
         assert_eq!(vlt, None)
+    }
+    #[test]
+    fn test_add_duplicate_entry_name() {
+        let mut vlt = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.add_entry(PasswordEntry {
+            which: None,
+            name: String::from("test"),
+            username: Some(String::from("user1")),
+            password: String::from("pass1"),
+            url: None,
+            notes: None,
+            copy: false,
+        });
+        let initial_len = vlt.enteries.len();
+        vlt.add_entry(PasswordEntry {
+            which: None,
+            name: String::from("test"),
+            username: Some(String::from("user2")),
+            password: String::from("pass2"),
+            url: None,
+            notes: None,
+            copy: false,
+        });
+        assert_eq!(vlt.enteries.len(), initial_len);
+    }
+    #[test]
+    fn test_add_multiple_entries_ids_sequential() {
+        let mut vlt = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        for i in 0..5 {
+            vlt.add_entry(PasswordEntry {
+                which: None,
+                name: format!("entry{}", i),
+                username: Some(format!("user{}", i)),
+                password: format!("pass{}", i),
+                url: None,
+                notes: None,
+                copy: false,
+            });
+        }
+        for (i, entry) in vlt.enteries.iter().enumerate() {
+            assert_eq!(entry.id, i + 1);
+        }
+    }
+    #[test]
+    fn test_delete_entry_reindexes_ids() {
+        let mut vlt = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        for i in 0..5 {
+            vlt.add_entry(PasswordEntry {
+                which: None,
+                name: format!("entry{}", i),
+                username: Some(format!("user{}", i)),
+                password: format!("pass{}", i),
+                url: None,
+                notes: None,
+                copy: false,
+            });
+        }
+        vlt.delete_entry(DeleteType::Id(2));
+        for (i, entry) in vlt.enteries.iter().enumerate() {
+            assert_eq!(entry.id, i + 1);
+        }
+    }
+    #[test]
+    fn test_update_password_changes() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("oldpass"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(1),
+            update: UpdateArgs {
+                name: None,
+                username: None,
+                password: true,
+                gen_pass: false,
+                url: None,
+                notes: None,
+            },
+            password: Some(String::from("newpass")),
+        });
+        assert_eq!(vlt.enteries[0].password, "newpass");
+    }
+    #[test]
+    fn test_update_url_changes() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(1),
+            update: UpdateArgs {
+                name: None,
+                username: None,
+                password: false,
+                gen_pass: false,
+                url: Some(String::from("https://example.com")),
+                notes: None,
+            },
+            password: None,
+        });
+        assert_eq!(
+            vlt.enteries[0].url,
+            Some(String::from("https://example.com"))
+        );
+    }
+    #[test]
+    fn test_update_notes_changes() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(1),
+            update: UpdateArgs {
+                name: None,
+                username: None,
+                password: false,
+                gen_pass: false,
+                url: None,
+                notes: Some(String::from("important notes")),
+            },
+            password: None,
+        });
+        assert_eq!(vlt.enteries[0].notes, Some(String::from("important notes")));
+    }
+
+    #[test]
+    #[should_panic(expected = "not valid id")]
+    fn test_delete_entry_invalid_id_zero() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.delete_entry(DeleteType::Id(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "not valid id")]
+    fn test_delete_entry_invalid_id_out_of_bounds() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.delete_entry(DeleteType::Id(100));
+    }
+
+    #[test]
+    #[should_panic(expected = "not valid id")]
+    fn test_update_entry_invalid_id_zero() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(0),
+            update: UpdateArgs {
+                name: Some(String::from("new")),
+                username: None,
+                password: false,
+                gen_pass: false,
+                url: None,
+                notes: None,
+            },
+            password: None,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "not valid id")]
+    fn test_update_entry_invalid_id_out_of_bounds() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(100),
+            update: UpdateArgs {
+                name: Some(String::from("new")),
+                username: None,
+                password: false,
+                gen_pass: false,
+                url: None,
+                notes: None,
+            },
+            password: None,
+        });
+    }
+
+    #[test]
+    fn test_delete_entry_by_name_no_match() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        let initial_len = vlt.enteries.len();
+        vlt.delete_entry(DeleteType::Name("nonexistent".into()));
+        assert_eq!(vlt.enteries.len(), initial_len);
+    }
+
+    #[test]
+    fn test_update_entry_by_name_no_match() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        let original_modified = vlt.enteries[0].modified.clone();
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Name(String::from("nonexistent")),
+            update: UpdateArgs {
+                name: Some(String::from("new")),
+                username: None,
+                password: false,
+                gen_pass: false,
+                url: None,
+                notes: None,
+            },
+            password: None,
+        });
+        assert_eq!(vlt.enteries[0].name, "test");
+        assert_eq!(vlt.enteries[0].modified, original_modified);
+    }
+
+    #[test]
+    fn test_delete_name_with_only_first_match() {
+        let mut vlt = Vault {
+            enteries: vec![
+                VaultEnteries {
+                    id: 1,
+                    name: String::from("dup"),
+                    username: Some(String::from("user1")),
+                    password: String::from("pass1"),
+                    url: None,
+                    notes: None,
+                    created: chrono::Local::now().to_string(),
+                    modified: chrono::Local::now().to_string(),
+                },
+                VaultEnteries {
+                    id: 2,
+                    name: String::from("dup"),
+                    username: Some(String::from("user2")),
+                    password: String::from("pass2"),
+                    url: None,
+                    notes: None,
+                    created: chrono::Local::now().to_string(),
+                    modified: chrono::Local::now().to_string(),
+                },
+            ],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.delete_entry(DeleteType::Name("dup".into()));
+        assert_eq!(vlt.enteries.len(), 1);
+        assert_eq!(vlt.enteries[0].id, 1);
+        assert_eq!(vlt.enteries[0].username, Some(String::from("user2")));
+    }
+
+    #[test]
+    fn test_add_entry_with_all_fields() {
+        let mut vlt: Vault = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.add_entry(PasswordEntry {
+            which: None,
+            name: String::from("full_entry"),
+            username: Some(String::from("admin")),
+            password: String::from("secret123"),
+            url: Some(String::from("https://example.com")),
+            notes: Some(String::from("important account")),
+            copy: false,
+        });
+        assert_eq!(vlt.enteries.len(), 1);
+        assert_eq!(vlt.enteries[0].name, "full_entry");
+        assert_eq!(vlt.enteries[0].username, Some(String::from("admin")));
+        assert_eq!(vlt.enteries[0].password, "secret123");
+        assert_eq!(
+            vlt.enteries[0].url,
+            Some(String::from("https://example.com"))
+        );
+        assert_eq!(
+            vlt.enteries[0].notes,
+            Some(String::from("important account"))
+        );
+    }
+
+    #[test]
+    fn test_add_entry_with_minimal_fields() {
+        let mut vlt: Vault = Vault {
+            enteries: vec![],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        vlt.add_entry(PasswordEntry {
+            which: None,
+            name: String::from("minimal"),
+            username: None,
+            password: String::from("pass"),
+            url: None,
+            notes: None,
+            copy: false,
+        });
+        assert_eq!(vlt.enteries.len(), 1);
+        assert_eq!(vlt.enteries[0].name, "minimal");
+        assert_eq!(vlt.enteries[0].username, None);
+        assert_eq!(vlt.enteries[0].url, None);
+        assert_eq!(vlt.enteries[0].notes, None);
+    }
+
+    #[test]
+    fn test_update_all_fields_at_once() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("original"),
+                username: Some(String::from("old_user")),
+                password: String::from("old_pass"),
+                url: Some(String::from("http://old.com")),
+                notes: Some(String::from("old notes")),
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        let original_created = vlt.enteries[0].created.clone();
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(1),
+            update: UpdateArgs {
+                name: Some(String::from("new_name")),
+                username: Some(String::from("new_user")),
+                password: true,
+                gen_pass: false,
+                url: Some(String::from("https://new.com")),
+                notes: Some(String::from("new notes")),
+            },
+            password: Some(String::from("new_pass")),
+        });
+        assert_eq!(vlt.enteries[0].name, "new_name");
+        assert_eq!(vlt.enteries[0].username, Some(String::from("new_user")));
+        assert_eq!(vlt.enteries[0].password, "new_pass");
+        assert_eq!(vlt.enteries[0].url, Some(String::from("https://new.com")));
+        assert_eq!(vlt.enteries[0].notes, Some(String::from("new notes")));
+        assert_eq!(vlt.enteries[0].created, original_created);
+    }
+
+    #[test]
+    fn test_update_no_changes() {
+        let mut vlt = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+        };
+        let original_modified = vlt.enteries[0].modified.clone();
+        thread::sleep(std::time::Duration::from_millis(10));
+        vlt.update_entry(UpdateStruct {
+            which: DeleteType::Id(1),
+            update: UpdateArgs {
+                name: None,
+                username: None,
+                password: false,
+                gen_pass: false,
+                url: None,
+                notes: None,
+            },
+            password: None,
+        });
+        assert_eq!(vlt.enteries[0].modified, original_modified);
     }
 }
