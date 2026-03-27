@@ -394,4 +394,112 @@ pub fn respond(message: &str, stream: &mut TcpStream, http: bool) {
     stream.flush().unwrap();
 }
 
-// add tests
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::vault::{Vault, VaultEnteries, VaultMetadata};
+
+    #[test]
+    fn test_server_info_default() {
+        let info = ServerInfo::default();
+        assert!(info.locked);
+        assert!(info.keypass.is_none());
+    }
+
+    #[test]
+    fn test_server_info_with_password() {
+        let mut info = ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Password("secret".to_string())),
+        };
+        info.zeroize();
+        assert!(info.locked);
+        assert!(info.keypass.is_none());
+    }
+
+    #[test]
+    fn test_server_info_with_key() {
+        let mut info = ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Key("key.pem".to_string())),
+        };
+        info.zeroize();
+        assert!(info.locked);
+        assert!(info.keypass.is_none());
+    }
+
+    #[test]
+    fn test_password_type_zeroize_password() {
+        let mut pt = PasswordType::Password("secret_password".to_string());
+        pt.zeroize();
+        match pt {
+            PasswordType::Password(s) => assert_eq!(s, ""),
+            _ => panic!("Expected Password variant"),
+        }
+    }
+
+    #[test]
+    fn test_password_type_zeroize_key() {
+        let mut pt = PasswordType::Key("secret_key.pem".to_string());
+        pt.zeroize();
+        match pt {
+            PasswordType::Key(s) => assert_eq!(s, ""),
+            _ => panic!("Expected Key variant"),
+        }
+    }
+
+    #[test]
+    fn test_password_type_clone() {
+        let pt1 = PasswordType::Password("test".to_string());
+        let pt2 = pt1.clone();
+        assert_eq!(pt1, pt2);
+    }
+
+    #[test]
+    fn test_vault_enteries_zeroize() {
+        let mut entry = VaultEnteries {
+            id: 42,
+            name: "test".to_string(),
+            username: Some("user".to_string()),
+            password: "secret".to_string(),
+            url: Some("https://example.com".to_string()),
+            notes: Some("important".to_string()),
+            created: "2024-01-01".to_string(),
+            modified: "2024-01-01".to_string(),
+        };
+        entry.zeroize();
+        assert_eq!(entry.id, 0);
+        assert_eq!(entry.name, "");
+        assert_eq!(entry.username, None);
+        assert_eq!(entry.password, "");
+        assert_eq!(entry.url, None);
+        assert_eq!(entry.notes, None);
+    }
+
+    #[test]
+    fn test_vault_zeroize() {
+        let mut vault = Vault {
+            enteries: vec![VaultEnteries {
+                id: 1,
+                name: "test".to_string(),
+                username: Some("user".to_string()),
+                password: "secret".to_string(),
+                url: None,
+                notes: None,
+                created: "2024-01-01".to_string(),
+                modified: "2024-01-01".to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".to_string(),
+            },
+        };
+        vault.zeroize();
+        assert!(vault.enteries.is_empty());
+        assert_eq!(vault.metadata.filename, "");
+    }
+
+    #[test]
+    fn test_addr_constant() {
+        assert_eq!(ADDR, "127.0.0.1:7878");
+    }
+}

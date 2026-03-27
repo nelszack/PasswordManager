@@ -136,7 +136,7 @@ pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::env;
+    use std::{env, fs, fs::File};
 
     #[test]
     fn test_config() {
@@ -194,5 +194,243 @@ mod test {
             }
         );
         write_file(&conf1, config_path);
+    }
+    #[test]
+    fn test_is_config_exists() {
+        let config_path = env::temp_dir().join("test_exists.toml");
+        File::create(&config_path).unwrap();
+        assert!(is_config(&config_path));
+        fs::remove_file(&config_path).unwrap();
+    }
+    #[test]
+    fn test_is_config_not_exists() {
+        let config_path = env::temp_dir().join("nonexistent_config.toml");
+        assert!(!is_config(&config_path));
+    }
+    #[test]
+    fn test_update_single_field() {
+        let config_path = env::temp_dir().join("test_single.toml");
+        default_config(true, &config_path);
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: false,
+                genpass_length: Some(24),
+                genpass_stats: None,
+                genpass_copy: None,
+                clpb_timeout: None,
+                unlock_timeout: None,
+            },
+            &config_path,
+        );
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, 24);
+        assert_eq!(conf.genpass.stats, false);
+        fs::remove_file(&config_path).unwrap();
+    }
+    #[test]
+    fn test_default_config_values() {
+        let config = default_config(false, &Path::new("dummy.toml"));
+        assert_eq!(config.genpass.length, 12);
+        assert!(!config.genpass.stats);
+        assert!(config.genpass.copy);
+        assert_eq!(config.clpboard.clp_timeout, 15);
+        assert_eq!(config.unlock.unlock_timeout, 0);
+        assert!(config.copy.copy_pass);
+    }
+    #[test]
+    fn test_reset_to_default() {
+        let config_path = env::temp_dir().join("test_reset.toml");
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: true,
+                genpass_length: Some(100),
+                genpass_stats: Some(true),
+                genpass_copy: Some(false),
+                clpb_timeout: Some(30),
+                unlock_timeout: Some(5),
+            },
+            &config_path,
+        );
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: true,
+                genpass_length: None,
+                genpass_stats: None,
+                genpass_copy: None,
+                clpb_timeout: None,
+                unlock_timeout: None,
+            },
+            &config_path,
+        );
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, 12);
+        assert!(!conf.genpass.stats);
+        assert!(conf.genpass.copy);
+        fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_config_with_alternate_values() {
+        let config_path = env::temp_dir().join("alternate.toml");
+        let content = r#"
+[genpass]
+length = 20
+stats = true
+copy = false
+
+[clpboard]
+clp_timeout = 30
+
+[unlock]
+unlock_timeout = 5
+
+[copy]
+copy_pass = false
+"#;
+        fs::write(&config_path, content).unwrap();
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, 20);
+        assert!(conf.genpass.stats);
+        assert!(!conf.genpass.copy);
+        assert_eq!(conf.clpboard.clp_timeout, 30);
+        assert_eq!(conf.unlock.unlock_timeout, 5);
+        assert!(!conf.copy.copy_pass);
+        fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_multiple_updates() {
+        let config_path = env::temp_dir().join("multiple.toml");
+        default_config(true, &config_path);
+
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: false,
+                genpass_length: Some(16),
+                genpass_stats: Some(true),
+                genpass_copy: None,
+                clpb_timeout: None,
+                unlock_timeout: None,
+            },
+            &config_path,
+        );
+
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: false,
+                genpass_length: None,
+                genpass_stats: None,
+                genpass_copy: Some(false),
+                clpb_timeout: Some(45),
+                unlock_timeout: Some(10),
+            },
+            &config_path,
+        );
+
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, 16);
+        assert!(conf.genpass.stats);
+        assert!(!conf.genpass.copy);
+        assert_eq!(conf.clpboard.clp_timeout, 45);
+        assert_eq!(conf.unlock.unlock_timeout, 10);
+        fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_config_round_trip() {
+        let config_path = env::temp_dir().join("roundtrip.toml");
+
+        let original = Config {
+            genpass: Genpassconf {
+                length: 32,
+                stats: true,
+                copy: false,
+            },
+            clpboard: Clpbconf { clp_timeout: 60 },
+            unlock: Unlockconf { unlock_timeout: 15 },
+            copy: Copyconf { copy_pass: false },
+        };
+
+        write_file(&original, &config_path);
+        let loaded = read_config(&config_path);
+
+        assert_eq!(original, loaded);
+        fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_config_update_zero_timeout() {
+        let config_path = env::temp_dir().join("zero_timeout.toml");
+        default_config(true, &config_path);
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: false,
+                genpass_length: None,
+                genpass_stats: None,
+                genpass_copy: None,
+                clpb_timeout: Some(0),
+                unlock_timeout: Some(0),
+            },
+            &config_path,
+        );
+        let conf = read_config(&config_path);
+        assert_eq!(conf.clpboard.clp_timeout, 0);
+        assert_eq!(conf.unlock.unlock_timeout, 0);
+        fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_config_update_max_values() {
+        let config_path = env::temp_dir().join("max_values.toml");
+        default_config(true, &config_path);
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                defalt: false,
+                genpass_length: Some(u8::MAX),
+                genpass_stats: Some(true),
+                genpass_copy: Some(false),
+                clpb_timeout: Some(u8::MAX),
+                unlock_timeout: Some(u8::MAX),
+            },
+            &config_path,
+        );
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, u8::MAX);
+        assert!(conf.genpass.stats);
+        assert!(!conf.genpass.copy);
+        assert_eq!(conf.clpboard.clp_timeout, u8::MAX);
+        assert_eq!(conf.unlock.unlock_timeout, u8::MAX);
+        fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_config_preserves_unmodified_fields() {
+        let config_path = env::temp_dir().join("preserve.toml");
+        update(
+            default_config(false, &config_path),
+            ConfigArgs {
+                defalt: false,
+                genpass_length: Some(50),
+                genpass_stats: None,
+                genpass_copy: None,
+                clpb_timeout: None,
+                unlock_timeout: None,
+            },
+            &config_path,
+        );
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, 50);
+        assert!(!conf.genpass.stats);
+        assert!(conf.genpass.copy);
+        assert_eq!(conf.clpboard.clp_timeout, 15);
+        assert_eq!(conf.unlock.unlock_timeout, 0);
+        fs::remove_file(&config_path).unwrap();
     }
 }

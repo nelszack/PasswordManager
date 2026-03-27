@@ -118,4 +118,69 @@ mod test {
         fs::remove_file(file_path).unwrap();
         assert_eq!(decrypt, plantext)
     }
+    #[test]
+    fn test_encrypt_decrept_empty_plaintext() {
+        let plantext = b"";
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypt = encrypt_file(&mut pass, plantext);
+        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
+        assert_eq!(decrypt, plantext);
+    }
+    #[test]
+    fn test_encrypt_decrept_large_plaintext() {
+        let plantext = vec![0u8; 10000];
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypt = encrypt_file(&mut pass, &plantext);
+        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
+        assert_eq!(decrypt, plantext);
+    }
+    #[test]
+    fn test_decrypt_invalid_data_returns_none() {
+        let mut pass = PasswordType::Password("test123".into());
+        let result = decrypt_file(&mut pass, b"short");
+        assert!(result.is_none());
+    }
+    #[test]
+    fn test_decrypt_wrong_password_returns_none() {
+        let plantext = "secret data".as_bytes();
+        let mut pass1 = PasswordType::Password("password1".into());
+        let encrypt = encrypt_file(&mut pass1, plantext);
+        let mut pass2 = PasswordType::Password("password2".into());
+        let result = decrypt_file(&mut pass2, &encrypt);
+        assert!(result.is_none());
+    }
+    #[test]
+    fn test_decrypt_corrupted_ciphertext_returns_none() {
+        let plantext = "test".as_bytes();
+        let mut pass = PasswordType::Password("test123".into());
+        let mut encrypt = encrypt_file(&mut pass, plantext);
+        encrypt[24] ^= 0xFF;
+        let result = decrypt_file(&mut pass, &encrypt);
+        assert!(result.is_none());
+    }
+    #[test]
+    fn test_encrypt_produces_different_output_each_time() {
+        let plantext = "test".as_bytes();
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypt1 = encrypt_file(&mut pass, plantext);
+        let encrypt2 = encrypt_file(&mut pass, plantext);
+        assert_ne!(
+            encrypt1, encrypt2,
+            "Encryption should produce unique ciphertexts due to random nonce"
+        );
+    }
+    #[test]
+    fn test_encrypted_data_contains_nonce() {
+        let plantext = "test".as_bytes();
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypt = encrypt_file(&mut pass, plantext);
+        assert!(
+            encrypt.len() > plantext.len(),
+            "Encrypted data should be larger than plaintext"
+        );
+        assert!(
+            encrypt.len() >= 24 + plantext.len(),
+            "Nonce (24 bytes) + ciphertext"
+        );
+    }
 }
