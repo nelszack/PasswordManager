@@ -142,7 +142,7 @@ impl Vault {
                 if !found {
                     respond("not found\n", stream, http);
                 } else {
-                    respond(&format!("{}", l1.join(",")), stream, http);
+                    respond(&format!("[{}]", l1.join(",")), stream, http);
                 }
             }
             DeleteType::Vault(_) => unreachable!(),
