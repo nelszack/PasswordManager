@@ -81,6 +81,18 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
         server_info.zeroize();
     }
 }
+fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) {
+    if key_pass.keypass == None || key_pass.locked {
+        return;
+    }
+    let fname = vlt.metadata.filename.clone();
+    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let data_path = proj_dir.data_dir();
+    let file_path = data_path.join(&fname);
+    let buf = rmp_serde::to_vec(&vlt).unwrap();
+    let txt = encrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &buf[..]);
+    write(file_path, txt).unwrap();
+}
 
 fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
     let fname = get_filename(&mut key_pass.keypass.as_mut().unwrap(), false);
@@ -149,7 +161,7 @@ impl Vault {
         }
     }
 
-    pub fn add_entry(&mut self, info: PasswordEntry) {
+    pub fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo) {
         let nid = self.enteries.len() + 1;
 
         let mut exists = false;
@@ -175,9 +187,10 @@ impl Vault {
             modified: chrono::Local::now().to_string(),
         };
         self.enteries.append(&mut vec![nentrty]);
+        write_vault(self, key_pass);
     }
 
-    pub fn delete_entry(&mut self, id: DeleteType) {
+    pub fn delete_entry(&mut self, id: DeleteType, key_pass: &mut ServerInfo) {
         match id {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
@@ -199,9 +212,10 @@ impl Vault {
         for i in 1..=self.enteries.len() {
             self.enteries[i - 1].id = i;
         }
+        write_vault(self, key_pass);
     }
 
-    pub fn update_entry(&mut self, add: UpdateStruct) {
+    pub fn update_entry(&mut self, add: UpdateStruct, key_pass: &mut ServerInfo) {
         match add.which {
             DeleteType::Id(mut i) => {
                 if i == 0 || i > self.enteries.len() {
@@ -230,7 +244,8 @@ impl Vault {
                     modified = true;
                 }
                 if modified {
-                    self.enteries[i].modified = chrono::Local::now().to_string()
+                    self.enteries[i].modified = chrono::Local::now().to_string();
+                    write_vault(self, key_pass);
                 }
             }
             DeleteType::Name(n) => {
@@ -259,6 +274,7 @@ impl Vault {
                         }
                         if modified {
                             self.enteries[i].modified = chrono::Local::now().to_string();
+                            write_vault(self, key_pass);
                         }
                         break;
                     }
@@ -287,13 +303,7 @@ impl Vault {
     }
 
     pub fn lock_vault(&self, key_pass: &mut ServerInfo) {
-        let fname = self.metadata.filename.clone();
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
-        let file_path = data_path.join(&fname);
-        let buf = rmp_serde::to_vec(&self).unwrap();
-        let txt = encrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &buf[..]);
-        write(file_path, txt).unwrap();
+        write_vault(self, key_pass);
         key_pass.zeroize();
     }
     pub fn export(&self, path: String) {
@@ -316,9 +326,9 @@ impl Vault {
 
 pub trait VaultFns {
     fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool);
-    fn add_entry(&mut self, info: PasswordEntry);
-    fn delete_entry(&mut self, id: DeleteType);
-    fn update_entry(&mut self, add: UpdateStruct);
+    fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo);
+    fn delete_entry(&mut self, id: DeleteType, key_pass: &mut ServerInfo);
+    fn update_entry(&mut self, add: UpdateStruct, key_pass: &mut ServerInfo);
     fn view_entries(&self, stream: &mut TcpStream, http: bool);
     fn lock_vault(&self, key_pass: &mut ServerInfo);
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo);
@@ -332,20 +342,20 @@ impl VaultFns for Option<Vault> {
             vlt.get_entry(a, stream, http)
         }
     }
-    fn add_entry(&mut self, info: PasswordEntry) {
+    fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo) {
         if let Some(vlt) = self {
-            vlt.add_entry(info)
+            vlt.add_entry(info, key_pass)
         }
     }
-    fn delete_entry(&mut self, id: DeleteType) {
+    fn delete_entry(&mut self, id: DeleteType, key_pass: &mut ServerInfo) {
         if let Some(vlt) = self {
-            vlt.delete_entry(id);
+            vlt.delete_entry(id, key_pass);
         }
     }
 
-    fn update_entry(&mut self, add: UpdateStruct) {
+    fn update_entry(&mut self, add: UpdateStruct, key_pass: &mut ServerInfo) {
         if let Some(vlt) = self {
-            vlt.update_entry(add);
+            vlt.update_entry(add, key_pass);
         }
     }
     fn view_entries(&self, stream: &mut TcpStream, http: bool) {
@@ -413,15 +423,21 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vault.add_entry(PasswordEntry {
-            which: None,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            copy: false,
-        });
+        vault.add_entry(
+            PasswordEntry {
+                which: None,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         let expected = Vault {
             enteries: vec![VaultEnteries {
                 id: 1,
@@ -458,7 +474,13 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(DeleteType::Id(1));
+        vlt.delete_entry(
+            DeleteType::Id(1),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(
             vlt,
             Vault {
@@ -486,7 +508,13 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(DeleteType::Name("test".into()));
+        vlt.delete_entry(
+            DeleteType::Name("test".into()),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(
             vlt,
             Vault {
@@ -514,18 +542,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(1),
-            update: UpdateArgs {
-                name: Some(String::from("test2")),
-                username: Some(String::from("test2")),
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(1),
+                update: UpdateArgs {
+                    name: Some(String::from("test2")),
+                    username: Some(String::from("test2")),
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         let expected = Vault {
             enteries: vec![VaultEnteries {
                 id: 1,
@@ -561,18 +595,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Name(String::from("test")),
-            update: UpdateArgs {
-                name: Some(String::from("test2")),
-                username: Some(String::from("test2")),
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Name(String::from("test")),
+                update: UpdateArgs {
+                    name: Some(String::from("test2")),
+                    username: Some(String::from("test2")),
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         let expected = Vault {
             enteries: vec![VaultEnteries {
                 id: 1,
@@ -809,25 +849,37 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.add_entry(PasswordEntry {
-            which: None,
-            name: String::from("test"),
-            username: Some(String::from("user1")),
-            password: String::from("pass1"),
-            url: None,
-            notes: None,
-            copy: false,
-        });
+        vlt.add_entry(
+            PasswordEntry {
+                which: None,
+                name: String::from("test"),
+                username: Some(String::from("user1")),
+                password: String::from("pass1"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         let initial_len = vlt.enteries.len();
-        vlt.add_entry(PasswordEntry {
-            which: None,
-            name: String::from("test"),
-            username: Some(String::from("user2")),
-            password: String::from("pass2"),
-            url: None,
-            notes: None,
-            copy: false,
-        });
+        vlt.add_entry(
+            PasswordEntry {
+                which: None,
+                name: String::from("test"),
+                username: Some(String::from("user2")),
+                password: String::from("pass2"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries.len(), initial_len);
     }
     #[test]
@@ -839,15 +891,21 @@ mod test {
             },
         };
         for i in 0..5 {
-            vlt.add_entry(PasswordEntry {
-                which: None,
-                name: format!("entry{}", i),
-                username: Some(format!("user{}", i)),
-                password: format!("pass{}", i),
-                url: None,
-                notes: None,
-                copy: false,
-            });
+            vlt.add_entry(
+                PasswordEntry {
+                    which: None,
+                    name: format!("entry{}", i),
+                    username: Some(format!("user{}", i)),
+                    password: format!("pass{}", i),
+                    url: None,
+                    notes: None,
+                    copy: false,
+                },
+                &mut ServerInfo {
+                    locked: true,
+                    keypass: None,
+                },
+            );
         }
         for (i, entry) in vlt.enteries.iter().enumerate() {
             assert_eq!(entry.id, i + 1);
@@ -862,17 +920,29 @@ mod test {
             },
         };
         for i in 0..5 {
-            vlt.add_entry(PasswordEntry {
-                which: None,
-                name: format!("entry{}", i),
-                username: Some(format!("user{}", i)),
-                password: format!("pass{}", i),
-                url: None,
-                notes: None,
-                copy: false,
-            });
+            vlt.add_entry(
+                PasswordEntry {
+                    which: None,
+                    name: format!("entry{}", i),
+                    username: Some(format!("user{}", i)),
+                    password: format!("pass{}", i),
+                    url: None,
+                    notes: None,
+                    copy: false,
+                },
+                &mut ServerInfo {
+                    locked: true,
+                    keypass: None,
+                },
+            );
         }
-        vlt.delete_entry(DeleteType::Id(2));
+        vlt.delete_entry(
+            DeleteType::Id(2),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         for (i, entry) in vlt.enteries.iter().enumerate() {
             assert_eq!(entry.id, i + 1);
         }
@@ -894,18 +964,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(1),
-            update: UpdateArgs {
-                name: None,
-                username: None,
-                password: true,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(1),
+                update: UpdateArgs {
+                    name: None,
+                    username: None,
+                    password: true,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: Some(String::from("newpass")),
             },
-            password: Some(String::from("newpass")),
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries[0].password, "newpass");
     }
     #[test]
@@ -925,18 +1001,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(1),
-            update: UpdateArgs {
-                name: None,
-                username: None,
-                password: false,
-                gen_pass: false,
-                url: Some(String::from("https://example.com")),
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(1),
+                update: UpdateArgs {
+                    name: None,
+                    username: None,
+                    password: false,
+                    gen_pass: false,
+                    url: Some(String::from("https://example.com")),
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(
             vlt.enteries[0].url,
             Some(String::from("https://example.com"))
@@ -959,18 +1041,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(1),
-            update: UpdateArgs {
-                name: None,
-                username: None,
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: Some(String::from("important notes")),
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(1),
+                update: UpdateArgs {
+                    name: None,
+                    username: None,
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: Some(String::from("important notes")),
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries[0].notes, Some(String::from("important notes")));
     }
 
@@ -992,7 +1080,13 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(DeleteType::Id(0));
+        vlt.delete_entry(
+            DeleteType::Id(0),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
     }
 
     #[test]
@@ -1013,7 +1107,13 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(DeleteType::Id(100));
+        vlt.delete_entry(
+            DeleteType::Id(100),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
     }
 
     #[test]
@@ -1034,18 +1134,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(0),
-            update: UpdateArgs {
-                name: Some(String::from("new")),
-                username: None,
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(0),
+                update: UpdateArgs {
+                    name: Some(String::from("new")),
+                    username: None,
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
     }
 
     #[test]
@@ -1066,18 +1172,24 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(100),
-            update: UpdateArgs {
-                name: Some(String::from("new")),
-                username: None,
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(100),
+                update: UpdateArgs {
+                    name: Some(String::from("new")),
+                    username: None,
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
     }
 
     #[test]
@@ -1098,7 +1210,13 @@ mod test {
             },
         };
         let initial_len = vlt.enteries.len();
-        vlt.delete_entry(DeleteType::Name("nonexistent".into()));
+        vlt.delete_entry(
+            DeleteType::Name("nonexistent".into()),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries.len(), initial_len);
     }
 
@@ -1120,18 +1238,24 @@ mod test {
             },
         };
         let original_modified = vlt.enteries[0].modified.clone();
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Name(String::from("nonexistent")),
-            update: UpdateArgs {
-                name: Some(String::from("new")),
-                username: None,
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Name(String::from("nonexistent")),
+                update: UpdateArgs {
+                    name: Some(String::from("new")),
+                    username: None,
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries[0].name, "test");
         assert_eq!(vlt.enteries[0].modified, original_modified);
     }
@@ -1165,7 +1289,13 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(DeleteType::Name("dup".into()));
+        vlt.delete_entry(
+            DeleteType::Name("dup".into()),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries.len(), 1);
         assert_eq!(vlt.enteries[0].id, 1);
         assert_eq!(vlt.enteries[0].username, Some(String::from("user2")));
@@ -1179,15 +1309,21 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.add_entry(PasswordEntry {
-            which: None,
-            name: String::from("full_entry"),
-            username: Some(String::from("admin")),
-            password: String::from("secret123"),
-            url: Some(String::from("https://example.com")),
-            notes: Some(String::from("important account")),
-            copy: false,
-        });
+        vlt.add_entry(
+            PasswordEntry {
+                which: None,
+                name: String::from("full_entry"),
+                username: Some(String::from("admin")),
+                password: String::from("secret123"),
+                url: Some(String::from("https://example.com")),
+                notes: Some(String::from("important account")),
+                copy: false,
+            },
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries.len(), 1);
         assert_eq!(vlt.enteries[0].name, "full_entry");
         assert_eq!(vlt.enteries[0].username, Some(String::from("admin")));
@@ -1210,15 +1346,21 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.add_entry(PasswordEntry {
-            which: None,
-            name: String::from("minimal"),
-            username: None,
-            password: String::from("pass"),
-            url: None,
-            notes: None,
-            copy: false,
-        });
+        vlt.add_entry(
+            PasswordEntry {
+                which: None,
+                name: String::from("minimal"),
+                username: None,
+                password: String::from("pass"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries.len(), 1);
         assert_eq!(vlt.enteries[0].name, "minimal");
         assert_eq!(vlt.enteries[0].username, None);
@@ -1244,18 +1386,24 @@ mod test {
             },
         };
         let original_created = vlt.enteries[0].created.clone();
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(1),
-            update: UpdateArgs {
-                name: Some(String::from("new_name")),
-                username: Some(String::from("new_user")),
-                password: true,
-                gen_pass: false,
-                url: Some(String::from("https://new.com")),
-                notes: Some(String::from("new notes")),
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(1),
+                update: UpdateArgs {
+                    name: Some(String::from("new_name")),
+                    username: Some(String::from("new_user")),
+                    password: true,
+                    gen_pass: false,
+                    url: Some(String::from("https://new.com")),
+                    notes: Some(String::from("new notes")),
+                },
+                password: Some(String::from("new_pass")),
             },
-            password: Some(String::from("new_pass")),
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries[0].name, "new_name");
         assert_eq!(vlt.enteries[0].username, Some(String::from("new_user")));
         assert_eq!(vlt.enteries[0].password, "new_pass");
@@ -1283,18 +1431,24 @@ mod test {
         };
         let original_modified = vlt.enteries[0].modified.clone();
         thread::sleep(std::time::Duration::from_millis(10));
-        vlt.update_entry(UpdateStruct {
-            which: DeleteType::Id(1),
-            update: UpdateArgs {
-                name: None,
-                username: None,
-                password: false,
-                gen_pass: false,
-                url: None,
-                notes: None,
+        vlt.update_entry(
+            UpdateStruct {
+                which: DeleteType::Id(1),
+                update: UpdateArgs {
+                    name: None,
+                    username: None,
+                    password: false,
+                    gen_pass: false,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        });
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
         assert_eq!(vlt.enteries[0].modified, original_modified);
     }
 }

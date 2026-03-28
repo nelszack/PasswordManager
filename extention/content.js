@@ -109,7 +109,7 @@ function createDropdownButton(input, accounts) {
 // Attach to all valid inputs
 // ===============================
 function attachToInputs(accounts) {
-    if (!document.querySelector("input[type='password']")){
+    if (!document.location.href.includes("auth") && !document.location.href.includes("login")) {
         return
     }
     const inputs = document.querySelectorAll(
@@ -226,7 +226,7 @@ let modalOpen = false;
 function showPromptModal(title, message, showUpdateOption = false, oldUsername = "", oldPassword = "", showNameInput = false, existingName = "") {
     modalOpen = true;
     const originalSubmit = HTMLFormElement.prototype.submit;
-    HTMLFormElement.prototype.submit = function() {
+    HTMLFormElement.prototype.submit = function () {
         if (modalOpen) return;
         return originalSubmit.call(this);
     };
@@ -359,13 +359,12 @@ function isPopupPending() {
 // ===============================
 async function initExtension(accounts) {
     observeInputs(accounts);
-
     const pendingPopup = await isPopupPending();
     if (pendingPopup && !modalOpen) {
         modalOpen = true;
         const result = await showPromptModal(
             pendingPopup.hasAccounts ? "Credentials Mismatch" : "Save Credentials",
-            pendingPopup.hasAccounts 
+            pendingPopup.hasAccounts
                 ? `This doesn't match saved account "${pendingPopup.accountName || pendingPopup.username}". What would you like to do?`
                 : "Would you like to save these credentials?",
             pendingPopup.hasAccounts,
@@ -420,7 +419,7 @@ async function initExtension(accounts) {
 
             const result = await showPromptModal(
                 accounts.length > 0 ? "Credentials Mismatch" : "Save Credentials",
-                accounts.length > 0 
+                accounts.length > 0
                     ? `This doesn't match saved account "${accounts[0].username}". What would you like to do?`
                     : "Would you like to save these credentials?",
                 accounts.length > 0,

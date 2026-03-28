@@ -188,7 +188,7 @@ pub fn server(key: String) {
                 } else {
                     let copy = info.copy.clone();
                     let mut pass = info.password.clone();
-                    vlt.add_entry(info);
+                    vlt.add_entry(info,&mut server_info);
                     respond("entry added", &mut stream1, http);
                     if copy {
                         cpy(&pass, 10);
@@ -203,7 +203,7 @@ pub fn server(key: String) {
                     respond("vault deleted", &mut stream1, http)
                 }
                 _ if !server_info.locked => {
-                    vlt.delete_entry(id);
+                   vlt.delete_entry(id,&mut server_info);
                     respond("entry deleted", &mut stream1, http);
                 }
                 _ => respond("Vault locked", &mut stream1, http),
@@ -224,7 +224,7 @@ pub fn server(key: String) {
             }
             ServerCommands::Update(a) => {
                 if !server_info.locked {
-                    vlt.update_entry(a);
+                    vlt.update_entry(a,&mut server_info);
                 } else {
                     respond("Vault locked", &mut stream1, http);
                 }
