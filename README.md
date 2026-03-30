@@ -90,11 +90,36 @@ pm passcheck --password "mypassword123"
 pm config --genpass-length 24 --genpass-stats --clpb-timeout 30
 ```
 
+### Reset Config to Defaults
+
+```bash
+pm config --defalt
+```
+
+### Create a New Vault
+
+```bash
+pm new --key-path /path/to/key.pem
+```
+
+### Check Server Status
+
+```bash
+pm status
+```
+
+### Stop the Server
+
+```bash
+pm kill
+```
+
 ## Browser Extension
 
-1. Load the `extention` folder as an unpacked extension in Chrome
+1. Load the `extention` folder as an unpacked extension in Chrome/Chromium
 2. The extension connects to `http://localhost:7878`
 3. Click the extension icon to view and manage passwords
+4. The extension supports auto-fill on web pages via content scripts
 
 ## Architecture
 
