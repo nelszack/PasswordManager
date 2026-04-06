@@ -1,8 +1,5 @@
 use crate::{
-    encryption::{decrypt_file, encrypt_file, gen_master_key},
-    file::file_exists,
-    server::{ServerInfo, respond},
-    types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct},
+    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key}, file::file_exists, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
 };
 use blake3;
 use directories::ProjectDirs;
@@ -115,6 +112,11 @@ impl Vault {
                 }
                 if i <= self.enteries.len() {
                     respond(&format!("{:?}\n", self.enteries[i - 1]), stream, http);
+                    if let Some(uname)=&self.enteries[i-1].username{
+                        cpy(&uname, 15);
+
+                    }
+                    cpy(&self.enteries[i-1].password, 15);
                 } else {
                     respond(&format!("id not found\n"), stream, http);
                 }
