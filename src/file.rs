@@ -1,9 +1,33 @@
-use std::path::Path;
+use directories::ProjectDirs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
+
 pub fn file_exists(file_path: &str) -> bool {
-    if Path::new(file_path).exists() {
-        return true;
-    }
-    return false;
+    Path::new(file_path).exists()
+}
+
+pub fn data_dir() -> PathBuf {
+    let data_dir = TEST_DATA_DIR
+        .get()
+        .map(|d| d.path().to_path_buf())
+        .unwrap_or_else(project_data_dir);
+    fs::create_dir_all(&data_dir).unwrap();
+    data_dir
+}
+
+fn project_data_dir() -> PathBuf {
+    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    proj_dir.data_dir().to_path_buf()
+}
+
+static TEST_DATA_DIR: OnceLock<&'static tempfile::TempDir> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn init_test_data_dir() {
+    let _ = TEST_DATA_DIR.get_or_init(|| Box::leak(Box::new(tempfile::TempDir::new().unwrap())));
 }
 
 #[cfg(test)]

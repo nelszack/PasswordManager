@@ -1,13 +1,10 @@
 use crate::{
-    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key}, file::file_exists, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
+    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key}, file::{data_dir, file_exists}, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
 };
 use blake3;
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs::{self, File, read, write},
-    net::TcpStream,
-};
+use std::fs::{self, File, read, write};
+use tokio::net::TcpStream;
 use zeroize::Zeroize;
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
@@ -56,9 +53,7 @@ fn get_filename(mut key_pass: &mut PasswordType, new: bool) -> String {
 
 pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock: bool) {
     let fname = get_filename(&mut server_info.keypass.as_mut().unwrap(), true);
-    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-    let data_path = proj_dir.data_dir();
-    let file_path = data_path.join(&fname);
+    let file_path = data_dir().join(&fname);
     if file_exists(&file_path.to_str().unwrap()) {
         panic!("file already exists")
     }
@@ -79,13 +74,11 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
     }
 }
 fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) {
-    if key_pass.keypass == None || key_pass.locked {
+    if key_pass.keypass == None {
         return;
     }
     let fname = vlt.metadata.filename.clone();
-    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-    let data_path = proj_dir.data_dir();
-    let file_path = data_path.join(&fname);
+    let file_path = data_dir().join(&fname);
     let buf = rmp_serde::to_vec(&vlt).unwrap();
     let txt = encrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &buf[..]);
     write(file_path, txt).unwrap();
@@ -93,9 +86,7 @@ fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) {
 
 fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
     let fname = get_filename(&mut key_pass.keypass.as_mut().unwrap(), false);
-    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-    let data_path = proj_dir.data_dir();
-    let file_path = data_path.join(&fname);
+    let file_path = data_dir().join(&fname);
     let contents = read(file_path).unwrap();
     let dec = decrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &contents);
     let vault: Vault = rmp_serde::from_slice(&dec.unwrap()).unwrap();
@@ -104,34 +95,34 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Vault {
 }
 
 impl Vault {
-    pub fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
+    pub async fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
         match a {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
                     panic!("not valid id");
                 }
                 if i <= self.enteries.len() {
-                    respond(&format!("{:?}\n", self.enteries[i - 1]), stream, http);
+                    respond(&format!("{:?}\n", self.enteries[i - 1]), stream, http).await;
                     if let Some(uname)=&self.enteries[i-1].username{
                         cpy(&uname, 15);
 
                     }
                     cpy(&self.enteries[i-1].password, 15);
                 } else {
-                    respond(&format!("id not found\n"), stream, http);
+                    respond(&format!("id not found\n"), stream, http).await;
                 }
             }
             DeleteType::Name(n) => {
                 let mut found = false;
                 for i in 0..self.enteries.len() {
                     if self.enteries[i].name == n {
-                        respond(&format!("{:?}\n", self.enteries[i]), stream, http);
+                        respond(&format!("{:?}\n", self.enteries[i]), stream, http).await;
                         found = true;
                         break;
                     }
                 }
                 if !found {
-                    respond(&format!("not found\n"), stream, http);
+                    respond(&format!("not found\n"), stream, http).await;
                 }
             }
             DeleteType::Url(u) => {
@@ -154,9 +145,9 @@ impl Vault {
                     }
                 }
                 if !found {
-                    respond("not found\n", stream, http);
+                    respond("not found\n", stream, http).await;
                 } else {
-                    respond(&format!("[{}]", l1.join(",")), stream, http);
+                    respond(&format!("[{}]", l1.join(",")), stream, http).await;
                 }
             }
             DeleteType::Vault(_) => unreachable!(),
@@ -286,10 +277,10 @@ impl Vault {
         }
     }
 
-    pub fn view_entries(&self, stream: &mut TcpStream, http: bool) {
+    pub async fn view_entries(&self, stream: &mut TcpStream, http: bool) {
         let enteries = &self.enteries[..];
         if enteries.len() == 0 {
-            respond("No entries", stream, http);
+            respond("No entries", stream, http).await;
             // stream.write_all(b"No entries").unwrap();
         }
         for i in enteries {
@@ -300,7 +291,8 @@ impl Vault {
                 ),
                 stream,
                 http,
-            );
+            )
+            .await;
         }
     }
 
@@ -327,11 +319,11 @@ impl Vault {
 }
 
 pub trait VaultFns {
-    fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool);
+    async fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool);
     fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo);
     fn delete_entry(&mut self, id: DeleteType, key_pass: &mut ServerInfo);
     fn update_entry(&mut self, add: UpdateStruct, key_pass: &mut ServerInfo);
-    fn view_entries(&self, stream: &mut TcpStream, http: bool);
+    async fn view_entries(&self, stream: &mut TcpStream, http: bool);
     fn lock_vault(&self, key_pass: &mut ServerInfo);
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo);
     fn export(&self, path: String);
@@ -339,9 +331,9 @@ pub trait VaultFns {
 }
 
 impl VaultFns for Option<Vault> {
-    fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
+    async fn get_entry(&self, a: DeleteType, stream: &mut TcpStream, http: bool) {
         if let Some(vlt) = self {
-            vlt.get_entry(a, stream, http)
+            vlt.get_entry(a, stream, http).await
         }
     }
     fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo) {
@@ -360,9 +352,9 @@ impl VaultFns for Option<Vault> {
             vlt.update_entry(add, key_pass);
         }
     }
-    fn view_entries(&self, stream: &mut TcpStream, http: bool) {
+    async fn view_entries(&self, stream: &mut TcpStream, http: bool) {
         if let Some(vlt) = self {
-            vlt.view_entries(stream, http);
+            vlt.view_entries(stream, http).await;
         }
     }
     fn lock_vault(&self, key_pass: &mut ServerInfo) {
@@ -390,9 +382,7 @@ impl VaultFns for Option<Vault> {
     }
 }
 pub fn delete_vault(mut key: PasswordType) {
-    use directories::ProjectDirs;
-    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-    let data = proj_dir.data_dir();
+    let data = data_dir();
     let filename = get_filename(&mut key, false);
     fs::remove_file(data.join(filename)).unwrap();
     match key {
@@ -406,6 +396,7 @@ pub fn delete_vault(mut key: PasswordType) {
 mod test {
     use super::*;
     use crate::cli::UpdateArgs;
+    use crate::file::init_test_data_dir;
     use chrono::FixedOffset;
     use std::{fs, path::Path, thread};
     use tempfile::NamedTempFile;
@@ -662,8 +653,43 @@ mod test {
         vlt1.import(file.path().to_str().unwrap().to_string());
         assert_eq!(vlt, vlt1);
     }
+
+    #[test]
+    fn test_import_new_persists_vault_to_disk() {
+        init_test_data_dir();
+        let pass = PasswordType::Password("import_fix_test_pass!".to_string());
+        let mut server_info = ServerInfo {
+            locked: true,
+            keypass: Some(pass.clone()),
+        };
+        let mut vlt: Option<Vault> = None;
+        create_vault(&mut vlt, &mut server_info, false);
+
+        let mut tf = NamedTempFile::new().unwrap();
+        {
+            use std::io::Write;
+            writeln!(tf, "id,name,username,password,url,notes,created,modified").unwrap();
+            writeln!(tf, "1,example.com,bob,secret,,,2026-01-01 00:00:00,2026-01-01 00:00:00").unwrap();
+            writeln!(tf, "2,test.org,alice,pw456,,,2026-01-02 00:00:00,2026-01-02 00:00:00").unwrap();
+        }
+        vlt.import(tf.path().to_str().unwrap().to_string());
+
+        vlt.lock_vault(&mut server_info);
+
+        let vlt1 = unlock_vault(&mut ServerInfo {
+            locked: true,
+            keypass: Some(pass),
+        });
+        assert_eq!(vlt1.enteries.len(), 2);
+        assert_eq!(vlt1.enteries[0].name, "example.com");
+        assert_eq!(vlt1.enteries[1].name, "test.org");
+
+        let fname = vlt1.metadata.filename.clone();
+        let _ = fs::remove_file(data_dir().join(fname));
+    }
     #[test]
     fn test_lock_unlock_key() {
+        init_test_data_dir();
         let temp = Path::new("test_lock_unlock_key.pem");
         gen_master_key(
             &mut PasswordType::Key("test_lock_unlock_key.pem".to_string()),
@@ -698,8 +724,7 @@ mod test {
             locked: true,
             keypass: Some(pass1),
         });
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
+        let data_path = data_dir();
         let file_path = data_path.join(&filename);
         let file_path2 = data_path.join(temp);
         fs::remove_file(file_path2).unwrap();
@@ -708,6 +733,7 @@ mod test {
     }
     #[test]
     fn test_lock_unlock_password() {
+        init_test_data_dir();
         let filename = get_filename(
             &mut PasswordType::Password("test_password1234!".to_string()),
             true,
@@ -737,14 +763,14 @@ mod test {
             locked: true,
             keypass: Some(pass1),
         });
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
+        let data_path = data_dir();
         let file_path = data_path.join(&filename);
         fs::remove_file(file_path).unwrap();
         assert_eq!(vlt, vlt1)
     }
     #[test]
     fn test_create_vault_key() {
+        init_test_data_dir();
         let mut vlt = None;
         create_vault(
             &mut vlt,
@@ -758,8 +784,7 @@ mod test {
             &mut PasswordType::Key("create_vault.enc".to_string()),
             false,
         );
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
+        let data_path = data_dir();
         let file_path = data_path.join(&filename);
         let file_path2 = data_path.join("create_vault.enc");
         fs::remove_file(file_path).unwrap();
@@ -774,6 +799,7 @@ mod test {
     }
     #[test]
     fn test_create_vault_key_lock() {
+        init_test_data_dir();
         let mut vlt = None;
         create_vault(
             &mut vlt,
@@ -787,8 +813,7 @@ mod test {
             &mut PasswordType::Key("create_vault_lock.enc".to_string()),
             false,
         );
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
+        let data_path = data_dir();
         let file_path = data_path.join(&filename);
         let file_path2 = data_path.join("create_vault_lock.enc");
         fs::remove_file(file_path).unwrap();
@@ -797,6 +822,7 @@ mod test {
     }
     #[test]
     fn test_create_vault_password() {
+        init_test_data_dir();
         let mut vlt = None;
         create_vault(
             &mut vlt,
@@ -810,8 +836,7 @@ mod test {
             &mut PasswordType::Password("test123456!".to_string()),
             false,
         );
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
+        let data_path = data_dir();
         let file_path = data_path.join(&filename);
         fs::remove_file(file_path).unwrap();
         assert_eq!(
@@ -824,6 +849,7 @@ mod test {
     }
     #[test]
     fn test_create_vault_password_lock() {
+        init_test_data_dir();
         let mut vlt = None;
         create_vault(
             &mut vlt,
@@ -837,8 +863,7 @@ mod test {
             &mut PasswordType::Password("test1234567!".to_string()),
             false,
         );
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_path = proj_dir.data_dir();
+        let data_path = data_dir();
         let file_path = data_path.join(&filename);
         fs::remove_file(file_path).unwrap();
         assert_eq!(vlt, None)

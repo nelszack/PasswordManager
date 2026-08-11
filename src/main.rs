@@ -22,7 +22,9 @@ use crate::{
 };
 use directories::ProjectDirs;
 use std::fs;
-fn main() {
+
+#[tokio::main]
+async fn main() {
     let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
     let config_path = proj_dir.config_dir();
     let data_path = proj_dir.data_dir();
@@ -82,7 +84,7 @@ fn main() {
                 manager(ServerCommands::Kill);
             }
             (CliCommands::Start, false) => start(),
-            (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())),
+            (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())).await,
             (CliCommands::New { key_path }, true) => {
                 manager(ServerCommands::New(if key_path.is_some() {
                     PasswordType::Key(key_path.unwrap())

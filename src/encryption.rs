@@ -1,11 +1,10 @@
-use crate::file::file_exists;
+use crate::file::{data_dir, file_exists};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     AeadCore, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
-use directories::ProjectDirs;
 use rand::Rng;
 use rand_core::OsRng;
 use std::{
@@ -51,9 +50,7 @@ fn master_key_from_keyfile(keyfile_bytes: &[u8]) -> [u8; 32] {
 pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
     match key_pass {
         PasswordType::Key(key) => {
-            let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-            let data_dir = proj_dir.data_dir();
-            let file_path = data_dir.join(key);
+            let file_path = data_dir().join(key);
             if new {
                 master_key_from_keyfile(&generate_key(&file_path))
             } else {
@@ -106,15 +103,14 @@ mod test {
     }
     #[test]
     fn test_encrypt_decrept_key() {
+        crate::file::init_test_data_dir();
         let temp = Path::new("temp.enc");
         gen_master_key(&mut PasswordType::Key("temp.enc".to_string()), true);
         let plantext = "this is a test".as_bytes();
         let mut pass = PasswordType::Key(temp.to_str().unwrap().to_string());
         let encrypt = encrypt_file(&mut pass, plantext);
         let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
-        let data_dir = proj_dir.data_dir();
-        let file_path = data_dir.join(temp);
+        let file_path = data_dir().join(temp);
         fs::remove_file(file_path).unwrap();
         assert_eq!(decrypt, plantext)
     }
