@@ -350,7 +350,13 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
                     request.extra_info[3].clone(),
                 ) {
                     ServerCommands::Update(UpdateStruct {
-                        which: DeleteType::Name(name),
+                        which: match request.extra_info.get(4).cloned().flatten() {
+                            Some(id) => match id.parse::<usize>() {
+                                Ok(n) => DeleteType::Id(n),
+                                Err(_) => DeleteType::Name(name.clone()),
+                            },
+                            None => DeleteType::Name(name.clone()),
+                        },
                         update: UpdateArgs {
                             name: None,
                             username: Some(username),

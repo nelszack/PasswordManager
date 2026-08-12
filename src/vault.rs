@@ -132,7 +132,8 @@ impl Vault {
                     if let Some(url) = &self.enteries[i].url {
                         if url == &u || url.contains(&u) {
                             l1.append(&mut vec![format!(
-                                "{{\"username\": {:?}, \"password\": \"{}\", \"name\": \"{}\"}}",
+                                "{{\"id\": {}, \"username\": {:?}, \"password\": \"{}\", \"name\": \"{}\"}}",
+                                self.enteries[i].id,
                                 self.enteries[i]
                                     .username
                                     .clone()
@@ -159,7 +160,7 @@ impl Vault {
 
         let mut exists = false;
         for i in &self.enteries {
-            if i.name == info.name {
+            if i.name == info.name && i.username == info.username {
                 exists = true;
                 break;
             }
@@ -892,6 +893,8 @@ mod test {
             },
         );
         let initial_len = vlt.enteries.len();
+
+        // Same name, different username -> allowed (multiple accounts per site)
         vlt.add_entry(
             PasswordEntry {
                 which: None,
@@ -907,7 +910,25 @@ mod test {
                 keypass: None,
             },
         );
-        assert_eq!(vlt.enteries.len(), initial_len);
+        assert_eq!(vlt.enteries.len(), initial_len + 1);
+
+        // Same name AND same username -> still blocked
+        vlt.add_entry(
+            PasswordEntry {
+                which: None,
+                name: String::from("test"),
+                username: Some(String::from("user1")),
+                password: String::from("pass3"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        );
+        assert_eq!(vlt.enteries.len(), initial_len + 1);
     }
     #[test]
     fn test_add_multiple_entries_ids_sequential() {

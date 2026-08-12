@@ -47,7 +47,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             },
             body: JSON.stringify({
                 command: "update",
-                extra_info: [request.domain, request.username, request.password, request.name]
+                extra_info: [request.domain, request.username, request.password, request.name, request.id]
             })
         })
             .then(res => res.text())
