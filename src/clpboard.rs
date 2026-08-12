@@ -2,6 +2,9 @@ use arboard::Clipboard;
 use std::{io::Write, thread, time::Duration};
 
 pub fn cpy(secret: &str, timeout: u8) {
+    if timeout == 0 {
+        return;
+    }
     let mut clipboard = Clipboard::new().unwrap();
     clipboard.set_text(secret).unwrap();
     println!("copyied to clipboard");
@@ -34,5 +37,16 @@ mod test {
         cpy("this is a test", 2);
         let content = clipboard.get_text().ok();
         assert_eq!(content, None);
+    }
+    #[test]
+    fn test_cpy_zero_timeout_does_not_panic() {
+        let mut clipboard = Clipboard::new().unwrap();
+        clipboard.set_text("keep me").unwrap();
+        cpy("secret", 0);
+        let content = clipboard.get_text().ok();
+        assert!(
+            content.is_some(),
+            "clipboard must not be cleared when timeout is 0"
+        );
     }
 }

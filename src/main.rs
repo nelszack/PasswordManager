@@ -23,6 +23,16 @@ use crate::{
 use directories::ProjectDirs;
 use std::fs;
 
+fn which_type(which: DeleteArgs) -> DeleteType {
+    if let Some(id) = which.id {
+        DeleteType::Id(id)
+    } else if let Some(name) = which.entry_name {
+        DeleteType::Name(name)
+    } else {
+        panic!("must provide --id or --entry-name")
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
@@ -84,7 +94,9 @@ async fn main() {
                 manager(ServerCommands::Kill);
             }
             (CliCommands::Start, false) => start(),
+            (CliCommands::Start, true) => start(),
             (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())).await,
+            (CliCommands::Run { .. }, true) => println!("server already running"),
             (CliCommands::New { key_path }, true) => {
                 manager(ServerCommands::New(if key_path.is_some() {
                     PasswordType::Key(key_path.unwrap())
@@ -105,15 +117,15 @@ async fn main() {
                 true,
             ) => {
                 manager(ServerCommands::Add(PasswordEntry {
-                    name: name,
-                    username: username,
+                    name,
+                    username,
                     password: if !gen_password {
                         create_password()
                     } else {
                         pass_gen(conf.genpass.length)
                     },
-                    url: url,
-                    notes: notes,
+                    url,
+                    notes,
                     which: None,
                     copy: if !copy && !no_copy {
                         conf.copy.copy_pass
@@ -153,11 +165,7 @@ async fn main() {
             }
             (CliCommands::Update { add, which }, true) => {
                 manager(ServerCommands::Update(UpdateStruct {
-                    which: if which.id.is_some() {
-                        DeleteType::Id(which.id.unwrap())
-                    } else {
-                        DeleteType::Name(which.entry_name.unwrap())
-                    },
+                    which: which_type(which),
                     password: if add.password {
                         if !add.gen_pass {
                             Some(create_password())
@@ -171,11 +179,7 @@ async fn main() {
                 }));
             }
             (CliCommands::Get { which }, true) => {
-                manager(ServerCommands::Get(if which.id.is_some() {
-                    DeleteType::Id(which.id.unwrap())
-                } else {
-                    DeleteType::Name(which.entry_name.unwrap())
-                }));
+                manager(ServerCommands::Get(which_type(which)));
             }
             (CliCommands::Export { path }, true) => {
                 manager(ServerCommands::Export(path));
@@ -194,13 +198,12 @@ async fn main() {
                     PasswordType::Password(create_password())
                 };
                 manager(ServerCommands::Import(ImportArgs {
-                    path: path,
-                    new: new,
+                    path,
+                    new,
                     key_pass: keypass,
                 }));
             }
             (_, false) => println!("server not running"),
-            (_, true) => unreachable!(),
         };
     }
 }

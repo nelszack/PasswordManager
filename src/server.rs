@@ -5,7 +5,6 @@ use crate::{
     types::*,
     vault::{Vault, VaultEnteries, VaultFns, create_vault, delete_vault},
 };
-use bincode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -85,7 +84,7 @@ pub fn is_running() -> bool {
     if std::net::TcpStream::connect_timeout(&ADDR.parse().unwrap(), Duration::from_secs(1)).is_ok() {
         return true;
     }
-    return false;
+    false
 }
 pub fn start() {
     if is_running() {
@@ -163,18 +162,24 @@ async fn handle_connection(
         }
         ServerCommands::Lock(send) => {
             if !server_info.locked && vlt.is_some() {
+                lock_vlt(&mut *vlt, &mut *server_info);
                 if send {
-                    lock_vlt(&mut *vlt, &mut *server_info);
                     respond("Vault locked", &mut stream, http).await;
                 }
+            } else if send {
+                respond("Vault already locked", &mut stream, http).await;
             }
         }
         ServerCommands::UnLock(info) => {
             if server_info.locked {
                 server_info.keypass = Some(info.key);
-                vlt.unlock_vault(&mut *server_info);
-                thread::spawn(move || auto_lock(info.timeout));
-                respond("Vault unlocked", &mut stream, http).await;
+                match vlt.unlock_vault(&mut *server_info) {
+                    Ok(()) => {
+                        thread::spawn(move || auto_lock(info.timeout));
+                        respond("Vault unlocked", &mut stream, http).await;
+                    }
+                    Err(e) => respond(&format!("unlock failed: {}", e), &mut stream, http).await,
+                }
             } else {
                 respond(
                     "A vault is already unlocked lock it before trying to unlock another one",
@@ -213,10 +218,14 @@ async fn handle_connection(
             } else {
                 let copy = info.copy.clone();
                 let mut pass = info.password.clone();
-                vlt.add_entry(info, &mut *server_info);
-                respond("entry added", &mut stream, http).await;
-                if copy {
-                    cpy(&pass, 10);
+                let added = vlt.add_entry(info, &mut *server_info);
+                if added {
+                    respond("entry added", &mut stream, http).await;
+                    if copy {
+                        cpy(&pass, 10);
+                    }
+                } else {
+                    respond("entry already exists", &mut stream, http).await;
                 }
                 pass.zeroize();
             }
@@ -228,8 +237,17 @@ async fn handle_connection(
                 respond("vault deleted", &mut stream, http).await;
             }
             _ if !server_info.locked => {
-                vlt.delete_entry(id, &mut *server_info);
-                respond("entry deleted", &mut stream, http).await;
+                let deleted = vlt.delete_entry(id, &mut *server_info);
+                respond(
+                    if deleted {
+                        "entry deleted"
+                    } else {
+                        "entry not found"
+                    },
+                    &mut stream,
+                    http,
+                )
+                .await;
             }
             _ => respond("Vault locked", &mut stream, http).await,
         },
@@ -249,7 +267,17 @@ async fn handle_connection(
         }
         ServerCommands::Update(a) => {
             if !server_info.locked {
-                vlt.update_entry(a, &mut *server_info);
+                let updated = vlt.update_entry(a, &mut *server_info);
+                respond(
+                    if updated {
+                        "entry updated"
+                    } else {
+                        "entry not found"
+                    },
+                    &mut stream,
+                    http,
+                )
+                .await;
             } else {
                 respond("Vault locked", &mut stream, http).await;
             }
@@ -259,6 +287,7 @@ async fn handle_connection(
             if !server_info.locked {
                 lock_vlt(&mut *vlt, &mut *server_info);
             }
+            let mut error = None;
             if args.new {
                 *server_info = ServerInfo {
                     locked: true,
@@ -267,12 +296,19 @@ async fn handle_connection(
                 create_vault(&mut *vlt, &mut *server_info, false);
             } else if server_info.locked {
                 server_info.keypass = Some(args.key_pass);
-                vlt.unlock_vault(&mut *server_info);
+                if let Err(e) = vlt.unlock_vault(&mut *server_info) {
+                    error = Some(e);
+                }
             }
 
-            vlt.import(args.path);
-            lock_vlt(&mut *vlt, &mut *server_info);
-            respond("finished import", &mut stream, http).await;
+            match error {
+                Some(e) => respond(&format!("import failed: {}", e), &mut stream, http).await,
+                None => {
+                    vlt.import(args.path);
+                    lock_vlt(&mut *vlt, &mut *server_info);
+                    respond("finished import", &mut stream, http).await;
+                }
+            }
         }
     }
     let _ = stream.flush().await;
@@ -299,13 +335,37 @@ struct HttpInfo {
     extra_info: Vec<Option<String>>,
 }
 async fn handle_http(message: &mut TcpStream) -> ServerCommands {
+    let mut request_str = String::new();
     let mut buf = [0u8; 1024];
-    message.flush().await.unwrap();
-    let size = message.read(&mut buf).await.unwrap();
-    let request_str = String::from_utf8_lossy(&buf[..size]);
-    let lines = request_str.lines();
-    if let Some(h) = lines.last() {
-        let request: HttpInfo = serde_json::from_str(h.trim()).unwrap();
+    loop {
+        let n = message.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        request_str.push_str(&String::from_utf8_lossy(&buf[..n]));
+        let Some(header_end) = request_str.find("\r\n\r\n") else {
+            continue;
+        };
+        let header = &request_str[..header_end];
+        let content_len = header
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        if request_str[header_end + 4..].len() >= content_len {
+            break;
+        }
+    }
+    let body = match request_str.find("\r\n\r\n") {
+        Some(i) => &request_str[i + 4..],
+        None => &request_str,
+    };
+    let body_line = body.lines().last().unwrap_or("");
+    let request: HttpInfo = serde_json::from_str(body_line.trim()).unwrap();
         match request.command {
             val if val == "veiw".to_string() => ServerCommands::View,
             val if val == "lock".to_string() => {
@@ -333,7 +393,7 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
                         which: None,
                         name: name.clone(),
                         username: Some(username),
-                        password: password,
+                        password,
                         url: Some(url),
                         notes: None,
                         copy:false,
@@ -381,20 +441,23 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
             }
             _ => panic!("not supported yet"),
         }
-    } else {
-        panic!("")
-    }
 }
 
 async fn handler(message: &mut TcpStream) -> Option<(ServerCommands, bool)> {
-    let mut buff = [0u8; 1024];
+    let mut buff = [0u8; 16];
     let n = message.peek(&mut buff).await.unwrap();
-    if n > 400 {
-        return Some((handle_http(message).await, true));
-    } else if n > 0 {
-        return Some((handle_tcp(message).await, false));
+    if n == 0 {
+        return None;
     }
-    None
+    const METHODS: [&str; 9] = [
+        "GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ", "TRACE ",
+    ];
+    let is_http = METHODS.iter().any(|m| buff.starts_with(m.as_bytes()));
+    if is_http {
+        Some((handle_http(message).await, true))
+    } else {
+        Some((handle_tcp(message).await, false))
+    }
 }
 
 fn lock_vlt(vlt: &mut Option<Vault>, mut server_info: &mut ServerInfo) {

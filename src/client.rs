@@ -1,6 +1,5 @@
 use crate::server::ADDR;
 use crate::types::*;
-use bincode;
 use std::{
     io::{Read, Write},
     net::TcpStream,

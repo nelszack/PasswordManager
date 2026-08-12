@@ -48,13 +48,13 @@ fn default_config(write_to_file: bool, config_path: &Path) -> Config {
     if write_to_file {
         write_file(&config, config_path)
     }
-    return config;
+    config
 }
 fn is_config(config_path: &Path) -> bool {
     if Path::new(config_path).exists() {
         return true;
     }
-    return false;
+    false
 }
 pub fn read_config(config_path: &Path) -> Config {
     if !is_config(config_path) {
@@ -68,7 +68,7 @@ pub fn read_config(config_path: &Path) -> Config {
             read_config(config_path)
         }
     };
-    return config;
+    config
 }
 fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
     let mut new = ConfigArgs {
@@ -79,31 +79,51 @@ fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
         clpb_timeout: None,
         unlock_timeout: None,
     };
-    let tre = old_config_txt.split("\n\n").collect::<Vec<&str>>();
-    for i in tre {
-        let peices = i.split("\n").collect::<Vec<&str>>();
-        let trimmed = peices[0]
+    for section in old_config_txt.split("\n\n") {
+        let mut lines = section.lines();
+        let Some(header) = lines.next() else {
+            continue;
+        };
+        let Some(trimmed) = header
+            .trim()
             .strip_prefix('[')
             .and_then(|s| s.strip_suffix(']'))
-            .unwrap();
-        for j in &peices[1..] {
-            let sp = j.split('\n').collect::<String>();
-            let thing = sp.split(" = ").collect::<Vec<&str>>();
-            match (trimmed, thing[0]) {
+        else {
+            continue;
+        };
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            match (trimmed, key.trim()) {
                 ("genpass", "length") => {
-                    new.genpass_length = Some(thing[1].parse().unwrap());
+                    if let Ok(v) = value.trim().parse() {
+                        new.genpass_length = Some(v);
+                    }
                 }
                 ("genpass", "stats") => {
-                    new.genpass_stats = Some(thing[1].parse().unwrap());
+                    if let Ok(v) = value.trim().parse() {
+                        new.genpass_stats = Some(v);
+                    }
                 }
                 ("genpass", "copy") => {
-                    new.genpass_copy = Some(thing[1].parse().unwrap());
+                    if let Ok(v) = value.trim().parse() {
+                        new.genpass_copy = Some(v);
+                    }
                 }
                 ("clpboard", "clp_timeout") => {
-                    new.clpb_timeout = Some(thing[1].parse().unwrap());
+                    if let Ok(v) = value.trim().parse() {
+                        new.clpb_timeout = Some(v);
+                    }
                 }
                 ("unlock", "unlock_timeout") => {
-                    new.unlock_timeout = Some(thing[1].parse().unwrap());
+                    if let Ok(v) = value.trim().parse() {
+                        new.unlock_timeout = Some(v);
+                    }
                 }
                 _ => {}
             }
