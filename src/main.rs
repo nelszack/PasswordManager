@@ -61,12 +61,12 @@ async fn main() {
                 if !stats && !no_stats {
                     conf.genpass.stats
                 } else {
-                    if stats { true } else { false }
+                    stats
                 },
                 if !copy && !no_copy {
                     conf.genpass.copy
                 } else {
-                    if copy { true } else { false }
+                    copy
                 },
                 copy_time.unwrap_or(conf.clpboard.clp_timeout),
             ),
@@ -77,8 +77,8 @@ async fn main() {
             }
             (CliCommands::Unlock { key, timeout }, true) => {
                 manager(ServerCommands::UnLock(UnlockInfo {
-                    key: if key.is_some() {
-                        PasswordType::Key(key.unwrap())
+                    key: if let Some(k) = key {
+                        PasswordType::Key(k)
                     } else {
                         PasswordType::Password(
                             rpassword::prompt_password("enter password: ").unwrap(),
@@ -98,8 +98,8 @@ async fn main() {
             (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())).await,
             (CliCommands::Run { .. }, true) => println!("server already running"),
             (CliCommands::New { key_path }, true) => {
-                manager(ServerCommands::New(if key_path.is_some() {
-                    PasswordType::Key(key_path.unwrap())
+                manager(ServerCommands::New(if let Some(kp) = key_path {
+                    PasswordType::Key(kp)
                 } else {
                     PasswordType::Password(create_password())
                 }));
@@ -130,7 +130,7 @@ async fn main() {
                     copy: if !copy && !no_copy {
                         conf.copy.copy_pass
                     } else {
-                        if copy { true } else { false }
+                        copy
                     },
                 }));
             }
@@ -151,8 +151,8 @@ async fn main() {
                 }
                 (None, None, true) => {
                     manager(ServerCommands::Delete(DeleteType::Vault(
-                        if key.is_some() {
-                            PasswordType::Key(key.unwrap())
+                        if let Some(k) = key {
+                            PasswordType::Key(k)
                         } else {
                             PasswordType::Password(create_password())
                         },

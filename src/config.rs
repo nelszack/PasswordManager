@@ -61,14 +61,14 @@ pub fn read_config(config_path: &Path) -> Config {
         return default_config(true, config_path);
     }
     let txt = std::fs::read_to_string(config_path).unwrap();
-    let config = match toml::from_str(&txt) {
+    
+    match toml::from_str(&txt) {
         Ok(content) => content,
         Err(_) => {
             fix_new_config(default_config(false, config_path), &txt, config_path);
             read_config(config_path)
         }
-    };
-    config
+    }
 }
 fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
     let mut new = ConfigArgs {
@@ -245,12 +245,12 @@ mod test {
         );
         let conf = read_config(&config_path);
         assert_eq!(conf.genpass.length, 24);
-        assert_eq!(conf.genpass.stats, false);
+        assert!(!conf.genpass.stats);
         fs::remove_file(&config_path).unwrap();
     }
     #[test]
     fn test_default_config_values() {
-        let config = default_config(false, &Path::new("dummy.toml"));
+        let config = default_config(false, Path::new("dummy.toml"));
         assert_eq!(config.genpass.length, 12);
         assert!(!config.genpass.stats);
         assert!(config.genpass.copy);

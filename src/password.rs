@@ -31,9 +31,9 @@ pub fn gen_pass(len: u8, stats: bool, copy: bool, copy_time: u8) {
     }
 }
 
-pub fn pass_str(pass: &String) {
+pub fn pass_str(pass: &str) {
     println!("password stats:");
-    let estimate = zxcvbn(&pass, &[]);
+    let estimate = zxcvbn(pass, &[]);
     let entropy = (estimate.guesses() as f64).log2();
     println!("    score (0-4): {}", estimate.score());
     println!("    entropy: {}", entropy);
@@ -48,7 +48,7 @@ pub fn pass_str(pass: &String) {
     println!("    password strength: {}", rating);
     if let Some(fdback) = estimate.feedback() {
         if let Some(warning) = fdback.warning() {
-            println!("    WARNING: {}", warning.to_string())
+            println!("    WARNING: {}", warning)
         }
         let mut parts = Vec::new();
         for suggestions in fdback.suggestions() {
@@ -189,7 +189,7 @@ mod test {
     fn test_pass_gen_all_ascii() {
         let pass = pass_gen(255);
         assert!(
-            pass.chars().all(|c| c.is_ascii()),
+            pass.is_ascii(),
             "Password should only contain ASCII characters"
         );
     }

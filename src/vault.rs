@@ -45,16 +45,16 @@ fn vault_filename_from_key(filename_key: &[u8; 32]) -> String {
     format!("{}.enc", hex::encode(short))
 }
 
-fn get_filename(mut key_pass: &mut PasswordType, new: bool) -> String {
-    let master_key = gen_master_key(&mut key_pass, new);
+fn get_filename(key_pass: &mut PasswordType, new: bool) -> String {
+    let master_key = gen_master_key(key_pass, new);
     let filename_key = filename_key_from_master(&master_key);
     vault_filename_from_key(&filename_key)
 }
 
 pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock: bool) {
-    let fname = get_filename(&mut server_info.keypass.as_mut().unwrap(), true);
+    let fname = get_filename(server_info.keypass.as_mut().unwrap(), true);
     let file_path = data_dir().join(&fname);
-    if file_exists(&file_path.to_str().unwrap()) {
+    if file_exists(file_path.to_str().unwrap()) {
         panic!("file already exists")
     }
     File::create(file_path).unwrap();
@@ -74,32 +74,29 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
     }
 }
 fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) {
-    if key_pass.keypass == None {
+    if key_pass.keypass.is_none() {
         return;
     }
     let fname = vlt.metadata.filename.clone();
     let file_path = data_dir().join(&fname);
     let buf = rmp_serde::to_vec(&vlt).unwrap();
-    let txt = encrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &buf[..]);
+    let txt = encrypt_file(key_pass.keypass.as_mut().unwrap(), &buf[..]);
     write(file_path, txt).unwrap();
 }
 
 fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
-    let Some(kp) = key_pass.keypass.as_mut() else {
-        return None;
-    };
-    if let PasswordType::Key(key) = kp {
-        if !data_dir().join(key).exists() {
+    let kp = key_pass.keypass.as_mut()?;
+    if let PasswordType::Key(key) = kp
+        && !data_dir().join(key).exists() {
             return None;
         }
-    }
     let fname = get_filename(key_pass.keypass.as_mut().unwrap(), false);
     let file_path = data_dir().join(&fname);
     if !file_path.exists() {
         return None;
     }
     let contents = read(file_path).ok()?;
-    let dec = decrypt_file(&mut key_pass.keypass.as_mut().unwrap(), &contents)?;
+    let dec = decrypt_file(key_pass.keypass.as_mut().unwrap(), &contents)?;
     let vault: Vault = rmp_serde::from_slice(&dec).ok()?;
     key_pass.locked = false;
     Some(vault)
@@ -108,8 +105,8 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
 fn url_match_json(entries: &[VaultEnteries], url: &str) -> Option<String> {
     let mut results = Vec::new();
     for e in entries {
-        if let Some(u) = &e.url {
-            if u == url || u.contains(url) {
+        if let Some(u) = &e.url
+            && (u == url || u.contains(url)) {
                 results.push(json!({
                     "id": e.id,
                     "username": e.username.clone().unwrap_or_else(|| "None".to_string()),
@@ -117,7 +114,6 @@ fn url_match_json(entries: &[VaultEnteries], url: &str) -> Option<String> {
                     "name": e.name,
                 }));
             }
-        }
     }
     if results.is_empty() {
         None
@@ -147,7 +143,7 @@ impl Vault {
                     }
                 }
                 if !found {
-                    respond(&format!("not found\n"), stream, http).await;
+                    respond("not found\n", stream, http).await;
                 }
             }
             DeleteType::Url(u) => {
@@ -229,8 +225,8 @@ impl Vault {
                     panic!("not valid id");
                 }
                 let mut modified = false;
-                if add.update.name.is_some() {
-                    self.enteries[i - 1].name = add.update.name.unwrap();
+                if let Some(name) = add.update.name {
+                    self.enteries[i - 1].name = name;
                     modified = true;
                 }
                 if add.update.notes.is_some() {
@@ -259,8 +255,8 @@ impl Vault {
                 for i in 0..self.enteries.len() {
                     if self.enteries[i].name == n {
                         let mut modified = false;
-                        if add.update.name.is_some() {
-                            self.enteries[i].name = add.update.name.unwrap();
+                        if let Some(name) = add.update.name {
+                            self.enteries[i].name = name;
                             modified = true;
                         }
                         if add.update.notes.is_some() {
@@ -294,7 +290,7 @@ impl Vault {
 
     pub async fn view_entries(&self, stream: &mut TcpStream, http: bool) {
         let enteries = &self.enteries[..];
-        if enteries.len() == 0 {
+        if enteries.is_empty() {
             respond("No entries", stream, http).await;
             return;
         }
@@ -413,11 +409,8 @@ pub fn delete_vault(mut key: PasswordType) {
     let data = data_dir();
     let filename = get_filename(&mut key, false);
     fs::remove_file(data.join(filename)).unwrap();
-    match key {
-        PasswordType::Key(key) => {
-            fs::remove_file(data.join(key)).unwrap();
-        }
-        _ => {}
+    if let PasswordType::Key(key) = key {
+        fs::remove_file(data.join(key)).unwrap();
     }
 }
 #[cfg(test)]

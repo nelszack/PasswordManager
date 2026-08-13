@@ -26,7 +26,7 @@ pub fn create_password() -> String {
 fn generate_key(path: &std::path::Path) -> [u8; 32] {
     let mut key = [0u8; 32];
     rand::thread_rng().fill(&mut key);
-    if file_exists(&path.as_os_str().to_str().unwrap()) {
+    if file_exists(path.as_os_str().to_str().unwrap()) {
         panic!("Key file already exists choose a different name for file")
     }
     let mut file = File::create(path).unwrap();
@@ -58,7 +58,7 @@ pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
             }
         }
         PasswordType::Password(pass) => {
-            master_key_from_password(&pass, b"vault-master-key-salt-v1")
+            master_key_from_password(pass, b"vault-master-key-salt-v1")
         }
     }
 }
@@ -67,8 +67,8 @@ fn encryption_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
     blake3::derive_key("vault-encryption-v1", master_key)
 }
 
-pub fn encrypt_file(mut key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8> {
-    let enc_key = encryption_key_from_master(&gen_master_key(&mut key_pass, false));
+pub fn encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8> {
+    let enc_key = encryption_key_from_master(&gen_master_key(key_pass, false));
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
@@ -77,12 +77,12 @@ pub fn encrypt_file(mut key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8
     [nonce.as_slice(), &ciphertext].concat()
 }
 
-pub fn decrypt_file(mut key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
+pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
     if encrypted.len() < 24 {
         return None;
     }
 
-    let enc_key = encryption_key_from_master(&gen_master_key(&mut key_pass, false));
+    let enc_key = encryption_key_from_master(&gen_master_key(key_pass, false));
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
     let (nonce_bytes, ciphertext) = encrypted.split_at(24);
     let nonce = XNonce::from_slice(nonce_bytes);

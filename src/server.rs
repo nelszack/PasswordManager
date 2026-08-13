@@ -101,6 +101,7 @@ pub fn start() {
         .spawn()
         .expect("failed to start background process");
     println!("Started (PID {})", child.id());
+    std::mem::forget(child);
 }
 
 fn auto_lock(time: u8) {
@@ -153,7 +154,7 @@ async fn handle_connection(
     match msg {
         ServerCommands::Kill => {
             if !server_info.locked {
-                lock_vlt(&mut *vlt, &mut *server_info);
+                lock_vlt(&mut vlt, &mut server_info);
             }
             respond("server killed", &mut stream, http).await;
             let _ = stream.shutdown().await;
@@ -162,7 +163,7 @@ async fn handle_connection(
         }
         ServerCommands::Lock(send) => {
             if !server_info.locked && vlt.is_some() {
-                lock_vlt(&mut *vlt, &mut *server_info);
+                lock_vlt(&mut vlt, &mut server_info);
                 if send {
                     respond("Vault locked", &mut stream, http).await;
                 }
@@ -173,7 +174,7 @@ async fn handle_connection(
         ServerCommands::UnLock(info) => {
             if server_info.locked {
                 server_info.keypass = Some(info.key);
-                match vlt.unlock_vault(&mut *server_info) {
+                match vlt.unlock_vault(&mut server_info) {
                     Ok(()) => {
                         thread::spawn(move || auto_lock(info.timeout));
                         respond("Vault unlocked", &mut stream, http).await;
@@ -206,19 +207,19 @@ async fn handle_connection(
         }
         ServerCommands::New(key_path) => {
             if !server_info.locked {
-                lock_vlt(&mut *vlt, &mut *server_info);
+                lock_vlt(&mut vlt, &mut server_info);
             }
             server_info.keypass = Some(key_path);
-            create_vault(&mut *vlt, &mut *server_info, true);
+            create_vault(&mut vlt, &mut server_info, true);
             respond("vault created", &mut stream, http).await;
         }
         ServerCommands::Add(info) => {
             if server_info.locked {
                 respond("Vault locked", &mut stream, http).await;
             } else {
-                let copy = info.copy.clone();
+                let copy = info.copy;
                 let mut pass = info.password.clone();
-                let added = vlt.add_entry(info, &mut *server_info);
+                let added = vlt.add_entry(info, &mut server_info);
                 if added {
                     respond("entry added", &mut stream, http).await;
                     if copy {
@@ -232,12 +233,12 @@ async fn handle_connection(
         }
         ServerCommands::Delete(id) => match id {
             DeleteType::Vault(k) => {
-                lock_vlt(&mut *vlt, &mut *server_info);
+                lock_vlt(&mut vlt, &mut server_info);
                 delete_vault(k);
                 respond("vault deleted", &mut stream, http).await;
             }
             _ if !server_info.locked => {
-                let deleted = vlt.delete_entry(id, &mut *server_info);
+                let deleted = vlt.delete_entry(id, &mut server_info);
                 respond(
                     if deleted {
                         "entry deleted"
@@ -267,7 +268,7 @@ async fn handle_connection(
         }
         ServerCommands::Update(a) => {
             if !server_info.locked {
-                let updated = vlt.update_entry(a, &mut *server_info);
+                let updated = vlt.update_entry(a, &mut server_info);
                 respond(
                     if updated {
                         "entry updated"
@@ -285,7 +286,7 @@ async fn handle_connection(
         ServerCommands::Export(path) => vlt.export(path),
         ServerCommands::Import(args) => {
             if !server_info.locked {
-                lock_vlt(&mut *vlt, &mut *server_info);
+                lock_vlt(&mut vlt, &mut server_info);
             }
             let mut error = None;
             if args.new {
@@ -293,10 +294,10 @@ async fn handle_connection(
                     locked: true,
                     keypass: Some(args.key_pass),
                 };
-                create_vault(&mut *vlt, &mut *server_info, false);
+                create_vault(&mut vlt, &mut server_info, false);
             } else if server_info.locked {
                 server_info.keypass = Some(args.key_pass);
-                if let Err(e) = vlt.unlock_vault(&mut *server_info) {
+                if let Err(e) = vlt.unlock_vault(&mut server_info) {
                     error = Some(e);
                 }
             }
@@ -305,7 +306,7 @@ async fn handle_connection(
                 Some(e) => respond(&format!("import failed: {}", e), &mut stream, http).await,
                 None => {
                     vlt.import(args.path);
-                    lock_vlt(&mut *vlt, &mut *server_info);
+                    lock_vlt(&mut vlt, &mut server_info);
                     respond("finished import", &mut stream, http).await;
                 }
             }
@@ -367,8 +368,8 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
     let body_line = body.lines().last().unwrap_or("");
     let request: HttpInfo = serde_json::from_str(body_line.trim()).unwrap();
         match request.command {
-            val if val == "veiw".to_string() => ServerCommands::View,
-            val if val == "lock".to_string() => {
+            val if val == "veiw" => ServerCommands::View,
+            val if val == "lock" => {
                 let lock = match &request.extra_info[0].clone().unwrap() {
                     val if val == &"true".to_string() => true,
                     val if val == &"false".to_string() => false,
@@ -376,13 +377,13 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
                 };
                 ServerCommands::Lock(lock)
             }
-            val if val == "status".to_string() => ServerCommands::Status,
-            val if val == "get".to_string() => {
+            val if val == "status" => ServerCommands::Status,
+            val if val == "get" => {
                 let url = request.extra_info[0].clone().unwrap();
                 ServerCommands::Get(DeleteType::Url(url))
             }
-            val if val == "kill".to_string() => ServerCommands::Kill,
-            val if val == "add".to_string() => {
+            val if val == "kill" => ServerCommands::Kill,
+            val if val == "add" => {
                 if let (Some(url), Some(username), Some(password), Some(name)) = (
                     request.extra_info[0].clone(),
                     request.extra_info[1].clone(),
@@ -460,8 +461,8 @@ async fn handler(message: &mut TcpStream) -> Option<(ServerCommands, bool)> {
     }
 }
 
-fn lock_vlt(vlt: &mut Option<Vault>, mut server_info: &mut ServerInfo) {
-    vlt.lock_vault(&mut server_info);
+fn lock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) {
+    vlt.lock_vault(server_info);
     vlt.zeroize();
     server_info.zeroize();
 }

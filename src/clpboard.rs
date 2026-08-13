@@ -12,13 +12,12 @@ pub fn cpy(secret: &str, timeout: u8) {
     let size = (timeout.ilog10() as usize) + 1;
     let t = thread::spawn(move || {
         thread::sleep(Duration::from_secs(timeout as u64));
-        if let Ok(mut cb) = Clipboard::new() {
-            if cb.get_text().ok().as_deref() == Some(&secret) {
+        if let Ok(mut cb) = Clipboard::new()
+            && cb.get_text().ok().as_deref() == Some(&secret) {
                 cb.clear().unwrap();
                 let add_size = size + 12;
                 println!("\rclipboard cleared {:add_size$}", "")
             }
-        }
     });
     for i in (1..=timeout).rev() {
         print!("\rclear clipboard in {:^size$} seconds", i);
