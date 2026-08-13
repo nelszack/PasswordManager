@@ -41,28 +41,43 @@ async function sendCommand(command, extra_info = []) {
     }
 }
 
+async function refreshStatus() {
+    const status = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: "getStatus" }, (r) => {
+            resolve(r || { running: false, locked: false, token: false });
+        });
+    });
+    const dot = document.getElementById("statusDot");
+    const text = document.getElementById("statusText");
+    if (!status.token) {
+        dot.style.background = "#f59e0b";
+        text.innerText = "Set session token";
+    } else if (!status.running) {
+        dot.style.background = "#6b7280";
+        text.innerText = "Server not running";
+    } else if (status.locked) {
+        dot.style.background = "#ef4444";
+        text.innerText = "Vault locked";
+    } else {
+        dot.style.background = "#22c55e";
+        text.innerText = "Vault unlocked";
+    }
+}
+
 document.getElementById("saveTokenBtn").addEventListener("click", async () => {
     const token = document.getElementById("tokenInput").value.trim();
     await saveToken(token);
     document.getElementById("output").innerText = token ? "Token saved" : "Token cleared";
+    refreshStatus();
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("tokenInput").value = await loadToken();
-});
-
-document.getElementById("statusBtn").addEventListener("click", async () => {
-    const result = await sendCommand("status");
-    document.getElementById("output").innerText = result;
-});
-
-document.getElementById("getBtn").addEventListener("click", async () => {
-    const site = prompt("Enter site name:");
-    const result = await sendCommand("get", [site]);
-    document.getElementById("output").innerText = result;
+    refreshStatus();
 });
 
 document.getElementById("lockBtn").addEventListener("click", async () => {
     const result = await sendCommand("lock", ["true"]);
     document.getElementById("output").innerText = result;
+    refreshStatus();
 });

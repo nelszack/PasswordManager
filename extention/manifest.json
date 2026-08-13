@@ -5,7 +5,8 @@
   "description": "Communicates with local password manager server",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "http://localhost:7878/*",
