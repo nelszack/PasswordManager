@@ -1,5 +1,7 @@
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 #[derive(Parser, Debug)]
 pub struct Cli {
     #[command(subcommand)]
@@ -21,6 +23,7 @@ pub enum CliCommands {
         no_copy: bool,
         #[arg(long("copy"), default_value_t = false)]
         copy: bool,
+        #[arg(long)]
         copy_time: Option<u8>,
     },
     Passcheck {
@@ -43,7 +46,7 @@ pub enum CliCommands {
     Kill,
     Delete(DeleteArgs),
     New {
-        #[arg(long)]
+        #[arg(long = "key")]
         key_path: Option<String>,
     },
     Add {
@@ -55,7 +58,7 @@ pub enum CliCommands {
         url: Option<String>,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long)]
+        #[arg(long = "generate-password")]
         gen_password: bool,
         #[arg(long)]
         #[arg(long("no-copy"), default_value_t = false, conflicts_with = "copy")]
@@ -79,12 +82,18 @@ pub enum CliCommands {
         path: String,
         #[arg(long)]
         new: bool,
-        #[arg(long)]
+        #[arg(long = "key")]
         key_path: Option<String>,
     },
     Export {
         #[arg(long)]
         path: String,
+    },
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+        #[arg(long, default_value = "-")]
+        output: PathBuf,
     },
 }
 
@@ -97,16 +106,16 @@ pub struct Timeout {
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
     #[arg(long)]
-    pub defalt: bool,
-    #[arg(long("genpass-length"))]
+    pub reset: bool,
+    #[arg(long = "length")]
     pub genpass_length: Option<u8>,
-    #[arg(long("genpass-stats"))]
+    #[arg(long = "stats")]
     pub genpass_stats: Option<bool>,
-    #[arg(long("genpass-copy"))]
+    #[arg(long = "copy")]
     pub genpass_copy: Option<bool>,
-    #[arg(long("clpb-timeout"))]
-    pub clpb_timeout: Option<u8>,
-    #[arg(long("unlock-timeout"))]
+    #[arg(long)]
+    pub clipboard_timeout: Option<u8>,
+    #[arg(long)]
     pub unlock_timeout: Option<u8>,
 }
 
@@ -118,8 +127,8 @@ pub struct UpdateArgs {
     pub username: Option<String>,
     #[arg(long, default_value_t = false)]
     pub password: bool,
-    #[arg(long, default_value_t = false, requires = "password")]
-    pub gen_pass: bool,
+    #[arg(long = "generate-password", default_value_t = false, requires = "password")]
+    pub gen_password: bool,
     #[arg(long)]
     pub url: Option<String>,
     #[arg(long)]
@@ -224,6 +233,18 @@ mod test {
                 assert!(!no_copy);
             }
             _ => panic!("expected Genpass command"),
+        }
+    }
+
+    #[test]
+    fn test_completions_parses() {
+        let cli = Cli::try_parse_from(["pm", "completions", "bash"]).unwrap();
+        match cli.command {
+            Some(CliCommands::Completions { shell, output }) => {
+                assert!(matches!(shell, Shell::Bash));
+                assert_eq!(output.to_string_lossy(), "-");
+            }
+            _ => panic!("expected Completions command"),
         }
     }
 }

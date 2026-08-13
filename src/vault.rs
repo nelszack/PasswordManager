@@ -55,7 +55,7 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
     let fname = get_filename(server_info.keypass.as_mut().unwrap(), true);
     let file_path = data_dir().join(&fname);
     if file_exists(file_path.to_str().unwrap()) {
-        panic!("file already exists")
+        panic!("A vault file with this key already exists.")
     }
     File::create(&file_path).unwrap();
     set_private_perms(&file_path);
@@ -129,7 +129,7 @@ impl Vault {
         match a {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
-                    panic!("not valid id");
+                    panic!("Invalid id");
                 }
                 let entry = &self.enteries[i - 1];
                 respond(&format!("{:?}\n", entry), stream, http).await;
@@ -145,14 +145,14 @@ impl Vault {
                     }
                 }
                 if !found {
-                    respond("not found\n", stream, http).await;
+                    respond("Not found.\n", stream, http).await;
                 }
             }
             DeleteType::Url(u) => {
                 if let Some(json) = url_match_json(&self.enteries, &u) {
                     respond(&json, stream, http).await;
                 } else {
-                    respond("not found\n", stream, http).await;
+                    respond("Not found.\n", stream, http).await;
                 }
             }
             DeleteType::Vault(_) => unreachable!(),
@@ -170,7 +170,7 @@ impl Vault {
             }
         }
         if exists {
-            println!("name already exists choose another name");
+            println!("An entry with this name and username already exists.");
             return false;
         }
 
@@ -194,7 +194,7 @@ impl Vault {
         match id {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
-                    panic!("not valid id");
+                    panic!("Invalid id");
                 }
                 self.enteries.remove(i - 1);
                 removed = true;
@@ -224,7 +224,7 @@ impl Vault {
         match add.which {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
-                    panic!("not valid id");
+                    panic!("Invalid id");
                 }
                 let mut modified = false;
                 if let Some(name) = add.update.name {
@@ -293,7 +293,7 @@ impl Vault {
     pub async fn view_entries(&self, stream: &mut TcpStream, http: bool) {
         let enteries = &self.enteries[..];
         if enteries.is_empty() {
-            respond("No entries", stream, http).await;
+            respond("No entries.", stream, http).await;
             return;
         }
         for i in enteries {
@@ -382,7 +382,7 @@ impl VaultFns for Option<Vault> {
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), String> {
         if self.is_some() {
             return Err(
-                "A vault is already unlocked lock it before unlocking another one".to_string(),
+                "a vault is already unlocked; lock it before unlocking another one".to_string(),
             );
         }
         match crate::vault::unlock_vault(key_pass) {
@@ -391,8 +391,7 @@ impl VaultFns for Option<Vault> {
                 Ok(())
             }
             None => Err(
-                "could not unlock: wrong master password or no vault exists for this key"
-                    .to_string(),
+                "wrong master password, or no vault exists for this key".to_string(),
             ),
         }
     }
@@ -555,7 +554,7 @@ mod test {
                 name: Some("x".into()),
                 username: None,
                 password: false,
-                gen_pass: false,
+                gen_password: false,
                 url: None,
                 notes: None,
             },
@@ -697,7 +696,7 @@ mod test {
                     name: Some(String::from("test2")),
                     username: Some(String::from("test2")),
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },
@@ -750,7 +749,7 @@ mod test {
                     name: Some(String::from("test2")),
                     username: Some(String::from("test2")),
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },
@@ -1176,7 +1175,7 @@ mod test {
                     name: None,
                     username: None,
                     password: true,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },
@@ -1213,7 +1212,7 @@ mod test {
                     name: None,
                     username: None,
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: Some(String::from("https://example.com")),
                     notes: None,
                 },
@@ -1253,7 +1252,7 @@ mod test {
                     name: None,
                     username: None,
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: Some(String::from("important notes")),
                 },
@@ -1268,7 +1267,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "not valid id")]
+    #[should_panic(expected = "Invalid id")]
     fn test_delete_entry_invalid_id_zero() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1295,7 +1294,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "not valid id")]
+    #[should_panic(expected = "Invalid id")]
     fn test_delete_entry_invalid_id_out_of_bounds() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1322,7 +1321,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "not valid id")]
+    #[should_panic(expected = "Invalid id")]
     fn test_update_entry_invalid_id_zero() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1346,7 +1345,7 @@ mod test {
                     name: Some(String::from("new")),
                     username: None,
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },
@@ -1360,7 +1359,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "not valid id")]
+    #[should_panic(expected = "Invalid id")]
     fn test_update_entry_invalid_id_out_of_bounds() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1384,7 +1383,7 @@ mod test {
                     name: Some(String::from("new")),
                     username: None,
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },
@@ -1450,7 +1449,7 @@ mod test {
                     name: Some(String::from("new")),
                     username: None,
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },
@@ -1598,7 +1597,7 @@ mod test {
                     name: Some(String::from("new_name")),
                     username: Some(String::from("new_user")),
                     password: true,
-                    gen_pass: false,
+                    gen_password: false,
                     url: Some(String::from("https://new.com")),
                     notes: Some(String::from("new notes")),
                 },
@@ -1643,7 +1642,7 @@ mod test {
                     name: None,
                     username: None,
                     password: false,
-                    gen_pass: false,
+                    gen_password: false,
                     url: None,
                     notes: None,
                 },

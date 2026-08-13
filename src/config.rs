@@ -72,11 +72,11 @@ pub fn read_config(config_path: &Path) -> Config {
 }
 fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
     let mut new = ConfigArgs {
-        defalt: false,
+        reset: false,
         genpass_copy: None,
         genpass_length: None,
         genpass_stats: None,
-        clpb_timeout: None,
+        clipboard_timeout: None,
         unlock_timeout: None,
     };
     for section in old_config_txt.split("\n\n") {
@@ -117,7 +117,7 @@ fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
                 }
                 ("clpboard", "clp_timeout") => {
                     if let Ok(v) = value.trim().parse() {
-                        new.clpb_timeout = Some(v);
+                        new.clipboard_timeout = Some(v);
                     }
                 }
                 ("unlock", "unlock_timeout") => {
@@ -132,7 +132,7 @@ fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
     update(config, new, config_path);
 }
 pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
-    if modify.defalt {
+    if modify.reset {
         config = default_config(false, config_path);
     }
     if let Some(i) = modify.genpass_length {
@@ -144,7 +144,7 @@ pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
     if let Some(i) = modify.genpass_copy {
         config.genpass.copy = i
     }
-    if let Some(i) = modify.clpb_timeout {
+    if let Some(i) = modify.clipboard_timeout {
         config.clpboard.clp_timeout = i
     }
     if let Some(i) = modify.unlock_timeout {
@@ -191,11 +191,11 @@ mod test {
         update(
             default_config(true, config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: Some(100),
                 genpass_stats: Some(false),
                 genpass_copy: Some(true),
-                clpb_timeout: Some(12),
+                clipboard_timeout: Some(12),
                 unlock_timeout: Some(15),
             },
             config_path,
@@ -234,11 +234,11 @@ mod test {
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: Some(24),
                 genpass_stats: None,
                 genpass_copy: None,
-                clpb_timeout: None,
+                clipboard_timeout: None,
                 unlock_timeout: None,
             },
             &config_path,
@@ -264,11 +264,11 @@ mod test {
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: true,
+                reset: true,
                 genpass_length: Some(100),
                 genpass_stats: Some(true),
                 genpass_copy: Some(false),
-                clpb_timeout: Some(30),
+                clipboard_timeout: Some(30),
                 unlock_timeout: Some(5),
             },
             &config_path,
@@ -276,11 +276,11 @@ mod test {
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: true,
+                reset: true,
                 genpass_length: None,
                 genpass_stats: None,
                 genpass_copy: None,
-                clpb_timeout: None,
+                clipboard_timeout: None,
                 unlock_timeout: None,
             },
             &config_path,
@@ -329,11 +329,11 @@ copy_pass = false
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: Some(16),
                 genpass_stats: Some(true),
                 genpass_copy: None,
-                clpb_timeout: None,
+                clipboard_timeout: None,
                 unlock_timeout: None,
             },
             &config_path,
@@ -342,11 +342,11 @@ copy_pass = false
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: None,
                 genpass_stats: None,
                 genpass_copy: Some(false),
-                clpb_timeout: Some(45),
+                clipboard_timeout: Some(45),
                 unlock_timeout: Some(10),
             },
             &config_path,
@@ -390,11 +390,11 @@ copy_pass = false
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: None,
                 genpass_stats: None,
                 genpass_copy: None,
-                clpb_timeout: Some(0),
+                clipboard_timeout: Some(0),
                 unlock_timeout: Some(0),
             },
             &config_path,
@@ -412,11 +412,11 @@ copy_pass = false
         update(
             read_config(&config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: Some(u8::MAX),
                 genpass_stats: Some(true),
                 genpass_copy: Some(false),
-                clpb_timeout: Some(u8::MAX),
+                clipboard_timeout: Some(u8::MAX),
                 unlock_timeout: Some(u8::MAX),
             },
             &config_path,
@@ -436,11 +436,11 @@ copy_pass = false
         update(
             default_config(false, &config_path),
             ConfigArgs {
-                defalt: false,
+                reset: false,
                 genpass_length: Some(50),
                 genpass_stats: None,
                 genpass_copy: None,
-                clpb_timeout: None,
+                clipboard_timeout: None,
                 unlock_timeout: None,
             },
             &config_path,

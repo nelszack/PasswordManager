@@ -19,10 +19,10 @@ pub fn pass_gen(len: u8) -> String {
 
 pub fn gen_pass(len: u8, stats: bool, copy: bool, copy_time: u8) {
     if len < 12 {
-        println!("for better security the recomended password length at least 12")
+        println!("Tip: for better security, use a password length of at least 12.")
     }
     let pass = pass_gen(len);
-    println!("password: {}", pass);
+    println!("Password: {}", pass);
     if stats {
         pass_str(&pass);
     }
@@ -32,11 +32,11 @@ pub fn gen_pass(len: u8, stats: bool, copy: bool, copy_time: u8) {
 }
 
 pub fn pass_str(pass: &str) {
-    println!("password stats:");
+    println!("Password stats:");
     let estimate = zxcvbn(pass, &[]);
     let entropy = (estimate.guesses() as f64).log2();
-    println!("    score (0-4): {}", estimate.score());
-    println!("    entropy: {}", entropy);
+    println!("    Score (0-4): {}", estimate.score());
+    println!("    Entropy: {:.2} bits", entropy);
     let rating = match estimate.score() {
         Score::Zero => "Very Weak",
         Score::One => "Weak",
@@ -45,17 +45,17 @@ pub fn pass_str(pass: &str) {
         Score::Four => "Strong",
         _ => unreachable!(),
     };
-    println!("    password strength: {}", rating);
+    println!("    Strength: {}", rating);
     if let Some(fdback) = estimate.feedback() {
         if let Some(warning) = fdback.warning() {
-            println!("    WARNING: {}", warning)
+            println!("    Warning: {}", warning)
         }
         let mut parts = Vec::new();
         for suggestions in fdback.suggestions() {
             parts.push(suggestions.to_string());
         }
-        if let Some(sugestion_str) = Some(parts.join(". ")) {
-            println!("    Suggestion(s): {}", sugestion_str);
+        if !parts.is_empty() {
+            println!("    Suggestions: {}", parts.join(". "));
         }
     }
 }

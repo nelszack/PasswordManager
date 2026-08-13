@@ -41,7 +41,7 @@ pm genpass --length 20 --copy
 ### Add a New Entry
 
 ```bash
-pm add --name "github.com" --username "user@email.com" --gen-password --copy
+pm add --name "github.com" --username "user@email.com" --generate-password --copy
 ```
 
 ### View All Entries
@@ -91,7 +91,39 @@ pm passcheck --password "mypassword123"
 ### Configure Settings
 
 ```bash
-pm config --genpass-length 24 --genpass-stats --clpb-timeout 30
+pm config --length 24 --stats --clipboard-timeout 30
+```
+
+### Shell Completions
+
+Generate tab completion for your shell:
+
+```bash
+# bash
+sudo mkdir -p /etc/bash_completion.d
+pm completions bash | sudo tee /etc/bash_completion.d/pm > /dev/null
+
+# zsh
+pm completions zsh > ~/.zshrc.d/_pm
+
+# fish
+pm completions fish > ~/.config/fish/completions/pm.fish
+
+# powershell
+pm completions powershell > $PROFILE
+```
+
+Or write to a file with `pm completions <shell> --output <path>`. Supported
+shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`. You may need to
+restart your shell (or `source` the file) for completions to take effect.
+
+If tab still completes filenames instead of commands/flags, the script isn't
+being sourced. Check with `type _pm` (or `complete -p pm`), and add an
+explicit source line to your `~/.bashrc`:
+
+```bash
+echo 'source /etc/bash_completion.d/pm' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ## Browser Extension

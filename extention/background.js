@@ -70,7 +70,7 @@ async function serverStatus() {
             return { running: false, locked: false, token: true };
         }
         const text = await res.text();
-        return { running: true, locked: text.includes("Locked"), token: true };
+        return { running: true, locked: /locked/i.test(text), token: true };
     } catch (err) {
         return { running: false, locked: false, token: true };
     }

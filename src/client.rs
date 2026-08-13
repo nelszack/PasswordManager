@@ -14,7 +14,7 @@ pub fn manager(command: ServerCommands) {
 fn server_token() -> String {
     let path = data_dir().join(TOKEN_FILE);
     fs::read_to_string(&path)
-        .expect("server not running: could not read session token")
+        .expect("Could not read session token. Is the server running?")
         .trim()
         .to_string()
 }

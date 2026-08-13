@@ -9,7 +9,7 @@ mod server;
 mod types;
 mod vault;
 use crate::{
-    cli::{CliCommands, DeleteArgs, cli_parse},
+    cli::{Cli, CliCommands, DeleteArgs, cli_parse},
     client::manager,
     config::{read_config, update},
     encryption::create_password,
@@ -20,8 +20,10 @@ use crate::{
         UpdateStruct,
     },
 };
+use clap::CommandFactory;
+use clap_complete::generate;
 use directories::ProjectDirs;
-use std::fs;
+use std::{fs, io};
 
 fn which_type(which: DeleteArgs) -> DeleteType {
     if let Some(id) = which.id {
@@ -30,6 +32,20 @@ fn which_type(which: DeleteArgs) -> DeleteType {
         DeleteType::Name(name)
     } else {
         panic!("must provide --id or --entry-name")
+    }
+}
+
+struct SilentPipe(io::Stdout);
+
+impl io::Write for SilentPipe {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.0.write(buf) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(buf.len()),
+            r => r,
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
     }
 }
 
@@ -71,6 +87,16 @@ async fn main() {
                 copy_time.unwrap_or(conf.clpboard.clp_timeout),
             ),
             (CliCommands::Passcheck { password }, _) => pass_str(&password),
+            (CliCommands::Completions { shell, output }, _) => {
+                let mut cmd = Cli::command();
+                if output.to_string_lossy() == "-" {
+                    generate(shell, &mut cmd, "pm", &mut SilentPipe(io::stdout()));
+                } else {
+                    let mut file = fs::File::create(&output).unwrap();
+                    generate(shell, &mut cmd, "pm", &mut file);
+                    println!("Completions written to {}", output.display());
+                }
+            }
             (CliCommands::Config(command), _) => update(conf, command, &config_file),
             (CliCommands::Lock, true) => {
                 manager(ServerCommands::Lock(true));
@@ -81,7 +107,7 @@ async fn main() {
                         PasswordType::Key(k)
                     } else {
                         PasswordType::Password(
-                            rpassword::prompt_password("enter password: ").unwrap(),
+                            rpassword::prompt_password("Enter master password: ").unwrap(),
                         )
                     },
                     timeout: timeout.timeout.unwrap_or(conf.unlock.unlock_timeout),
@@ -96,7 +122,7 @@ async fn main() {
             (CliCommands::Start, false) => start(),
             (CliCommands::Start, true) => start(),
             (CliCommands::Run, false) => server().await,
-            (CliCommands::Run, true) => println!("server already running"),
+            (CliCommands::Run, true) => println!("Server is already running."),
             (CliCommands::New { key_path }, true) => {
                 manager(ServerCommands::New(if let Some(kp) = key_path {
                     PasswordType::Key(kp)
@@ -167,7 +193,7 @@ async fn main() {
                 manager(ServerCommands::Update(UpdateStruct {
                     which: which_type(which),
                     password: if add.password {
-                        if !add.gen_pass {
+                        if !add.gen_password {
                             Some(create_password())
                         } else {
                             Some(pass_gen(conf.genpass.length))
@@ -203,7 +229,7 @@ async fn main() {
                     key_pass: keypass,
                 }));
             }
-            (_, false) => println!("server not running"),
+            (_, false) => println!("Server is not running. Start it with `pm start`."),
         };
     }
 }

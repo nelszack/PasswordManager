@@ -18,12 +18,12 @@ const LEGACY_SALT: &[u8] = b"vault-master-key-salt-v1";
 
 pub fn create_password() -> String {
     loop {
-        let p1 = rpassword::prompt_password("enter password ").unwrap();
-        let p2 = rpassword::prompt_password("enter password again ").unwrap();
+        let p1 = rpassword::prompt_password("Enter a password: ").unwrap();
+        let p2 = rpassword::prompt_password("Re-enter the password: ").unwrap();
         if p1 == p2 {
             return p1;
         }
-        println!("passwords dont match try again")
+        println!("Passwords don't match. Try again.")
     }
 }
 
@@ -31,7 +31,7 @@ fn generate_key(path: &std::path::Path) -> [u8; 32] {
     let mut key = [0u8; 32];
     OsRng.fill(&mut key);
     if file_exists(path.as_os_str().to_str().unwrap()) {
-        panic!("Key file already exists choose a different name for file")
+        panic!("Key file already exists. Choose a different name.")
     }
     let mut file = File::create(path).unwrap();
     file.write_all(&key).unwrap();
