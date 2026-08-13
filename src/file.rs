@@ -5,6 +5,17 @@ use std::{
     sync::OnceLock,
 };
 
+pub const TOKEN_FILE: &str = "session.key";
+
+#[cfg(unix)]
+pub fn set_private_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[cfg(not(unix))]
+pub fn set_private_perms(_path: &Path) {}
+
 pub fn file_exists(file_path: &str) -> bool {
     Path::new(file_path).exists()
 }

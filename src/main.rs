@@ -95,8 +95,8 @@ async fn main() {
             }
             (CliCommands::Start, false) => start(),
             (CliCommands::Start, true) => start(),
-            (CliCommands::Run { key }, false) => server(key.unwrap_or("none".into())).await,
-            (CliCommands::Run { .. }, true) => println!("server already running"),
+            (CliCommands::Run, false) => server().await,
+            (CliCommands::Run, true) => println!("server already running"),
             (CliCommands::New { key_path }, true) => {
                 manager(ServerCommands::New(if let Some(kp) = key_path {
                     PasswordType::Key(kp)

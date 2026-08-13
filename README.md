@@ -28,6 +28,10 @@ The binary will be at `target/release/pm`.
 pm start
 ```
 
+The server prints the location of its session token file (e.g.
+`~/.local/share/password_manager/session.key`). The CLI client authenticates
+automatically; the browser extension needs this token (see below).
+
 ### Generate a Password
 
 ```bash
@@ -94,7 +98,9 @@ pm config --genpass-length 24 --genpass-stats --clpb-timeout 30
 
 1. Load the `extention` folder as an unpacked extension in Chrome
 2. The extension connects to `http://localhost:7878`
-3. Click the extension icon to view and manage passwords
+3. Click the extension icon, paste the session token from the file printed by
+   `pm start` into the "Session token" field, and click **Save Token**
+4. Use the extension icon to view and manage passwords
 
 ## Architecture
 
@@ -112,8 +118,11 @@ pm config --genpass-length 24 --genpass-stats --clpb-timeout 30
 
 ## Security
 
-- Master password derived using Argon2
+- Master password derived using Argon2 with a random per-vault salt
 - Entries encrypted with ChaCha20-Poly1305
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
 - Configurable auto-lock timeout
+- The local server requires a random session token (stored with 0600
+  permissions) on every TCP and HTTP connection; vault, key and token files
+  are created with 0600 permissions

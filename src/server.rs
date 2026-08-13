@@ -2,13 +2,17 @@ use crate::{
     cli::UpdateArgs,
     client::manager,
     clpboard::cpy,
+    file::{TOKEN_FILE, data_dir, set_private_perms},
     types::*,
     vault::{Vault, VaultEnteries, VaultFns, create_vault, delete_vault},
 };
+use rand::Rng;
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    io::ErrorKind,
+    fs,
+    path::Path,
     process::{Command, Stdio},
     sync::Arc,
     thread,
@@ -80,27 +84,71 @@ impl Zeroize for VaultEnteries {
 
 pub const ADDR: &str = "127.0.0.1:7878";
 
+const MAX_TCP_MSG: usize = 16 * 1024 * 1024;
+const MAX_HTTP_REQ: usize = 1024 * 1024;
+const TOKEN_HEX_LEN: usize = 64;
+
 pub fn is_running() -> bool {
     if std::net::TcpStream::connect_timeout(&ADDR.parse().unwrap(), Duration::from_secs(1)).is_ok() {
         return true;
     }
     false
 }
+
+fn random_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn write_token_file(token: &str, path: &Path) {
+    fs::write(path, token).unwrap();
+    set_private_perms(path);
+}
+
+fn load_or_create_token() -> String {
+    let path = data_dir().join(TOKEN_FILE);
+    if let Ok(t) = fs::read_to_string(&path) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let token = random_token();
+    write_token_file(&token, &path);
+    token
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub fn start() {
     if is_running() {
         println!("server already running");
         return;
     }
+    let token = random_token();
+    write_token_file(&token, &data_dir().join(TOKEN_FILE));
     // let stdout = File::create("worker.out").expect("couldnt create file out");
     // let stderr = File::create("worker.err").expect("couldnt create file err");
     let child = Command::new(std::env::current_exe().unwrap())
-        .args(["run", "--key", "master_key"])
+        .arg("run")
+        .env("PM_SERVER_TOKEN", token)
         .stdin(Stdio::null())
         // .stdout(Stdio::from(stdout))
         // .stderr(Stdio::from(stderr))
         .spawn()
         .expect("failed to start background process");
     println!("Started (PID {})", child.id());
+    println!("session token file: {}", data_dir().join(TOKEN_FILE).display());
     std::mem::forget(child);
 }
 
@@ -111,10 +159,8 @@ fn auto_lock(time: u8) {
     thread::sleep(Duration::from_secs(time.into()));
     manager(ServerCommands::Lock(false));
 }
-pub async fn server(key: String) {
-    if key != "master_key" {
-        panic!("unotherized run");
-    }
+pub async fn server() {
+    let token = std::env::var("PM_SERVER_TOKEN").unwrap_or_else(|_| load_or_create_token());
     let listener = TcpListener::bind(ADDR).await.unwrap();
 
     let server_info = Arc::new(Mutex::new(ServerInfo {
@@ -132,7 +178,8 @@ pub async fn server(key: String) {
                 let si = Arc::clone(&server_info);
                 let v = Arc::clone(&vlt);
                 let kt = kill_tx.clone();
-                tokio::spawn(handle_connection(stream, si, v, kt));
+                let tk = token.clone();
+                tokio::spawn(handle_connection(stream, si, v, kt, tk));
             }
         }
     }
@@ -143,8 +190,9 @@ async fn handle_connection(
     server_info: Arc<Mutex<ServerInfo>>,
     vlt: Arc<Mutex<Option<Vault>>>,
     kill_tx: watch::Sender<bool>,
+    token: String,
 ) {
-    let Some((msg, http)) = handler(&mut stream).await else {
+    let Some((msg, http)) = handler(&mut stream, &token).await else {
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
         return;
@@ -173,6 +221,9 @@ async fn handle_connection(
         }
         ServerCommands::UnLock(info) => {
             if server_info.locked {
+                if let Some(mut old) = server_info.keypass.take() {
+                    old.zeroize();
+                }
                 server_info.keypass = Some(info.key);
                 match vlt.unlock_vault(&mut server_info) {
                     Ok(()) => {
@@ -209,6 +260,9 @@ async fn handle_connection(
             if !server_info.locked {
                 lock_vlt(&mut vlt, &mut server_info);
             }
+            if let Some(mut old) = server_info.keypass.take() {
+                old.zeroize();
+            }
             server_info.keypass = Some(key_path);
             create_vault(&mut vlt, &mut server_info, true);
             respond("vault created", &mut stream, http).await;
@@ -217,18 +271,19 @@ async fn handle_connection(
             if server_info.locked {
                 respond("Vault locked", &mut stream, http).await;
             } else {
-                let copy = info.copy;
-                let mut pass = info.password.clone();
+                let mut pass = info.copy.then(|| info.password.clone());
                 let added = vlt.add_entry(info, &mut server_info);
                 if added {
                     respond("entry added", &mut stream, http).await;
-                    if copy {
-                        cpy(&pass, 10);
+                    if let Some(p) = pass.as_deref() {
+                        cpy(p, 10);
                     }
                 } else {
                     respond("entry already exists", &mut stream, http).await;
                 }
-                pass.zeroize();
+                if let Some(p) = pass.as_mut() {
+                    p.zeroize();
+                }
             }
         }
         ServerCommands::Delete(id) => match id {
@@ -288,6 +343,9 @@ async fn handle_connection(
             if !server_info.locked {
                 lock_vlt(&mut vlt, &mut server_info);
             }
+            if let Some(mut old) = server_info.keypass.take() {
+                old.zeroize();
+            }
             let mut error = None;
             if args.new {
                 *server_info = ServerInfo {
@@ -316,38 +374,59 @@ async fn handle_connection(
     let _ = stream.shutdown().await;
 }
 
-async fn handle_tcp(message: &mut TcpStream) -> ServerCommands {
+async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommands> {
+    let mut token_buff = [0u8; TOKEN_HEX_LEN];
+    if message.read_exact(&mut token_buff).await.is_err() {
+        return None;
+    }
+    if !ct_eq(&token_buff, token.as_bytes()) {
+        return None;
+    }
     let mut len_buff = [0u8; 4];
-    message.read_exact(&mut len_buff).await.unwrap();
+    if message.read_exact(&mut len_buff).await.is_err() {
+        return None;
+    }
     let len = u32::from_be_bytes(len_buff) as usize;
+    if len > MAX_TCP_MSG {
+        return None;
+    }
     let mut buf = vec![0u8; len];
-    match message.read_exact(&mut buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {}
-        Err(e) => panic!("error {}", e),
+    if message.read_exact(&mut buf).await.is_err() {
+        return None;
+    }
+    let msg = match bincode::deserialize(&buf) {
+        Ok(m) => m,
+        Err(_) => return None,
     };
-    let msg: ServerCommands = bincode::deserialize(&buf).unwrap();
-    message.flush().await.unwrap();
-    msg
+    buf.zeroize();
+    Some(msg)
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct HttpInfo {
     command: String,
     extra_info: Vec<Option<String>>,
 }
-async fn handle_http(message: &mut TcpStream) -> ServerCommands {
+async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerCommands> {
     let mut request_str = String::new();
     let mut buf = [0u8; 1024];
+    let mut header_end = 0;
     loop {
-        let n = message.read(&mut buf).await.unwrap();
+        let n = match message.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => return None,
+        };
         if n == 0 {
             break;
         }
         request_str.push_str(&String::from_utf8_lossy(&buf[..n]));
-        let Some(header_end) = request_str.find("\r\n\r\n") else {
+        if request_str.len() > MAX_HTTP_REQ {
+            return None;
+        }
+        let Some(end) = request_str.find("\r\n\r\n") else {
             continue;
         };
-        let header = &request_str[..header_end];
+        header_end = end;
+        let header = &request_str[..end];
         let content_len = header
             .lines()
             .find_map(|l| {
@@ -357,61 +436,78 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
                     .and_then(|v| v.trim().parse::<usize>().ok())
             })
             .unwrap_or(0);
-        if request_str[header_end + 4..].len() >= content_len {
+        if content_len > MAX_HTTP_REQ {
+            return None;
+        }
+        if request_str[end + 4..].len() >= content_len {
             break;
         }
+    }
+    let auth_ok = request_str[..header_end].lines().any(|l| {
+        let lower = l.trim().to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("authorization:") else {
+            return false;
+        };
+        let Some(bearer) = rest.trim().strip_prefix("bearer ") else {
+            return false;
+        };
+        ct_eq(bearer.trim().as_bytes(), token.as_bytes())
+    });
+    if !auth_ok {
+        let _ = message
+            .write_all(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .as_bytes(),
+            )
+            .await;
+        return None;
     }
     let body = match request_str.find("\r\n\r\n") {
         Some(i) => &request_str[i + 4..],
         None => &request_str,
     };
     let body_line = body.lines().last().unwrap_or("");
-    let request: HttpInfo = serde_json::from_str(body_line.trim()).unwrap();
-        match request.command {
-            val if val == "veiw" => ServerCommands::View,
-            val if val == "lock" => {
-                let lock = match &request.extra_info[0].clone().unwrap() {
-                    val if val == &"true".to_string() => true,
-                    val if val == &"false".to_string() => false,
-                    _ => panic!(""),
-                };
-                ServerCommands::Lock(lock)
-            }
-            val if val == "status" => ServerCommands::Status,
-            val if val == "get" => {
-                let url = request.extra_info[0].clone().unwrap();
-                ServerCommands::Get(DeleteType::Url(url))
-            }
-            val if val == "kill" => ServerCommands::Kill,
-            val if val == "add" => {
-                if let (Some(url), Some(username), Some(password), Some(name)) = (
-                    request.extra_info[0].clone(),
-                    request.extra_info[1].clone(),
-                    request.extra_info[2].clone(),
-                    request.extra_info[3].clone(),
-                ) {
-                    ServerCommands::Add(PasswordEntry {
+    let request: HttpInfo = match serde_json::from_str(body_line.trim()) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+    let mut extra = request.extra_info.into_iter();
+    match request.command.as_str() {
+        "veiw" => Some(ServerCommands::View),
+        "lock" => match extra.next().flatten().as_deref() {
+            Some("true") => Some(ServerCommands::Lock(true)),
+            Some("false") => Some(ServerCommands::Lock(false)),
+            _ => None,
+        },
+        "status" => Some(ServerCommands::Status),
+        "get" => extra
+            .next()
+            .flatten()
+            .map(|url| ServerCommands::Get(DeleteType::Url(url))),
+        "kill" => Some(ServerCommands::Kill),
+        "add" => {
+            let mut it = extra;
+            match (it.next().flatten(), it.next().flatten(), it.next().flatten(), it.next().flatten()) {
+                (Some(url), Some(username), Some(password), Some(name)) => {
+                    Some(ServerCommands::Add(PasswordEntry {
                         which: None,
-                        name: name.clone(),
+                        name,
                         username: Some(username),
                         password,
                         url: Some(url),
                         notes: None,
-                        copy:false,
-                    })
-                } else {
-                    panic!("bad args")
+                        copy: false,
+                    }))
                 }
+                _ => None,
             }
-            val if val == "update" => {
-                if let (Some(url), Some(username), Some(password), Some(name)) = (
-                    request.extra_info[0].clone(),
-                    request.extra_info[1].clone(),
-                    request.extra_info[2].clone(),
-                    request.extra_info[3].clone(),
-                ) {
-                    ServerCommands::Update(UpdateStruct {
-                        which: match request.extra_info.get(4).cloned().flatten() {
+        }
+        "update" => {
+            let mut it = extra;
+            match (it.next().flatten(), it.next().flatten(), it.next().flatten(), it.next().flatten(), it.next().flatten()) {
+                (Some(url), Some(username), Some(password), Some(name), id) => {
+                    Some(ServerCommands::Update(UpdateStruct {
+                        which: match id {
                             Some(id) => match id.parse::<usize>() {
                                 Ok(n) => DeleteType::Id(n),
                                 Err(_) => DeleteType::Name(name.clone()),
@@ -427,26 +523,18 @@ async fn handle_http(message: &mut TcpStream) -> ServerCommands {
                             notes: None,
                         },
                         password: Some(password),
-                    })
-                } else {
-                    panic!(
-                        "bad args {:?}",
-                        (
-                            request.extra_info[0].clone(),
-                            request.extra_info[1].clone(),
-                            request.extra_info[2].clone(),
-                            request.extra_info[3].clone()
-                        )
-                    )
+                    }))
                 }
+                _ => None,
             }
-            _ => panic!("not supported yet"),
         }
+        _ => None,
+    }
 }
 
-async fn handler(message: &mut TcpStream) -> Option<(ServerCommands, bool)> {
+async fn handler(message: &mut TcpStream, token: &str) -> Option<(ServerCommands, bool)> {
     let mut buff = [0u8; 16];
-    let n = message.peek(&mut buff).await.unwrap();
+    let n = message.peek(&mut buff).await.ok()?;
     if n == 0 {
         return None;
     }
@@ -455,9 +543,9 @@ async fn handler(message: &mut TcpStream) -> Option<(ServerCommands, bool)> {
     ];
     let is_http = METHODS.iter().any(|m| buff.starts_with(m.as_bytes()));
     if is_http {
-        Some((handle_http(message).await, true))
+        Some((handle_http(message, token).await?, true))
     } else {
-        Some((handle_tcp(message).await, false))
+        Some((handle_tcp(message, token).await?, false))
     }
 }
 

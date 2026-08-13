@@ -1,5 +1,5 @@
 use crate::{
-    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key}, file::{data_dir, file_exists}, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
+    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key}, file::{data_dir, file_exists, set_private_perms}, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -57,7 +57,8 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
     if file_exists(file_path.to_str().unwrap()) {
         panic!("file already exists")
     }
-    File::create(file_path).unwrap();
+    File::create(&file_path).unwrap();
+    set_private_perms(&file_path);
     *vlt = Some(Vault {
         enteries: Vec::new(),
         metadata: VaultMetadata {
@@ -81,7 +82,8 @@ fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) {
     let file_path = data_dir().join(&fname);
     let buf = rmp_serde::to_vec(&vlt).unwrap();
     let txt = encrypt_file(key_pass.keypass.as_mut().unwrap(), &buf[..]);
-    write(file_path, txt).unwrap();
+    write(&file_path, txt).unwrap();
+    set_private_perms(&file_path);
 }
 
 fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {

@@ -39,10 +39,7 @@ pub enum CliCommands {
     Status,
     Start,
     #[command(hide = true)]
-    Run {
-        #[arg(long)]
-        key: Option<String>,
-    },
+    Run,
     Kill,
     Delete(DeleteArgs),
     New {

@@ -1,6 +1,8 @@
+use crate::file::{TOKEN_FILE, data_dir};
 use crate::server::ADDR;
 use crate::types::*;
 use std::{
+    fs,
     io::{Read, Write},
     net::TcpStream,
 };
@@ -9,8 +11,19 @@ pub fn manager(command: ServerCommands) {
     send_command(command)
 }
 
+fn server_token() -> String {
+    let path = data_dir().join(TOKEN_FILE);
+    fs::read_to_string(&path)
+        .expect("server not running: could not read session token")
+        .trim()
+        .to_string()
+}
+
 fn send_command(cmd: ServerCommands) {
     let mut con = TcpStream::connect(ADDR).unwrap();
+    let token = server_token();
+    con.write_all(token.as_bytes()).unwrap();
+    con.flush().unwrap();
     let data = bincode::serialize(&cmd).unwrap();
     con.write_all(&(data.len() as u32).to_be_bytes()).unwrap();
     con.flush().unwrap();

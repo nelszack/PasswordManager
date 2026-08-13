@@ -1,4 +1,4 @@
-use crate::file::{data_dir, file_exists};
+use crate::file::{data_dir, file_exists, set_private_perms};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -11,6 +11,10 @@ use std::{
     fs::{File, read},
     io::Write,
 };
+
+const SALT_LEN: usize = 16;
+const NONCE_LEN: usize = 24;
+const LEGACY_SALT: &[u8] = b"vault-master-key-salt-v1";
 
 pub fn create_password() -> String {
     loop {
@@ -25,12 +29,13 @@ pub fn create_password() -> String {
 
 fn generate_key(path: &std::path::Path) -> [u8; 32] {
     let mut key = [0u8; 32];
-    rand::thread_rng().fill(&mut key);
+    OsRng.fill(&mut key);
     if file_exists(path.as_os_str().to_str().unwrap()) {
         panic!("Key file already exists choose a different name for file")
     }
     let mut file = File::create(path).unwrap();
     file.write_all(&key).unwrap();
+    set_private_perms(path);
     key
 }
 
@@ -58,7 +63,7 @@ pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
             }
         }
         PasswordType::Password(pass) => {
-            master_key_from_password(pass, b"vault-master-key-salt-v1")
+            master_key_from_password(pass, LEGACY_SALT)
         }
     }
 }
@@ -67,26 +72,54 @@ fn encryption_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
     blake3::derive_key("vault-encryption-v1", master_key)
 }
 
+fn encryption_master(key_pass: &mut PasswordType, salt: &[u8]) -> [u8; 32] {
+    match key_pass {
+        PasswordType::Password(pass) => master_key_from_password(pass, salt),
+        PasswordType::Key(_) => gen_master_key(key_pass, false),
+    }
+}
+
 pub fn encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8> {
-    let enc_key = encryption_key_from_master(&gen_master_key(key_pass, false));
+    let mut salt = [0u8; SALT_LEN];
+    OsRng.fill(&mut salt);
+    let enc_key = encryption_key_from_master(&encryption_master(key_pass, &salt));
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .expect("encryption failure");
-    [nonce.as_slice(), &ciphertext].concat()
+    [salt.as_slice(), nonce.as_slice(), ciphertext.as_slice()].concat()
+}
+
+fn decrypt_with(
+    key_pass: &mut PasswordType,
+    salt: &[u8],
+    nonce_bytes: &[u8],
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
+    let enc_key = encryption_key_from_master(&encryption_master(key_pass, salt));
+    let cipher = XChaCha20Poly1305::new((&enc_key).into());
+    let nonce = XNonce::from_slice(nonce_bytes);
+    cipher.decrypt(nonce, ciphertext).ok()
 }
 
 pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
-    if encrypted.len() < 24 {
+    if encrypted.len() < NONCE_LEN {
         return None;
     }
 
-    let enc_key = encryption_key_from_master(&gen_master_key(key_pass, false));
-    let cipher = XChaCha20Poly1305::new((&enc_key).into());
-    let (nonce_bytes, ciphertext) = encrypted.split_at(24);
-    let nonce = XNonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ciphertext).ok()
+    // New format: salt(16) || nonce(24) || ciphertext
+    if encrypted.len() >= SALT_LEN + NONCE_LEN {
+        let salt = &encrypted[..SALT_LEN];
+        let (nonce_bytes, ciphertext) = encrypted[SALT_LEN..].split_at(NONCE_LEN);
+        if let Some(plaintext) = decrypt_with(key_pass, salt, nonce_bytes, ciphertext) {
+            return Some(plaintext);
+        }
+    }
+
+    // Legacy format: nonce(24) || ciphertext with a fixed salt
+    let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_LEN);
+    decrypt_with(key_pass, LEGACY_SALT, nonce_bytes, ciphertext)
 }
 
 #[cfg(test)]
@@ -178,5 +211,25 @@ mod test {
             encrypt.len() >= 24 + plantext.len(),
             "Nonce (24 bytes) + ciphertext"
         );
+    }
+    #[test]
+    fn test_legacy_format_still_decrypts() {
+        let plantext = b"legacy vault data";
+        let mut pass = PasswordType::Password("test123".into());
+        let enc_key = encryption_key_from_master(&gen_master_key(&mut pass, false));
+        let cipher = XChaCha20Poly1305::new((&enc_key).into());
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher.encrypt(&nonce, plantext.as_slice()).unwrap();
+        let legacy = [nonce.as_slice(), ciphertext.as_slice()].concat();
+        let dec = decrypt_file(&mut pass, &legacy).unwrap();
+        assert_eq!(dec, plantext);
+    }
+    #[test]
+    fn test_encrypt_uses_random_salt() {
+        let plantext = b"same plaintext";
+        let mut pass = PasswordType::Password("test123".into());
+        let e1 = encrypt_file(&mut pass, plantext);
+        let e2 = encrypt_file(&mut pass, plantext);
+        assert_ne!(&e1[..SALT_LEN], &e2[..SALT_LEN]);
     }
 }
