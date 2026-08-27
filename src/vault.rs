@@ -1,5 +1,5 @@
 use crate::{
-    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key}, file::{data_dir, file_exists, set_private_perms}, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
+    clpboard::cpy, encryption::{decrypt_file, encrypt_file, gen_master_key, gen_master_key_legacy}, file::{data_dir, file_exists, set_private_perms}, server::{ServerInfo, respond}, types::{DeleteType, PasswordEntry, PasswordType, UpdateStruct}
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -51,11 +51,17 @@ fn get_filename(key_pass: &mut PasswordType, new: bool) -> String {
     vault_filename_from_key(&filename_key)
 }
 
-pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock: bool) {
+fn get_legacy_filename(key_pass: &mut PasswordType) -> String {
+    let master_key = gen_master_key_legacy(key_pass);
+    let filename_key = filename_key_from_master(&master_key);
+    vault_filename_from_key(&filename_key)
+}
+
+pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock: bool) -> Result<(), String> {
     let fname = get_filename(server_info.keypass.as_mut().unwrap(), true);
     let file_path = data_dir().join(&fname);
     if file_exists(file_path.to_str().unwrap()) {
-        panic!("A vault file with this key already exists.")
+        return Err("A vault file with this key already exists.".to_string());
     }
     File::create(&file_path).unwrap();
     set_private_perms(&file_path);
@@ -73,6 +79,7 @@ pub fn create_vault(vlt: &mut Option<Vault>, server_info: &mut ServerInfo, lock:
         vlt.zeroize();
         server_info.zeroize();
     }
+    Ok(())
 }
 fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) {
     if key_pass.keypass.is_none() {
@@ -93,9 +100,13 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
             return None;
         }
     let fname = get_filename(key_pass.keypass.as_mut().unwrap(), false);
-    let file_path = data_dir().join(&fname);
+    let mut file_path = data_dir().join(&fname);
     if !file_path.exists() {
-        return None;
+        let legacy_fname = get_legacy_filename(key_pass.keypass.as_mut().unwrap());
+        file_path = data_dir().join(&legacy_fname);
+        if !file_path.exists() {
+            return None;
+        }
     }
     let contents = read(file_path).ok()?;
     let dec = decrypt_file(key_pass.keypass.as_mut().unwrap(), &contents)?;
@@ -129,7 +140,8 @@ impl Vault {
         match a {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
-                    panic!("Invalid id");
+                    respond("Invalid id.", stream, http).await;
+                    return;
                 }
                 let entry = &self.enteries[i - 1];
                 respond(&format!("{:?}\n", entry), stream, http).await;
@@ -194,7 +206,7 @@ impl Vault {
         match id {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
-                    panic!("Invalid id");
+                    return false;
                 }
                 self.enteries.remove(i - 1);
                 removed = true;
@@ -224,7 +236,7 @@ impl Vault {
         match add.which {
             DeleteType::Id(i) => {
                 if i == 0 || i > self.enteries.len() {
-                    panic!("Invalid id");
+                    return false;
                 }
                 let mut modified = false;
                 if let Some(name) = add.update.name {
@@ -314,6 +326,7 @@ impl Vault {
         key_pass.zeroize();
     }
     pub fn export(&self, path: String) {
+        println!("WARNING: Export writes passwords as plaintext CSV. Delete the file after use.");
         let mut wtr = csv::Writer::from_path(path).unwrap();
         for i in &self.enteries {
             wtr.serialize(i).unwrap();
@@ -817,7 +830,7 @@ mod test {
             keypass: Some(pass.clone()),
         };
         let mut vlt: Option<Vault> = None;
-        create_vault(&mut vlt, &mut server_info, false);
+        create_vault(&mut vlt, &mut server_info, false).unwrap();
 
         let mut tf = NamedTempFile::new().unwrap();
         {
@@ -936,7 +949,7 @@ mod test {
                 keypass: Some(PasswordType::Key("create_vault.enc".to_string())),
             },
             false,
-        );
+        ).unwrap();
         let filename = get_filename(
             &mut PasswordType::Key("create_vault.enc".to_string()),
             false,
@@ -965,7 +978,7 @@ mod test {
                 keypass: Some(PasswordType::Key("create_vault_lock.enc".to_string())),
             },
             true,
-        );
+        ).unwrap();
         let filename = get_filename(
             &mut PasswordType::Key("create_vault_lock.enc".to_string()),
             false,
@@ -988,7 +1001,7 @@ mod test {
                 keypass: Some(PasswordType::Password("test123456!".to_string())),
             },
             false,
-        );
+        ).unwrap();
         let filename = get_filename(
             &mut PasswordType::Password("test123456!".to_string()),
             false,
@@ -1015,7 +1028,7 @@ mod test {
                 keypass: Some(PasswordType::Password("test1234567!".to_string())),
             },
             true,
-        );
+        ).unwrap();
         let filename = get_filename(
             &mut PasswordType::Password("test1234567!".to_string()),
             false,
@@ -1267,7 +1280,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Invalid id")]
     fn test_delete_entry_invalid_id_zero() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1284,17 +1296,17 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(
+        let result = vlt.delete_entry(
             DeleteType::Id(0),
             &mut ServerInfo {
                 locked: true,
                 keypass: None,
             },
         );
+        assert!(!result);
     }
 
     #[test]
-    #[should_panic(expected = "Invalid id")]
     fn test_delete_entry_invalid_id_out_of_bounds() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1311,17 +1323,17 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.delete_entry(
+        let result = vlt.delete_entry(
             DeleteType::Id(100),
             &mut ServerInfo {
                 locked: true,
                 keypass: None,
             },
         );
+        assert!(!result);
     }
 
     #[test]
-    #[should_panic(expected = "Invalid id")]
     fn test_update_entry_invalid_id_zero() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1338,7 +1350,7 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(
+        let result = vlt.update_entry(
             UpdateStruct {
                 which: DeleteType::Id(0),
                 update: UpdateArgs {
@@ -1356,10 +1368,10 @@ mod test {
                 keypass: None,
             },
         );
+        assert!(!result);
     }
 
     #[test]
-    #[should_panic(expected = "Invalid id")]
     fn test_update_entry_invalid_id_out_of_bounds() {
         let mut vlt = Vault {
             enteries: vec![VaultEnteries {
@@ -1376,7 +1388,7 @@ mod test {
                 filename: "test.enc".into(),
             },
         };
-        vlt.update_entry(
+        let result = vlt.update_entry(
             UpdateStruct {
                 which: DeleteType::Id(100),
                 update: UpdateArgs {
@@ -1394,6 +1406,7 @@ mod test {
                 keypass: None,
             },
         );
+        assert!(!result);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use std::{
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const LEGACY_SALT: &[u8] = b"vault-master-key-salt-v1";
+const SALT_CONTEXT: &str = "vault-password-salt-v1";
 
 pub fn create_password() -> String {
     loop {
@@ -61,6 +62,18 @@ pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
             } else {
                 master_key_from_keyfile(&read(&file_path).unwrap())
             }
+        }
+        PasswordType::Password(pass) => {
+            master_key_from_password(pass, &blake3::derive_key(SALT_CONTEXT, pass.as_bytes())[..SALT_LEN])
+        }
+    }
+}
+
+pub fn gen_master_key_legacy(key_pass: &mut PasswordType) -> [u8; 32] {
+    match key_pass {
+        PasswordType::Key(key) => {
+            let file_path = data_dir().join(key);
+            master_key_from_keyfile(&read(&file_path).unwrap())
         }
         PasswordType::Password(pass) => {
             master_key_from_password(pass, LEGACY_SALT)
@@ -216,7 +229,7 @@ mod test {
     fn test_legacy_format_still_decrypts() {
         let plantext = b"legacy vault data";
         let mut pass = PasswordType::Password("test123".into());
-        let enc_key = encryption_key_from_master(&gen_master_key(&mut pass, false));
+        let enc_key = encryption_key_from_master(&master_key_from_password("test123", LEGACY_SALT));
         let cipher = XChaCha20Poly1305::new((&enc_key).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ciphertext = cipher.encrypt(&nonce, plantext.as_slice()).unwrap();

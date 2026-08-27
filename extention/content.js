@@ -1,4 +1,13 @@
 // ===============================
+// Sanitize user-controlled strings before inserting into HTML
+// ===============================
+function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
+// ===============================
 // Track dropdowns so they can be repositioned
 // as the page loads / layout changes
 // ===============================
@@ -446,11 +455,11 @@ function showPromptModal(title, message, showUpdateOption = false, oldUsername =
         modal.addEventListener("keydown", (e) => e.stopPropagation());
 
         const nameInputHTML = showNameInput ? `
-            <input id="pmNameInput" type="text" placeholder="Name (e.g., Work, Personal)" value="${existingName}" style="padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;" />
+            <input id="pmNameInput" type="text" placeholder="Name (e.g., Work, Personal)" value="${escapeHtml(existingName)}" style="padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;" />
         ` : "";
 
         const usernameInputHTML = showUsernameInput ? `
-            <input id="pmUsernameInput" type="text" placeholder="Username" value="${usernameValue}" style="padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;" />
+            <input id="pmUsernameInput" type="text" placeholder="Username" value="${escapeHtml(usernameValue)}" style="padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;" />
         ` : "";
 
         modal.innerHTML = `
@@ -563,15 +572,18 @@ function relayLoginToParent(username, password, accounts) {
         };
 
         window.addEventListener("message", handler);
-        window.parent.postMessage({
-            type: "PM_LOGIN",
-            token,
-            domain: currentDomain,
-            username,
-            password,
-            accountName: accounts.length > 0 ? accounts[0].name : "",
-            hasAccounts: accounts.length > 0
-        }, "*");
+        chrome.runtime.sendMessage({
+            action: "relayToParent",
+            data: {
+                type: "PM_LOGIN",
+                token,
+                domain: currentDomain,
+                username,
+                password,
+                accountName: accounts.length > 0 ? accounts[0].name : "",
+                hasAccounts: accounts.length > 0
+            }
+        });
 
         // If the parent never answers, don't block the login
         setTimeout(() => resolve({ action: "ignore" }), 30000);
@@ -602,7 +614,7 @@ function isSameSite(a, b) {
 const PENDING_TIMEOUT = 10 * 60 * 1000;
 
 function setPopupPending(pendingData, domain = currentDomain) {
-    chrome.storage.local.set({
+    chrome.storage.session.set({
         pmPopupPending: {
             domain: domain,
             username: pendingData.username,
@@ -615,12 +627,12 @@ function setPopupPending(pendingData, domain = currentDomain) {
 }
 
 function clearPopupPending() {
-    chrome.storage.local.remove("pmPopupPending");
+    chrome.storage.session.remove("pmPopupPending");
 }
 
 function isPopupPending() {
     return new Promise((resolve) => {
-        chrome.storage.local.get("pmPopupPending", (result) => {
+        chrome.storage.session.get("pmPopupPending", (result) => {
             const p = result.pmPopupPending;
             if (p && isSameSite(p.domain, currentDomain) && Date.now() - p.time < PENDING_TIMEOUT) {
                 resolve(p);
@@ -751,7 +763,7 @@ async function initExtension(accounts) {
             if (!data || data.type !== "PM_LOGIN") return;
 
             if (modalOpen || popupResolved) {
-                event.source.postMessage({ type: "PM_LOGIN_RESULT", action: "ignore", token: data.token }, "*");
+                event.source.postMessage({ type: "PM_LOGIN_RESULT", action: "ignore", token: data.token }, event.origin);
                 return;
             }
 
@@ -792,7 +804,7 @@ async function initExtension(accounts) {
                 });
             }
 
-            event.source.postMessage({ type: "PM_LOGIN_RESULT", action: result.action, token: data.token }, "*");
+            event.source.postMessage({ type: "PM_LOGIN_RESULT", action: result.action, token: data.token }, event.origin);
         });
     }
 
@@ -817,15 +829,18 @@ async function initExtension(accounts) {
 
         // Relay from a subframe so the parent can show the prompt live.
         if (window !== window.top) {
-            window.parent.postMessage({
-                type: "PM_LOGIN",
-                token: Math.random().toString(36).slice(2),
-                domain: currentDomain,
-                username,
-                password,
-                accountName: accounts.length > 0 ? accounts[0].name : "",
-                hasAccounts: accounts.length > 0
-            }, "*");
+            chrome.runtime.sendMessage({
+                action: "relayToParent",
+                data: {
+                    type: "PM_LOGIN",
+                    token: Math.random().toString(36).slice(2),
+                    domain: currentDomain,
+                    username,
+                    password,
+                    accountName: accounts.length > 0 ? accounts[0].name : "",
+                    hasAccounts: accounts.length > 0
+                }
+            });
         }
     });
 }

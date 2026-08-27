@@ -21,9 +21,10 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{watch, Mutex},
+    sync::{mpsc, Mutex},
 };
 use zeroize::Zeroize;
+use subtle::ConstantTimeEq;
 
 #[derive(Debug)]
 pub struct ServerInfo {
@@ -123,11 +124,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 pub fn start() {
@@ -136,20 +133,19 @@ pub fn start() {
         return;
     }
     let token = random_token();
-    write_token_file(&token, &data_dir().join(TOKEN_FILE));
-    // let stdout = File::create("worker.out").expect("couldnt create file out");
-    // let stderr = File::create("worker.err").expect("couldnt create file err");
-    let child = Command::new(std::env::current_exe().unwrap())
+    let token_path = data_dir().join(TOKEN_FILE);
+    write_token_file(&token, &token_path);
+    let mut child = Command::new(std::env::current_exe().unwrap())
         .arg("run")
-        .env("PM_SERVER_TOKEN", token)
         .stdin(Stdio::null())
-        // .stdout(Stdio::from(stdout))
-        // .stderr(Stdio::from(stderr))
         .spawn()
         .expect("failed to start background process");
-    println!("Server started (PID {})", child.id());
-    println!("Session token file: {}", data_dir().join(TOKEN_FILE).display());
-    std::mem::forget(child);
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    println!("Server started (PID {})", pid);
+    println!("Session token file: {}", token_path.display());
 }
 
 fn auto_lock(time: u8) {
@@ -160,7 +156,7 @@ fn auto_lock(time: u8) {
     manager(ServerCommands::Lock(false));
 }
 pub async fn server() {
-    let token = std::env::var("PM_SERVER_TOKEN").unwrap_or_else(|_| load_or_create_token());
+    let token = load_or_create_token();
     let listener = TcpListener::bind(ADDR).await.unwrap();
 
     let server_info = Arc::new(Mutex::new(ServerInfo {
@@ -168,11 +164,11 @@ pub async fn server() {
         keypass: None,
     }));
     let vlt: Arc<Mutex<Option<Vault>>> = Arc::new(Mutex::new(None));
-    let (kill_tx, mut kill_rx) = watch::channel(false);
+    let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
 
     loop {
         tokio::select! {
-            _ = kill_rx.changed() => break,
+            _ = kill_rx.recv() => break,
             accepted = listener.accept() => {
                 let (stream, _) = accepted.unwrap();
                 let si = Arc::clone(&server_info);
@@ -189,7 +185,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     server_info: Arc<Mutex<ServerInfo>>,
     vlt: Arc<Mutex<Option<Vault>>>,
-    kill_tx: watch::Sender<bool>,
+    kill_tx: mpsc::Sender<()>,
     token: String,
 ) {
     let Some((msg, http)) = handler(&mut stream, &token).await else {
@@ -206,7 +202,7 @@ async fn handle_connection(
             }
             respond("Server stopped.", &mut stream, http).await;
             let _ = stream.shutdown().await;
-            let _ = kill_tx.send(true);
+            let _ = kill_tx.send(()).await;
             return;
         }
         ServerCommands::Lock(send) => {
@@ -264,8 +260,10 @@ async fn handle_connection(
                 old.zeroize();
             }
             server_info.keypass = Some(key_path);
-            create_vault(&mut vlt, &mut server_info, true);
-            respond("Vault created.", &mut stream, http).await;
+            match create_vault(&mut vlt, &mut server_info, true) {
+                Ok(()) => respond("Vault created.", &mut stream, http).await,
+                Err(e) => respond(&e, &mut stream, http).await,
+            }
         }
         ServerCommands::Add(info) => {
             if server_info.locked {
@@ -352,7 +350,9 @@ async fn handle_connection(
                     locked: true,
                     keypass: Some(args.key_pass),
                 };
-                create_vault(&mut vlt, &mut server_info, false);
+                if let Err(e) = create_vault(&mut vlt, &mut server_info, false) {
+                    error = Some(e);
+                }
             } else if server_info.locked {
                 server_info.keypass = Some(args.key_pass);
                 if let Err(e) = vlt.unlock_vault(&mut server_info) {
@@ -394,10 +394,7 @@ async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerComman
     if message.read_exact(&mut buf).await.is_err() {
         return None;
     }
-    let msg = match bincode::deserialize(&buf) {
-        Ok(m) => m,
-        Err(_) => return None,
-    };
+    let msg: ServerCommands = bincode::deserialize(&buf).ok()?;
     buf.zeroize();
     Some(msg)
 }

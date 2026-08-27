@@ -70,7 +70,7 @@ async function serverStatus() {
             return { running: false, locked: false, token: true };
         }
         const text = await res.text();
-        return { running: true, locked: /locked/i.test(text), token: true };
+        return { running: true, locked: /\blocked\b/i.test(text), token: true };
     } catch (err) {
         return { running: false, locked: false, token: true };
     }
@@ -127,5 +127,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             })
             .catch(err => sendResponse({ success: false, error: err.toString() }));
         return true;
+    }
+
+    if (request.action === "relayToParent") {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId;
+        if (tabId != null && frameId != null) {
+            chrome.tabs.get(tabId, (tab) => {
+                if (chrome.runtime.lastError || !tab) return;
+                const topFrameId = 0;
+                if (frameId !== topFrameId) {
+                    chrome.tabs.sendMessage(tabId, request.data, { frameId: topFrameId });
+                }
+            });
+        }
+        sendResponse({ ok: true });
+        return false;
     }
 });

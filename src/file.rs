@@ -13,8 +13,17 @@ pub fn set_private_perms(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+#[cfg(unix)]
+pub fn set_private_dir_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 #[cfg(not(unix))]
 pub fn set_private_perms(_path: &Path) {}
+
+#[cfg(not(unix))]
+pub fn set_private_dir_perms(_path: &Path) {}
 
 pub fn file_exists(file_path: &str) -> bool {
     Path::new(file_path).exists()
@@ -26,6 +35,7 @@ pub fn data_dir() -> PathBuf {
         .map(|d| d.path().to_path_buf())
         .unwrap_or_else(project_data_dir);
     fs::create_dir_all(&data_dir).unwrap();
+    set_private_dir_perms(&data_dir);
     data_dir
 }
 

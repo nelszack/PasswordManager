@@ -9,8 +9,7 @@
     "alarms"
   ],
   "host_permissions": [
-    "http://localhost:7878/*",
-    "<all_urls>"
+    "http://localhost:7878/*"
   ],
   "action": {
     "default_popup": "popup.html"
