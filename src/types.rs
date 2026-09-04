@@ -1,32 +1,24 @@
 use crate::cli::UpdateArgs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum PasswordType {
     Password(String),
     Key(String),
 }
-impl Clone for PasswordType {
-    fn clone(&self) -> Self {
-        match self {
-            PasswordType::Key(key) => PasswordType::Key(key.clone()),
-            PasswordType::Password(pass) => PasswordType::Password(pass.clone()),
-        }
-    }
-}
 #[derive(Serialize, Deserialize, Debug)]
-pub enum ServerCommands {
+pub enum ServerCommand {
     Kill,
     Lock(bool),
-    UnLock(UnlockInfo),
+    Unlock(UnlockInfo),
     Status,
     View,
     Add(PasswordEntry),
-    Get(DeleteType),
-    Delete(DeleteType),
-    Update(UpdateStruct),
+    Get(Target),
+    Delete(Target),
+    Update(EntryUpdate),
     Export(String),
-    Import(ImportArgs),
+    Import(ImportRequest),
     New(PasswordType),
 }
 
@@ -38,7 +30,6 @@ pub struct UnlockInfo {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PasswordEntry {
-    pub which: Option<DeleteType>,
     pub name: String,
     pub username: Option<String>,
     pub password: String,
@@ -48,7 +39,7 @@ pub struct PasswordEntry {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub enum DeleteType {
+pub enum Target {
     Id(usize),
     Name(String),
     Url(String),
@@ -56,13 +47,13 @@ pub enum DeleteType {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct UpdateStruct {
-    pub which: DeleteType,
+pub struct EntryUpdate {
+    pub target: Target,
     pub update: UpdateArgs,
     pub password: Option<String>,
 }
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ImportArgs {
+pub struct ImportRequest {
     pub path: String,
     pub new: bool,
     pub key_pass: PasswordType,

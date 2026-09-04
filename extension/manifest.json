@@ -5,11 +5,11 @@
   "description": "Communicates with local password manager server",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
-    "http://localhost:7878/*",
-    "<all_urls>"
+    "http://127.0.0.1:7878/*"
   ],
   "action": {
     "default_popup": "popup.html"
@@ -25,7 +25,8 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

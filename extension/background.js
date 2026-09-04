@@ -1,0 +1,147 @@
+const SERVER_URL = "http://127.0.0.1:7878";
+
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.alarms.create("status-poll", { periodInMinutes: 1 });
+    refreshStatus();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "status-poll") refreshStatus();
+});
+
+function loadToken() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get("pmServerToken", (result) => {
+            resolve(result.pmServerToken || "");
+        });
+    });
+}
+
+function setBadge(status) {
+    let text, color, title;
+    if (!status.token) {
+        text = "?";
+        color = "#f59e0b";
+        title = "Password Manager: set the session token in the popup";
+    } else if (!status.running) {
+        text = "N";
+        color = "#6b7280";
+        title = "Password Manager: server not running";
+    } else if (status.locked) {
+        text = "L";
+        color = "#ef4444";
+        title = "Password Manager: vault locked";
+    } else {
+        text = "U";
+        color = "#22c55e";
+        title = "Password Manager: vault unlocked";
+    }
+    chrome.action.setBadgeText({ text });
+    chrome.action.setBadgeBackgroundColor({ color });
+    chrome.action.setTitle({ title });
+}
+
+async function refreshStatus() {
+    const status = await serverStatus();
+    setBadge(status);
+    return status;
+}
+
+async function serverStatus() {
+    const token = await loadToken();
+    if (!token) {
+        return { running: false, locked: false, token: false };
+    }
+    try {
+        const res = await fetch(SERVER_URL, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token
+            },
+            body: JSON.stringify({ command: "status", extra_info: [] })
+        });
+        if (res.status === 401) {
+            return { running: true, locked: false, token: false };
+        }
+        if (!res.ok) {
+            return { running: false, locked: false, token: true };
+        }
+        const text = await res.text();
+        return { running: true, locked: /\blocked\b/i.test(text), token: true };
+    } catch (err) {
+        return { running: false, locked: false, token: true };
+    }
+}
+
+async function post(command, extra_info) {
+    const token = await loadToken();
+    if (!token) {
+        return { error: "missing-token" };
+    }
+    const res = await fetch(SERVER_URL, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + token
+        },
+        body: JSON.stringify({ command, extra_info })
+    });
+    if (!res.ok) {
+        return { error: res.status === 401 ? "invalid-token" : `server-error-${res.status}` };
+    }
+    return { res };
+}
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "getStatus") {
+        refreshStatus()
+            .then(sendResponse)
+            .catch(() => sendResponse({ running: false, locked: false, token: false }));
+        return true;
+    }
+    if (request.action === "getCredentials") {
+        post("get", [request.domain])
+            .then(({ res, error }) => {
+                if (error) return sendResponse({ success: false, error });
+                return res.json().then(data => sendResponse({ success: true, data }));
+            })
+            .catch(err => sendResponse({ success: false, error: err.toString() }));
+        return true;
+    }
+    if (request.action === "saveCredentials") {
+        post("add", [request.domain, request.username, request.password, request.name])
+            .then(({ res, error }) => {
+                if (error) return sendResponse({ success: false, error });
+                return res.text().then(data => sendResponse({ success: true, data }));
+            })
+            .catch(err => sendResponse({ success: false, error: err.toString() }));
+        return true;
+    }
+
+    if (request.action === "updateCredentials") {
+        post("update", [request.domain, request.username, request.password, request.name, request.id])
+            .then(({ res, error }) => {
+                if (error) return sendResponse({ success: false, error });
+                return res.text().then(data => sendResponse({ success: true, data }));
+            })
+            .catch(err => sendResponse({ success: false, error: err.toString() }));
+        return true;
+    }
+
+    if (request.action === "relayToParent") {
+        const tabId = sender.tab?.id;
+        const frameId = sender.frameId;
+        if (tabId != null && frameId != null) {
+            chrome.tabs.get(tabId, (tab) => {
+                if (chrome.runtime.lastError || !tab) return;
+                const topFrameId = 0;
+                if (frameId !== topFrameId) {
+                    chrome.tabs.sendMessage(tabId, request.data, { frameId: topFrameId });
+                }
+            });
+        }
+        sendResponse({ ok: true });
+        return false;
+    }
+});

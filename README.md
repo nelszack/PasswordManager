@@ -28,6 +28,10 @@ The binary will be at `target/release/pm`.
 pm start
 ```
 
+The server prints the location of its session token file (e.g.
+`~/.local/share/password_manager/session.key`). The CLI client authenticates
+automatically; the browser extension needs this token (see below).
+
 ### Generate a Password
 
 ```bash
@@ -37,7 +41,7 @@ pm genpass --length 20 --copy
 ### Add a New Entry
 
 ```bash
-pm add --name "github.com" --username "user@email.com" --gen-password --copy
+pm add --name "github.com" --username "user@email.com" --generate-password --copy
 ```
 
 ### View All Entries
@@ -87,14 +91,48 @@ pm passcheck --password "mypassword123"
 ### Configure Settings
 
 ```bash
-pm config --genpass-length 24 --genpass-stats --clpb-timeout 30
+pm config --length 24 --stats --clipboard-timeout 30
+```
+
+### Shell Completions
+
+Generate tab completion for your shell:
+
+```bash
+# bash
+sudo mkdir -p /etc/bash_completion.d
+pm completions bash | sudo tee /etc/bash_completion.d/pm > /dev/null
+
+# zsh
+pm completions zsh > ~/.zshrc.d/_pm
+
+# fish
+pm completions fish > ~/.config/fish/completions/pm.fish
+
+# powershell
+pm completions powershell > $PROFILE
+```
+
+Or write to a file with `pm completions <shell> --output <path>`. Supported
+shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`. You may need to
+restart your shell (or `source` the file) for completions to take effect.
+
+If tab still completes filenames instead of commands/flags, the script isn't
+being sourced. Check with `type _pm` (or `complete -p pm`), and add an
+explicit source line to your `~/.bashrc`:
+
+```bash
+echo 'source /etc/bash_completion.d/pm' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ## Browser Extension
 
-1. Load the `extention` folder as an unpacked extension in Chrome
-2. The extension connects to `http://localhost:7878`
-3. Click the extension icon to view and manage passwords
+1. Load the `extension` folder as an unpacked extension in Chrome
+2. The extension connects to `http://127.0.0.1:7878`
+3. Click the extension icon, paste the session token from the file printed by
+   `pm start` into the "Session token" field, and click **Save Token**
+4. Use the extension icon to view and manage passwords
 
 ## Architecture
 
@@ -106,14 +144,17 @@ pm config --genpass-length 24 --genpass-stats --clpb-timeout 30
 - `src/password.rs` - Password generation and strength checking
 - `src/cli.rs` - CLI argument parsing
 - `src/config.rs` - Configuration management
-- `src/clpboard.rs` - Clipboard operations
+- `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - File import/export
-- `extention/` - Browser extension (Chrome/Chromium)
+- `extension/` - Browser extension (Chrome/Chromium)
 
 ## Security
 
-- Master password derived using Argon2
+- Master password derived using Argon2 with a random per-vault salt
 - Entries encrypted with ChaCha20-Poly1305
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
 - Configurable auto-lock timeout
+- The local server requires a random session token (stored with 0600
+  permissions) on every TCP and HTTP connection; vault, key and token files
+  are created with 0600 permissions
