@@ -25,8 +25,8 @@ pub fn set_private_perms(_path: &Path) {}
 #[cfg(not(unix))]
 pub fn set_private_dir_perms(_path: &Path) {}
 
-pub fn file_exists(file_path: &str) -> bool {
-    Path::new(file_path).exists()
+pub fn file_exists(file_path: impl AsRef<Path>) -> bool {
+    file_path.as_ref().exists()
 }
 
 pub fn data_dir() -> PathBuf {
@@ -62,20 +62,20 @@ mod test {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test_file.txt");
         File::create(&file_path).unwrap();
-        assert!(file_exists(file_path.to_str().unwrap()));
+        assert!(file_exists(&file_path));
     }
 
     #[test]
     fn test_file_exists_returns_false_for_nonexistent_file() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("nonexistent_file.txt");
-        assert!(!file_exists(file_path.to_str().unwrap()));
+        assert!(!file_exists(&file_path));
     }
 
     #[test]
     fn test_file_exists_returns_true_for_directory() {
         let temp_dir = TempDir::new().unwrap();
-        assert!(file_exists(temp_dir.path().to_str().unwrap()));
+        assert!(file_exists(temp_dir.path()));
     }
 
     #[test]
@@ -85,6 +85,6 @@ mod test {
         fs::create_dir_all(&nested).unwrap();
         let file_path = nested.join("test.txt");
         File::create(&file_path).unwrap();
-        assert!(file_exists(file_path.to_str().unwrap()));
+        assert!(file_exists(&file_path));
     }
 }

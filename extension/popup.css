@@ -1,0 +1,45 @@
+body {
+  width: 250px;
+  font-family: Arial, sans-serif;
+  padding: 10px;
+}
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  margin-bottom: 5px;
+  padding: 6px;
+}
+
+button {
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+label,
+#output {
+  font-size: 12px;
+}
+
+#statusRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 10px;
+  font-size: 13px;
+}
+
+#statusDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #6b7280;
+  display: inline-block;
+}
+
+#output {
+  margin-top: 10px;
+}

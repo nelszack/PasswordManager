@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>Password Manager</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+
+  <h3>Password Manager</h3>
+
+  <div id="statusRow">
+    <span id="statusDot"></span>
+    <span id="statusText">Checking...</span>
+  </div>
+
+  <label for="tokenInput">Session token (from the file printed by <code>pm start</code>):</label>
+  <input id="tokenInput" type="password" autocomplete="off">
+  <button id="saveTokenBtn">Save Token</button>
+
+  <button id="lockBtn">Lock Vault</button>
+
+  <div id="output"></div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

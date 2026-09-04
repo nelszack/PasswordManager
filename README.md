@@ -128,8 +128,8 @@ source ~/.bashrc
 
 ## Browser Extension
 
-1. Load the `extention` folder as an unpacked extension in Chrome
-2. The extension connects to `http://localhost:7878`
+1. Load the `extension` folder as an unpacked extension in Chrome
+2. The extension connects to `http://127.0.0.1:7878`
 3. Click the extension icon, paste the session token from the file printed by
    `pm start` into the "Session token" field, and click **Save Token**
 4. Use the extension icon to view and manage passwords
@@ -144,9 +144,9 @@ source ~/.bashrc
 - `src/password.rs` - Password generation and strength checking
 - `src/cli.rs` - CLI argument parsing
 - `src/config.rs` - Configuration management
-- `src/clpboard.rs` - Clipboard operations
+- `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - File import/export
-- `extention/` - Browser extension (Chrome/Chromium)
+- `extension/` - Browser extension (Chrome/Chromium)
 
 ## Security
 

@@ -1,7 +1,6 @@
 const SERVER_URL = "http://127.0.0.1:7878";
 
 chrome.runtime.onInstalled.addListener(() => {
-    console.log("Password Manager Extension Installed");
     chrome.alarms.create("status-poll", { periodInMinutes: 1 });
     refreshStatus();
 });
@@ -58,8 +57,7 @@ async function serverStatus() {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": "Bearer " + token,
-                "Connection": "close"
+                "Authorization": "Bearer " + token
             },
             body: JSON.stringify({ command: "status", extra_info: [] })
         });
@@ -85,11 +83,13 @@ async function post(command, extra_info) {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer " + token,
-            "Connection": "close"
+            "Authorization": "Bearer " + token
         },
         body: JSON.stringify({ command, extra_info })
     });
+    if (!res.ok) {
+        return { error: res.status === 401 ? "invalid-token" : `server-error-${res.status}` };
+    }
     return { res };
 }
 

@@ -59,7 +59,7 @@ pub enum CliCommands {
         #[arg(long)]
         notes: Option<String>,
         #[arg(long = "generate-password")]
-        gen_password: bool,
+        generate_password: bool,
         #[arg(long)]
         #[arg(long("no-copy"), default_value_t = false, conflicts_with = "copy")]
         no_copy: bool,
@@ -71,11 +71,11 @@ pub enum CliCommands {
         #[command(flatten)]
         add: UpdateArgs,
         #[command(flatten)]
-        which: DeleteArgs,
+        target: EntryArgs,
     },
     Get {
         #[command(flatten)]
-        which: DeleteArgs,
+        target: EntryArgs,
     },
     Import {
         #[arg(long)]
@@ -127,8 +127,12 @@ pub struct UpdateArgs {
     pub username: Option<String>,
     #[arg(long, default_value_t = false)]
     pub password: bool,
-    #[arg(long = "generate-password", default_value_t = false, requires = "password")]
-    pub gen_password: bool,
+    #[arg(
+        long = "generate-password",
+        default_value_t = false,
+        requires = "password"
+    )]
+    pub generate_password: bool,
     #[arg(long)]
     pub url: Option<String>,
     #[arg(long)]
@@ -151,6 +155,18 @@ pub struct DeleteArgs {
     pub key: Option<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct EntryArgs {
+    #[arg(
+        long,
+        conflicts_with = "entry_name",
+        required_unless_present = "entry_name"
+    )]
+    pub id: Option<usize>,
+    #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+    pub entry_name: Option<String>,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -160,9 +176,9 @@ mod test {
     fn test_get_by_entry_name_parses() {
         let cli = Cli::try_parse_from(["pm", "get", "--entry-name", "foo"]).unwrap();
         match cli.command {
-            Some(CliCommands::Get { which }) => {
-                assert_eq!(which.id, None);
-                assert_eq!(which.entry_name.as_deref(), Some("foo"));
+            Some(CliCommands::Get { target }) => {
+                assert_eq!(target.id, None);
+                assert_eq!(target.entry_name.as_deref(), Some("foo"));
             }
             _ => panic!("expected Get command"),
         }
@@ -172,9 +188,9 @@ mod test {
     fn test_delete_by_entry_name_parses() {
         let cli = Cli::try_parse_from(["pm", "delete", "--entry-name", "foo"]).unwrap();
         match cli.command {
-            Some(CliCommands::Delete(which)) => {
-                assert_eq!(which.id, None);
-                assert_eq!(which.entry_name.as_deref(), Some("foo"));
+            Some(CliCommands::Delete(target)) => {
+                assert_eq!(target.id, None);
+                assert_eq!(target.entry_name.as_deref(), Some("foo"));
             }
             _ => panic!("expected Delete command"),
         }
@@ -182,11 +198,12 @@ mod test {
 
     #[test]
     fn test_update_by_entry_name_parses() {
-        let cli = Cli::try_parse_from(["pm", "update", "--name", "new", "--entry-name", "foo"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["pm", "update", "--name", "new", "--entry-name", "foo"]).unwrap();
         match cli.command {
-            Some(CliCommands::Update { which, .. }) => {
-                assert_eq!(which.id, None);
-                assert_eq!(which.entry_name.as_deref(), Some("foo"));
+            Some(CliCommands::Update { target, .. }) => {
+                assert_eq!(target.id, None);
+                assert_eq!(target.entry_name.as_deref(), Some("foo"));
             }
             _ => panic!("expected Update command"),
         }
@@ -196,21 +213,17 @@ mod test {
     fn test_get_by_id_parses() {
         let cli = Cli::try_parse_from(["pm", "get", "--id", "3"]).unwrap();
         match cli.command {
-            Some(CliCommands::Get { which }) => {
-                assert_eq!(which.id, Some(3));
-                assert_eq!(which.entry_name, None);
+            Some(CliCommands::Get { target }) => {
+                assert_eq!(target.id, Some(3));
+                assert_eq!(target.entry_name, None);
             }
             _ => panic!("expected Get command"),
         }
     }
 
     #[test]
-    fn test_get_by_vault_parses() {
-        let cli = Cli::try_parse_from(["pm", "get", "--vault", "--key", "k.bin"]).unwrap();
-        match cli.command {
-            Some(CliCommands::Get { which }) => assert!(which.vault),
-            _ => panic!("expected Get command"),
-        }
+    fn test_get_rejects_vault_target() {
+        assert!(Cli::try_parse_from(["pm", "get", "--vault", "--key", "k.bin"]).is_err());
     }
 
     #[test]

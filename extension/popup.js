@@ -24,8 +24,7 @@ async function sendCommand(command, extra_info = []) {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": "Bearer " + token,
-                "Connection": "close"
+                "Authorization": "Bearer " + token
             },
             body: JSON.stringify({
                 command: command,
@@ -33,10 +32,12 @@ async function sendCommand(command, extra_info = []) {
             })
         });
 
+        if (!response.ok) {
+            return [`Server error (${response.status})`];
+        }
         const data = await response.json();
         return data;
     } catch (error) {
-        console.log(error)
         return ["Server not reachable"]
     }
 }

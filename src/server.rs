@@ -1,30 +1,31 @@
 use crate::{
     cli::UpdateArgs,
-    client::manager,
-    clpboard::cpy,
+    clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, set_private_perms},
     types::*,
-    vault::{Vault, VaultEnteries, VaultFns, create_vault, delete_vault},
+    vault::{Vault, VaultAccess, VaultEntry, create_vault, delete_vault},
 };
 use rand::Rng;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     fs,
     path::Path,
     process::{Command, Stdio},
-    sync::Arc,
-    thread,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
+use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
 };
 use zeroize::Zeroize;
-use subtle::ConstantTimeEq;
 
 #[derive(Debug)]
 pub struct ServerInfo {
@@ -64,12 +65,12 @@ impl Zeroize for PasswordType {
 }
 impl Zeroize for Vault {
     fn zeroize(&mut self) {
-        self.enteries.zeroize();
+        self.entries.zeroize();
         self.metadata.zeroize();
         *self = Self::default();
     }
 }
-impl Zeroize for VaultEnteries {
+impl Zeroize for VaultEntry {
     fn zeroize(&mut self) {
         self.created.zeroize();
         self.id.zeroize();
@@ -90,10 +91,11 @@ const MAX_HTTP_REQ: usize = 1024 * 1024;
 const TOKEN_HEX_LEN: usize = 64;
 
 pub fn is_running() -> bool {
-    if std::net::TcpStream::connect_timeout(&ADDR.parse().unwrap(), Duration::from_secs(1)).is_ok() {
-        return true;
-    }
-    false
+    std::net::TcpStream::connect_timeout(
+        &ADDR.parse().expect("valid server address"),
+        Duration::from_secs(1),
+    )
+    .is_ok()
 }
 
 fn random_token() -> String {
@@ -111,7 +113,7 @@ fn load_or_create_token() -> String {
     let path = data_dir().join(TOKEN_FILE);
     if let Ok(t) = fs::read_to_string(&path) {
         let t = t.trim().to_string();
-        if !t.is_empty() {
+        if t.len() == TOKEN_HEX_LEN && t.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return t;
         }
     }
@@ -148,12 +150,30 @@ pub fn start() {
     println!("Session token file: {}", token_path.display());
 }
 
-fn auto_lock(time: u8) {
+fn schedule_auto_lock(
+    time: u8,
+    generation: u64,
+    lock_generation: Arc<AtomicU64>,
+    server_info: Arc<Mutex<ServerInfo>>,
+    vlt: Arc<Mutex<Option<Vault>>>,
+) {
     if time == 0 {
         return;
     }
-    thread::sleep(Duration::from_secs(time.into()));
-    manager(ServerCommands::Lock(false));
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(time.into())).await;
+        if lock_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        let mut server_info = server_info.lock().await;
+        let mut vlt = vlt.lock().await;
+        if lock_generation.load(Ordering::Acquire) == generation
+            && !server_info.locked
+            && vlt.is_some()
+        {
+            lock_vlt(&mut vlt, &mut server_info);
+        }
+    });
 }
 pub async fn server() {
     let token = load_or_create_token();
@@ -164,6 +184,7 @@ pub async fn server() {
         keypass: None,
     }));
     let vlt: Arc<Mutex<Option<Vault>>> = Arc::new(Mutex::new(None));
+    let lock_generation = Arc::new(AtomicU64::new(0));
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
 
     loop {
@@ -175,7 +196,8 @@ pub async fn server() {
                 let v = Arc::clone(&vlt);
                 let kt = kill_tx.clone();
                 let tk = token.clone();
-                tokio::spawn(handle_connection(stream, si, v, kt, tk));
+                let lg = Arc::clone(&lock_generation);
+                tokio::spawn(handle_connection(stream, si, v, kt, tk, lg));
             }
         }
     }
@@ -187,16 +209,20 @@ async fn handle_connection(
     vlt: Arc<Mutex<Option<Vault>>>,
     kill_tx: mpsc::Sender<()>,
     token: String,
+    lock_generation: Arc<AtomicU64>,
 ) {
     let Some((msg, http)) = handler(&mut stream, &token).await else {
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
         return;
     };
+    let server_info_handle = Arc::clone(&server_info);
+    let vlt_handle = Arc::clone(&vlt);
     let mut server_info = server_info.lock().await;
     let mut vlt = vlt.lock().await;
     match msg {
-        ServerCommands::Kill => {
+        ServerCommand::Kill => {
+            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked {
                 lock_vlt(&mut vlt, &mut server_info);
             }
@@ -205,7 +231,8 @@ async fn handle_connection(
             let _ = kill_tx.send(()).await;
             return;
         }
-        ServerCommands::Lock(send) => {
+        ServerCommand::Lock(send) => {
+            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked && vlt.is_some() {
                 lock_vlt(&mut vlt, &mut server_info);
                 if send {
@@ -215,7 +242,7 @@ async fn handle_connection(
                 respond("Vault is already locked.", &mut stream, http).await;
             }
         }
-        ServerCommands::UnLock(info) => {
+        ServerCommand::Unlock(info) => {
             if server_info.locked {
                 if let Some(mut old) = server_info.keypass.take() {
                     old.zeroize();
@@ -223,7 +250,14 @@ async fn handle_connection(
                 server_info.keypass = Some(info.key);
                 match vlt.unlock_vault(&mut server_info) {
                     Ok(()) => {
-                        thread::spawn(move || auto_lock(info.timeout));
+                        let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                        schedule_auto_lock(
+                            info.timeout,
+                            generation,
+                            Arc::clone(&lock_generation),
+                            server_info_handle,
+                            vlt_handle,
+                        );
                         respond("Vault unlocked.", &mut stream, http).await;
                     }
                     Err(e) => respond(&format!("Unlock failed: {}", e), &mut stream, http).await,
@@ -237,7 +271,7 @@ async fn handle_connection(
                 .await;
             }
         }
-        ServerCommands::Status => {
+        ServerCommand::Status => {
             respond(
                 &format!(
                     "Status: {}",
@@ -252,7 +286,8 @@ async fn handle_connection(
             )
             .await;
         }
-        ServerCommands::New(key_path) => {
+        ServerCommand::New(key_path) => {
+            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked {
                 lock_vlt(&mut vlt, &mut server_info);
             }
@@ -265,7 +300,7 @@ async fn handle_connection(
                 Err(e) => respond(&e, &mut stream, http).await,
             }
         }
-        ServerCommands::Add(info) => {
+        ServerCommand::Add(info) => {
             if server_info.locked {
                 respond("Vault locked.", &mut stream, http).await;
             } else {
@@ -274,7 +309,7 @@ async fn handle_connection(
                 if added {
                     respond("Entry added.", &mut stream, http).await;
                     if let Some(p) = pass.as_deref() {
-                        cpy(p, 10);
+                        copy_in_background(p.to_owned(), 10);
                     }
                 } else {
                     respond("Entry already exists.", &mut stream, http).await;
@@ -284,11 +319,14 @@ async fn handle_connection(
                 }
             }
         }
-        ServerCommands::Delete(id) => match id {
-            DeleteType::Vault(k) => {
+        ServerCommand::Delete(id) => match id {
+            Target::Vault(k) => {
+                lock_generation.fetch_add(1, Ordering::AcqRel);
                 lock_vlt(&mut vlt, &mut server_info);
-                delete_vault(k);
-                respond("Vault deleted.", &mut stream, http).await;
+                match delete_vault(k) {
+                    Ok(()) => respond("Vault deleted.", &mut stream, http).await,
+                    Err(e) => respond(&format!("Delete failed: {e}"), &mut stream, http).await,
+                }
             }
             _ if !server_info.locked => {
                 let deleted = vlt.delete_entry(id, &mut server_info);
@@ -305,21 +343,21 @@ async fn handle_connection(
             }
             _ => respond("Vault locked.", &mut stream, http).await,
         },
-        ServerCommands::View => {
+        ServerCommand::View => {
             if !server_info.locked {
                 vlt.view_entries(&mut stream, http).await;
             } else {
                 respond("Vault locked.", &mut stream, http).await;
             }
         }
-        ServerCommands::Get(a) => {
+        ServerCommand::Get(a) => {
             if !server_info.locked {
                 vlt.get_entry(a, &mut stream, http).await;
             } else {
                 respond("Vault locked.", &mut stream, http).await;
             }
         }
-        ServerCommands::Update(a) => {
+        ServerCommand::Update(a) => {
             if !server_info.locked {
                 let updated = vlt.update_entry(a, &mut server_info);
                 respond(
@@ -336,8 +374,19 @@ async fn handle_connection(
                 respond("Vault locked.", &mut stream, http).await;
             }
         }
-        ServerCommands::Export(path) => vlt.export(path),
-        ServerCommands::Import(args) => {
+        ServerCommand::Export(path) => match vlt.export(path) {
+            Ok(()) => {
+                respond(
+                    "Export finished. WARNING: the export contains plaintext passwords.",
+                    &mut stream,
+                    http,
+                )
+                .await
+            }
+            Err(e) => respond(&format!("Export failed: {e}"), &mut stream, http).await,
+        },
+        ServerCommand::Import(args) => {
+            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked {
                 lock_vlt(&mut vlt, &mut server_info);
             }
@@ -362,11 +411,16 @@ async fn handle_connection(
 
             match error {
                 Some(e) => respond(&format!("Import failed: {}", e), &mut stream, http).await,
-                None => {
-                    vlt.import(args.path);
-                    lock_vlt(&mut vlt, &mut server_info);
-                    respond("Import finished.", &mut stream, http).await;
-                }
+                None => match vlt.import(args.path) {
+                    Ok(()) => {
+                        lock_vlt(&mut vlt, &mut server_info);
+                        respond("Import finished.", &mut stream, http).await;
+                    }
+                    Err(e) => {
+                        lock_vlt(&mut vlt, &mut server_info);
+                        respond(&format!("Import failed: {e}"), &mut stream, http).await;
+                    }
+                },
             }
         }
     }
@@ -374,7 +428,7 @@ async fn handle_connection(
     let _ = stream.shutdown().await;
 }
 
-async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommands> {
+async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
     let mut token_buff = [0u8; TOKEN_HEX_LEN];
     if message.read_exact(&mut token_buff).await.is_err() {
         return None;
@@ -394,7 +448,7 @@ async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerComman
     if message.read_exact(&mut buf).await.is_err() {
         return None;
     }
-    let msg: ServerCommands = bincode::deserialize(&buf).ok()?;
+    let msg: ServerCommand = bincode::deserialize(&buf).ok()?;
     buf.zeroize();
     Some(msg)
 }
@@ -403,7 +457,7 @@ struct HttpInfo {
     command: String,
     extra_info: Vec<Option<String>>,
 }
-async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerCommands> {
+async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
     let mut request_str = String::new();
     let mut buf = [0u8; 1024];
     let mut header_end = 0;
@@ -470,24 +524,28 @@ async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerComma
     };
     let mut extra = request.extra_info.into_iter();
     match request.command.as_str() {
-        "veiw" => Some(ServerCommands::View),
+        "view" | "veiw" => Some(ServerCommand::View),
         "lock" => match extra.next().flatten().as_deref() {
-            Some("true") => Some(ServerCommands::Lock(true)),
-            Some("false") => Some(ServerCommands::Lock(false)),
+            Some("true") => Some(ServerCommand::Lock(true)),
+            Some("false") => Some(ServerCommand::Lock(false)),
             _ => None,
         },
-        "status" => Some(ServerCommands::Status),
+        "status" => Some(ServerCommand::Status),
         "get" => extra
             .next()
             .flatten()
-            .map(|url| ServerCommands::Get(DeleteType::Url(url))),
-        "kill" => Some(ServerCommands::Kill),
+            .map(|url| ServerCommand::Get(Target::Url(url))),
+        "kill" => Some(ServerCommand::Kill),
         "add" => {
             let mut it = extra;
-            match (it.next().flatten(), it.next().flatten(), it.next().flatten(), it.next().flatten()) {
+            match (
+                it.next().flatten(),
+                it.next().flatten(),
+                it.next().flatten(),
+                it.next().flatten(),
+            ) {
                 (Some(url), Some(username), Some(password), Some(name)) => {
-                    Some(ServerCommands::Add(PasswordEntry {
-                        which: None,
+                    Some(ServerCommand::Add(PasswordEntry {
                         name,
                         username: Some(username),
                         password,
@@ -501,21 +559,27 @@ async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerComma
         }
         "update" => {
             let mut it = extra;
-            match (it.next().flatten(), it.next().flatten(), it.next().flatten(), it.next().flatten(), it.next().flatten()) {
+            match (
+                it.next().flatten(),
+                it.next().flatten(),
+                it.next().flatten(),
+                it.next().flatten(),
+                it.next().flatten(),
+            ) {
                 (Some(url), Some(username), Some(password), Some(name), id) => {
-                    Some(ServerCommands::Update(UpdateStruct {
-                        which: match id {
+                    Some(ServerCommand::Update(EntryUpdate {
+                        target: match id {
                             Some(id) => match id.parse::<usize>() {
-                                Ok(n) => DeleteType::Id(n),
-                                Err(_) => DeleteType::Name(name.clone()),
+                                Ok(n) => Target::Id(n),
+                                Err(_) => Target::Name(name.clone()),
                             },
-                            None => DeleteType::Name(name.clone()),
+                            None => Target::Name(name.clone()),
                         },
                         update: UpdateArgs {
                             name: None,
                             username: Some(username),
                             password: true,
-                            gen_password: false,
+                            generate_password: false,
                             url: Some(url),
                             notes: None,
                         },
@@ -529,7 +593,7 @@ async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerComma
     }
 }
 
-async fn handler(message: &mut TcpStream, token: &str) -> Option<(ServerCommands, bool)> {
+async fn handler(message: &mut TcpStream, token: &str) -> Option<(ServerCommand, bool)> {
     let mut buff = [0u8; 16];
     let n = message.peek(&mut buff).await.ok()?;
     if n == 0 {
@@ -554,31 +618,22 @@ fn lock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) {
 
 pub async fn respond(message: &str, stream: &mut TcpStream, http: bool) {
     if http {
-        let msg = json!(message);
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                    serde_json::to_vec(&msg).unwrap().len(),
-                    msg
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap()
+        let body = json!(message).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
     } else {
-        stream
-            .write_all(format!("{}\n", message).as_bytes())
-            .await
-            .unwrap()
+        let _ = stream.write_all(format!("{message}\n").as_bytes()).await;
     }
-    stream.flush().await.unwrap();
+    let _ = stream.flush().await;
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::vault::{Vault, VaultEnteries, VaultMetadata};
+    use crate::vault::{Vault, VaultEntry, VaultMetadata};
 
     #[test]
     fn test_server_info_default() {
@@ -637,8 +692,8 @@ mod test {
     }
 
     #[test]
-    fn test_vault_enteries_zeroize() {
-        let mut entry = VaultEnteries {
+    fn test_vault_entries_zeroize() {
+        let mut entry = VaultEntry {
             id: 42,
             name: "test".to_string(),
             username: Some("user".to_string()),
@@ -660,7 +715,7 @@ mod test {
     #[test]
     fn test_vault_zeroize() {
         let mut vault = Vault {
-            enteries: vec![VaultEnteries {
+            entries: vec![VaultEntry {
                 id: 1,
                 name: "test".to_string(),
                 username: Some("user".to_string()),
@@ -675,7 +730,7 @@ mod test {
             },
         };
         vault.zeroize();
-        assert!(vault.enteries.is_empty());
+        assert!(vault.entries.is_empty());
         assert_eq!(vault.metadata.filename, "");
     }
 
