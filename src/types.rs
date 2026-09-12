@@ -13,19 +13,27 @@ pub enum ServerCommand {
     Unlock(UnlockInfo),
     Status,
     View,
+    Search(SearchFilter),
     Add(PasswordEntry),
     Get(Target),
     Delete(Target),
+    History(Target),
+    RestorePassword { target: Target, revision: usize },
+    Trash,
+    RestoreTrash(usize),
+    PurgeTrash(Option<usize>),
+    Audit,
     Update(EntryUpdate),
     Export(String),
     Import(ImportRequest),
     New(PasswordType),
+    Rekey(PasswordType),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UnlockInfo {
     pub key: PasswordType,
-    pub timeout: u8,
+    pub timeout: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -36,6 +44,15 @@ pub struct PasswordEntry {
     pub url: Option<String>,
     pub notes: Option<String>,
     pub copy: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct SearchFilter {
+    pub query: Option<String>,
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub notes: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

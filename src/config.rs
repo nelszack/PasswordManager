@@ -31,7 +31,7 @@ pub struct ClipboardConfig {
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct UnlockConfig {
     #[serde(alias = "unlock_timeout")]
-    pub timeout: u8,
+    pub timeout: u64,
 }
 
 impl Default for Config {
@@ -43,7 +43,7 @@ impl Default for Config {
                 copy: true,
             },
             clipboard: ClipboardConfig { timeout: 15 },
-            unlock: UnlockConfig { timeout: 0 },
+            unlock: UnlockConfig { timeout: 15 * 60 },
             copy: CopyConfig { passwords: true },
         }
     }
@@ -185,7 +185,7 @@ mod test {
                     copy: true
                 },
                 clipboard: ClipboardConfig { timeout: 15 },
-                unlock: UnlockConfig { timeout: 0 },
+                unlock: UnlockConfig { timeout: 15 * 60 },
                 copy: CopyConfig { passwords: true }
             }
         );
@@ -262,7 +262,7 @@ mod test {
         assert!(!config.genpass.stats);
         assert!(config.genpass.copy);
         assert_eq!(config.clipboard.timeout, 15);
-        assert_eq!(config.unlock.timeout, 0);
+        assert_eq!(config.unlock.timeout, 15 * 60);
         assert!(config.copy.passwords);
     }
     #[test]
@@ -424,7 +424,7 @@ copy_pass = false
                 genpass_stats: Some(true),
                 genpass_copy: Some(false),
                 clipboard_timeout: Some(u8::MAX),
-                unlock_timeout: Some(u8::MAX),
+                unlock_timeout: Some(u64::MAX),
             },
             &config_path,
         );
@@ -433,7 +433,7 @@ copy_pass = false
         assert!(conf.genpass.stats);
         assert!(!conf.genpass.copy);
         assert_eq!(conf.clipboard.timeout, u8::MAX);
-        assert_eq!(conf.unlock.timeout, u8::MAX);
+        assert_eq!(conf.unlock.timeout, u64::MAX);
         fs::remove_file(&config_path).unwrap();
     }
 
@@ -457,7 +457,7 @@ copy_pass = false
         assert!(!conf.genpass.stats);
         assert!(conf.genpass.copy);
         assert_eq!(conf.clipboard.timeout, 15);
-        assert_eq!(conf.unlock.timeout, 0);
+        assert_eq!(conf.unlock.timeout, 15 * 60);
         fs::remove_file(&config_path).unwrap();
     }
 }

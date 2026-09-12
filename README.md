@@ -4,12 +4,16 @@ A secure, local-first password manager with a CLI interface and browser extensio
 
 ## Features
 
-- **Secure Storage**: Encrypted vault using Argon2 and ChaCha20-Poly1305
-- **Password Generator**: Generate strong passwords with customizable length
+- **Secure Storage**: Versioned encrypted vaults using Argon2id and XChaCha20-Poly1305
+- **Password Generator**: Random passwords with configurable character sets, or readable passphrases
 - **Password Strength Checker**: Evaluate password strength with zxcvbn
-- **Browser Extension**: Auto-fill passwords from the extension popup
+- **Security Audit**: Find weak, reused, and duplicate active logins without exposing passwords
+- **Recovery**: Bounded password history and encrypted trash with restore/purge controls
+- **Search and Filtering**: Case-insensitive searches across non-secret entry fields
+- **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
+- **Browser Extension**: On-page credential picker plus save/update prompts
 - **Clipboard Integration**: Secure clipboard with auto-clear timeout
-- **Import/Export**: Support for CSV and JSON formats
+- **Import/Export**: CSV and JSON, including common browser and password-manager exports
 - **Background Server**: Long-running server for quick access
 
 ## Installation
@@ -36,7 +40,13 @@ automatically; the browser extension needs this token (see below).
 
 ```bash
 pm genpass --length 20 --copy
+pm genpass --length 24 --exclude-ambiguous --no-symbols
+pm genpass --passphrase --words 7 --separator "."
 ```
+
+Character classes can be disabled with `--no-uppercase`, `--no-lowercase`,
+`--no-digits`, and `--no-symbols`; replace the default symbol set with
+`--symbols`. At least one non-empty class must remain.
 
 ### Add a New Entry
 
@@ -49,6 +59,19 @@ pm add --name "github.com" --username "user@email.com" --generate-password --cop
 ```bash
 pm view
 ```
+
+### Search and Filter Entries
+
+Search across names, usernames, URLs, and notes (passwords are never searched):
+
+```bash
+pm search github
+pm search --username alice --url github.com
+pm search work --name git --notes account
+```
+
+The general search term matches any non-secret field. Field-specific filters are
+combined, so every supplied filter must match. Matching is case-insensitive.
 
 ### Get a Password
 
@@ -68,19 +91,88 @@ pm update --name "New Name" --entry-name "github.com"
 pm delete --entry-name "github.com"
 ```
 
+Deletion moves the entry and its password history into encrypted trash. Manage
+deleted entries with:
+
+```bash
+pm trash
+pm restore --id 1
+pm purge --id 1
+pm purge --all
+```
+
+`restore` and `purge --id` use the IDs shown by `pm trash`. Purging is
+permanent.
+
+Active entry IDs are persistent: deleting or restoring a different entry does
+not renumber them. Restoring a trashed entry also restores its original ID, and
+imports receive new local IDs instead of trusting IDs from the source file.
+
+### Password History
+
+Changing a password retains the ten most recent previous passwords inside the
+encrypted vault. History output shows timestamps, not password values:
+
+```bash
+pm history --entry-name "github.com"
+pm restore-password --entry-name "github.com" --revision 1
+```
+
+Revision `1` is the newest previous password. Restoring a revision places the
+current password back into history, so the operation can be reversed.
+
+### Audit the Vault
+
+```bash
+pm audit
+```
+
+The audit checks active entries for weak passwords, reused-password groups, and
+duplicate site/username combinations. Reports identify affected entries but
+never print their passwords.
+
 ### Lock/Unlock
 
 ```bash
 pm lock
-pm unlock
+pm unlock --timeout 15m
 ```
+
+The timeout is based on inactivity: each authenticated vault operation resets it;
+passive status polling does not.
+Durations accept seconds or `s`, `m`, `h`, and `d` suffixes. New configurations
+default to 15 minutes; a value of `0` disables automatic locking.
+
+### Change the Master Password or Key File
+
+Unlock the vault first, then run:
+
+```bash
+# Prompt for and confirm a new master password
+pm rekey
+
+# Or create and switch to a new key file in the application data directory
+pm rekey --key replacement.key
+```
+
+Rekeying persists the replacement vault before removing the old
+vault. An old key file is left in place, but no vault remains encrypted with it.
 
 ### Import/Export
 
 ```bash
 pm import --path backup.csv --new
 pm export --path backup.csv
+pm import --path bitwarden.json --new
+pm export --path backup.json
 ```
+
+The format is detected from the input content; exports use JSON when the path
+ends in `.json`, otherwise CSV. Supported inputs are this application's CSV or
+JSON, Chrome/Chromium CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV.
+Duplicate rows with the same name, username, and URL are skipped. Both export
+formats contain plaintext passwords and should be protected or deleted after
+use.
 
 ### Check Password Strength
 
@@ -91,7 +183,7 @@ pm passcheck --password "mypassword123"
 ### Configure Settings
 
 ```bash
-pm config --length 24 --stats --clipboard-timeout 30
+pm config --length 24 --stats true --clipboard-timeout 30 --unlock-timeout 15m
 ```
 
 ### Shell Completions
@@ -132,7 +224,23 @@ source ~/.bashrc
 2. The extension connects to `http://127.0.0.1:7878`
 3. Click the extension icon, paste the session token from the file printed by
    `pm start` into the "Session token" field, and click **Save Token**
-4. Use the extension icon to view and manage passwords
+4. Visit a login page and use the key button beside a credential field to
+   choose an account. The extension can offer to save or update credentials
+   when a login is submitted.
+
+Autofill is form-aware: choosing an account fills only the username and current
+password fields associated with that control. Other login forms and
+new/confirmation-password fields on the page are left unchanged. Forms created
+or revealed after page load are detected automatically.
+
+Credentials are matched to the exact saved hostname by default and are only
+retrieved when the picker is opened or a user-initiated login must be checked.
+To deliberately share an entry with subdomains, store its URL as a wildcard,
+for example `*.example.com`. Wildcards rooted at public suffixes such as
+`*.github.io` are rejected for matching.
+
+The popup currently manages the session token, shows server/vault status, and
+locks the vault; entry management happens through the CLI and on-page controls.
 
 ## Architecture
 
@@ -150,11 +258,15 @@ source ~/.bashrc
 
 ## Security
 
-- Master password derived using Argon2 with a random per-vault salt
-- Entries encrypted with ChaCha20-Poly1305
+- Master passwords derived using Argon2id with a random salt on every vault write
+- Vaults encrypted and authenticated with XChaCha20-Poly1305
+- A versioned, authenticated vault header records the format and KDF parameters
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
-- Configurable auto-lock timeout
+- Configurable inactivity-based auto-lock timeout
 - The local server requires a random session token (stored with 0600
   permissions) on every TCP and HTTP connection; vault, key and token files
   are created with 0600 permissions
+
+Existing unversioned vaults remain readable. The next successful vault write
+automatically stores them in the versioned format.

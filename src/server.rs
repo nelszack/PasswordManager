@@ -67,6 +67,7 @@ impl Zeroize for Vault {
     fn zeroize(&mut self) {
         self.entries.zeroize();
         self.metadata.zeroize();
+        self.recovery.zeroize();
         *self = Self::default();
     }
 }
@@ -106,7 +107,7 @@ fn random_token() -> String {
 
 fn write_token_file(token: &str, path: &Path) {
     fs::write(path, token).unwrap();
-    set_private_perms(path);
+    set_private_perms(path).unwrap();
 }
 
 fn load_or_create_token() -> String {
@@ -151,7 +152,7 @@ pub fn start() {
 }
 
 fn schedule_auto_lock(
-    time: u8,
+    time: u64,
     generation: u64,
     lock_generation: Arc<AtomicU64>,
     server_info: Arc<Mutex<ServerInfo>>,
@@ -161,7 +162,7 @@ fn schedule_auto_lock(
         return;
     }
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(time.into())).await;
+        tokio::time::sleep(Duration::from_secs(time)).await;
         if lock_generation.load(Ordering::Acquire) != generation {
             return;
         }
@@ -170,8 +171,9 @@ fn schedule_auto_lock(
         if lock_generation.load(Ordering::Acquire) == generation
             && !server_info.locked
             && vlt.is_some()
+            && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
         {
-            lock_vlt(&mut vlt, &mut server_info);
+            eprintln!("Automatic lock failed: {error}");
         }
     });
 }
@@ -185,6 +187,7 @@ pub async fn server() {
     }));
     let vlt: Arc<Mutex<Option<Vault>>> = Arc::new(Mutex::new(None));
     let lock_generation = Arc::new(AtomicU64::new(0));
+    let inactivity_timeout = Arc::new(AtomicU64::new(0));
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
 
     loop {
@@ -197,7 +200,8 @@ pub async fn server() {
                 let kt = kill_tx.clone();
                 let tk = token.clone();
                 let lg = Arc::clone(&lock_generation);
-                tokio::spawn(handle_connection(stream, si, v, kt, tk, lg));
+                let timeout = Arc::clone(&inactivity_timeout);
+                tokio::spawn(handle_connection(stream, si, v, kt, tk, lg, timeout));
             }
         }
     }
@@ -210,6 +214,7 @@ async fn handle_connection(
     kill_tx: mpsc::Sender<()>,
     token: String,
     lock_generation: Arc<AtomicU64>,
+    inactivity_timeout: Arc<AtomicU64>,
 ) {
     let Some((msg, http)) = handler(&mut stream, &token).await else {
         let _ = stream.flush().await;
@@ -220,11 +225,37 @@ async fn handle_connection(
     let vlt_handle = Arc::clone(&vlt);
     let mut server_info = server_info.lock().await;
     let mut vlt = vlt.lock().await;
+    if !server_info.locked
+        && !matches!(
+            &msg,
+            ServerCommand::Kill
+                | ServerCommand::Lock(_)
+                | ServerCommand::Unlock(_)
+                | ServerCommand::Status
+        )
+    {
+        let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        schedule_auto_lock(
+            inactivity_timeout.load(Ordering::Acquire),
+            generation,
+            Arc::clone(&lock_generation),
+            Arc::clone(&server_info_handle),
+            Arc::clone(&vlt_handle),
+        );
+    }
     match msg {
         ServerCommand::Kill => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
-            if !server_info.locked {
-                lock_vlt(&mut vlt, &mut server_info);
+            if !server_info.locked
+                && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
+            {
+                respond(
+                    &format!("Could not stop server safely: {error}"),
+                    &mut stream,
+                    http,
+                )
+                .await;
+                return;
             }
             respond("Server stopped.", &mut stream, http).await;
             let _ = stream.shutdown().await;
@@ -234,9 +265,12 @@ async fn handle_connection(
         ServerCommand::Lock(send) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked && vlt.is_some() {
-                lock_vlt(&mut vlt, &mut server_info);
-                if send {
-                    respond("Vault locked.", &mut stream, http).await;
+                match lock_vlt(&mut vlt, &mut server_info) {
+                    Ok(()) if send => respond("Vault locked.", &mut stream, http).await,
+                    Err(error) if send => {
+                        respond(&format!("Lock failed: {error}"), &mut stream, http).await
+                    }
+                    _ => {}
                 }
             } else if send {
                 respond("Vault is already locked.", &mut stream, http).await;
@@ -250,6 +284,7 @@ async fn handle_connection(
                 server_info.keypass = Some(info.key);
                 match vlt.unlock_vault(&mut server_info) {
                     Ok(()) => {
+                        inactivity_timeout.store(info.timeout, Ordering::Release);
                         let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
                         schedule_auto_lock(
                             info.timeout,
@@ -288,8 +323,16 @@ async fn handle_connection(
         }
         ServerCommand::New(key_path) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
-            if !server_info.locked {
-                lock_vlt(&mut vlt, &mut server_info);
+            if !server_info.locked
+                && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
+            {
+                respond(
+                    &format!("Could not lock current vault: {error}"),
+                    &mut stream,
+                    http,
+                )
+                .await;
+                return;
             }
             if let Some(mut old) = server_info.keypass.take() {
                 old.zeroize();
@@ -300,19 +343,36 @@ async fn handle_connection(
                 Err(e) => respond(&e, &mut stream, http).await,
             }
         }
+        ServerCommand::Rekey(new_key) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_mut() {
+                match vault.rekey(&mut server_info, new_key) {
+                    Ok(()) => {
+                        respond("Vault re-encrypted with the new key.", &mut stream, http).await
+                    }
+                    Err(error) => {
+                        respond(&format!("Rekey failed: {error}"), &mut stream, http).await
+                    }
+                }
+            } else {
+                respond("Vault unavailable.", &mut stream, http).await;
+            }
+        }
         ServerCommand::Add(info) => {
             if server_info.locked {
                 respond("Vault locked.", &mut stream, http).await;
             } else {
                 let mut pass = info.copy.then(|| info.password.clone());
-                let added = vlt.add_entry(info, &mut server_info);
-                if added {
-                    respond("Entry added.", &mut stream, http).await;
-                    if let Some(p) = pass.as_deref() {
-                        copy_in_background(p.to_owned(), 10);
+                match vlt.add_entry(info, &mut server_info) {
+                    Ok(true) => {
+                        respond("Entry added.", &mut stream, http).await;
+                        if let Some(p) = pass.as_deref() {
+                            copy_in_background(p.to_owned(), 10);
+                        }
                     }
-                } else {
-                    respond("Entry already exists.", &mut stream, http).await;
+                    Ok(false) => respond("Entry already exists.", &mut stream, http).await,
+                    Err(error) => respond(&format!("Add failed: {error}"), &mut stream, http).await,
                 }
                 if let Some(p) = pass.as_mut() {
                     p.zeroize();
@@ -322,30 +382,104 @@ async fn handle_connection(
         ServerCommand::Delete(id) => match id {
             Target::Vault(k) => {
                 lock_generation.fetch_add(1, Ordering::AcqRel);
-                lock_vlt(&mut vlt, &mut server_info);
+                if let Err(error) = lock_vlt(&mut vlt, &mut server_info) {
+                    respond(
+                        &format!("Delete failed while locking vault: {error}"),
+                        &mut stream,
+                        http,
+                    )
+                    .await;
+                    return;
+                }
                 match delete_vault(k) {
                     Ok(()) => respond("Vault deleted.", &mut stream, http).await,
                     Err(e) => respond(&format!("Delete failed: {e}"), &mut stream, http).await,
                 }
             }
-            _ if !server_info.locked => {
-                let deleted = vlt.delete_entry(id, &mut server_info);
-                respond(
-                    if deleted {
-                        "Entry deleted."
-                    } else {
-                        "Entry not found."
-                    },
-                    &mut stream,
-                    http,
-                )
-                .await;
-            }
+            _ if !server_info.locked => match vlt.delete_entry(id, &mut server_info) {
+                Ok(true) => respond("Entry moved to trash.", &mut stream, http).await,
+                Ok(false) => respond("Entry not found.", &mut stream, http).await,
+                Err(error) => respond(&format!("Delete failed: {error}"), &mut stream, http).await,
+            },
             _ => respond("Vault locked.", &mut stream, http).await,
         },
+        ServerCommand::History(target) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_ref() {
+                vault.view_password_history(target, &mut stream, http).await;
+            }
+        }
+        ServerCommand::RestorePassword { target, revision } => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_mut() {
+                match vault.restore_password(target, revision, &mut server_info) {
+                    Ok(true) => respond("Password restored.", &mut stream, http).await,
+                    Ok(false) => respond("Entry not found.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(
+                            &format!("Password restore failed: {error}"),
+                            &mut stream,
+                            http,
+                        )
+                        .await
+                    }
+                }
+            }
+        }
+        ServerCommand::Trash => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_ref() {
+                vault.view_trash(&mut stream, http).await;
+            }
+        }
+        ServerCommand::RestoreTrash(id) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_mut() {
+                match vault.restore_trashed(id, &mut server_info) {
+                    Ok(true) => respond("Entry restored.", &mut stream, http).await,
+                    Ok(false) => respond("Trash entry not found.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(&format!("Restore failed: {error}"), &mut stream, http).await
+                    }
+                }
+            }
+        }
+        ServerCommand::PurgeTrash(id) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_mut() {
+                match vault.purge_trash(id, &mut server_info) {
+                    Ok(true) => respond("Trash purged.", &mut stream, http).await,
+                    Ok(false) => respond("Trash entry not found.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(&format!("Purge failed: {error}"), &mut stream, http).await
+                    }
+                }
+            }
+        }
+        ServerCommand::Audit => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_ref() {
+                vault.audit(&mut stream, http).await;
+            }
+        }
         ServerCommand::View => {
             if !server_info.locked {
                 vlt.view_entries(&mut stream, http).await;
+            } else {
+                respond("Vault locked.", &mut stream, http).await;
+            }
+        }
+        ServerCommand::Search(filter) => {
+            if !server_info.locked {
+                if let Some(vault) = vlt.as_ref() {
+                    vault.search(filter, &mut stream, http).await;
+                }
             } else {
                 respond("Vault locked.", &mut stream, http).await;
             }
@@ -359,17 +493,13 @@ async fn handle_connection(
         }
         ServerCommand::Update(a) => {
             if !server_info.locked {
-                let updated = vlt.update_entry(a, &mut server_info);
-                respond(
-                    if updated {
-                        "Entry updated."
-                    } else {
-                        "Entry not found."
-                    },
-                    &mut stream,
-                    http,
-                )
-                .await;
+                match vlt.update_entry(a, &mut server_info) {
+                    Ok(true) => respond("Entry updated.", &mut stream, http).await,
+                    Ok(false) => respond("Entry not found.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(&format!("Update failed: {error}"), &mut stream, http).await
+                    }
+                }
             } else {
                 respond("Vault locked.", &mut stream, http).await;
             }
@@ -387,8 +517,16 @@ async fn handle_connection(
         },
         ServerCommand::Import(args) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
-            if !server_info.locked {
-                lock_vlt(&mut vlt, &mut server_info);
+            if !server_info.locked
+                && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
+            {
+                respond(
+                    &format!("Import failed while locking vault: {error}"),
+                    &mut stream,
+                    http,
+                )
+                .await;
+                return;
             }
             if let Some(mut old) = server_info.keypass.take() {
                 old.zeroize();
@@ -412,12 +550,19 @@ async fn handle_connection(
             match error {
                 Some(e) => respond(&format!("Import failed: {}", e), &mut stream, http).await,
                 None => match vlt.import(args.path) {
-                    Ok(()) => {
-                        lock_vlt(&mut vlt, &mut server_info);
-                        respond("Import finished.", &mut stream, http).await;
-                    }
+                    Ok(()) => match lock_vlt(&mut vlt, &mut server_info) {
+                        Ok(()) => respond("Import finished.", &mut stream, http).await,
+                        Err(error) => {
+                            respond(
+                                &format!("Import could not be saved: {error}"),
+                                &mut stream,
+                                http,
+                            )
+                            .await
+                        }
+                    },
                     Err(e) => {
-                        lock_vlt(&mut vlt, &mut server_info);
+                        let _ = lock_vlt(&mut vlt, &mut server_info);
                         respond(&format!("Import failed: {e}"), &mut stream, http).await;
                     }
                 },
@@ -610,10 +755,11 @@ async fn handler(message: &mut TcpStream, token: &str) -> Option<(ServerCommand,
     }
 }
 
-fn lock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) {
-    vlt.lock_vault(server_info);
+fn lock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) -> Result<(), String> {
+    vlt.lock_vault(server_info)?;
     vlt.zeroize();
     server_info.zeroize();
+    Ok(())
 }
 
 pub async fn respond(message: &str, stream: &mut TcpStream, http: bool) {
@@ -728,6 +874,7 @@ mod test {
             metadata: VaultMetadata {
                 filename: "test.enc".to_string(),
             },
+            recovery: crate::vault::RecoveryData::default(),
         };
         vault.zeroize();
         assert!(vault.entries.is_empty());

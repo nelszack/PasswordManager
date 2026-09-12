@@ -14,11 +14,13 @@ use crate::{
     config::{read_config, update},
     encryption::prompt_for_password,
     password::{
-        generate_and_print_password, generate_password as make_password, print_password_strength,
+        PasswordOptions, generate_passphrase, generate_password as make_password,
+        generate_password_with_options, print_generated_password, print_password_strength,
     },
     server::{is_running, server, start},
     types::{
-        EntryUpdate, ImportRequest, PasswordEntry, PasswordType, ServerCommand, Target, UnlockInfo,
+        EntryUpdate, ImportRequest, PasswordEntry, PasswordType, SearchFilter, ServerCommand,
+        Target, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -75,22 +77,57 @@ async fn main() {
                 copy,
                 no_copy,
                 copy_time,
+                no_uppercase,
+                no_lowercase,
+                no_digits,
+                no_symbols,
+                symbols,
+                exclude_ambiguous,
+                passphrase,
+                words,
+                separator,
             },
             _,
-        ) => generate_and_print_password(
-            length.unwrap_or(conf.genpass.length),
-            if !stats && !no_stats {
+        ) => {
+            let show_stats = if !stats && !no_stats {
                 conf.genpass.stats
             } else {
                 stats
-            },
-            if !copy && !no_copy {
+            };
+            let should_copy = if !copy && !no_copy {
                 conf.genpass.copy
             } else {
                 copy
-            },
-            copy_time.unwrap_or(conf.clipboard.timeout),
-        ),
+            };
+            let generated = if passphrase {
+                generate_passphrase(words, &separator)
+            } else {
+                let symbol_set = if no_symbols {
+                    None
+                } else {
+                    Some(symbols.as_deref().unwrap_or("!@#$%^&*-_=+"))
+                };
+                generate_password_with_options(
+                    length.unwrap_or(conf.genpass.length),
+                    &PasswordOptions {
+                        uppercase: !no_uppercase,
+                        lowercase: !no_lowercase,
+                        digits: !no_digits,
+                        symbols: symbol_set,
+                        exclude_ambiguous,
+                    },
+                )
+            };
+            match generated {
+                Ok(password) => print_generated_password(
+                    password,
+                    show_stats,
+                    should_copy,
+                    copy_time.unwrap_or(conf.clipboard.timeout),
+                ),
+                Err(error) => eprintln!("Error: {error}"),
+            }
+        }
         (CliCommands::Passcheck { password }, _) => print_password_strength(&password),
         (CliCommands::Completions { shell, output }, _) => {
             let mut cmd = Cli::command();
@@ -130,6 +167,13 @@ async fn main() {
         (CliCommands::Run, true) => println!("Server is already running."),
         (CliCommands::New { key_path }, true) => {
             send_command(ServerCommand::New(if let Some(kp) = key_path {
+                PasswordType::Key(kp)
+            } else {
+                PasswordType::Password(prompt_for_password())
+            }));
+        }
+        (CliCommands::Rekey { key_path }, true) => {
+            send_command(ServerCommand::Rekey(if let Some(kp) = key_path {
                 PasswordType::Key(kp)
             } else {
                 PasswordType::Password(prompt_for_password())
@@ -190,6 +234,36 @@ async fn main() {
         },
         (CliCommands::View, true) => {
             send_command(ServerCommand::View);
+        }
+        (CliCommands::Search(args), true) => {
+            send_command(ServerCommand::Search(SearchFilter {
+                query: args.query,
+                name: args.name,
+                username: args.username,
+                url: args.url,
+                notes: args.notes,
+            }));
+        }
+        (CliCommands::History { target }, true) => {
+            send_command(ServerCommand::History(target_type(target)));
+        }
+        (CliCommands::RestorePassword { target, revision }, true) => {
+            send_command(ServerCommand::RestorePassword {
+                target: target_type(target),
+                revision,
+            });
+        }
+        (CliCommands::Trash, true) => {
+            send_command(ServerCommand::Trash);
+        }
+        (CliCommands::Restore { id }, true) => {
+            send_command(ServerCommand::RestoreTrash(id));
+        }
+        (CliCommands::Purge(args), true) => {
+            send_command(ServerCommand::PurgeTrash(args.id));
+        }
+        (CliCommands::Audit, true) => {
+            send_command(ServerCommand::Audit);
         }
         (CliCommands::Update { add, target }, true) => {
             send_command(ServerCommand::Update(EntryUpdate {

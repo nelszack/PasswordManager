@@ -50,6 +50,109 @@ function isElementVisible(el) {
     return true;
 }
 
+function isUsableInput(input) {
+    return input instanceof HTMLInputElement
+        && !input.disabled
+        && !input.readOnly
+        && isElementVisible(input);
+}
+
+function scopeInputs(scope) {
+    if (scope instanceof HTMLFormElement) {
+        return Array.from(scope.elements).filter(element => element instanceof HTMLInputElement);
+    }
+    return Array.from(scope.querySelectorAll("input"));
+}
+
+// Prefer the browser's explicit form association (including form="id" fields).
+// For sites built without <form>, use the smallest nearby container that holds
+// a plausible credential pair instead of searching the entire page.
+function credentialScope(input) {
+    if (input.form) return input.form;
+
+    const explicitScope = input.closest("[role='form'], dialog");
+    if (explicitScope) return explicitScope;
+
+    let candidate = input.parentElement;
+    while (candidate && candidate !== document.body) {
+        const fields = Array.from(candidate.querySelectorAll("input")).filter(isUsableInput);
+        const hasPassword = fields.some(field => field.type === "password");
+        const possibleUserFields = fields.filter(field =>
+            USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field)
+        );
+        if (hasPassword && possibleUserFields.length > 0) return candidate;
+        candidate = candidate.parentElement;
+    }
+
+    return input.parentElement || document;
+}
+
+function autocompleteTokens(input) {
+    return (input.autocomplete || "").toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function isNewPasswordInput(input) {
+    if (autocompleteTokens(input).includes("new-password")) return true;
+    return inputDescriptors(input).some(value => /confirm|repeat|retype|new[-_ ]?pass|create[-_ ]?pass/i.test(value));
+}
+
+function isLoginPasswordInput(input) {
+    return isUsableInput(input) && input.type === "password" && !isNewPasswordInput(input);
+}
+
+function usernameCandidates(fields) {
+    return fields.filter(field =>
+        isUsableInput(field)
+        && USERNAME_INPUT_TYPES.has(field.type)
+        && !hasSearchHint(field)
+    );
+}
+
+function chooseUsernameField(fields, anchor) {
+    const candidates = usernameCandidates(fields);
+    const beforeAnchor = anchor
+        ? candidates.filter(field => fields.indexOf(field) < fields.indexOf(anchor))
+        : candidates;
+    const pool = beforeAnchor.length > 0 ? beforeAnchor : candidates;
+    return pool.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
+        || pool.find(hasUsernameHint)
+        || pool.at(-1)
+        || null;
+}
+
+function choosePasswordField(fields, anchor) {
+    const candidates = fields.filter(isLoginPasswordInput);
+    return candidates.find(field => autocompleteTokens(field).includes("current-password"))
+        || (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
+        || candidates[0]
+        || null;
+}
+
+function credentialFields(input) {
+    const scope = credentialScope(input);
+    const fields = scopeInputs(scope);
+    return {
+        scope,
+        usernameField: USERNAME_INPUT_TYPES.has(input.type)
+            ? input
+            : chooseUsernameField(fields, input),
+        passwordField: isLoginPasswordInput(input)
+            ? input
+            : choosePasswordField(fields, input)
+    };
+}
+
+// Frameworks such as React observe the native value setter and input/change
+// events. Using both keeps their internal form state synchronized with autofill.
+function fillInput(input, value) {
+    if (!input || !isUsableInput(input)) return;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (setter) setter.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 // Fetch the current saved accounts for a domain from the background
 function fetchAccounts(domain) {
     return new Promise((resolve) => {
@@ -69,6 +172,10 @@ function fetchAccounts(domain) {
             }
         );
     });
+}
+
+function accountUsername(account) {
+    return account.username && account.username !== "None" ? account.username : "";
 }
 
 function createDropdownButton(input, accounts) {
@@ -174,7 +281,7 @@ function createDropdownButton(input, accounts) {
 
         accountList.forEach(acc => {
             const item = document.createElement("div");
-            item.innerText = acc.username;
+            item.innerText = accountUsername(acc) || "(no username)";
             Object.assign(item.style, {
                 padding: "8px 12px",
                 cursor: "pointer",
@@ -193,16 +300,10 @@ function createDropdownButton(input, accounts) {
             item.addEventListener("click", (e) => {
                 e.preventDefault();
 
-                if (input.type !== "password") {
-                    input.value = acc.username;
-                    input.dispatchEvent(new Event("input", { bubbles: true }));
-                }
-
-                const passwordField = document.querySelector("input[type='password']");
-                if (passwordField) {
-                    passwordField.value = acc.password;
-                    passwordField.dispatchEvent(new Event("input", { bubbles: true }));
-                }
+                const fields = credentialFields(input);
+                fillInput(fields.usernameField, accountUsername(acc));
+                fillInput(fields.passwordField, acc.password);
+                (fields.passwordField || fields.usernameField)?.focus();
 
                 menu.style.display = "none";
             });
@@ -241,44 +342,62 @@ function createDropdownButton(input, accounts) {
 // Only treat inputs as credential fields when
 // they look like a username or password
 // ===============================
-const USERNAME_HINT_RE = /user|login|email|account|signin|sign-in|auth/i;
+const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth/i;
+const SEARCH_HINT_RE = /search|query|lookup|find/i;
+const USERNAME_INPUT_TYPES = new Set(["text", "email", "tel"]);
 
-function hasUsernameHint(input) {
-    const fields = [
+function inputDescriptors(input) {
+    return [
         input.name,
         input.id,
         input.className,
         input.autocomplete,
+        input.getAttribute("type"),
         input.getAttribute("placeholder"),
-        input.getAttribute("aria-label")
-    ];
-    return fields.some(f => f && USERNAME_HINT_RE.test(String(f)));
+        input.getAttribute("aria-label"),
+        input.getAttribute("role")
+    ].filter(Boolean).map(String);
 }
 
-function isNearPassword(input) {
+function hasUsernameHint(input) {
+    return inputDescriptors(input).some(value => USERNAME_HINT_RE.test(value));
+}
+
+function hasSearchHint(input) {
+    return input.type === "search"
+        || input.getAttribute("role") === "searchbox"
+        || inputDescriptors(input).some(value => SEARCH_HINT_RE.test(value));
+}
+
+// Some login pages use an unlabelled text box for the username. In that case,
+// only accept the closest eligible field before a password in the same form.
+// This avoids treating unrelated page-level text/search fields as credentials.
+function isUsernameBeforePassword(input) {
     const form = input.form;
-    if (form && form.querySelector("input[type='password']")) return true;
+    if (!form) return false;
 
-    let container = input.parentElement;
-    for (let i = 0; i < 3 && container; i++) {
-        if (container.querySelector("input[type='password']")) return true;
-        container = container.parentElement;
-    }
+    const fields = scopeInputs(form);
+    const passwordIndex = fields.findIndex(isLoginPasswordInput);
+    if (passwordIndex < 0) return false;
 
-    return false;
+    const candidates = fields
+        .slice(0, passwordIndex)
+        .filter(field => isUsableInput(field) && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field));
+    return candidates.at(-1) === input;
 }
 
 function isCredentialInput(input) {
+    if (!isUsableInput(input)) return false;
     const type = input.type;
-    if (type === "password") return true;
+    if (type === "password") return !isNewPasswordInput(input);
 
-    if (type !== "text" && type !== "email" && type !== "username" && type !== "tel") {
+    if (!USERNAME_INPUT_TYPES.has(type) || hasSearchHint(input)) {
         return false;
     }
 
-    // Username fields don't always sit next to a password field
-    // (multi-step logins), so also accept fields with username-like hints.
-    return isNearPassword(input) || hasUsernameHint(input);
+    // Explicit hints support multi-step login pages where the password field
+    // is not present yet; the same-form fallback supports minimal login forms.
+    return hasUsernameHint(input) || isUsernameBeforePassword(input);
 }
 
 // ===============================
@@ -302,12 +421,12 @@ function observeInputs(accounts) {
         let foundNewInput = false;
 
         for (const mutation of mutations) {
+            if (mutation.type === "attributes" && mutation.target instanceof HTMLInputElement) {
+                foundNewInput = true;
+            }
             for (const node of mutation.addedNodes) {
-                if (
-                    node.nodeType === 1 &&
-                    node.querySelector &&
-                    node.querySelector("input")
-                ) {
+                if (node.nodeType === 1 &&
+                    (node.matches?.("input") || node.querySelector?.("input"))) {
                     foundNewInput = true;
                 }
             }
@@ -320,7 +439,9 @@ function observeInputs(accounts) {
 
     observer.observe(document.body, {
         childList: true,
-        subtree: true
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style", "hidden", "type", "autocomplete", "disabled", "readonly"]
     });
 
     // Initial run
@@ -343,31 +464,65 @@ function getDomainFromUrl(url) {
 // ===============================
 let storedUsername = "";
 let storedDomain = "";
+let lastCredentialInput = null;
 
-function findLoginCredentials() {
-    const usernameInputs = document.querySelectorAll(
-        "input[type='text'], input[type='email'], input[type='username'], input[type='tel']"
+function credentialsFromScope(scope) {
+    const fields = scopeInputs(scope);
+    const filledPasswords = fields.filter(field =>
+        isUsableInput(field) && field.type === "password" && field.value
     );
-    const passwordInputs = document.querySelectorAll("input[type='password']");
+    const newPasswords = filledPasswords.filter(isNewPasswordInput);
+    const currentPasswords = filledPasswords.filter(field => !isNewPasswordInput(field));
+    // Capture a newly chosen password on registration/change-password forms,
+    // but never autofill these fields (credentialFields excludes them).
+    const passwordField = newPasswords.find(field => autocompleteTokens(field).includes("new-password"))
+        || newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value)))
+        || newPasswords[0]
+        || currentPasswords.find(field => autocompleteTokens(field).includes("current-password"))
+        || currentPasswords[0]
+        || null;
+    if (!passwordField) return { username: "", password: "", scope };
 
-    let username = "";
-    let password = "";
+    const candidates = usernameCandidates(fields);
+    const preceding = candidates.filter(field => fields.indexOf(field) < fields.indexOf(passwordField));
+    const pool = preceding.length > 0 ? preceding : candidates;
+    const valued = pool.filter(field => field.value.trim());
+    const usernameField = valued.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
+        || valued.find(hasUsernameHint)
+        || valued.at(-1)
+        || null;
 
-    for (const input of usernameInputs) {
-        if (input.value.trim()) {
-            username = input.value.trim();
-            break;
-        }
+    return {
+        username: usernameField ? usernameField.value.trim() : "",
+        password: passwordField.value,
+        scope
+    };
+}
+
+function findLoginCredentials(source = null) {
+    if (source instanceof HTMLFormElement) {
+        return credentialsFromScope(source);
+    }
+    if (source instanceof HTMLInputElement) {
+        return credentialsFromScope(credentialScope(source));
     }
 
-    for (const input of passwordInputs) {
-        if (input.value) {
-            password = input.value;
-            break;
-        }
+    if (lastCredentialInput && lastCredentialInput.isConnected) {
+        const recent = credentialsFromScope(credentialScope(lastCredentialInput));
+        if (recent.password) return recent;
     }
 
-    return { username, password };
+    const seen = new Set();
+    for (const passwordField of document.querySelectorAll("input[type='password']")) {
+        if (!isUsableInput(passwordField) || !passwordField.value) continue;
+        const scope = credentialScope(passwordField);
+        if (seen.has(scope)) continue;
+        seen.add(scope);
+        const credentials = credentialsFromScope(scope);
+        if (credentials.password) return credentials;
+    }
+
+    return { username: "", password: "", scope: null };
 }
 
 function storeUsernameForLater(username) {
@@ -386,14 +541,14 @@ function storeUsernameForLater(username) {
 function findMatchingAccount(username, password, accounts) {
     return accounts.find(acc => {
         if (username) {
-            return acc.username === username && acc.password === password;
+            return accountUsername(acc) === username && acc.password === password;
         }
         return acc.password === password;
     });
 }
 
 function findAccountByUsername(username, accounts) {
-    return accounts.find(acc => acc.username === username);
+    return accounts.find(acc => accountUsername(acc) === username);
 }
 
 // On password-only logins the username field may be missing; fall back to
@@ -403,8 +558,8 @@ function resolveUsername(username, accounts) {
     if (storedUsername && storedDomain === getDomainFromUrl(window.location.href)) {
         return storedUsername;
     }
-    if (accounts.length === 1 && accounts[0].username) {
-        return accounts[0].username;
+    if (accounts.length === 1 && accountUsername(accounts[0])) {
+        return accountUsername(accounts[0]);
     }
     return "";
 }
@@ -649,17 +804,25 @@ function isPopupPending() {
 // ===============================
 // Request credentials from background
 // ===============================
-async function initExtension(accounts) {
-    observeInputs(accounts);
+async function initExtension() {
+    // Do not place plaintext vault credentials in every matching page at load.
+    // The picker fetches on click, and save/update checks fetch on submission.
+    observeInputs([]);
 
     // Remember the last username typed on this domain so password-only
     // login steps (and the save prompt) know which account is logging in.
     document.addEventListener("input", (e) => {
         const t = e.target;
-        if (t && t.matches &&
-            t.matches("input[type='text'], input[type='email'], input[type='username'], input[type='tel']") &&
-            t.value.trim()) {
+        if (!(t instanceof HTMLInputElement) || !isCredentialInput(t)) return;
+        lastCredentialInput = t;
+        if (USERNAME_INPUT_TYPES.has(t.type) && t.value.trim()) {
             storeUsernameForLater(t.value.trim());
+        }
+    }, true);
+
+    document.addEventListener("focusin", (e) => {
+        if (e.target instanceof HTMLInputElement && isCredentialInput(e.target)) {
+            lastCredentialInput = e.target;
         }
     }, true);
 
@@ -668,6 +831,12 @@ async function initExtension(accounts) {
         modalOpen = true;
         const pendingDomain = pendingPopup.domain;
         const domainAccounts = await fetchAccounts(pendingDomain);
+        if (findMatchingAccount(pendingPopup.username, pendingPopup.password, domainAccounts)) {
+            modalOpen = false;
+            popupResolved = true;
+            clearPopupPending();
+            return;
+        }
         const { result, updateTarget } = await promptForCredentials(
             pendingPopup.username,
             pendingPopup.password,
@@ -705,8 +874,9 @@ async function initExtension(accounts) {
     document.addEventListener("submit", async (e) => {
         if (modalOpen || popupResolved) return;
 
-        const { username: rawUsername, password } = findLoginCredentials();
+        const { username: rawUsername, password } = findLoginCredentials(e.target);
         if (!password) return;
+        const accounts = await fetchAccounts(currentDomain);
         const username = resolveUsername(rawUsername, accounts);
         if (rawUsername) storeUsernameForLater(rawUsername);
 
@@ -761,6 +931,13 @@ async function initExtension(accounts) {
             if (event.source === window) return;
             const data = event.data;
             if (!data || data.type !== "PM_LOGIN") return;
+            let sourceDomain = "";
+            try {
+                sourceDomain = new URL(event.origin).hostname;
+            } catch (_) {
+                return;
+            }
+            if (sourceDomain !== data.domain) return;
 
             if (modalOpen || popupResolved) {
                 event.source.postMessage({ type: "PM_LOGIN_RESULT", action: "ignore", token: data.token }, event.origin);
@@ -768,10 +945,7 @@ async function initExtension(accounts) {
             }
 
             modalOpen = true;
-            let domainAccounts = await fetchAccounts(data.domain);
-            if (!domainAccounts.length) {
-                domainAccounts = accounts;
-            }
+            const domainAccounts = await fetchAccounts(data.domain);
             const { result, updateTarget } = await promptForCredentials(
                 data.username,
                 data.password,
@@ -816,15 +990,14 @@ async function initExtension(accounts) {
 
         const { username: rawUsername, password } = findLoginCredentials();
         if (!password) return;
-        const username = resolveUsername(rawUsername, accounts);
+        const username = resolveUsername(rawUsername, []);
         if (rawUsername) storeUsernameForLater(rawUsername);
-        if (findMatchingAccount(username, password, accounts)) return;
 
         setPopupPending({
             username,
             password,
-            accountName: accounts.length > 0 ? accounts[0].name : "",
-            hasAccounts: accounts.length > 0
+            accountName: "",
+            hasAccounts: false
         });
 
         // Relay from a subframe so the parent can show the prompt live.
@@ -837,30 +1010,12 @@ async function initExtension(accounts) {
                     domain: currentDomain,
                     username,
                     password,
-                    accountName: accounts.length > 0 ? accounts[0].name : "",
-                    hasAccounts: accounts.length > 0
+                    accountName: "",
+                    hasAccounts: false
                 }
             });
         }
     });
 }
 
-chrome.runtime.sendMessage(
-    { action: "getCredentials", domain: window.location.hostname },
-    (response) => {
-        if (response && response.success) {
-            try {
-                let accounts = [];
-                try {
-                    accounts = JSON.parse(response.data);
-                    if (!Array.isArray(accounts)) accounts = [];
-                } catch (e) {
-                    accounts = [];
-                }
-                initExtension(accounts);
-            } catch (error) {
-                console.log("Password Manager error:", error);
-            }
-        }
-    }
-);
+initExtension().catch(error => console.log("Password Manager error:", error));
