@@ -23,8 +23,8 @@ use crate::{
     },
     server::{is_running, server, start},
     types::{
-        BackupRequest, CustomField, EntryUpdate, ImportRequest, PasswordEntry, PasswordType,
-        SearchFilter, ServerCommand, Target, TotpCommand, UnlockInfo,
+        AuditOptions, BackupRequest, CustomField, EntryUpdate, ImportRequest, PasswordEntry,
+        PasswordType, SearchFilter, ServerCommand, Target, TotpCommand, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -350,8 +350,19 @@ async fn main() {
         (CliCommands::Purge(args), true) => {
             send_command(ServerCommand::PurgeTrash(args.id));
         }
-        (CliCommands::Audit, true) => {
-            send_command(ServerCommand::Audit);
+        (
+            CliCommands::Audit {
+                stale_days,
+                breaches,
+                require_totp,
+            },
+            true,
+        ) => {
+            send_command(ServerCommand::Audit(AuditOptions {
+                stale_days,
+                check_breaches: breaches,
+                require_totp,
+            }));
         }
         (CliCommands::Totp { command }, true) => match command {
             TotpCommands::Set { target } => {

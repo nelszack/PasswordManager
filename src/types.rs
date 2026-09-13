@@ -26,7 +26,7 @@ pub enum ServerCommand {
     Trash,
     RestoreTrash(usize),
     PurgeTrash(Option<usize>),
-    Audit,
+    Audit(AuditOptions),
     Totp(TotpCommand),
     Backup(BackupRequest),
     RestoreBackup(BackupRequest),
@@ -109,8 +109,19 @@ pub struct ListOptions {
     pub kind: Option<ItemKind>,
     pub has_totp: Option<bool>,
     pub weak: bool,
+    pub stale_days: Option<u64>,
     pub sort: SortField,
     pub descending: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct AuditOptions {
+    /// Report login passwords at least this many days old.
+    pub stale_days: Option<u64>,
+    /// Check SHA-1 hash prefixes against the Pwned Passwords range API.
+    pub check_breaches: bool,
+    /// Treat logins without an authenticator as a health finding.
+    pub require_totp: bool,
 }
 
 #[derive(Serialize, Deserialize)]

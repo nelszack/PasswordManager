@@ -7,7 +7,7 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **Secure Storage**: Versioned encrypted vaults using Argon2id and XChaCha20-Poly1305
 - **Password Generator**: Random passwords with configurable character sets, or readable passphrases
 - **Password Strength Checker**: Evaluate password strength with zxcvbn
-- **Security Audit**: Find weak, reused, and duplicate active logins without exposing passwords
+- **Security Health**: Score weak, reused, duplicate, stale, breached, and TOTP coverage findings without exposing passwords
 - **Recovery**: Bounded password history and encrypted trash with restore/purge controls
 - **Search and Filtering**: Case-insensitive searches across non-secret entry fields
 - **Typed Items**: Logins, secure notes, payment cards, identities, Wi-Fi,
@@ -20,7 +20,7 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **Browser Extension**: Native-messaging bridge, on-page autofill, TOTP, and save/update prompts
 - **In-page Password Generation**: Fill new-password and confirmation fields securely
 - **Clipboard Integration**: Secure clipboard with auto-clear timeout
-- **Import/Export**: CSV and JSON, including common browser and password-manager exports
+- **Import/Export**: Interoperable CSV plus versioned, full-fidelity portable JSON
 - **Import Planning**: Non-mutating previews with skip, replace, and keep-both policies
 - **Encrypted Backups**: Versioned, authenticated full-vault backup and disaster recovery
 - **Background Server**: Long-running server for quick access
@@ -126,11 +126,12 @@ pm search work --name git --notes account
 pm search --type wifi
 pm search --totp --sort name
 pm search --weak --sort password-age
+pm search --stale-days 365 --sort password-age
 ```
 
 The general search term matches any non-secret field. Field-specific filters are
 combined, so every supplied filter must match. Matching is case-insensitive.
-The `--type`, `--totp`, `--no-totp`, and `--weak` filters work with both
+The `--type`, `--totp`, `--no-totp`, `--weak`, and `--stale-days` filters work with both
 `view` and `search`. Supported types are `login`, `secure-note`,
 `payment-card`, `identity`, `wifi`, `software-license`, `ssh-key`, and
 `api-secret`. Weakness filtering ignores items with no primary secret.
@@ -204,11 +205,19 @@ current password back into history, so the operation can be reversed.
 
 ```bash
 pm audit
+pm audit --stale-days 365 --require-totp
+pm audit --breaches
 ```
 
-The audit checks active entries for weak passwords, reused-password groups, and
-duplicate site/username combinations. Reports identify affected entries but
-never print their passwords.
+The audit assigns a health score and checks active logins for weak passwords,
+reused-password groups, and duplicate site/username combinations. Optional
+checks report passwords older than a chosen number of days and accounts without
+TOTP. Reports identify affected entries but never print their passwords.
+
+`--breaches` performs an opt-in Pwned Passwords range check. It sends only the
+first five characters of each password's SHA-1 hash, requests padded responses,
+and never sends a password or complete hash. The ordinary audit remains fully
+offline. A network failure is reported without suppressing the local results.
 
 ### TOTP Authenticator
 
@@ -235,10 +244,10 @@ shorter secrets remain rejected.
 
 Authenticator configurations are stored only inside the encrypted vault. They
 remain attached to an entry in trash and after restoration, and are securely
-removed when that trash entry is purged. Plaintext CSV and JSON exports omit
-authenticator configurations, item types, additional URLs, custom fields, and
-password-age metadata. Use an encrypted backup when those fields must be
-preserved.
+removed when that trash entry is purged. Plaintext CSV exports omit authenticator
+configurations and richer item metadata. Portable JSON exports preserve active
+item metadata, history, and TOTP configurations; use an encrypted backup when
+trash and the complete recovery state must also be preserved.
 
 ### Lock/Unlock
 
@@ -320,12 +329,15 @@ pm import --path backup.csv --conflicts keep-both
 `replace` preserves the existing stable ID and records a changed password in
 history. `keep-both` adds a new stable ID and appends an `(imported)` suffix.
 
-The format is detected from the input content; exports use JSON when the path
-ends in `.json`, otherwise CSV. Supported inputs are this application's CSV or
-JSON, Chrome/Chromium CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV.
-Duplicate rows with the same name, username, and URL are skipped. Both export
-formats contain plaintext passwords and should be protected or deleted after
-use.
+The format is detected from the input content; exports use a versioned portable
+JSON envelope when the path ends in `.json`, otherwise CSV. Portable JSON
+preserves active item types, additional URLs, custom fields, password-age
+metadata, bounded password history, and TOTP configurations. Imported IDs are
+always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
+CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV. Duplicate rows with the same
+name, username, and URL are skipped. Both export formats contain plaintext
+secrets; portable JSON can also contain TOTP secrets and password history, so
+exports should be protected or deleted after use.
 
 ### Check Password Strength
 
@@ -454,8 +466,10 @@ To deliberately share an entry with subdomains, store its URL as a wildcard,
 for example `*.example.com`. Wildcards rooted at public suffixes such as
 `*.github.io` are rejected for matching.
 
-The popup shows native-host/server/vault status and locks the vault; entry
-management happens through the CLI and on-page controls.
+The badge and any open popup track native-host, server, and vault lock state
+continuously, including changes made through the CLI and automatic locking.
+The popup can lock the vault; entry management happens through the CLI and
+on-page controls.
 
 ## Architecture
 

@@ -4,12 +4,13 @@ use crate::{
     file::{data_dir, file_exists, set_private_perms},
     server::{ServerInfo, respond},
     types::{
-        ConflictPolicy, CustomField, EntryUpdate, ItemKind, ListOptions, PasswordEntry,
-        PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
+        AuditOptions, ConflictPolicy, CustomField, EntryUpdate, ItemKind, ListOptions,
+        PasswordEntry, PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha1::{Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, read},
@@ -174,6 +175,73 @@ pub struct ImportReport {
     pub skipped: usize,
     pub renamed: usize,
     pub preview: bool,
+}
+
+const PORTABLE_FORMAT: &str = "password-manager-portable";
+const PORTABLE_VERSION: u8 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct PortableExport {
+    format: String,
+    version: u8,
+    exported_at: String,
+    items: Vec<PortableItem>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PortableItem {
+    id: usize,
+    name: String,
+    username: Option<String>,
+    password: String,
+    url: Option<String>,
+    notes: Option<String>,
+    created: String,
+    modified: String,
+    #[serde(rename = "type", default)]
+    kind: ItemKind,
+    #[serde(default)]
+    additional_urls: Vec<String>,
+    #[serde(default)]
+    custom_fields: Vec<CustomField>,
+    #[serde(default)]
+    password_changed: Option<String>,
+    #[serde(default)]
+    password_history: Vec<PortableRevision>,
+    #[serde(default)]
+    totp: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PortableRevision {
+    password: String,
+    changed: String,
+}
+
+struct ImportedItem {
+    portable: bool,
+    entry: VaultEntry,
+    kind: ItemKind,
+    additional_urls: Vec<String>,
+    custom_fields: Vec<CustomField>,
+    password_changed: Option<String>,
+    password_history: Vec<PortableRevision>,
+    totp: Option<String>,
+}
+
+impl ImportedItem {
+    fn login(entry: VaultEntry) -> Self {
+        Self {
+            portable: false,
+            entry,
+            kind: ItemKind::Login,
+            additional_urls: Vec::new(),
+            custom_fields: Vec::new(),
+            password_changed: None,
+            password_history: Vec::new(),
+            totp: None,
+        }
+    }
 }
 
 impl std::fmt::Display for ImportReport {
@@ -568,6 +636,51 @@ fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
     saved == requested
 }
 
+fn password_hash(password: &str) -> String {
+    hex::encode_upper(Sha1::digest(password.as_bytes()))
+}
+
+fn parse_pwned_range(body: &str, prefix: &str) -> HashMap<String, u64> {
+    body.lines()
+        .filter_map(|line| {
+            let (suffix, count) = line.trim().split_once(':')?;
+            let count = count.parse::<u64>().ok()?;
+            (count > 0).then(|| (format!("{prefix}{}", suffix.to_ascii_uppercase()), count))
+        })
+        .collect()
+}
+
+async fn breached_hashes(
+    passwords: impl Iterator<Item = String>,
+) -> Result<HashMap<String, u64>, String> {
+    let mut prefixes = HashSet::new();
+    for password in passwords {
+        prefixes.insert(password_hash(&password)[..5].to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("password-manager/0.1 breach-audit")
+        .build()
+        .map_err(|error| format!("could not initialize breach checker: {error}"))?;
+    let mut matches = HashMap::new();
+    for prefix in prefixes {
+        let response = client
+            .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
+            .header("Add-Padding", "true")
+            .send()
+            .await
+            .map_err(|error| format!("Pwned Passwords request failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("Pwned Passwords returned an error: {error}"))?;
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("could not read Pwned Passwords response: {error}"))?;
+        matches.extend(parse_pwned_range(&body, &prefix));
+    }
+    Ok(matches)
+}
+
 fn is_otpauth_uri(value: &str) -> bool {
     value
         .get(.."otpauth://".len())
@@ -677,7 +790,7 @@ fn csv_field(headers: &[String], record: &csv::StringRecord, aliases: &[&str]) -
         .map(str::to_string)
 }
 
-fn import_csv(contents: &str, path: &str) -> Result<Vec<VaultEntry>, String> {
+fn import_csv(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
     let mut reader = csv::Reader::from_reader(contents.as_bytes());
     let headers: Vec<String> = reader
         .headers()
@@ -694,7 +807,7 @@ fn import_csv(contents: &str, path: &str) -> Result<Vec<VaultEntry>, String> {
         let password = csv_field(&headers, &row, &["password"])
             .ok_or_else(|| format!("an imported CSV row in {path:?} has no password"))?;
         let now = chrono::Local::now().to_string();
-        entries.push(VaultEntry {
+        entries.push(ImportedItem::login(VaultEntry {
             id: 0,
             name,
             username: csv_field(&headers, &row, &["username", "loginusername", "login"]),
@@ -713,7 +826,7 @@ fn import_csv(contents: &str, path: &str) -> Result<Vec<VaultEntry>, String> {
                 &["modified", "timemodified", "timepasswordchanged"],
             )
             .unwrap_or(now),
-        });
+        }));
     }
     Ok(entries)
 }
@@ -726,9 +839,54 @@ fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-fn import_json(contents: &str, path: &str) -> Result<Vec<VaultEntry>, String> {
+fn import_json(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
     let root: serde_json::Value =
         serde_json::from_str(contents).map_err(|e| format!("invalid JSON in {path:?}: {e}"))?;
+    if root.get("format").and_then(serde_json::Value::as_str) == Some(PORTABLE_FORMAT) {
+        let portable: PortableExport = serde_json::from_value(root)
+            .map_err(|e| format!("invalid portable JSON in {path:?}: {e}"))?;
+        if portable.version != PORTABLE_VERSION {
+            return Err(format!(
+                "unsupported portable JSON version {} in {path:?}",
+                portable.version
+            ));
+        }
+        return portable
+            .items
+            .into_iter()
+            .map(|mut item| {
+                if item.name.trim().is_empty() {
+                    return Err(format!("a portable JSON item in {path:?} has no name"));
+                }
+                if let Some(configuration) = item.totp.as_deref() {
+                    let (normalized, _) =
+                        normalize_totp_configuration(configuration).map_err(|error| {
+                            format!("invalid TOTP configuration for {:?}: {error}", item.name)
+                        })?;
+                    item.totp = Some(normalized);
+                }
+                Ok(ImportedItem {
+                    portable: true,
+                    entry: VaultEntry {
+                        id: 0,
+                        name: item.name,
+                        username: item.username,
+                        password: item.password,
+                        url: item.url,
+                        notes: item.notes,
+                        created: item.created,
+                        modified: item.modified,
+                    },
+                    kind: item.kind,
+                    additional_urls: item.additional_urls,
+                    custom_fields: item.custom_fields,
+                    password_changed: item.password_changed,
+                    password_history: item.password_history,
+                    totp: item.totp,
+                })
+            })
+            .collect();
+    }
     let bitwarden = root.get("items").is_some();
     let values = if let Some(items) = root.get("items").and_then(serde_json::Value::as_array) {
         items
@@ -757,7 +915,7 @@ fn import_json(contents: &str, path: &str) -> Result<Vec<VaultEntry>, String> {
             .or_else(|| json_text(value, &["password"]))
             .ok_or_else(|| format!("an imported JSON item in {path:?} has no password"))?;
         let now = chrono::Local::now().to_string();
-        entries.push(VaultEntry {
+        entries.push(ImportedItem::login(VaultEntry {
             id: 0,
             name,
             username: json_text(login, &["username", "login"]),
@@ -766,7 +924,7 @@ fn import_json(contents: &str, path: &str) -> Result<Vec<VaultEntry>, String> {
             notes: json_text(value, &["notes", "note"]),
             created: json_text(value, &["created", "creationDate"]).unwrap_or_else(|| now.clone()),
             modified: json_text(value, &["modified", "revisionDate"]).unwrap_or(now),
-        });
+        }));
     }
     if entries.is_empty() {
         return Err(format!("no supported login entries were found in {path:?}"));
@@ -878,6 +1036,17 @@ impl Vault {
         self.metadata(entry.id)
             .and_then(|record| record.password_changed.as_deref())
             .unwrap_or(&entry.created)
+    }
+
+    fn password_is_stale(&self, entry: &VaultEntry, days: u64) -> bool {
+        let changed = self.password_changed(entry);
+        let parsed = chrono::DateTime::parse_from_rfc3339(changed)
+            .or_else(|_| chrono::DateTime::parse_from_str(changed, "%Y-%m-%d %H:%M:%S%.f %:z"));
+        let Ok(changed) = parsed else {
+            return false;
+        };
+        chrono::Utc::now().signed_duration_since(changed.with_timezone(&chrono::Utc))
+            >= chrono::Duration::days(i64::try_from(days).unwrap_or(i64::MAX))
     }
 
     fn custom_fields(&self, entry_id: usize) -> &[CustomField] {
@@ -1712,17 +1881,52 @@ impl Vault {
         }
     }
 
-    fn audit_report(&self) -> String {
+    fn audit_report(
+        &self,
+        options: &AuditOptions,
+        breached: Option<&HashMap<String, u64>>,
+        breach_error: Option<&str>,
+    ) -> String {
         let mut weak = Vec::new();
+        let mut stale = Vec::new();
+        let mut missing_totp = Vec::new();
+        let mut breached_entries = Vec::new();
         let mut passwords: HashMap<&str, Vec<&VaultEntry>> = HashMap::new();
         let mut identities: HashMap<(String, String), Vec<&VaultEntry>> = HashMap::new();
-        for entry in self
+        let logins = self
             .entries
             .iter()
             .filter(|entry| self.item_kind(entry.id) == ItemKind::Login)
-        {
+            .collect::<Vec<_>>();
+        let mut unhealthy = HashSet::new();
+        for &entry in &logins {
             if zxcvbn::zxcvbn(&entry.password, &[]).score() <= zxcvbn::Score::Two {
                 weak.push(entry);
+                unhealthy.insert(entry.id);
+            }
+            if options
+                .stale_days
+                .is_some_and(|days| self.password_is_stale(entry, days))
+            {
+                stale.push(entry);
+                unhealthy.insert(entry.id);
+            }
+            if options.require_totp
+                && !self
+                    .recovery
+                    .totp
+                    .iter()
+                    .any(|record| record.entry_id == entry.id)
+            {
+                missing_totp.push(entry);
+                unhealthy.insert(entry.id);
+            }
+            if let Some(count) = breached
+                .and_then(|hashes| hashes.get(&password_hash(&entry.password)))
+                .copied()
+            {
+                breached_entries.push((entry, count));
+                unhealthy.insert(entry.id);
             }
             passwords.entry(&entry.password).or_default().push(entry);
             let identity = (
@@ -1739,15 +1943,31 @@ impl Vault {
             .values()
             .filter(|entries| entries.len() > 1)
             .collect();
+        for entries in &reused {
+            unhealthy.extend(entries.iter().map(|entry| entry.id));
+        }
         let duplicates: Vec<_> = identities
             .values()
             .filter(|entries| entries.len() > 1)
             .collect();
+        for entries in &duplicates {
+            unhealthy.extend(entries.iter().map(|entry| entry.id));
+        }
+        let healthy = logins.len().saturating_sub(unhealthy.len());
+        let score = if logins.is_empty() {
+            100
+        } else {
+            healthy * 100 / logins.len()
+        };
         let mut report = format!(
-            "Audit: {} weak entries, {} reused-password groups, {} duplicate-login groups.\n",
+            "Health score: {score}/100 ({healthy}/{} login entries have no detected issues).\nAudit: {} weak entries, {} reused-password groups, {} duplicate-login groups, {} stale entries, {} missing TOTP, {} breached entries.\n",
+            logins.len(),
             weak.len(),
             reused.len(),
-            duplicates.len()
+            duplicates.len(),
+            stale.len(),
+            missing_totp.len(),
+            breached_entries.len(),
         );
         for entry in weak {
             report.push_str(&format!(
@@ -1771,11 +1991,49 @@ impl Vault {
                 .join(", ");
             report.push_str(&format!("Duplicate login: {labels}\n"));
         }
+        for entry in stale {
+            report.push_str(&format!(
+                "Stale password: {}. {} (last changed {})\n",
+                entry.id,
+                entry.name,
+                self.password_changed(entry)
+            ));
+        }
+        for entry in missing_totp {
+            report.push_str(&format!("Missing TOTP: {}. {}\n", entry.id, entry.name));
+        }
+        for (entry, count) in breached_entries {
+            report.push_str(&format!(
+                "Breached password: {}. {} (seen {count} times)\n",
+                entry.id, entry.name
+            ));
+        }
+        if let Some(error) = breach_error {
+            report.push_str(&format!("Breach check unavailable: {error}\n"));
+        }
         report
     }
 
-    pub async fn audit(&self, stream: &mut TcpStream, http: bool) {
-        respond(&self.audit_report(), stream, http).await;
+    pub async fn audit(&self, options: AuditOptions, stream: &mut TcpStream, http: bool) {
+        let breach_result = if options.check_breaches {
+            Some(
+                breached_hashes(
+                    self.entries
+                        .iter()
+                        .filter(|entry| self.item_kind(entry.id) == ItemKind::Login)
+                        .map(|entry| entry.password.clone()),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let (breached, error) = match breach_result.as_ref() {
+            Some(Ok(matches)) => (Some(matches), None),
+            Some(Err(error)) => (None, Some(error.as_str())),
+            None => (None, None),
+        };
+        respond(&self.audit_report(&options, breached, error), stream, http).await;
     }
 
     fn is_weak(&self, entry: &VaultEntry) -> bool {
@@ -1800,6 +2058,9 @@ impl Vault {
                         == expected
                 })
                 && (!options.weak || self.is_weak(entry))
+                && options
+                    .stale_days
+                    .is_none_or(|days| self.password_is_stale(entry, days))
         });
         entries.sort_by(|left, right| {
             let ordering = match options.sort {
@@ -1921,12 +2182,62 @@ impl Vault {
         Ok(())
     }
     pub fn export(&self, path: String) -> Result<(), String> {
-        println!("WARNING: Export writes passwords as plaintext. Delete the file after use.");
+        println!(
+            "WARNING: Export writes passwords, TOTP secrets, and other sensitive fields as plaintext. Delete the file after use."
+        );
         if std::path::Path::new(&path)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
         {
-            let encoded = serde_json::to_vec_pretty(&self.entries)
+            let items = self
+                .entries
+                .iter()
+                .map(|entry| {
+                    let metadata = self.metadata(entry.id);
+                    PortableItem {
+                        id: entry.id,
+                        name: entry.name.clone(),
+                        username: entry.username.clone(),
+                        password: entry.password.clone(),
+                        url: entry.url.clone(),
+                        notes: entry.notes.clone(),
+                        created: entry.created.clone(),
+                        modified: entry.modified.clone(),
+                        kind: self.item_kind(entry.id),
+                        additional_urls: metadata
+                            .map(|record| record.additional_urls.clone())
+                            .unwrap_or_default(),
+                        custom_fields: metadata
+                            .map(|record| record.custom_fields.clone())
+                            .unwrap_or_default(),
+                        password_changed: metadata
+                            .and_then(|record| record.password_changed.clone()),
+                        password_history: self
+                            .recovery
+                            .password_history
+                            .iter()
+                            .filter(|revision| revision.entry_id == entry.id)
+                            .map(|revision| PortableRevision {
+                                password: revision.password.clone(),
+                                changed: revision.changed.clone(),
+                            })
+                            .collect(),
+                        totp: self
+                            .recovery
+                            .totp
+                            .iter()
+                            .find(|record| record.entry_id == entry.id)
+                            .map(|record| record.configuration.clone()),
+                    }
+                })
+                .collect();
+            let export = PortableExport {
+                format: PORTABLE_FORMAT.to_string(),
+                version: PORTABLE_VERSION,
+                exported_at: chrono::Utc::now().to_rfc3339(),
+                items,
+            };
+            let encoded = serde_json::to_vec_pretty(&export)
                 .map_err(|e| format!("could not encode JSON export: {e}"))?;
             fs::write(&path, encoded)
                 .map_err(|e| format!("could not create export file {path:?}: {e}"))?;
@@ -1979,6 +2290,71 @@ impl Vault {
         result
     }
 
+    fn replace_portable_records(
+        &mut self,
+        entry_id: usize,
+        imported: &mut ImportedItem,
+        old_password: Option<String>,
+        password_history_limit: usize,
+    ) {
+        self.remove_metadata_records(&[entry_id]);
+        self.remove_totp_records(&[entry_id]);
+
+        let mut retained = Vec::with_capacity(self.recovery.password_history.len());
+        for mut revision in std::mem::take(&mut self.recovery.password_history) {
+            if revision.entry_id == entry_id {
+                revision.zeroize();
+            } else {
+                retained.push(revision);
+            }
+        }
+        self.recovery.password_history = retained;
+
+        let mut history = std::mem::take(&mut imported.password_history)
+            .into_iter()
+            .map(|revision| PasswordRevision {
+                entry_id,
+                password: revision.password,
+                changed: revision.changed,
+            })
+            .collect::<Vec<_>>();
+        if let Some(password) = old_password {
+            history.push(PasswordRevision {
+                entry_id,
+                password,
+                changed: chrono::Local::now().to_string(),
+            });
+        }
+        if history.len() > password_history_limit {
+            let mut removed = history.drain(..history.len() - password_history_limit);
+            removed.by_ref().for_each(|revision| {
+                let mut revision = revision;
+                revision.zeroize();
+            });
+        }
+        self.recovery.password_history.extend(history);
+
+        if imported.kind != ItemKind::Login
+            || !imported.additional_urls.is_empty()
+            || !imported.custom_fields.is_empty()
+            || imported.password_changed.is_some()
+        {
+            self.recovery.entry_metadata.push(EntryMetadata {
+                entry_id,
+                kind: imported.kind,
+                additional_urls: std::mem::take(&mut imported.additional_urls),
+                password_changed: imported.password_changed.take(),
+                custom_fields: std::mem::take(&mut imported.custom_fields),
+            });
+        }
+        if let Some(configuration) = imported.totp.take() {
+            self.recovery.totp.push(TotpRecord {
+                entry_id,
+                configuration,
+            });
+        }
+    }
+
     pub fn import_with_options(
         &mut self,
         path: String,
@@ -2002,11 +2378,11 @@ impl Vault {
         };
         let mut entries_before = self.entries.clone();
         let mut recovery_before = self.recovery.clone();
-        for mut entry in imported {
+        for mut imported in imported {
             let duplicate = self.entries.iter().position(|existing| {
-                existing.name == entry.name
-                    && existing.username == entry.username
-                    && existing.url == entry.url
+                existing.name == imported.entry.name
+                    && existing.username == imported.entry.username
+                    && existing.url == imported.entry.url
             });
             match (duplicate, conflicts) {
                 (Some(_), ConflictPolicy::Skip) => report.skipped += 1,
@@ -2015,25 +2391,35 @@ impl Vault {
                     if !preview {
                         let id = self.entries[index].id;
                         let created = self.entries[index].created.clone();
-                        if self.entries[index].password != entry.password {
+                        let old_password = (self.entries[index].password
+                            != imported.entry.password)
+                            .then(|| self.entries[index].password.clone());
+                        imported.entry.id = id;
+                        imported.entry.created = created;
+                        imported.entry.modified = chrono::Local::now().to_string();
+                        self.entries[index].zeroize();
+                        self.entries[index] = std::mem::take(&mut imported.entry);
+                        if imported.portable {
+                            self.replace_portable_records(
+                                id,
+                                &mut imported,
+                                old_password,
+                                password_history_limit,
+                            );
+                        } else if let Some(password) = old_password {
                             self.push_password_history_with_limit(
                                 id,
-                                self.entries[index].password.clone(),
+                                password,
                                 password_history_limit,
                             );
                         }
-                        entry.id = id;
-                        entry.created = created;
-                        entry.modified = chrono::Local::now().to_string();
-                        self.entries[index].zeroize();
-                        self.entries[index] = entry;
                     }
                 }
                 (Some(_), ConflictPolicy::KeepBoth) => {
                     report.added += 1;
                     report.renamed += 1;
                     if !preview {
-                        let base = entry.name.clone();
+                        let base = imported.entry.name.clone();
                         let mut suffix = 1usize;
                         loop {
                             let candidate = if suffix == 1 {
@@ -2042,22 +2428,41 @@ impl Vault {
                                 format!("{base} (imported {suffix})")
                             };
                             if !self.entries.iter().any(|existing| {
-                                existing.name == candidate && existing.username == entry.username
+                                existing.name == candidate
+                                    && existing.username == imported.entry.username
                             }) {
-                                entry.name = candidate;
+                                imported.entry.name = candidate;
                                 break;
                             }
                             suffix += 1;
                         }
-                        entry.id = self.allocate_entry_id()?;
-                        self.entries.push(entry);
+                        let id = self.allocate_entry_id()?;
+                        imported.entry.id = id;
+                        self.entries.push(std::mem::take(&mut imported.entry));
+                        if imported.portable {
+                            self.replace_portable_records(
+                                id,
+                                &mut imported,
+                                None,
+                                password_history_limit,
+                            );
+                        }
                     }
                 }
                 (None, _) => {
                     report.added += 1;
                     if !preview {
-                        entry.id = self.allocate_entry_id()?;
-                        self.entries.push(entry);
+                        let id = self.allocate_entry_id()?;
+                        imported.entry.id = id;
+                        self.entries.push(std::mem::take(&mut imported.entry));
+                        if imported.portable {
+                            self.replace_portable_records(
+                                id,
+                                &mut imported,
+                                None,
+                                password_history_limit,
+                            );
+                        }
                     }
                 }
             }
@@ -2816,9 +3221,9 @@ mod test {
             "name,url,username,password,note\nExample,https://example.com,alice,secret,personal\n";
         let entries = import_csv(csv, "chrome.csv").unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "Example");
-        assert_eq!(entries[0].username.as_deref(), Some("alice"));
-        assert_eq!(entries[0].notes.as_deref(), Some("personal"));
+        assert_eq!(entries[0].entry.name, "Example");
+        assert_eq!(entries[0].entry.username.as_deref(), Some("alice"));
+        assert_eq!(entries[0].entry.notes.as_deref(), Some("personal"));
     }
 
     #[test]
@@ -2837,8 +3242,11 @@ mod test {
         }"#;
         let entries = import_json(json, "bitwarden.json").unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].username.as_deref(), Some("alice"));
-        assert_eq!(entries[0].url.as_deref(), Some("https://example.com/login"));
+        assert_eq!(entries[0].entry.username.as_deref(), Some("alice"));
+        assert_eq!(
+            entries[0].entry.url.as_deref(),
+            Some("https://example.com/login")
+        );
     }
 
     #[test]
@@ -2856,12 +3264,47 @@ mod test {
                 modified: "modified".into(),
             }],
             metadata: VaultMetadata::default(),
-            recovery: RecoveryData::default(),
+            recovery: RecoveryData {
+                password_history: vec![PasswordRevision {
+                    entry_id: 1,
+                    password: "previous-secret".into(),
+                    changed: "2025-01-01T00:00:00Z".into(),
+                }],
+                totp: vec![TotpRecord {
+                    entry_id: 1,
+                    configuration: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into(),
+                }],
+                entry_metadata: vec![EntryMetadata {
+                    entry_id: 1,
+                    kind: ItemKind::ApiSecret,
+                    additional_urls: vec!["api.example.com".into()],
+                    password_changed: Some("2026-01-01T00:00:00Z".into()),
+                    custom_fields: vec![CustomField {
+                        name: "environment".into(),
+                        value: "production".into(),
+                        secret: false,
+                    }],
+                }],
+                ..RecoveryData::default()
+            },
         };
         vault.export(file.path().display().to_string()).unwrap();
+        let exported: serde_json::Value =
+            serde_json::from_slice(&fs::read(file.path()).unwrap()).unwrap();
+        assert_eq!(exported["format"], PORTABLE_FORMAT);
+        assert_eq!(exported["version"], PORTABLE_VERSION);
         let mut imported = Vault::default();
         imported.import(file.path().display().to_string()).unwrap();
         assert_eq!(imported.entries, vault.entries);
+        assert_eq!(
+            imported.recovery.entry_metadata,
+            vault.recovery.entry_metadata
+        );
+        assert_eq!(
+            imported.recovery.password_history,
+            vault.recovery.password_history
+        );
+        assert_eq!(imported.recovery.totp, vault.recovery.totp);
     }
 
     #[test]
@@ -2873,6 +3316,46 @@ mod test {
         let mut vault = Vault::default();
         vault.import(file.path().display().to_string()).unwrap();
         assert_eq!(vault.entries[0].id, 1);
+    }
+
+    #[test]
+    fn portable_import_remaps_ids_for_associated_records() {
+        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        let portable = serde_json::json!({
+            "format": PORTABLE_FORMAT,
+            "version": PORTABLE_VERSION,
+            "exported_at": "2026-01-01T00:00:00Z",
+            "items": [{
+                "id": 999,
+                "name": "Imported API",
+                "username": "alice",
+                "password": "current-secret",
+                "url": "https://api.example.com",
+                "notes": null,
+                "created": "2025-01-01T00:00:00Z",
+                "modified": "2026-01-01T00:00:00Z",
+                "type": "api-secret",
+                "additional_urls": ["https://backup.example.com"],
+                "custom_fields": [{"name": "env", "value": "prod", "secret": false}],
+                "password_changed": "2026-01-01T00:00:00Z",
+                "password_history": [{"password": "old-secret", "changed": "2025-06-01T00:00:00Z"}],
+                "totp": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+            }]
+        });
+        fs::write(file.path(), serde_json::to_vec(&portable).unwrap()).unwrap();
+
+        let mut vault = recovery_test_vault(vec![recovery_test_entry(
+            10,
+            "Existing",
+            "bob",
+            "existing-secret",
+        )]);
+        vault.import(file.path().display().to_string()).unwrap();
+
+        assert_eq!(vault.entries[1].id, 11);
+        assert_eq!(vault.recovery.entry_metadata[0].entry_id, 11);
+        assert_eq!(vault.recovery.password_history[0].entry_id, 11);
+        assert_eq!(vault.recovery.totp[0].entry_id, 11);
     }
 
     #[test]
@@ -4185,7 +4668,7 @@ mod test {
             entry_id: 2,
             kind: ItemKind::Wifi,
             additional_urls: Vec::new(),
-            password_changed: Some("2025-01-01".into()),
+            password_changed: Some("2025-01-01T00:00:00Z".into()),
             custom_fields: Vec::new(),
         }];
         vault.recovery.totp.push(TotpRecord {
@@ -4222,6 +4705,15 @@ mod test {
             },
         );
         assert_eq!(weak.iter().map(|entry| entry.id).collect::<Vec<_>>(), [2]);
+
+        let stale = vault.apply_list_options(
+            vault.entries.iter().collect(),
+            &ListOptions {
+                stale_days: Some(365),
+                ..ListOptions::default()
+            },
+        );
+        assert_eq!(stale.iter().map(|entry| entry.id).collect::<Vec<_>>(), [2]);
 
         let sorted = vault.apply_list_options(
             vault.entries.iter().collect(),
@@ -4340,7 +4832,7 @@ mod test {
     }
 
     #[test]
-    fn totp_secrets_are_redacted_and_omitted_from_plaintext_exports() {
+    fn totp_secrets_are_redacted_and_only_in_full_fidelity_json_exports() {
         let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
         let mut vault =
             recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
@@ -4349,10 +4841,13 @@ mod test {
             .unwrap();
         assert!(!format!("{:?}", vault.recovery.totp[0]).contains(secret));
 
-        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        vault.export(file.path().display().to_string()).unwrap();
-        let exported = fs::read_to_string(file.path()).unwrap();
-        assert!(!exported.contains(secret));
+        let json = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        vault.export(json.path().display().to_string()).unwrap();
+        assert!(fs::read_to_string(json.path()).unwrap().contains(secret));
+
+        let csv = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
+        vault.export(csv.path().display().to_string()).unwrap();
+        assert!(!fs::read_to_string(csv.path()).unwrap().contains(secret));
     }
 
     #[test]
@@ -4507,10 +5002,48 @@ mod test {
             recovery_test_entry(1, "first", "alice", "secret"),
             recovery_test_entry(2, "second", "alice", "secret"),
         ]);
-        let report = vault.audit_report();
+        let report = vault.audit_report(&AuditOptions::default(), None, None);
         assert!(report.contains("2 weak entries"));
         assert!(report.contains("1 reused-password groups"));
         assert!(report.contains("1 duplicate-login groups"));
         assert!(!report.contains("secret"));
+    }
+
+    #[test]
+    fn audit_reports_stale_missing_totp_and_breached_passwords() {
+        let mut vault = recovery_test_vault(vec![recovery_test_entry(
+            7,
+            "old account",
+            "alice",
+            "known-breached-value",
+        )]);
+        vault.recovery.entry_metadata.push(EntryMetadata {
+            entry_id: 7,
+            password_changed: Some("2020-01-01T00:00:00Z".into()),
+            ..EntryMetadata::default()
+        });
+        let mut breached = HashMap::new();
+        breached.insert(password_hash("known-breached-value"), 42);
+        let report = vault.audit_report(
+            &AuditOptions {
+                stale_days: Some(365),
+                check_breaches: true,
+                require_totp: true,
+            },
+            Some(&breached),
+            None,
+        );
+        assert!(report.contains("Stale password: 7. old account"));
+        assert!(report.contains("Missing TOTP: 7. old account"));
+        assert!(report.contains("Breached password: 7. old account (seen 42 times)"));
+        assert!(report.contains("Health score: 0/100"));
+        assert!(!report.contains("known-breached-value"));
+    }
+
+    #[test]
+    fn pwned_range_parser_ignores_padding_and_reconstructs_hashes() {
+        let parsed = parse_pwned_range("ABCDE:0\r\n12345:9\r\n", "FFFFF");
+        assert_eq!(parsed.get("FFFFF12345"), Some(&9));
+        assert!(!parsed.contains_key("FFFFFABCDE"));
     }
 }

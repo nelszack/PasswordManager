@@ -513,11 +513,11 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 }
             }
         }
-        ServerCommand::Audit => {
+        ServerCommand::Audit(options) => {
             if server_info.locked {
                 respond("Vault locked.", &mut stream, http).await;
             } else if let Some(vault) = vlt.as_ref() {
-                vault.audit(&mut stream, http).await;
+                vault.audit(options, &mut stream, http).await;
             }
         }
         ServerCommand::Totp(mut command) => {
