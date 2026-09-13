@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to package
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  verify:
+    name: Verify release tag and source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must be a semantic version beginning with v: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [[ "$RELEASE_TAG" != "v$cargo_version" ]]; then
+            echo "Tag $RELEASE_TAG does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+      - name: Run release tests
+        run: cargo test --locked
+      - name: Run strict lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Generate shell completions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-completions
+          cargo build --locked
+          target/debug/pm completions bash --output release-completions/pm.bash
+          target/debug/pm completions zsh --output release-completions/_pm
+          target/debug/pm completions fish --output release-completions/pm.fish
+          target/debug/pm completions elvish --output release-completions/pm.elv
+          target/debug/pm completions powershell --output release-completions/pm.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-completions
+          path: release-completions
+          if-no-files-found: error
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            executable: pm
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            executable: pm.exe
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            executable: pm
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            executable: pm
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-completions
+          path: release-completions
+      - name: Build optimized binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="pm-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p "dist/$package/completions"
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/$package/"
+          cp README.md "dist/$package/"
+          cp -R extension "dist/$package/"
+          cp release-completions/* "dist/$package/completions/"
+          tar -czf "dist/$package.tar.gz" -C dist "$package"
+          rm -rf "dist/$package"
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Package = "pm-$env:RELEASE_TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$Package/completions" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/$Package/"
+          Copy-Item README.md "dist/$Package/"
+          Copy-Item -Recurse extension "dist/$Package/"
+          Copy-Item "release-completions/*" "dist/$Package/completions/"
+          Compress-Archive -Path "dist/$Package" -DestinationPath "dist/$Package.zip"
+          Remove-Item -Recurse -Force "dist/$Package"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pm-${{ matrix.target }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  draft:
+    name: Create draft GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pm-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create SHA-256 checksums
+        working-directory: release-assets
+        run: sha256sum pm-* > SHA256SUMS
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release-assets/pm-*
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease+=(--prerelease)
+          fi
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > release-state; then
+            if [[ "$(<release-state)" != "true" ]]; then
+              echo "Refusing to modify the already-published release $RELEASE_TAG" >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --verify-tag \
+              --draft \
+              --title "$RELEASE_TAG" \
+              --generate-notes \
+              "${prerelease[@]}"
+          fi

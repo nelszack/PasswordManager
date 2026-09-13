@@ -36,7 +36,7 @@ pub fn request(command: ServerCommand) -> Result<String, String> {
         .map_err(|e| format!("could not configure server connection: {e}"))?;
     let mut token = server_token()?;
     let mut data =
-        bincode::serialize(&command).map_err(|e| format!("could not encode command: {e}"))?;
+        rmp_serde::to_vec(&command).map_err(|e| format!("could not encode command: {e}"))?;
     let send_result = connection
         .write_all(token.as_bytes())
         .and_then(|_| connection.write_all(&(data.len() as u32).to_be_bytes()))

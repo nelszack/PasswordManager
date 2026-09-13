@@ -372,3 +372,30 @@ encrypted backup recovery and tamper detection, hostile encryption parameters,
 secret redaction, vault recovery state, TOTP vectors, URL matching, and
 plaintext import/export compatibility. GitHub Actions runs the full test and
 strict-lint suite on Linux, macOS, and Windows for every push and pull request.
+
+Dependency changes are scanned against the RustSec advisory database and
+reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
+weekly. GitHub's secret scanning and push protection remain enabled for the
+repository.
+
+## Releases
+
+Releases are never published automatically. First push a semantic-version tag
+matching the version in `Cargo.toml`, for example:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Then open the **Release** workflow in GitHub Actions, choose **Run workflow**,
+and enter that existing tag. The pipeline reruns tests and strict linting, then
+creates a **draft** release with archives for Linux x86-64, Windows x86-64,
+macOS Apple Silicon, and macOS Intel. Review the draft and publish it manually
+from GitHub's Releases page.
+
+Each archive contains `pm`, the browser extension, README, and shell
+completions. Draft releases include generated notes, SHA-256 checksums, and
+GitHub build-provenance attestations. Prerelease tags such as
+`v0.2.0-beta.1` are marked as prereleases, but still remain drafts until you
+publish them.
