@@ -5,8 +5,7 @@ use crate::{
     types::*,
     vault::{Vault, VaultAccess, VaultEntry, create_vault, delete_vault, restore_encrypted_backup},
 };
-use rand::Rng;
-use rand::rngs::OsRng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -102,7 +101,7 @@ pub fn is_running() -> bool {
 
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill(&mut bytes);
+    rand::rng().fill(&mut bytes);
     hex::encode(bytes)
 }
 
@@ -149,7 +148,6 @@ pub fn start() {
         let _ = child.wait();
     });
     println!("Server started (PID {})", pid);
-    println!("Session token file: {}", token_path.display());
 }
 
 fn schedule_auto_lock(
@@ -178,7 +176,7 @@ fn schedule_auto_lock(
         }
     });
 }
-pub async fn server() {
+pub async fn server(password_history_limit: usize, trash_retention_days: u64) {
     let token = load_or_create_token();
     let listener = TcpListener::bind(ADDR).await.unwrap();
 
@@ -196,27 +194,45 @@ pub async fn server() {
             _ = kill_rx.recv() => break,
             accepted = listener.accept() => {
                 let (stream, _) = accepted.unwrap();
-                let si = Arc::clone(&server_info);
-                let v = Arc::clone(&vlt);
-                let kt = kill_tx.clone();
-                let tk = token.clone();
-                let lg = Arc::clone(&lock_generation);
-                let timeout = Arc::clone(&inactivity_timeout);
-                tokio::spawn(handle_connection(stream, si, v, kt, tk, lg, timeout));
+                let state = ConnectionState {
+                    server_info: Arc::clone(&server_info),
+                    vlt: Arc::clone(&vlt),
+                    kill_tx: kill_tx.clone(),
+                    token: token.clone(),
+                    lock_generation: Arc::clone(&lock_generation),
+                    inactivity_timeout: Arc::clone(&inactivity_timeout),
+                    password_history_limit,
+                    trash_retention_days,
+                };
+                tokio::spawn(handle_connection(stream, state));
             }
         }
     }
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
+#[derive(Clone)]
+struct ConnectionState {
     server_info: Arc<Mutex<ServerInfo>>,
     vlt: Arc<Mutex<Option<Vault>>>,
     kill_tx: mpsc::Sender<()>,
     token: String,
     lock_generation: Arc<AtomicU64>,
     inactivity_timeout: Arc<AtomicU64>,
-) {
+    password_history_limit: usize,
+    trash_retention_days: u64,
+}
+
+async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
+    let ConnectionState {
+        server_info,
+        vlt,
+        kill_tx,
+        token,
+        lock_generation,
+        inactivity_timeout,
+        password_history_limit,
+        trash_retention_days,
+    } = state;
     let Some((msg, http)) = handler(&mut stream, &token).await else {
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
@@ -285,6 +301,21 @@ async fn handle_connection(
                 server_info.keypass = Some(info.key);
                 match vlt.unlock_vault(&mut server_info) {
                     Ok(()) => {
+                        let expired = if let Some(vault) = vlt.as_mut() {
+                            vault.purge_expired_trash(trash_retention_days, &mut server_info)
+                        } else {
+                            Ok(0)
+                        };
+                        if let Err(error) = expired {
+                            let _ = lock_vlt(&mut vlt, &mut server_info);
+                            respond(
+                                &format!("Unlock failed while applying trash retention: {error}"),
+                                &mut stream,
+                                http,
+                            )
+                            .await;
+                            return;
+                        }
                         inactivity_timeout.store(info.timeout, Ordering::Release);
                         let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
                         schedule_auto_lock(
@@ -377,6 +408,26 @@ async fn handle_connection(
                 }
                 if let Some(p) = pass.as_mut() {
                     p.zeroize();
+                }
+            }
+        }
+        ServerCommand::AddTyped(info) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else {
+                let mut pass = info.entry.copy.then(|| info.entry.password.clone());
+                match vlt.add_typed_entry(info, &mut server_info) {
+                    Ok(true) => {
+                        respond("Item added.", &mut stream, http).await;
+                        if let Some(password) = pass.as_deref() {
+                            copy_in_background(password.to_owned(), 10);
+                        }
+                    }
+                    Ok(false) => respond("Item already exists.", &mut stream, http).await,
+                    Err(error) => respond(&format!("Add failed: {error}"), &mut stream, http).await,
+                }
+                if let Some(password) = pass.as_mut() {
+                    password.zeroize();
                 }
             }
         }
@@ -556,9 +607,9 @@ async fn handle_connection(
                 respond("Vault unavailable.", &mut stream, http).await;
             }
         }
-        ServerCommand::View => {
+        ServerCommand::View(options) => {
             if !server_info.locked {
-                vlt.view_entries(&mut stream, http).await;
+                vlt.view_entries(options, &mut stream, http).await;
             } else {
                 respond("Vault locked.", &mut stream, http).await;
             }
@@ -579,11 +630,35 @@ async fn handle_connection(
                 respond("Vault locked.", &mut stream, http).await;
             }
         }
+        ServerCommand::GetSecret(target) => {
+            if !server_info.locked {
+                vlt.get_secret(target, &mut stream, http).await;
+            } else {
+                respond("Vault locked.", &mut stream, http).await;
+            }
+        }
         ServerCommand::Update(a) => {
             if !server_info.locked {
-                match vlt.update_entry(a, &mut server_info) {
+                match vlt.update_entry_with_limit(a, &mut server_info, password_history_limit) {
                     Ok(true) => respond("Entry updated.", &mut stream, http).await,
                     Ok(false) => respond("Entry not found.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(&format!("Update failed: {error}"), &mut stream, http).await
+                    }
+                }
+            } else {
+                respond("Vault locked.", &mut stream, http).await;
+            }
+        }
+        ServerCommand::UpdateTyped(update) => {
+            if !server_info.locked {
+                match vlt.update_typed_entry_with_limit(
+                    update,
+                    &mut server_info,
+                    password_history_limit,
+                ) {
+                    Ok(true) => respond("Item updated.", &mut stream, http).await,
+                    Ok(false) => respond("Item not found or unchanged.", &mut stream, http).await,
                     Err(error) => {
                         respond(&format!("Update failed: {error}"), &mut stream, http).await
                     }
@@ -661,6 +736,31 @@ async fn handle_connection(
         }
         ServerCommand::Import(args) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
+            if args.new && args.preview {
+                let mut preview_vault = Vault::default();
+                let result = preview_vault.import_with_options(
+                    args.path,
+                    args.conflicts,
+                    true,
+                    args.password_history_limit,
+                    &mut ServerInfo::default(),
+                );
+                match result {
+                    Ok(report) => respond(&report.to_string(), &mut stream, http).await,
+                    Err(error) => {
+                        respond(
+                            &format!("Import preview failed: {error}"),
+                            &mut stream,
+                            http,
+                        )
+                        .await
+                    }
+                }
+                preview_vault.zeroize();
+                let _ = stream.flush().await;
+                let _ = stream.shutdown().await;
+                return;
+            }
             if !server_info.locked
                 && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
             {
@@ -693,18 +793,18 @@ async fn handle_connection(
 
             match error {
                 Some(e) => respond(&format!("Import failed: {}", e), &mut stream, http).await,
-                None => match vlt.import(args.path) {
-                    Ok(()) => match lock_vlt(&mut vlt, &mut server_info) {
-                        Ok(()) => respond("Import finished.", &mut stream, http).await,
-                        Err(error) => {
-                            respond(
-                                &format!("Import could not be saved: {error}"),
-                                &mut stream,
-                                http,
-                            )
-                            .await
-                        }
-                    },
+                None => match vlt.import_with_options(
+                    args.path,
+                    args.conflicts,
+                    args.preview,
+                    args.password_history_limit,
+                    &mut server_info,
+                ) {
+                    Ok(report) => {
+                        vlt.zeroize();
+                        server_info.zeroize();
+                        respond(&report.to_string(), &mut stream, http).await
+                    }
                     Err(e) => {
                         let _ = lock_vlt(&mut vlt, &mut server_info);
                         respond(&format!("Import failed: {e}"), &mut stream, http).await;
@@ -838,7 +938,7 @@ async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerComma
     }
     let mut extra = request.extra_info.into_iter();
     match request.command.as_str() {
-        "view" | "veiw" => Some(ServerCommand::View),
+        "view" | "veiw" => Some(ServerCommand::View(ListOptions::default())),
         "lock" => match extra.next().flatten().as_deref() {
             Some("true") => Some(ServerCommand::Lock(true)),
             Some("false") => Some(ServerCommand::Lock(false)),

@@ -1,9 +1,16 @@
+use crate::types::{ItemKind, ListOptions, SortField};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[derive(Parser, Debug)]
 pub struct Cli {
+    /// Wrap command output in a stable JSON object.
+    #[arg(long, global = true, conflicts_with = "quiet")]
+    pub json: bool,
+    /// Suppress successful command output.
+    #[arg(long, global = true, conflicts_with = "json")]
+    pub quiet: bool,
     #[command(subcommand)]
     pub command: Option<CliCommands>,
 }
@@ -108,10 +115,19 @@ pub enum CliCommands {
         name: String,
         #[arg(long)]
         username: Option<String>,
+        /// Associate one or more URLs with this item. The first is primary.
         #[arg(long)]
-        url: Option<String>,
+        url: Vec<String>,
+        #[arg(long = "type", value_enum, default_value_t = ItemKind::Login)]
+        kind: ItemKind,
         #[arg(long)]
         notes: Option<String>,
+        /// Add a searchable custom field as NAME=VALUE.
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        fields: Vec<String>,
+        /// Prompt privately for the value of this custom field.
+        #[arg(long = "secret-field", value_name = "NAME")]
+        secret_fields: Vec<String>,
         #[arg(long = "generate-password")]
         generate_password: bool,
         #[arg(long)]
@@ -120,17 +136,22 @@ pub enum CliCommands {
         #[arg(long("copy"), default_value_t = false)]
         copy: bool,
     },
-    View,
+    View(ListArgs),
     Search(SearchArgs),
     Update {
         #[command(flatten)]
         add: UpdateArgs,
         #[command(flatten)]
         target: EntryArgs,
+        #[command(flatten)]
+        metadata: MetadataArgs,
     },
     Get {
         #[command(flatten)]
         target: EntryArgs,
+        /// Print only the primary secret, without copying it to the clipboard.
+        #[arg(long)]
+        password_only: bool,
     },
     Import {
         #[arg(long)]
@@ -139,6 +160,12 @@ pub enum CliCommands {
         new: bool,
         #[arg(long = "key")]
         key_path: Option<String>,
+        /// Show import counts and conflicts without changing the vault.
+        #[arg(long)]
+        preview: bool,
+        /// How duplicate name/username/URL records are handled.
+        #[arg(long, value_enum, default_value_t = crate::types::ConflictPolicy::Skip)]
+        conflicts: crate::types::ConflictPolicy,
     },
     Export {
         #[arg(long)]
@@ -205,7 +232,7 @@ pub struct Timeout {
     pub timeout: Option<u64>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct ConfigArgs {
     #[arg(long)]
     pub reset: bool,
@@ -220,6 +247,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     #[arg(value_parser = parse_duration)]
     pub unlock_timeout: Option<u64>,
+    #[arg(long)]
+    pub password_history_limit: Option<usize>,
+    /// Automatically purge trash older than this many days; zero disables it.
+    #[arg(long)]
+    pub trash_retention_days: Option<u64>,
 }
 
 fn parse_duration(value: &str) -> Result<u64, String> {
@@ -262,6 +294,77 @@ pub struct UpdateArgs {
     pub notes: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Args)]
+pub struct MetadataArgs {
+    #[arg(long = "type", value_enum)]
+    pub kind: Option<ItemKind>,
+    /// Add another URL without replacing the primary URL.
+    #[arg(long, conflicts_with = "clear_urls")]
+    pub add_url: Vec<String>,
+    /// Remove a matching primary or additional URL.
+    #[arg(long, conflicts_with = "clear_urls")]
+    pub remove_url: Vec<String>,
+    /// Remove every URL from the item.
+    #[arg(long, conflicts_with_all = ["url", "add_url", "remove_url"])]
+    pub clear_urls: bool,
+    /// Set a searchable custom field as NAME=VALUE.
+    #[arg(
+        long = "field",
+        value_name = "NAME=VALUE",
+        conflicts_with = "clear_fields"
+    )]
+    pub fields: Vec<String>,
+    /// Prompt privately for the value of this custom field.
+    #[arg(
+        long = "secret-field",
+        value_name = "NAME",
+        conflicts_with = "clear_fields"
+    )]
+    pub secret_fields: Vec<String>,
+    #[arg(
+        long = "remove-field",
+        value_name = "NAME",
+        conflicts_with = "clear_fields"
+    )]
+    pub remove_fields: Vec<String>,
+    #[arg(long, conflicts_with_all = ["fields", "secret_fields", "remove_fields"])]
+    pub clear_fields: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ListArgs {
+    #[arg(long = "type", value_enum)]
+    pub kind: Option<ItemKind>,
+    #[arg(long, conflicts_with = "no_totp")]
+    pub totp: bool,
+    #[arg(long, conflicts_with = "totp")]
+    pub no_totp: bool,
+    #[arg(long)]
+    pub weak: bool,
+    #[arg(long, value_enum, default_value_t = SortField::Id)]
+    pub sort: SortField,
+    #[arg(long)]
+    pub descending: bool,
+}
+
+impl From<ListArgs> for ListOptions {
+    fn from(value: ListArgs) -> Self {
+        Self {
+            kind: value.kind,
+            has_totp: if value.totp {
+                Some(true)
+            } else if value.no_totp {
+                Some(false)
+            } else {
+                None
+            },
+            weak: value.weak,
+            sort: value.sort,
+            descending: value.descending,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
     #[arg(
@@ -289,7 +392,7 @@ pub struct PurgeArgs {
 #[derive(Args, Debug)]
 pub struct SearchArgs {
     /// Case-insensitive text matched across name, username, URL, and notes.
-    #[arg(required_unless_present_any = ["name", "username", "url", "notes"])]
+    #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak"])]
     pub query: Option<String>,
     /// Require this text in the entry name.
     #[arg(long)]
@@ -303,6 +406,8 @@ pub struct SearchArgs {
     /// Require this text in the notes.
     #[arg(long)]
     pub notes: Option<String>,
+    #[command(flatten)]
+    pub list: ListArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -349,7 +454,7 @@ mod test {
     fn test_get_by_entry_name_parses() {
         let cli = Cli::try_parse_from(["pm", "get", "--entry-name", "foo"]).unwrap();
         match cli.command {
-            Some(CliCommands::Get { target }) => {
+            Some(CliCommands::Get { target, .. }) => {
                 assert_eq!(target.id, None);
                 assert_eq!(target.entry_name.as_deref(), Some("foo"));
             }
@@ -386,7 +491,7 @@ mod test {
     fn test_get_by_id_parses() {
         let cli = Cli::try_parse_from(["pm", "get", "--id", "3"]).unwrap();
         match cli.command {
-            Some(CliCommands::Get { target }) => {
+            Some(CliCommands::Get { target, .. }) => {
                 assert_eq!(target.id, Some(3));
                 assert_eq!(target.entry_name, None);
             }
@@ -516,6 +621,101 @@ mod test {
             _ => panic!("expected Search command"),
         }
         assert!(Cli::try_parse_from(["pm", "search"]).is_err());
+    }
+
+    #[test]
+    fn typed_items_multiple_urls_and_list_options_parse() {
+        let add = Cli::try_parse_from([
+            "pm",
+            "add",
+            "--name",
+            "Office Wi-Fi",
+            "--type",
+            "wifi",
+            "--url",
+            "https://router.example",
+            "--url",
+            "https://backup-router.example",
+        ])
+        .unwrap();
+        assert!(matches!(
+            add.command,
+            Some(CliCommands::Add {
+                kind: ItemKind::Wifi,
+                url,
+                ..
+            }) if url.len() == 2
+        ));
+
+        let view = Cli::try_parse_from([
+            "pm",
+            "view",
+            "--type",
+            "payment-card",
+            "--sort",
+            "modified",
+            "--descending",
+        ])
+        .unwrap();
+        assert!(matches!(
+            view.command,
+            Some(CliCommands::View(ListArgs {
+                kind: Some(ItemKind::PaymentCard),
+                sort: SortField::Modified,
+                descending: true,
+                ..
+            }))
+        ));
+
+        assert!(Cli::try_parse_from(["pm", "search", "--type", "secure-note"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["pm", "update", "--id", "1", "--url", "a", "--clear-urls"])
+                .is_err()
+        );
+
+        let scripted =
+            Cli::try_parse_from(["pm", "--json", "get", "--id", "2", "--password-only"]).unwrap();
+        assert!(scripted.json);
+        assert!(matches!(
+            scripted.command,
+            Some(CliCommands::Get {
+                password_only: true,
+                ..
+            })
+        ));
+
+        let import = Cli::try_parse_from([
+            "pm",
+            "import",
+            "--path",
+            "vault.csv",
+            "--preview",
+            "--conflicts",
+            "replace",
+        ])
+        .unwrap();
+        assert!(matches!(
+            import.command,
+            Some(CliCommands::Import {
+                preview: true,
+                conflicts: crate::types::ConflictPolicy::Replace,
+                ..
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "pm",
+                "update",
+                "--id",
+                "1",
+                "--field",
+                "environment=production",
+                "--secret-field",
+                "token",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

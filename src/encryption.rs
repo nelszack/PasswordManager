@@ -2,11 +2,9 @@ use crate::file::{data_dir, set_private_perms};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
-    AeadCore, XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit, Payload},
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, Generate, KeyInit, Payload},
 };
-use rand::Rng;
-use rand::rngs::OsRng;
 use std::{
     fs::{self, OpenOptions, read},
     io::Write,
@@ -37,8 +35,7 @@ pub fn prompt_for_password() -> String {
 }
 
 fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
-    let mut key = [0u8; 32];
-    OsRng.fill(&mut key);
+    let key = <[u8; 32]>::generate();
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -143,15 +140,14 @@ fn encryption_master(key_pass: &mut PasswordType, salt: &[u8]) -> Result<[u8; 32
 }
 
 pub fn try_encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    let mut salt = [0u8; SALT_LEN];
-    OsRng.fill(&mut salt);
+    let salt = <[u8; SALT_LEN]>::generate();
     let kdf = match key_pass {
         PasswordType::Password(_) => KDF_ARGON2ID,
         PasswordType::Key(_) => KDF_KEYFILE,
     };
     let enc_key = encryption_key_from_master(&encryption_master(key_pass, &salt)?);
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
     let mut header = Vec::with_capacity(HEADER_LEN);
     header.extend_from_slice(VAULT_MAGIC);
     header.push(VAULT_VERSION);
@@ -186,8 +182,8 @@ fn decrypt_with(
 ) -> Option<Vec<u8>> {
     let enc_key = encryption_key_from_master(&encryption_master(key_pass, salt).ok()?);
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
-    let nonce = XNonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ciphertext).ok()
+    let nonce = XNonce::try_from(nonce_bytes).ok()?;
+    cipher.decrypt(&nonce, ciphertext).ok()
 }
 
 pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
@@ -213,7 +209,7 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
         let salt = &encrypted[22..22 + SALT_LEN];
         let nonce_start = 22 + SALT_LEN;
         let nonce_end = nonce_start + NONCE_LEN;
-        let nonce = XNonce::from_slice(&encrypted[nonce_start..nonce_end]);
+        let nonce = XNonce::try_from(&encrypted[nonce_start..nonce_end]).ok()?;
         let master = match (&*key_pass, kdf) {
             (PasswordType::Password(password), KDF_ARGON2ID) => {
                 master_key_from_password_with_params(
@@ -231,7 +227,7 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
         let cipher = XChaCha20Poly1305::new((&enc_key).into());
         return cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: &encrypted[nonce_end..],
                     aad: &encrypted[..nonce_end],
@@ -350,7 +346,7 @@ mod test {
         let mut pass = PasswordType::Password("test123".into());
         let enc_key = encryption_key_from_master(&master_key_from_password("test123", LEGACY_SALT));
         let cipher = XChaCha20Poly1305::new((&enc_key).into());
-        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = XNonce::generate();
         let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).unwrap();
         let legacy = [nonce.as_slice(), ciphertext.as_slice()].concat();
         let dec = decrypt_file(&mut pass, &legacy).unwrap();

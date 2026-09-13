@@ -1,5 +1,5 @@
 use crate::clipboard::copy_with_timeout;
-use rand::{distributions::Uniform, prelude::*};
+use rand::prelude::*;
 use zxcvbn::{Score, zxcvbn};
 
 pub struct PasswordOptions<'a> {
@@ -59,18 +59,17 @@ pub fn generate_password_with_options(
         return Err("at least one non-empty character class is required".to_string());
     }
     let charset: Vec<u8> = classes.iter().flatten().copied().collect();
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rng();
     let mut password = Vec::with_capacity(len as usize);
 
     if len as usize >= classes.len() {
         for class in &classes {
-            password.push(class[rng.gen_range(0..class.len())]);
+            password.push(class[rng.random_range(0..class.len())]);
         }
     }
 
-    let range = Uniform::from(0..charset.len());
     while password.len() < len as usize {
-        password.push(charset[rng.sample(range)]);
+        password.push(charset[rng.random_range(0..charset.len())]);
     }
     password.shuffle(&mut rng);
     String::from_utf8(password)
@@ -102,13 +101,13 @@ pub fn generate_passphrase(words: u8, separator: &str) -> Result<String, String>
     if separator.contains(['\n', '\r']) {
         return Err("the separator cannot contain a newline".to_string());
     }
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rng();
     Ok((0..words)
         .map(|_| {
             format!(
                 "{}{}",
-                LEFT[rng.gen_range(0..LEFT.len())],
-                RIGHT[rng.gen_range(0..RIGHT.len())]
+                LEFT[rng.random_range(0..LEFT.len())],
+                RIGHT[rng.random_range(0..RIGHT.len())]
             )
         })
         .collect::<Vec<_>>()
