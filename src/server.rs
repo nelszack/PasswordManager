@@ -5,8 +5,7 @@ use crate::{
     types::*,
     vault::{Vault, VaultAccess, VaultEntry, create_vault, delete_vault, restore_encrypted_backup},
 };
-use rand::Rng;
-use rand::rngs::OsRng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -102,7 +101,7 @@ pub fn is_running() -> bool {
 
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill(&mut bytes);
+    rand::rng().fill(&mut bytes);
     hex::encode(bytes)
 }
 
