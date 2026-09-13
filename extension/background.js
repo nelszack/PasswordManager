@@ -176,6 +176,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendAction("getCredentials", { domain: request.domain }, sendResponse);
         return true;
     }
+    if (request.action === "getAutofillItems") {
+        sendAction("getAutofillItems", {}, sendResponse);
+        return true;
+    }
     if (request.action === "getTotp") {
         sendAction("getTotp", { entryId: request.id }, sendResponse);
         return true;

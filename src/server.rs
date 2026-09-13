@@ -614,6 +614,15 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 respond("Vault locked.", &mut stream, http).await;
             }
         }
+        ServerCommand::BrowserAutofill => {
+            if !server_info.locked {
+                if let Some(vault) = vlt.as_ref() {
+                    vault.browser_autofill(&mut stream, http).await;
+                }
+            } else {
+                respond("Vault locked.", &mut stream, http).await;
+            }
+        }
         ServerCommand::Search(filter) => {
             if !server_info.locked {
                 if let Some(vault) = vlt.as_ref() {

@@ -2123,6 +2123,31 @@ impl Vault {
         }
     }
 
+    fn browser_autofill_json(&self) -> String {
+        let items = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let kind = self.item_kind(entry.id);
+                matches!(kind, ItemKind::PaymentCard | ItemKind::Identity).then(|| {
+                    json!({
+                        "id": entry.id,
+                        "name": entry.name,
+                        "kind": kind,
+                        "username": entry.username,
+                        "primary_secret": entry.password,
+                        "custom_fields": self.custom_fields(entry.id),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&items).expect("browser autofill items are serializable")
+    }
+
+    pub async fn browser_autofill(&self, stream: &mut TcpStream, http: bool) {
+        respond(&self.browser_autofill_json(), stream, http).await;
+    }
+
     fn search_entries(&self, filter: &SearchFilter) -> Vec<&VaultEntry> {
         fn field_matches(value: Option<&str>, needle: Option<&str>) -> bool {
             needle.is_none_or(|needle| {
@@ -2812,6 +2837,47 @@ mod test {
             modified: String::from("2026-01-01"),
         }];
         assert!(url_match_json(&entries, &[], &[], "example.com").is_none());
+    }
+
+    #[test]
+    fn browser_autofill_returns_only_cards_and_identities() {
+        let mut vault = recovery_test_vault(vec![
+            recovery_test_entry(1, "login", "login-user", "login-password"),
+            recovery_test_entry(2, "Personal Visa", "Alice Example", "4111111111111111"),
+            recovery_test_entry(3, "Home identity", "alice@example.com", ""),
+        ]);
+        vault.recovery.entry_metadata = vec![
+            EntryMetadata {
+                entry_id: 2,
+                kind: ItemKind::PaymentCard,
+                custom_fields: vec![CustomField {
+                    name: "expiration month".into(),
+                    value: "09".into(),
+                    secret: false,
+                }],
+                ..EntryMetadata::default()
+            },
+            EntryMetadata {
+                entry_id: 3,
+                kind: ItemKind::Identity,
+                custom_fields: vec![CustomField {
+                    name: "city".into(),
+                    value: "Boise".into(),
+                    secret: false,
+                }],
+                ..EntryMetadata::default()
+            },
+        ];
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&vault.browser_autofill_json()).unwrap();
+        let items = parsed.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["kind"], "payment-card");
+        assert_eq!(items[0]["primary_secret"], "4111111111111111");
+        assert_eq!(items[0]["custom_fields"][0]["value"], "09");
+        assert_eq!(items[1]["kind"], "identity");
+        assert!(!vault.browser_autofill_json().contains("login-password"));
     }
 
     #[test]

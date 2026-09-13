@@ -342,6 +342,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             "domain",
             2048,
         )?))),
+        "getAutofillItems" => Ok(ServerCommand::BrowserAutofill),
         "getTotp" => Ok(ServerCommand::Totp(TotpCommand::Show {
             target: Target::Id(
                 request
@@ -484,6 +485,15 @@ mod tests {
 
     #[test]
     fn native_requests_are_whitelisted_and_use_stable_ids() {
+        let mut autofill = NativeRequest {
+            action: "getAutofillItems".into(),
+            ..NativeRequest::default()
+        };
+        assert!(matches!(
+            command_for_request(&mut autofill).unwrap(),
+            ServerCommand::BrowserAutofill
+        ));
+
         let mut request = NativeRequest {
             action: "getTotp".into(),
             entry_id: Some(17),

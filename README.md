@@ -17,7 +17,7 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **Custom Fields**: Searchable fields and privately prompted secret fields
 - **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
 - **TOTP Authenticator**: Encrypted per-entry authenticator secrets with current-code generation
-- **Browser Extension**: Native-messaging bridge, on-page autofill, TOTP, and save/update prompts
+- **Browser Extension**: Login, payment-card, identity, and TOTP autofill with save/update prompts
 - **In-page Password Generation**: Fill new-password and confirmation fields securely
 - **Clipboard Integration**: Secure clipboard with auto-clear timeout
 - **Import/Export**: Interoperable CSV plus versioned, full-fidelity portable JSON
@@ -459,6 +459,28 @@ button beside fields marked `autocomplete="one-time-code"` or clearly labelled
 as OTP/2FA verification fields. Choose the account to fetch and fill a current
 code. Only the generated code and its remaining lifetime are returned to the
 extension; the encrypted TOTP secret never leaves the vault server.
+
+Payment-card and identity fields also receive contextual picker buttons. These
+pickers retrieve matching typed items only when clicked and fill controls in the
+same form. Cardholder/email fall back to the item's `--username`, and the card
+number comes from the card item's primary secret. Other values are read from
+custom fields using common names, for example:
+
+```bash
+pm add --type payment-card --name "Personal Visa" --username "Alice Example" \
+  --field "expiration month=09" --field "expiration year=2030" --secret-field cvv
+
+pm add --type identity --name "Home identity" --username alice@example.com \
+  --field "full name=Alice Example" --field "address line 1=123 Main St" \
+  --field city=Boise --field state=Idaho --field "postal code=83702" \
+  --field country=US --field "phone number=2085550100"
+```
+
+Supported standard browser fields include cardholder name, card number,
+expiration, security code, name components, email, telephone, organization,
+street-address lines, city, state/region, country, and postal code. Select boxes
+are matched using either their option value or visible label. Payment and
+identity secrets are never requested merely because a page loaded.
 
 Credentials are matched to the exact saved hostname by default and are only
 retrieved when the picker is opened or a user-initiated login must be checked.

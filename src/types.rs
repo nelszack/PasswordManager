@@ -15,6 +15,7 @@ pub enum ServerCommand {
     Unlock(UnlockInfo),
     Status,
     View(ListOptions),
+    BrowserAutofill,
     Search(SearchFilter),
     Add(PasswordEntry),
     AddTyped(TypedEntry),
