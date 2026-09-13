@@ -8,9 +8,9 @@ use std::{
 pub const TOKEN_FILE: &str = "session.key";
 
 #[cfg(unix)]
-pub fn set_private_perms(path: &Path) {
+pub fn set_private_perms(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(unix)]
@@ -20,7 +20,9 @@ pub fn set_private_dir_perms(path: &Path) {
 }
 
 #[cfg(not(unix))]
-pub fn set_private_perms(_path: &Path) {}
+pub fn set_private_perms(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 #[cfg(not(unix))]
 pub fn set_private_dir_perms(_path: &Path) {}

@@ -1,4 +1,9 @@
-const SERVER_URL = "http://127.0.0.1:7878";
+const NATIVE_HOST = "com.myproject.password_manager";
+const REQUEST_TIMEOUT_MS = 7000;
+
+let nativePort = null;
+let nextRequestId = 1;
+const pendingRequests = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
     chrome.alarms.create("status-poll", { periodInMinutes: 1 });
@@ -9,20 +14,60 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === "status-poll") refreshStatus();
 });
 
-function loadToken() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get("pmServerToken", (result) => {
-            resolve(result.pmServerToken || "");
-        });
+function closeNativePort(error) {
+    const message = error || "Native messaging host disconnected";
+    for (const pending of pendingRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(message));
+    }
+    pendingRequests.clear();
+    nativePort = null;
+}
+
+function connectNativeHost() {
+    if (nativePort) return nativePort;
+
+    const port = chrome.runtime.connectNative(NATIVE_HOST);
+    nativePort = port;
+    port.onMessage.addListener((response) => {
+        const pending = pendingRequests.get(response?.id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pendingRequests.delete(response.id);
+        pending.resolve(response);
+    });
+    port.onDisconnect.addListener(() => {
+        const error = chrome.runtime.lastError?.message;
+        if (nativePort === port) closeNativePort(error);
+    });
+    return port;
+}
+
+function nativeRequest(action, fields = {}) {
+    return new Promise((resolve, reject) => {
+        const id = nextRequestId++;
+        const timer = setTimeout(() => {
+            pendingRequests.delete(id);
+            reject(new Error("Native messaging request timed out"));
+        }, REQUEST_TIMEOUT_MS);
+        pendingRequests.set(id, { resolve, reject, timer });
+
+        try {
+            connectNativeHost().postMessage({ id, action, ...fields });
+        } catch (error) {
+            clearTimeout(timer);
+            pendingRequests.delete(id);
+            reject(error);
+        }
     });
 }
 
 function setBadge(status) {
     let text, color, title;
-    if (!status.token) {
+    if (!status.native) {
         text = "?";
         color = "#f59e0b";
-        title = "Password Manager: set the session token in the popup";
+        title = "Password Manager: native messaging host not installed";
     } else if (!status.running) {
         text = "N";
         color = "#6b7280";
@@ -41,103 +86,87 @@ function setBadge(status) {
     chrome.action.setTitle({ title });
 }
 
+async function serverStatus() {
+    try {
+        const response = await nativeRequest("status");
+        if (!response.success) {
+            return { native: true, running: false, locked: false, error: response.error };
+        }
+        return {
+            native: true,
+            running: true,
+            locked: /\blocked\b/i.test(String(response.data))
+        };
+    } catch (error) {
+        return { native: false, running: false, locked: false, error: error.message };
+    }
+}
+
 async function refreshStatus() {
     const status = await serverStatus();
     setBadge(status);
     return status;
 }
 
-async function serverStatus() {
-    const token = await loadToken();
-    if (!token) {
-        return { running: false, locked: false, token: false };
-    }
-    try {
-        const res = await fetch(SERVER_URL, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
-            },
-            body: JSON.stringify({ command: "status", extra_info: [] })
-        });
-        if (res.status === 401) {
-            return { running: true, locked: false, token: false };
-        }
-        if (!res.ok) {
-            return { running: false, locked: false, token: true };
-        }
-        const text = await res.text();
-        return { running: true, locked: /\blocked\b/i.test(text), token: true };
-    } catch (err) {
-        return { running: false, locked: false, token: true };
-    }
-}
-
-async function post(command, extra_info) {
-    const token = await loadToken();
-    if (!token) {
-        return { error: "missing-token" };
-    }
-    const res = await fetch(SERVER_URL, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token
-        },
-        body: JSON.stringify({ command, extra_info })
-    });
-    if (!res.ok) {
-        return { error: res.status === 401 ? "invalid-token" : `server-error-${res.status}` };
-    }
-    return { res };
+function sendAction(action, fields, sendResponse) {
+    nativeRequest(action, fields)
+        .then(response => sendResponse(response.success
+            ? { success: true, data: response.data }
+            : { success: false, error: response.error }))
+        .catch(error => sendResponse({ success: false, error: error.message }));
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getStatus") {
         refreshStatus()
             .then(sendResponse)
-            .catch(() => sendResponse({ running: false, locked: false, token: false }));
+            .catch(error => sendResponse({
+                native: false,
+                running: false,
+                locked: false,
+                error: error.message
+            }));
         return true;
     }
     if (request.action === "getCredentials") {
-        post("get", [request.domain])
-            .then(({ res, error }) => {
-                if (error) return sendResponse({ success: false, error });
-                return res.json().then(data => sendResponse({ success: true, data }));
-            })
-            .catch(err => sendResponse({ success: false, error: err.toString() }));
+        sendAction("getCredentials", { domain: request.domain }, sendResponse);
+        return true;
+    }
+    if (request.action === "getTotp") {
+        sendAction("getTotp", { entryId: request.id }, sendResponse);
         return true;
     }
     if (request.action === "saveCredentials") {
-        post("add", [request.domain, request.username, request.password, request.name])
-            .then(({ res, error }) => {
-                if (error) return sendResponse({ success: false, error });
-                return res.text().then(data => sendResponse({ success: true, data }));
-            })
-            .catch(err => sendResponse({ success: false, error: err.toString() }));
+        sendAction("saveCredentials", {
+            domain: request.domain,
+            username: request.username,
+            password: request.password,
+            name: request.name
+        }, sendResponse);
         return true;
     }
-
     if (request.action === "updateCredentials") {
-        post("update", [request.domain, request.username, request.password, request.name, request.id])
-            .then(({ res, error }) => {
-                if (error) return sendResponse({ success: false, error });
-                return res.text().then(data => sendResponse({ success: true, data }));
-            })
-            .catch(err => sendResponse({ success: false, error: err.toString() }));
+        sendAction("updateCredentials", {
+            domain: request.domain,
+            username: request.username,
+            password: request.password,
+            name: request.name,
+            entryId: request.id
+        }, sendResponse);
         return true;
     }
-
+    if (request.action === "lockVault") {
+        sendAction("lock", {}, sendResponse);
+        return true;
+    }
     if (request.action === "relayToParent") {
         const tabId = sender.tab?.id;
         const frameId = sender.frameId;
         if (tabId != null && frameId != null) {
             chrome.tabs.get(tabId, (tab) => {
                 if (chrome.runtime.lastError || !tab) return;
-                const topFrameId = 0;
-                if (frameId !== topFrameId) {
-                    chrome.tabs.sendMessage(tabId, request.data, { frameId: topFrameId });
+                if (frameId !== 0) {
+                    chrome.tabs.sendMessage(tabId, request.data, { frameId: 0 });
                 }
             });
         }

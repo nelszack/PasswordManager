@@ -4,21 +4,27 @@ mod clipboard;
 mod config;
 mod encryption;
 mod file;
+mod native_messaging;
 mod password;
 mod server;
 mod types;
 mod vault;
 use crate::{
-    cli::{Cli, CliCommands, DeleteArgs, EntryArgs, cli_parse},
+    cli::{
+        BackupCommands, Cli, CliCommands, DeleteArgs, EntryArgs, NativeHostCommands, TotpCommands,
+        cli_parse,
+    },
     client::send_command,
     config::{read_config, update},
     encryption::prompt_for_password,
     password::{
-        generate_and_print_password, generate_password as make_password, print_password_strength,
+        PasswordOptions, generate_passphrase, generate_password as make_password,
+        generate_password_with_options, print_generated_password, print_password_strength,
     },
     server::{is_running, server, start},
     types::{
-        EntryUpdate, ImportRequest, PasswordEntry, PasswordType, ServerCommand, Target, UnlockInfo,
+        BackupRequest, EntryUpdate, ImportRequest, PasswordEntry, PasswordType, SearchFilter,
+        ServerCommand, Target, TotpCommand, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -52,6 +58,12 @@ impl io::Write for SilentPipe {
 
 #[tokio::main]
 async fn main() {
+    if native_messaging::invoked_directly() {
+        if let Err(error) = native_messaging::run() {
+            eprintln!("Native messaging host error: {error}");
+        }
+        return;
+    }
     let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
     let config_path = proj_dir.config_dir();
     let data_path = proj_dir.data_dir();
@@ -75,22 +87,57 @@ async fn main() {
                 copy,
                 no_copy,
                 copy_time,
+                no_uppercase,
+                no_lowercase,
+                no_digits,
+                no_symbols,
+                symbols,
+                exclude_ambiguous,
+                passphrase,
+                words,
+                separator,
             },
             _,
-        ) => generate_and_print_password(
-            length.unwrap_or(conf.genpass.length),
-            if !stats && !no_stats {
+        ) => {
+            let show_stats = if !stats && !no_stats {
                 conf.genpass.stats
             } else {
                 stats
-            },
-            if !copy && !no_copy {
+            };
+            let should_copy = if !copy && !no_copy {
                 conf.genpass.copy
             } else {
                 copy
-            },
-            copy_time.unwrap_or(conf.clipboard.timeout),
-        ),
+            };
+            let generated = if passphrase {
+                generate_passphrase(words, &separator)
+            } else {
+                let symbol_set = if no_symbols {
+                    None
+                } else {
+                    Some(symbols.as_deref().unwrap_or("!@#$%^&*-_=+"))
+                };
+                generate_password_with_options(
+                    length.unwrap_or(conf.genpass.length),
+                    &PasswordOptions {
+                        uppercase: !no_uppercase,
+                        lowercase: !no_lowercase,
+                        digits: !no_digits,
+                        symbols: symbol_set,
+                        exclude_ambiguous,
+                    },
+                )
+            };
+            match generated {
+                Ok(password) => print_generated_password(
+                    password,
+                    show_stats,
+                    should_copy,
+                    copy_time.unwrap_or(conf.clipboard.timeout),
+                ),
+                Err(error) => eprintln!("Error: {error}"),
+            }
+        }
         (CliCommands::Passcheck { password }, _) => print_password_strength(&password),
         (CliCommands::Completions { shell, output }, _) => {
             let mut cmd = Cli::command();
@@ -102,6 +149,20 @@ async fn main() {
                 println!("Completions written to {}", output.display());
             }
         }
+        (CliCommands::NativeHost { command }, _) => match command {
+            NativeHostCommands::Install {
+                extension_id,
+                browser,
+            } => match native_messaging::install(&extension_id, browser) {
+                Ok(path) => println!("Native messaging host installed at {}", path.display()),
+                Err(error) => eprintln!("Error: {error}"),
+            },
+            NativeHostCommands::Run => {
+                if let Err(error) = native_messaging::run() {
+                    eprintln!("Native messaging host error: {error}");
+                }
+            }
+        },
         (CliCommands::Config(command), _) => update(conf, command, &config_file),
         (CliCommands::Lock, true) => {
             send_command(ServerCommand::Lock(true));
@@ -130,6 +191,13 @@ async fn main() {
         (CliCommands::Run, true) => println!("Server is already running."),
         (CliCommands::New { key_path }, true) => {
             send_command(ServerCommand::New(if let Some(kp) = key_path {
+                PasswordType::Key(kp)
+            } else {
+                PasswordType::Password(prompt_for_password())
+            }));
+        }
+        (CliCommands::Rekey { key_path }, true) => {
+            send_command(ServerCommand::Rekey(if let Some(kp) = key_path {
                 PasswordType::Key(kp)
             } else {
                 PasswordType::Password(prompt_for_password())
@@ -191,6 +259,93 @@ async fn main() {
         (CliCommands::View, true) => {
             send_command(ServerCommand::View);
         }
+        (CliCommands::Search(args), true) => {
+            send_command(ServerCommand::Search(SearchFilter {
+                query: args.query,
+                name: args.name,
+                username: args.username,
+                url: args.url,
+                notes: args.notes,
+            }));
+        }
+        (CliCommands::History { target }, true) => {
+            send_command(ServerCommand::History(target_type(target)));
+        }
+        (CliCommands::RestorePassword { target, revision }, true) => {
+            send_command(ServerCommand::RestorePassword {
+                target: target_type(target),
+                revision,
+            });
+        }
+        (CliCommands::Trash, true) => {
+            send_command(ServerCommand::Trash);
+        }
+        (CliCommands::Restore { id }, true) => {
+            send_command(ServerCommand::RestoreTrash(id));
+        }
+        (CliCommands::Purge(args), true) => {
+            send_command(ServerCommand::PurgeTrash(args.id));
+        }
+        (CliCommands::Audit, true) => {
+            send_command(ServerCommand::Audit);
+        }
+        (CliCommands::Totp { command }, true) => match command {
+            TotpCommands::Set { target } => {
+                match rpassword::prompt_password("TOTP Base32 secret or otpauth URI: ") {
+                    Ok(configuration) => send_command(ServerCommand::Totp(TotpCommand::Set {
+                        target: target_type(target),
+                        configuration,
+                    })),
+                    Err(error) => eprintln!("Could not read TOTP configuration: {error}"),
+                }
+            }
+            TotpCommands::Show {
+                target,
+                copy,
+                copy_time,
+            } => send_command(ServerCommand::Totp(TotpCommand::Show {
+                target: target_type(target),
+                copy_timeout: copy.then_some(copy_time.unwrap_or(conf.clipboard.timeout)),
+            })),
+            TotpCommands::Remove { target } => {
+                send_command(ServerCommand::Totp(TotpCommand::Remove {
+                    target: target_type(target),
+                }));
+            }
+        },
+        (CliCommands::Backup { command }, true) => match command {
+            BackupCommands::Create {
+                path,
+                key_path,
+                force,
+            } => send_command(ServerCommand::Backup(BackupRequest {
+                path,
+                key_pass: key_path.map_or_else(
+                    || PasswordType::Password(prompt_for_password()),
+                    PasswordType::Key,
+                ),
+                force,
+            })),
+            BackupCommands::Restore {
+                path,
+                key_path,
+                force,
+            } => {
+                let key_pass = key_path.map_or_else(
+                    || {
+                        PasswordType::Password(
+                            rpassword::prompt_password("Backup password: ").unwrap(),
+                        )
+                    },
+                    PasswordType::Key,
+                );
+                send_command(ServerCommand::RestoreBackup(BackupRequest {
+                    path,
+                    key_pass,
+                    force,
+                }));
+            }
+        },
         (CliCommands::Update { add, target }, true) => {
             send_command(ServerCommand::Update(EntryUpdate {
                 target: target_type(target),

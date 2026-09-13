@@ -2,37 +2,120 @@ use crate::clipboard::copy_with_timeout;
 use rand::{distributions::Uniform, prelude::*};
 use zxcvbn::{Score, zxcvbn};
 
+pub struct PasswordOptions<'a> {
+    pub uppercase: bool,
+    pub lowercase: bool,
+    pub digits: bool,
+    pub symbols: Option<&'a str>,
+    pub exclude_ambiguous: bool,
+}
+
+impl Default for PasswordOptions<'_> {
+    fn default() -> Self {
+        Self {
+            uppercase: true,
+            lowercase: true,
+            digits: true,
+            symbols: Some("!@#$%^&*-_=+"),
+            exclude_ambiguous: false,
+        }
+    }
+}
+
 pub fn generate_password(len: u8) -> String {
-    const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-    const DIGITS: &[u8] = b"0123456789";
-    const SPECIAL: &[u8] = b"!@#$%^&*-_=+";
-    const CHARSET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+";
+    generate_password_with_options(len, &PasswordOptions::default())
+        .expect("the default character set is not empty")
+}
+
+pub fn generate_password_with_options(
+    len: u8,
+    options: &PasswordOptions<'_>,
+) -> Result<String, String> {
+    const UPPERCASE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
+    const DIGITS: &str = "0123456789";
+    const AMBIGUOUS: &str = "Il1O0o|`'\"";
+    if options.symbols.is_some_and(|symbols| !symbols.is_ascii()) {
+        return Err("symbols must contain ASCII characters only".to_string());
+    }
+    let mut classes = Vec::new();
+    for (enabled, characters) in [
+        (options.uppercase, UPPERCASE),
+        (options.lowercase, LOWERCASE),
+        (options.digits, DIGITS),
+        (options.symbols.is_some(), options.symbols.unwrap_or("")),
+    ] {
+        if enabled {
+            let class: Vec<u8> = characters
+                .bytes()
+                .filter(|byte| !options.exclude_ambiguous || !AMBIGUOUS.as_bytes().contains(byte))
+                .collect();
+            if !class.is_empty() {
+                classes.push(class);
+            }
+        }
+    }
+    if classes.is_empty() {
+        return Err("at least one non-empty character class is required".to_string());
+    }
+    let charset: Vec<u8> = classes.iter().flatten().copied().collect();
     let mut rng = rand::rngs::OsRng;
     let mut password = Vec::with_capacity(len as usize);
 
-    // At practical password lengths, guarantee every major character class
-    // instead of merely hoping random sampling includes each one.
-    if len >= 4 {
-        for class in [UPPERCASE, LOWERCASE, DIGITS, SPECIAL] {
+    if len as usize >= classes.len() {
+        for class in &classes {
             password.push(class[rng.gen_range(0..class.len())]);
         }
     }
 
-    let range = Uniform::from(0..CHARSET.len());
+    let range = Uniform::from(0..charset.len());
     while password.len() < len as usize {
-        password.push(CHARSET[rng.sample(range)]);
+        password.push(charset[rng.sample(range)]);
     }
     password.shuffle(&mut rng);
-    String::from_utf8(password).expect("password character set is ASCII")
+    String::from_utf8(password)
+        .map_err(|_| "symbols must contain ASCII characters only".to_string())
 }
 
-pub fn generate_and_print_password(len: u8, stats: bool, copy: bool, copy_time: u8) {
-    if len < 12 {
-        println!("Tip: for better security, use a password length of at least 12.")
+pub fn generate_passphrase(words: u8, separator: &str) -> Result<String, String> {
+    const LEFT: &[&str] = &[
+        "amber", "ancient", "autumn", "bold", "bright", "calm", "cedar", "cinder", "clear",
+        "cloud", "cobalt", "coral", "crisp", "dawn", "deep", "ember", "fable", "fair", "fern",
+        "frost", "gentle", "gold", "grand", "green", "harbor", "hidden", "indigo", "iron", "ivory",
+        "jade", "keen", "lively", "lunar", "maple", "merry", "misty", "noble", "north", "ocean",
+        "olive", "opal", "quiet", "rapid", "red", "river", "royal", "sage", "silver", "solar",
+        "solid", "spring", "stone", "swift", "tender", "tidal", "true", "velvet", "vivid", "warm",
+        "wild", "winter", "wise", "young", "zenith",
+    ];
+    const RIGHT: &[&str] = &[
+        "acorn", "badger", "beacon", "birch", "brook", "canyon", "castle", "comet", "crane",
+        "creek", "dolphin", "eagle", "falcon", "field", "finch", "forest", "fox", "garden",
+        "glade", "grove", "heron", "hill", "island", "lake", "lantern", "lark", "leaf", "meadow",
+        "moon", "oak", "otter", "owl", "panda", "peak", "pine", "planet", "quartz", "raven",
+        "reef", "ridge", "robin", "sail", "shore", "sparrow", "star", "summit", "sun", "tiger",
+        "trail", "tree", "valley", "violet", "wave", "willow", "wind", "wolf", "wren", "yard",
+        "zephyr", "harvest", "isle", "orchard", "prairie", "rain",
+    ];
+    if words == 0 {
+        return Err("passphrases require at least one word".to_string());
     }
-    let pass = generate_password(len);
+    if separator.contains(['\n', '\r']) {
+        return Err("the separator cannot contain a newline".to_string());
+    }
+    let mut rng = rand::rngs::OsRng;
+    Ok((0..words)
+        .map(|_| {
+            format!(
+                "{}{}",
+                LEFT[rng.gen_range(0..LEFT.len())],
+                RIGHT[rng.gen_range(0..RIGHT.len())]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(separator))
+}
+
+pub fn print_generated_password(pass: String, stats: bool, copy: bool, copy_time: u8) {
     println!("Password: {}", pass);
     if stats {
         print_password_strength(&pass);
@@ -214,6 +297,31 @@ mod test {
             pass.is_ascii(),
             "Password should only contain ASCII characters"
         );
+    }
+
+    #[test]
+    fn test_custom_character_classes_and_ambiguous_filter() {
+        let password = generate_password_with_options(
+            100,
+            &PasswordOptions {
+                uppercase: false,
+                lowercase: false,
+                digits: true,
+                symbols: None,
+                exclude_ambiguous: true,
+            },
+        )
+        .unwrap();
+        assert!(password.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(!password.contains('0'));
+        assert!(!password.contains('1'));
+    }
+
+    #[test]
+    fn test_passphrase_word_count_and_separator() {
+        let phrase = generate_passphrase(6, ".").unwrap();
+        assert_eq!(phrase.split('.').count(), 6);
+        assert!(generate_passphrase(0, "-").is_err());
     }
 
     #[test]
