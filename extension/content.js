@@ -174,6 +174,20 @@ function fetchAccounts(domain) {
     });
 }
 
+function fetchTotp(id) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ action: "getTotp", id }, (response) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+            } else if (!response?.success) {
+                reject(new Error(response?.error || "TOTP unavailable"));
+            } else {
+                resolve(response.data);
+            }
+        });
+    });
+}
+
 function accountUsername(account) {
     return account.username && account.username !== "None" ? account.username : "";
 }
@@ -338,12 +352,153 @@ function createDropdownButton(input, accounts) {
     });
 }
 
+function createTotpButton(input, accounts) {
+    if (input.dataset.hasTotpDropdown) return;
+    input.dataset.hasTotpDropdown = "true";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.innerText = "🔐";
+    button.setAttribute("aria-label", "Fill authenticator code");
+    button.title = "Fill authenticator code";
+    Object.assign(button.style, {
+        position: "fixed",
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        fontSize: "16px",
+        zIndex: "2147483647",
+        padding: "0",
+        margin: "0",
+        display: "none"
+    });
+    document.body.appendChild(button);
+
+    const menu = document.createElement("div");
+    Object.assign(menu.style, {
+        position: "fixed",
+        background: "#fff",
+        color: "#000",
+        border: "1px solid #ccc",
+        display: "none",
+        zIndex: "2147483647",
+        minWidth: "210px",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+        fontFamily: "Arial, sans-serif",
+        fontSize: "14px",
+        textAlign: "left"
+    });
+    document.body.appendChild(menu);
+
+    function positionButton() {
+        if (!isElementVisible(input)) {
+            button.style.display = "none";
+            menu.style.display = "none";
+            return;
+        }
+        const rect = input.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+            button.style.display = "none";
+            menu.style.display = "none";
+            return;
+        }
+        button.style.display = "";
+        button.style.left = rect.right - 24 + "px";
+        button.style.top = rect.top + rect.height / 2 - 14 + "px";
+    }
+
+    function positionMenu() {
+        menu.style.display = "block";
+        menu.style.visibility = "hidden";
+        const rect = button.getBoundingClientRect();
+        const menuWidth = menu.offsetWidth;
+        const menuHeight = menu.offsetHeight;
+        const left = Math.min(rect.left, Math.max(4, window.innerWidth - menuWidth - 4));
+        let top = rect.bottom;
+        if (top + menuHeight > window.innerHeight - 4) top = rect.top - menuHeight;
+        menu.style.left = Math.max(4, left) + "px";
+        menu.style.top = Math.max(4, top) + "px";
+        menu.style.visibility = "";
+    }
+
+    function buildMenuItems(accountList) {
+        menu.innerHTML = "";
+        const totpAccounts = (accountList || []).filter(account => account.has_totp);
+        if (totpAccounts.length === 0) {
+            const empty = document.createElement("div");
+            empty.innerText = "No authenticator configured for this site";
+            Object.assign(empty.style, { padding: "8px 12px", color: "#666", fontStyle: "italic" });
+            menu.appendChild(empty);
+            return;
+        }
+
+        totpAccounts.forEach(account => {
+            const item = document.createElement("button");
+            item.type = "button";
+            item.innerText = accountUsername(account) || account.name || "(no username)";
+            Object.assign(item.style, {
+                display: "block",
+                width: "100%",
+                padding: "8px 12px",
+                border: "none",
+                cursor: "pointer",
+                color: "#000",
+                background: "#fff",
+                textAlign: "left"
+            });
+            item.addEventListener("mouseenter", () => { item.style.background = "#eee"; });
+            item.addEventListener("mouseleave", () => { item.style.background = "#fff"; });
+            item.addEventListener("click", async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                item.disabled = true;
+                item.innerText = "Generating code…";
+                try {
+                    const totp = await fetchTotp(account.id);
+                    fillInput(input, totp.code);
+                    input.focus();
+                    button.title = `Authenticator code filled (${totp.expires_in}s remaining)`;
+                    menu.style.display = "none";
+                } catch (error) {
+                    item.innerText = "Could not get code — try again";
+                    item.title = error.message;
+                    item.disabled = false;
+                }
+            });
+            menu.appendChild(item);
+        });
+    }
+
+    buildMenuItems(accounts);
+    positionButton();
+    dropdownRegistry.push({ position: positionButton });
+    startLayoutObserver();
+
+    button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        positionButton();
+        if (menu.style.display === "block") {
+            menu.style.display = "none";
+            return;
+        }
+        const fresh = await fetchAccounts(window.location.hostname);
+        buildMenuItems(fresh);
+        positionMenu();
+    });
+
+    document.addEventListener("click", event => {
+        if (!menu.contains(event.target) && event.target !== button) menu.style.display = "none";
+    });
+}
+
 // ===============================
 // Only treat inputs as credential fields when
 // they look like a username or password
 // ===============================
 const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth/i;
 const SEARCH_HINT_RE = /search|query|lookup|find/i;
+const TOTP_HINT_RE = /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
 const USERNAME_INPUT_TYPES = new Set(["text", "email", "tel"]);
 
 function inputDescriptors(input) {
@@ -367,6 +522,13 @@ function hasSearchHint(input) {
     return input.type === "search"
         || input.getAttribute("role") === "searchbox"
         || inputDescriptors(input).some(value => SEARCH_HINT_RE.test(value));
+}
+
+function isTotpInput(input) {
+    if (!isUsableInput(input)) return false;
+    if (autocompleteTokens(input).includes("one-time-code")) return true;
+    if (!["text", "tel", "number"].includes(input.type)) return false;
+    return inputDescriptors(input).some(value => TOTP_HINT_RE.test(value));
 }
 
 // Some login pages use an unlabelled text box for the username. In that case,
@@ -409,6 +571,9 @@ function attachToInputs(accounts) {
         if (input.classList.contains("my-extension-ui")) return;
         if (isCredentialInput(input)) {
             createDropdownButton(input, accounts);
+        }
+        if (isTotpInput(input)) {
+            createTotpButton(input, accounts);
         }
     });
 }

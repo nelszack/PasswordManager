@@ -4,12 +4,13 @@ mod clipboard;
 mod config;
 mod encryption;
 mod file;
+mod native_messaging;
 mod password;
 mod server;
 mod types;
 mod vault;
 use crate::{
-    cli::{Cli, CliCommands, DeleteArgs, EntryArgs, cli_parse},
+    cli::{Cli, CliCommands, DeleteArgs, EntryArgs, NativeHostCommands, TotpCommands, cli_parse},
     client::send_command,
     config::{read_config, update},
     encryption::prompt_for_password,
@@ -20,7 +21,7 @@ use crate::{
     server::{is_running, server, start},
     types::{
         EntryUpdate, ImportRequest, PasswordEntry, PasswordType, SearchFilter, ServerCommand,
-        Target, UnlockInfo,
+        Target, TotpCommand, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -54,6 +55,12 @@ impl io::Write for SilentPipe {
 
 #[tokio::main]
 async fn main() {
+    if native_messaging::invoked_directly() {
+        if let Err(error) = native_messaging::run() {
+            eprintln!("Native messaging host error: {error}");
+        }
+        return;
+    }
     let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
     let config_path = proj_dir.config_dir();
     let data_path = proj_dir.data_dir();
@@ -139,6 +146,20 @@ async fn main() {
                 println!("Completions written to {}", output.display());
             }
         }
+        (CliCommands::NativeHost { command }, _) => match command {
+            NativeHostCommands::Install {
+                extension_id,
+                browser,
+            } => match native_messaging::install(&extension_id, browser) {
+                Ok(path) => println!("Native messaging host installed at {}", path.display()),
+                Err(error) => eprintln!("Error: {error}"),
+            },
+            NativeHostCommands::Run => {
+                if let Err(error) = native_messaging::run() {
+                    eprintln!("Native messaging host error: {error}");
+                }
+            }
+        },
         (CliCommands::Config(command), _) => update(conf, command, &config_file),
         (CliCommands::Lock, true) => {
             send_command(ServerCommand::Lock(true));
@@ -265,6 +286,30 @@ async fn main() {
         (CliCommands::Audit, true) => {
             send_command(ServerCommand::Audit);
         }
+        (CliCommands::Totp { command }, true) => match command {
+            TotpCommands::Set { target } => {
+                match rpassword::prompt_password("TOTP Base32 secret or otpauth URI: ") {
+                    Ok(configuration) => send_command(ServerCommand::Totp(TotpCommand::Set {
+                        target: target_type(target),
+                        configuration,
+                    })),
+                    Err(error) => eprintln!("Could not read TOTP configuration: {error}"),
+                }
+            }
+            TotpCommands::Show {
+                target,
+                copy,
+                copy_time,
+            } => send_command(ServerCommand::Totp(TotpCommand::Show {
+                target: target_type(target),
+                copy_timeout: copy.then_some(copy_time.unwrap_or(conf.clipboard.timeout)),
+            })),
+            TotpCommands::Remove { target } => {
+                send_command(ServerCommand::Totp(TotpCommand::Remove {
+                    target: target_type(target),
+                }));
+            }
+        },
         (CliCommands::Update { add, target }, true) => {
             send_command(ServerCommand::Update(EntryUpdate {
                 target: target_type(target),

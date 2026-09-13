@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,6 +61,11 @@ pub enum CliCommands {
     Start,
     #[command(hide = true)]
     Run,
+    /// Install or run the browser native-messaging bridge.
+    NativeHost {
+        #[command(subcommand)]
+        command: NativeHostCommands,
+    },
     Kill,
     Delete(DeleteArgs),
     History {
@@ -80,6 +85,10 @@ pub enum CliCommands {
     },
     Purge(PurgeArgs),
     Audit,
+    Totp {
+        #[command(subcommand)]
+        command: TotpCommands,
+    },
     New {
         #[arg(long = "key")]
         key_path: Option<String>,
@@ -136,6 +145,27 @@ pub enum CliCommands {
         #[arg(long, default_value = "-")]
         output: PathBuf,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NativeHostCommands {
+    /// Register the native host for an unpacked Chrome-family extension.
+    Install {
+        /// The 32-character ID shown for the extension on chrome://extensions.
+        #[arg(long)]
+        extension_id: String,
+        #[arg(long, value_enum, default_value_t = NativeBrowser::Chrome)]
+        browser: NativeBrowser,
+    },
+    #[command(hide = true)]
+    Run,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum NativeBrowser {
+    Chrome,
+    Chromium,
+    Helium,
 }
 
 #[derive(Args, Debug)]
@@ -242,6 +272,29 @@ pub struct SearchArgs {
     /// Require this text in the notes.
     #[arg(long)]
     pub notes: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TotpCommands {
+    /// Store a Base32 secret or otpauth URI using a hidden prompt.
+    Set {
+        #[command(flatten)]
+        target: EntryArgs,
+    },
+    /// Generate the current authentication code.
+    Show {
+        #[command(flatten)]
+        target: EntryArgs,
+        #[arg(long)]
+        copy: bool,
+        #[arg(long, requires = "copy")]
+        copy_time: Option<u8>,
+    },
+    /// Remove the authenticator configuration from an entry.
+    Remove {
+        #[command(flatten)]
+        target: EntryArgs,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -351,6 +404,29 @@ mod test {
     }
 
     #[test]
+    fn test_native_host_install_parses() {
+        let cli = Cli::try_parse_from([
+            "pm",
+            "native-host",
+            "install",
+            "--extension-id",
+            "abcdefghijklmnopabcdefghijklmnop",
+            "--browser",
+            "chromium",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommands::NativeHost {
+                command: NativeHostCommands::Install {
+                    browser: NativeBrowser::Chromium,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
     fn test_human_duration_parses() {
         assert_eq!(parse_duration("90").unwrap(), 90);
         assert_eq!(parse_duration("15m").unwrap(), 900);
@@ -370,5 +446,42 @@ mod test {
             _ => panic!("expected Search command"),
         }
         assert!(Cli::try_parse_from(["pm", "search"]).is_err());
+    }
+
+    #[test]
+    fn test_totp_commands_parse() {
+        let set = Cli::try_parse_from(["pm", "totp", "set", "--id", "7"]).unwrap();
+        assert!(matches!(
+            set.command,
+            Some(CliCommands::Totp {
+                command: TotpCommands::Set { .. }
+            })
+        ));
+
+        let show = Cli::try_parse_from([
+            "pm",
+            "totp",
+            "show",
+            "--entry-name",
+            "github",
+            "--copy",
+            "--copy-time",
+            "20",
+        ])
+        .unwrap();
+        assert!(matches!(
+            show.command,
+            Some(CliCommands::Totp {
+                command: TotpCommands::Show {
+                    copy: true,
+                    copy_time: Some(20),
+                    ..
+                }
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from(["pm", "totp", "show", "--id", "7", "--copy-time", "20"]).is_err()
+        );
     }
 }

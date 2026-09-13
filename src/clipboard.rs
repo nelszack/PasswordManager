@@ -1,5 +1,6 @@
 use arboard::Clipboard;
 use std::{io::Write, thread, time::Duration};
+use zeroize::Zeroize;
 
 pub fn copy_with_timeout(secret: &str, timeout: u8) -> Result<(), String> {
     if timeout == 0 {
@@ -10,7 +11,7 @@ pub fn copy_with_timeout(secret: &str, timeout: u8) -> Result<(), String> {
         .set_text(secret)
         .map_err(|e| format!("could not copy password: {e}"))?;
     println!("Copied to clipboard.");
-    let secret = secret.to_owned();
+    let mut secret = secret.to_owned();
     let size = (timeout.ilog10() as usize) + 1;
     let t = thread::spawn(move || {
         thread::sleep(Duration::from_secs(timeout as u64));
@@ -21,6 +22,7 @@ pub fn copy_with_timeout(secret: &str, timeout: u8) -> Result<(), String> {
             let add_size = size + 22;
             println!("\rClipboard cleared.{:add_size$}", "")
         }
+        secret.zeroize();
     });
     for i in (1..=timeout).rev() {
         print!("\rClearing clipboard in {:>size$}s", i);
@@ -33,14 +35,16 @@ pub fn copy_with_timeout(secret: &str, timeout: u8) -> Result<(), String> {
 }
 
 /// Copy without blocking the server while the clipboard timeout counts down.
-pub fn copy_in_background(secret: String, timeout: u8) {
+pub fn copy_in_background(mut secret: String, timeout: u8) {
     if timeout == 0 {
+        secret.zeroize();
         return;
     }
     thread::spawn(move || {
         if let Err(error) = copy_with_timeout(&secret, timeout) {
             eprintln!("Warning: {error}");
         }
+        secret.zeroize();
     });
 }
 

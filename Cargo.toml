@@ -31,3 +31,4 @@ tempfile = "3"
 directories = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 subtle = "2"
+totp-rs = { version = "6", default-features = false, features = ["otpauth", "zeroize"] }

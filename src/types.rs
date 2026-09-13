@@ -1,5 +1,6 @@
 use crate::cli::UpdateArgs;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum PasswordType {
@@ -23,6 +24,7 @@ pub enum ServerCommand {
     RestoreTrash(usize),
     PurgeTrash(Option<usize>),
     Audit,
+    Totp(TotpCommand),
     Update(EntryUpdate),
     Export(String),
     Import(ImportRequest),
@@ -53,6 +55,53 @@ pub struct SearchFilter {
     pub username: Option<String>,
     pub url: Option<String>,
     pub notes: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum TotpCommand {
+    Set {
+        target: Target,
+        configuration: String,
+    },
+    Show {
+        target: Target,
+        copy_timeout: Option<u8>,
+    },
+    Remove {
+        target: Target,
+    },
+}
+
+impl std::fmt::Debug for TotpCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Set { target, .. } => formatter
+                .debug_struct("Set")
+                .field("target", target)
+                .field("configuration", &"<redacted>")
+                .finish(),
+            Self::Show {
+                target,
+                copy_timeout,
+            } => formatter
+                .debug_struct("Show")
+                .field("target", target)
+                .field("copy_timeout", copy_timeout)
+                .finish(),
+            Self::Remove { target } => formatter
+                .debug_struct("Remove")
+                .field("target", target)
+                .finish(),
+        }
+    }
+}
+
+impl Zeroize for TotpCommand {
+    fn zeroize(&mut self) {
+        if let Self::Set { configuration, .. } = self {
+            configuration.zeroize();
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

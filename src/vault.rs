@@ -14,6 +14,7 @@ use std::{
 };
 use tempfile::NamedTempFile;
 use tokio::net::TcpStream;
+use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::Zeroize;
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
@@ -42,12 +43,30 @@ pub struct TrashedEntry {
     pub deleted: String,
 }
 
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
+pub struct TotpRecord {
+    pub entry_id: usize,
+    pub configuration: String,
+}
+
+impl std::fmt::Debug for TotpRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TotpRecord")
+            .field("entry_id", &self.entry_id)
+            .field("configuration", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct RecoveryData {
     pub password_history: Vec<PasswordRevision>,
     pub trash: Vec<TrashedEntry>,
     #[serde(default)]
     pub next_entry_id: usize,
+    #[serde(default)]
+    pub totp: Vec<TotpRecord>,
 }
 
 impl Zeroize for PasswordRevision {
@@ -68,11 +87,20 @@ impl Zeroize for TrashedEntry {
     }
 }
 
+impl Zeroize for TotpRecord {
+    fn zeroize(&mut self) {
+        self.entry_id.zeroize();
+        self.configuration.zeroize();
+        *self = Self::default();
+    }
+}
+
 impl Zeroize for RecoveryData {
     fn zeroize(&mut self) {
         self.password_history.zeroize();
         self.trash.zeroize();
         self.next_entry_id.zeroize();
+        self.totp.zeroize();
         *self = Self::default();
     }
 }
@@ -216,7 +244,11 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
     Some(vault)
 }
 
-fn url_match_json(entries: &[VaultEntry], url: &str) -> Option<String> {
+fn url_match_json(
+    entries: &[VaultEntry],
+    totp_records: &[TotpRecord],
+    url: &str,
+) -> Option<String> {
     let mut results = Vec::new();
     for e in entries {
         if let Some(u) = &e.url
@@ -227,6 +259,7 @@ fn url_match_json(entries: &[VaultEntry], url: &str) -> Option<String> {
                 "username": e.username.clone().unwrap_or_else(|| "None".to_string()),
                 "password": e.password,
                 "name": e.name,
+                "has_totp": totp_records.iter().any(|record| record.entry_id == e.id),
             }));
         }
     }
@@ -275,6 +308,97 @@ fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
             && requested.ends_with(&format!(".{base}"));
     }
     saved == requested
+}
+
+fn is_otpauth_uri(value: &str) -> bool {
+    value
+        .get(.."otpauth://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("otpauth://"))
+}
+
+const MIN_COMPATIBLE_TOTP_SECRET_BYTES: usize = 10;
+
+fn compatible_totp_from_url(value: &str) -> Result<Totp, String> {
+    match Totp::from_url(value) {
+        Ok(totp) => Ok(totp),
+        Err(TotpError::SecretTooShort { bits }) if bits >= MIN_COMPATIBLE_TOTP_SECRET_BYTES * 8 => {
+            let totp = Totp::from_url_unchecked(value)
+                .map_err(|error| format!("invalid otpauth URI: {error}"))?;
+            if !(6..=8).contains(&totp.digits()) {
+                return Err(format!(
+                    "invalid otpauth URI: unsupported digit count {}",
+                    totp.digits()
+                ));
+            }
+            if totp.step() == 0 {
+                return Err("invalid otpauth URI: period cannot be zero".to_string());
+            }
+            Ok(totp)
+        }
+        Err(error) => Err(format!("invalid otpauth URI: {error}")),
+    }
+}
+
+fn compatible_totp_from_secret(secret: TotpSecret) -> Result<Totp, String> {
+    let secret_bytes = secret.as_ref().len();
+    if secret_bytes < MIN_COMPATIBLE_TOTP_SECRET_BYTES {
+        return Err(format!(
+            "TOTP secret must be at least {} bits, got {} bits",
+            MIN_COMPATIBLE_TOTP_SECRET_BYTES * 8,
+            secret_bytes * 8
+        ));
+    }
+    let builder = TotpBuilder::new().with_secret(secret);
+    if secret_bytes < 16 {
+        Ok(builder.build_noncompliant())
+    } else {
+        builder
+            .build()
+            .map_err(|error| format!("invalid TOTP configuration: {error}"))
+    }
+}
+
+fn normalize_totp_configuration(value: &str) -> Result<(String, usize), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("TOTP configuration cannot be empty".to_string());
+    }
+    if trimmed.len() > 4096 {
+        return Err("TOTP configuration is too long".to_string());
+    }
+    if is_otpauth_uri(trimmed) {
+        let totp = compatible_totp_from_url(trimmed)?;
+        return Ok((trimmed.to_string(), totp.secret().as_ref().len() * 8));
+    }
+
+    let mut normalized: String = trimmed
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '-')
+        .flat_map(char::to_uppercase)
+        .collect();
+    let secret = match TotpSecret::try_from_base32(&normalized) {
+        Ok(secret) => secret,
+        Err(error) => {
+            normalized.zeroize();
+            return Err(format!("invalid Base32 TOTP secret: {error}"));
+        }
+    };
+    let secret_bits = secret.as_ref().len() * 8;
+    if let Err(error) = compatible_totp_from_secret(secret) {
+        normalized.zeroize();
+        return Err(error);
+    }
+    Ok((normalized, secret_bits))
+}
+
+fn parse_totp_configuration(value: &str) -> Result<Totp, String> {
+    if is_otpauth_uri(value) {
+        compatible_totp_from_url(value)
+    } else {
+        let secret = TotpSecret::try_from_base32(value)
+            .map_err(|error| format!("invalid Base32 TOTP secret: {error}"))?;
+        compatible_totp_from_secret(secret)
+    }
 }
 
 fn normalized_header(value: &str) -> String {
@@ -523,7 +647,7 @@ impl Vault {
                 }
             }
             Target::Url(u) => {
-                if let Some(json) = url_match_json(&self.entries, &u) {
+                if let Some(json) = url_match_json(&self.entries, &self.recovery.totp, &u) {
                     respond(&json, stream, http).await;
                 } else {
                     respond("Not found.\n", stream, http).await;
@@ -641,6 +765,107 @@ impl Vault {
         Ok(modified)
     }
 
+    pub fn set_totp(
+        &mut self,
+        target: Target,
+        configuration: &str,
+        key_pass: &mut ServerInfo,
+    ) -> Result<Option<usize>, String> {
+        let Some(entry_index) = self.entry_index(&target) else {
+            return Ok(None);
+        };
+        let (normalized, secret_bits) = normalize_totp_configuration(configuration)?;
+        let entry_id = self.entries[entry_index].id;
+        let mut recovery_before = self.recovery.clone();
+        let mut modified_before = self.entries[entry_index].modified.clone();
+
+        if let Some(record) = self
+            .recovery
+            .totp
+            .iter_mut()
+            .find(|record| record.entry_id == entry_id)
+        {
+            record.configuration.zeroize();
+            record.configuration = normalized;
+        } else {
+            self.recovery.totp.push(TotpRecord {
+                entry_id,
+                configuration: normalized,
+            });
+        }
+        self.entries[entry_index].modified = chrono::Local::now().to_string();
+
+        if let Err(error) = write_vault(self, key_pass) {
+            self.entries[entry_index].modified.zeroize();
+            self.entries[entry_index].modified = modified_before;
+            self.recovery.zeroize();
+            self.recovery = recovery_before;
+            return Err(error);
+        }
+        modified_before.zeroize();
+        recovery_before.zeroize();
+        Ok(Some(secret_bits))
+    }
+
+    pub fn remove_totp(
+        &mut self,
+        target: Target,
+        key_pass: &mut ServerInfo,
+    ) -> Result<bool, String> {
+        let Some(entry_index) = self.entry_index(&target) else {
+            return Ok(false);
+        };
+        let entry_id = self.entries[entry_index].id;
+        let Some(record_index) = self
+            .recovery
+            .totp
+            .iter()
+            .position(|record| record.entry_id == entry_id)
+        else {
+            return Ok(false);
+        };
+        let mut recovery_before = self.recovery.clone();
+        let mut modified_before = self.entries[entry_index].modified.clone();
+        let mut removed = self.recovery.totp.remove(record_index);
+        removed.zeroize();
+        self.entries[entry_index].modified = chrono::Local::now().to_string();
+
+        if let Err(error) = write_vault(self, key_pass) {
+            self.entries[entry_index].modified.zeroize();
+            self.entries[entry_index].modified = modified_before;
+            self.recovery.zeroize();
+            self.recovery = std::mem::take(&mut recovery_before);
+            return Err(error);
+        }
+        modified_before.zeroize();
+        recovery_before.zeroize();
+        Ok(true)
+    }
+
+    fn totp_at(&self, target: &Target, timestamp: u64) -> Result<(String, u64), String> {
+        let Some(entry_index) = self.entry_index(target) else {
+            return Err("entry not found".to_string());
+        };
+        let entry_id = self.entries[entry_index].id;
+        let record = self
+            .recovery
+            .totp
+            .iter()
+            .find(|record| record.entry_id == entry_id)
+            .ok_or_else(|| "entry has no TOTP authenticator".to_string())?;
+        let totp = parse_totp_configuration(&record.configuration)?;
+        let ttl = totp.step() - (timestamp % totp.step());
+        Ok((totp.generate(timestamp).to_string(), ttl))
+    }
+
+    pub fn current_totp(&self, target: Target) -> Result<(String, u64), String> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "system clock is before the Unix epoch".to_string())?
+            .as_secs();
+        self.totp_at(&target, timestamp)
+    }
+
     pub async fn view_password_history(&self, target: Target, stream: &mut TcpStream, http: bool) {
         let Some(index) = self.entry_index(&target) else {
             respond("Entry not found.", stream, http).await;
@@ -718,13 +943,15 @@ impl Vault {
             return;
         }
         for (index, item) in self.recovery.trash.iter().enumerate() {
+            let totp = self.totp_marker(item.entry.id);
             respond(
                 &format!(
-                    "{}. {} {:?} deleted {}\n",
+                    "{}. {} {:?} deleted {}{}\n",
                     index + 1,
                     item.entry.name,
                     item.entry.username,
-                    item.deleted
+                    item.deleted,
+                    totp
                 ),
                 stream,
                 http,
@@ -792,19 +1019,54 @@ impl Vault {
                 return Ok(false);
             };
             let mut removed = self.recovery.trash.remove(index);
+            let removed_id = removed.entry.id;
             removed.zeroize();
+            self.remove_totp_records(&[removed_id]);
             true
         } else {
             let changed = !self.recovery.trash.is_empty();
+            let removed_ids = self
+                .recovery
+                .trash
+                .iter()
+                .map(|trashed| trashed.entry.id)
+                .collect::<Vec<_>>();
             self.recovery.trash.zeroize();
+            self.remove_totp_records(&removed_ids);
             changed
         };
         if changed && let Err(error) = write_vault(self, key_pass) {
+            self.recovery.zeroize();
             self.recovery = std::mem::take(&mut recovery_before);
             return Err(error);
         }
         recovery_before.zeroize();
         Ok(changed)
+    }
+
+    fn remove_totp_records(&mut self, entry_ids: &[usize]) {
+        let mut retained = Vec::with_capacity(self.recovery.totp.len());
+        for mut record in std::mem::take(&mut self.recovery.totp) {
+            if entry_ids.contains(&record.entry_id) {
+                record.zeroize();
+            } else {
+                retained.push(record);
+            }
+        }
+        self.recovery.totp = retained;
+    }
+
+    fn totp_marker(&self, entry_id: usize) -> &'static str {
+        if self
+            .recovery
+            .totp
+            .iter()
+            .any(|record| record.entry_id == entry_id)
+        {
+            " [TOTP]"
+        } else {
+            ""
+        }
     }
 
     fn audit_report(&self) -> String {
@@ -875,10 +1137,11 @@ impl Vault {
             return;
         }
         for entry in &self.entries {
+            let totp = self.totp_marker(entry.id);
             respond(
                 &format!(
-                    "{}. {} {:?} {:?} {:?}\n",
-                    entry.id, entry.name, entry.username, entry.url, entry.notes
+                    "{}. {} {:?} {:?} {:?}{}\n",
+                    entry.id, entry.name, entry.username, entry.url, entry.notes, totp
                 ),
                 stream,
                 http,
@@ -929,10 +1192,11 @@ impl Vault {
             return;
         }
         for entry in entries {
+            let totp = self.totp_marker(entry.id);
             respond(
                 &format!(
-                    "{}. {} {:?} {:?} {:?}\n",
-                    entry.id, entry.name, entry.username, entry.url, entry.notes
+                    "{}. {} {:?} {:?} {:?}{}\n",
+                    entry.id, entry.name, entry.username, entry.url, entry.notes, totp
                 ),
                 stream,
                 http,
@@ -1189,12 +1453,18 @@ mod test {
             created: String::from("2026-01-01"),
             modified: String::from("2026-01-01"),
         }];
-        let json = url_match_json(&entries, "example.com").unwrap();
+        let totp = vec![TotpRecord {
+            entry_id: 1,
+            configuration: "secret-never-exported".into(),
+        }];
+        let json = url_match_json(&entries, &totp, "example.com").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["password"], "pa\"ss\\wrd");
         assert_eq!(parsed[0]["name"], "site\"with\"quote");
         assert_eq!(parsed[0]["username"], "bob");
         assert_eq!(parsed[0]["id"], 1);
+        assert_eq!(parsed[0]["has_totp"], true);
+        assert!(!json.contains("secret-never-exported"));
     }
     #[test]
     fn test_url_match_json_no_match_returns_none() {
@@ -1208,7 +1478,7 @@ mod test {
             created: String::from("2026-01-01"),
             modified: String::from("2026-01-01"),
         }];
-        assert!(url_match_json(&entries, "example.com").is_none());
+        assert!(url_match_json(&entries, &[], "example.com").is_none());
     }
 
     #[test]
@@ -1223,7 +1493,7 @@ mod test {
             created: String::from("2026-01-01"),
             modified: String::from("2026-01-01"),
         }];
-        assert!(url_match_json(&entries, "example.com").is_none());
+        assert!(url_match_json(&entries, &[], "example.com").is_none());
     }
 
     #[test]
@@ -1253,9 +1523,10 @@ mod test {
             created: String::from("2026-01-01"),
             modified: String::from("2026-01-01"),
         }];
-        let json = url_match_json(&entries, "mail.example.com").unwrap();
+        let json = url_match_json(&entries, &[], "mail.example.com").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["id"], 2);
+        assert_eq!(parsed[0]["has_totp"], false);
     }
     #[test]
     fn test_add_entry_returns_false_for_duplicate() {
@@ -2743,6 +3014,124 @@ mod test {
             ..SearchFilter::default()
         });
         assert!(password_results.is_empty());
+    }
+
+    #[test]
+    fn totp_matches_rfc_6238_sha1_vectors() {
+        let raw = "GEZD GNBV-GY3TQOJQ GEZDGNBVGY3TQOJQ";
+        let (normalized, bits) = normalize_totp_configuration(raw).unwrap();
+        assert_eq!(normalized, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+        assert_eq!(bits, 160);
+        let totp = parse_totp_configuration(&normalized).unwrap();
+        assert_eq!(totp.generate(59).to_string(), "287082");
+
+        let uri = "otpauth://totp/RFC?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30";
+        let totp = parse_totp_configuration(uri).unwrap();
+        assert_eq!(totp.generate(59).to_string(), "94287082");
+    }
+
+    #[test]
+    fn totp_accepts_github_compatible_80_bit_secrets() {
+        let github_secret = "GEZDGNBVGY3TQOJQ";
+        let (normalized, bits) = normalize_totp_configuration(github_secret).unwrap();
+        assert_eq!(bits, 80);
+        let raw_totp = parse_totp_configuration(&normalized).unwrap();
+
+        let uri = format!(
+            "otpauth://totp/GitHub:test?secret={github_secret}&issuer=GitHub&algorithm=SHA1&digits=6&period=30"
+        );
+        let (normalized_uri, uri_bits) = normalize_totp_configuration(&uri).unwrap();
+        assert_eq!(uri_bits, 80);
+        let uri_totp = parse_totp_configuration(&normalized_uri).unwrap();
+        assert_eq!(raw_totp.generate(59), uri_totp.generate(59));
+
+        assert!(normalize_totp_configuration("GEZDGNBVGY3TQ").is_err());
+    }
+
+    #[test]
+    fn totp_follows_trash_restore_and_is_erased_on_purge() {
+        let mut vault =
+            recovery_test_vault(vec![recovery_test_entry(7, "service", "alice", "password")]);
+        let mut server_info = ServerInfo::default();
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+        assert_eq!(
+            vault
+                .set_totp(Target::Id(7), secret, &mut server_info)
+                .unwrap(),
+            Some(160)
+        );
+        assert_eq!(vault.totp_at(&Target::Id(7), 59).unwrap().0, "287082");
+
+        vault.delete_entry(Target::Id(7), &mut server_info).unwrap();
+        assert!(vault.totp_at(&Target::Id(7), 59).is_err());
+        assert_eq!(vault.recovery.totp[0].entry_id, 7);
+        vault.restore_trashed(1, &mut server_info).unwrap();
+        assert_eq!(vault.totp_at(&Target::Id(7), 59).unwrap().0, "287082");
+
+        vault.delete_entry(Target::Id(7), &mut server_info).unwrap();
+        vault.purge_trash(None, &mut server_info).unwrap();
+        assert!(vault.recovery.totp.is_empty());
+    }
+
+    #[test]
+    fn totp_rejects_invalid_configuration_and_can_be_removed() {
+        let mut vault =
+            recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
+        let mut server_info = ServerInfo::default();
+        assert!(
+            vault
+                .set_totp(Target::Id(1), "not base32!", &mut server_info)
+                .is_err()
+        );
+        assert!(vault.recovery.totp.is_empty());
+
+        vault
+            .set_totp(
+                Target::Id(1),
+                "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                &mut server_info,
+            )
+            .unwrap();
+        assert!(vault.remove_totp(Target::Id(1), &mut server_info).unwrap());
+        assert!(vault.recovery.totp.is_empty());
+        assert!(!vault.remove_totp(Target::Id(1), &mut server_info).unwrap());
+    }
+
+    #[test]
+    fn old_recovery_data_defaults_to_no_totp_records() {
+        #[derive(Serialize)]
+        struct LegacyRecoveryData {
+            password_history: Vec<PasswordRevision>,
+            trash: Vec<TrashedEntry>,
+            next_entry_id: usize,
+        }
+
+        let encoded = rmp_serde::to_vec(&LegacyRecoveryData {
+            password_history: Vec::new(),
+            trash: Vec::new(),
+            next_entry_id: 12,
+        })
+        .unwrap();
+        let decoded: RecoveryData = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.next_entry_id, 12);
+        assert!(decoded.totp.is_empty());
+    }
+
+    #[test]
+    fn totp_secrets_are_redacted_and_omitted_from_plaintext_exports() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let mut vault =
+            recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
+        vault
+            .set_totp(Target::Id(1), secret, &mut ServerInfo::default())
+            .unwrap();
+        assert!(!format!("{:?}", vault.recovery.totp[0]).contains(secret));
+
+        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        vault.export(file.path().display().to_string()).unwrap();
+        let exported = fs::read_to_string(file.path()).unwrap();
+        assert!(!exported.contains(secret));
     }
 
     #[test]

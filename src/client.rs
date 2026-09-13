@@ -7,10 +7,12 @@ use std::{
     net::TcpStream,
     time::Duration,
 };
+use zeroize::Zeroize;
 
 pub fn send_command(command: ServerCommand) {
-    if let Err(error) = try_send_command(command) {
-        eprintln!("Error: {error}");
+    match request(command) {
+        Ok(response) => print!("{response}"),
+        Err(error) => eprintln!("Error: {error}"),
     }
 }
 
@@ -26,21 +28,24 @@ fn server_token() -> Result<String, String> {
     Ok(token)
 }
 
-fn try_send_command(command: ServerCommand) -> Result<(), String> {
+pub fn request(command: ServerCommand) -> Result<String, String> {
     let mut connection = TcpStream::connect(ADDR)
         .map_err(|e| format!("could not connect to the password manager server: {e}"))?;
     connection
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("could not configure server connection: {e}"))?;
-    let token = server_token()?;
-    let data =
+    let mut token = server_token()?;
+    let mut data =
         bincode::serialize(&command).map_err(|e| format!("could not encode command: {e}"))?;
-    connection
+    let send_result = connection
         .write_all(token.as_bytes())
         .and_then(|_| connection.write_all(&(data.len() as u32).to_be_bytes()))
         .and_then(|_| connection.write_all(&data))
         .and_then(|_| connection.flush())
-        .map_err(|e| format!("could not send command: {e}"))?;
+        .map_err(|e| format!("could not send command: {e}"));
+    token.zeroize();
+    data.zeroize();
+    send_result?;
 
     let mut buf = vec![0u8; 64 * 1024];
     let mut total = Vec::new();
@@ -63,7 +68,5 @@ fn try_send_command(command: ServerCommand) -> Result<(), String> {
             break;
         }
     }
-    let response = String::from_utf8_lossy(&total);
-    print!("{}", response);
-    Ok(())
+    String::from_utf8(total).map_err(|_| "server returned invalid UTF-8".to_string())
 }

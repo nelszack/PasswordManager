@@ -468,6 +468,93 @@ async fn handle_connection(
                 vault.audit(&mut stream, http).await;
             }
         }
+        ServerCommand::Totp(mut command) => {
+            if server_info.locked {
+                command.zeroize();
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_mut() {
+                match command {
+                    TotpCommand::Set {
+                        target,
+                        mut configuration,
+                    } => {
+                        let result = vault.set_totp(target, &configuration, &mut server_info);
+                        configuration.zeroize();
+                        match result {
+                            Ok(Some(bits)) if bits < 128 => {
+                                respond(
+                                    &format!(
+                                        "TOTP authenticator saved. Warning: provider supplied a {bits}-bit secret; RFC 4226 recommends at least 128 bits."
+                                    ),
+                                    &mut stream,
+                                    http,
+                                )
+                                .await
+                            }
+                            Ok(Some(_)) => {
+                                respond("TOTP authenticator saved.", &mut stream, http).await
+                            }
+                            Ok(None) => respond("Entry not found.", &mut stream, http).await,
+                            Err(error) => {
+                                respond(&format!("TOTP setup failed: {error}"), &mut stream, http)
+                                    .await
+                            }
+                        }
+                    }
+                    TotpCommand::Show {
+                        target,
+                        copy_timeout,
+                    } => match vault.current_totp(target) {
+                        Ok((mut code, ttl)) => {
+                            if http {
+                                respond(
+                                    &json!({ "code": code, "expires_in": ttl }).to_string(),
+                                    &mut stream,
+                                    true,
+                                )
+                                .await;
+                            } else {
+                                respond(
+                                    &format!("TOTP: {code} ({ttl}s remaining)"),
+                                    &mut stream,
+                                    false,
+                                )
+                                .await;
+                            }
+                            if let Some(timeout) = copy_timeout {
+                                copy_in_background(code.clone(), timeout);
+                            }
+                            code.zeroize();
+                        }
+                        Err(error) => {
+                            respond(&format!("TOTP unavailable: {error}"), &mut stream, http).await
+                        }
+                    },
+                    TotpCommand::Remove { target } => {
+                        match vault.remove_totp(target, &mut server_info) {
+                            Ok(true) => {
+                                respond("TOTP authenticator removed.", &mut stream, http).await
+                            }
+                            Ok(false) => {
+                                respond(
+                                    "Entry not found or has no TOTP authenticator.",
+                                    &mut stream,
+                                    http,
+                                )
+                                .await
+                            }
+                            Err(error) => {
+                                respond(&format!("TOTP removal failed: {error}"), &mut stream, http)
+                                    .await
+                            }
+                        }
+                    }
+                }
+            } else {
+                command.zeroize();
+                respond("Vault unavailable.", &mut stream, http).await;
+            }
+        }
         ServerCommand::View => {
             if !server_info.locked {
                 vlt.view_entries(&mut stream, http).await;
@@ -602,6 +689,20 @@ struct HttpInfo {
     command: String,
     extra_info: Vec<Option<String>>,
 }
+
+fn browser_totp_command(extra_info: &[Option<String>]) -> Option<ServerCommand> {
+    extra_info
+        .first()
+        .and_then(Option::as_deref)
+        .and_then(|id| id.parse::<usize>().ok())
+        .map(|id| {
+            ServerCommand::Totp(TotpCommand::Show {
+                target: Target::Id(id),
+                copy_timeout: None,
+            })
+        })
+}
+
 async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
     let mut request_str = String::new();
     let mut buf = [0u8; 1024];
@@ -667,6 +768,9 @@ async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerComma
         Ok(r) => r,
         Err(_) => return None,
     };
+    if request.command == "totp" {
+        return browser_totp_command(&request.extra_info);
+    }
     let mut extra = request.extra_info.into_iter();
     match request.command.as_str() {
         "view" | "veiw" => Some(ServerCommand::View),
@@ -797,6 +901,20 @@ mod test {
         info.zeroize();
         assert!(info.locked);
         assert!(info.keypass.is_none());
+    }
+
+    #[test]
+    fn test_browser_totp_command_requires_numeric_entry_id() {
+        let command = browser_totp_command(&[Some("42".to_string())]).unwrap();
+        assert!(matches!(
+            command,
+            ServerCommand::Totp(TotpCommand::Show {
+                target: Target::Id(42),
+                copy_timeout: None,
+            })
+        ));
+        assert!(browser_totp_command(&[Some("not-an-id".to_string())]).is_none());
+        assert!(browser_totp_command(&[]).is_none());
     }
 
     #[test]

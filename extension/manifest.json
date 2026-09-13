@@ -1,15 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Password Manager",
-  "version": "1.0",
-  "description": "Communicates with local password manager server",
+  "version": "1.1",
+  "description": "Securely connects websites to the local password manager",
   "permissions": [
     "activeTab",
     "storage",
-    "alarms"
-  ],
-  "host_permissions": [
-    "http://127.0.0.1:7878/*"
+    "alarms",
+    "nativeMessaging"
   ],
   "action": {
     "default_popup": "popup.html"
