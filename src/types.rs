@@ -25,11 +25,39 @@ pub enum ServerCommand {
     PurgeTrash(Option<usize>),
     Audit,
     Totp(TotpCommand),
+    Backup(BackupRequest),
+    RestoreBackup(BackupRequest),
     Update(EntryUpdate),
     Export(String),
     Import(ImportRequest),
     New(PasswordType),
     Rekey(PasswordType),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BackupRequest {
+    pub path: String,
+    pub key_pass: PasswordType,
+    pub force: bool,
+}
+
+impl std::fmt::Debug for BackupRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BackupRequest")
+            .field("path", &self.path)
+            .field("key_pass", &"<redacted>")
+            .field("force", &self.force)
+            .finish()
+    }
+}
+
+impl Zeroize for BackupRequest {
+    fn zeroize(&mut self) {
+        self.path.zeroize();
+        self.key_pass.zeroize();
+        self.force.zeroize();
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -123,4 +151,31 @@ pub struct ImportRequest {
     pub path: String,
     pub new: bool,
     pub key_pass: PasswordType,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn sensitive_command_debug_output_is_redacted() {
+        let backup_secret = "backup-password-that-must-not-leak";
+        let backup = BackupRequest {
+            path: "archive.pmbackup".into(),
+            key_pass: PasswordType::Password(backup_secret.into()),
+            force: false,
+        };
+        let backup_debug = format!("{backup:?}");
+        assert!(backup_debug.contains("<redacted>"));
+        assert!(!backup_debug.contains(backup_secret));
+
+        let totp_secret = "JBSWY3DPEHPK3PXP";
+        let totp = TotpCommand::Set {
+            target: Target::Id(1),
+            configuration: totp_secret.into(),
+        };
+        let totp_debug = format!("{totp:?}");
+        assert!(totp_debug.contains("<redacted>"));
+        assert!(!totp_debug.contains(totp_secret));
+    }
 }

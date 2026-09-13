@@ -7,6 +7,8 @@ use crate::{
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::{
     fs,
     io::{self, Read, Write},
@@ -17,7 +19,10 @@ use zeroize::Zeroize;
 use crate::cli::UpdateArgs;
 
 const HOST_NAME: &str = "com.myproject.password_manager";
+#[cfg(not(target_os = "windows"))]
 const HOST_BINARY_NAME: &str = "pm-native-host";
+#[cfg(target_os = "windows")]
+const HOST_BINARY_NAME: &str = "pm-native-host.exe";
 const MAX_NATIVE_MESSAGE: usize = 1024 * 1024;
 
 #[derive(Deserialize, Default)]
@@ -112,24 +117,15 @@ pub fn install(extension_id: &str, browser: NativeBrowser) -> Result<PathBuf, St
     validate_extension_id(extension_id)?;
     let base_dirs =
         BaseDirs::new().ok_or_else(|| "could not locate the user config directory".to_string())?;
-    let browser_dir = match browser {
-        NativeBrowser::Chrome => "google-chrome",
-        NativeBrowser::Chromium => "chromium",
-        NativeBrowser::Helium => "net.imput.helium",
-    };
-    let manifest_dir = base_dirs
-        .config_dir()
-        .join(browser_dir)
-        .join("NativeMessagingHosts");
-    fs::create_dir_all(&manifest_dir)
-        .map_err(|error| format!("could not create {}: {error}", manifest_dir.display()))?;
-
     let host_dir = data_dir().join("native-messaging");
     fs::create_dir_all(&host_dir)
         .map_err(|error| format!("could not create {}: {error}", host_dir.display()))?;
     let host_path = host_dir.join(HOST_BINARY_NAME);
     install_host_link(&host_path)?;
 
+    let manifest_dir = native_manifest_dir(&base_dirs, browser, &host_dir);
+    fs::create_dir_all(&manifest_dir)
+        .map_err(|error| format!("could not create {}: {error}", manifest_dir.display()))?;
     let manifest_path = manifest_dir.join(format!("{HOST_NAME}.json"));
     let manifest = json!({
         "name": HOST_NAME,
@@ -142,10 +138,42 @@ pub fn install(extension_id: &str, browser: NativeBrowser) -> Result<PathBuf, St
         .map_err(|error| format!("could not encode native host manifest: {error}"))?;
     fs::write(&manifest_path, encoded)
         .map_err(|error| format!("could not write {}: {error}", manifest_path.display()))?;
+    register_manifest(&manifest_path, browser)?;
     Ok(manifest_path)
 }
 
 #[cfg(target_os = "linux")]
+fn native_manifest_dir(base_dirs: &BaseDirs, browser: NativeBrowser, _host_dir: &Path) -> PathBuf {
+    let browser_dir = match browser {
+        NativeBrowser::Chrome => "google-chrome",
+        NativeBrowser::Chromium => "chromium",
+        NativeBrowser::Helium => "net.imput.helium",
+    };
+    base_dirs
+        .config_dir()
+        .join(browser_dir)
+        .join("NativeMessagingHosts")
+}
+
+#[cfg(target_os = "macos")]
+fn native_manifest_dir(base_dirs: &BaseDirs, browser: NativeBrowser, _host_dir: &Path) -> PathBuf {
+    let browser_dir = match browser {
+        NativeBrowser::Chrome => Path::new("Google").join("Chrome"),
+        NativeBrowser::Chromium => PathBuf::from("Chromium"),
+        NativeBrowser::Helium => PathBuf::from("Helium"),
+    };
+    base_dirs
+        .config_dir()
+        .join(browser_dir)
+        .join("NativeMessagingHosts")
+}
+
+#[cfg(target_os = "windows")]
+fn native_manifest_dir(_base_dirs: &BaseDirs, _browser: NativeBrowser, host_dir: &Path) -> PathBuf {
+    host_dir.to_path_buf()
+}
+
+#[cfg(unix)]
 fn install_host_link(host_path: &Path) -> Result<(), String> {
     use std::os::unix::fs::symlink;
 
@@ -171,9 +199,43 @@ fn install_host_link(host_path: &Path) -> Result<(), String> {
         .map_err(|error| format!("could not link {}: {error}", host_path.display()))
 }
 
-#[cfg(not(target_os = "linux"))]
-fn install_host_link(_host_path: &Path) -> Result<(), String> {
-    Err("native host installation is currently supported on Linux".to_string())
+#[cfg(target_os = "windows")]
+fn install_host_link(host_path: &Path) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(|error| format!("could not locate the pm executable: {error}"))?;
+    fs::copy(&executable, host_path)
+        .map(|_| ())
+        .map_err(|error| format!("could not install {}: {error}", host_path.display()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_manifest(_manifest_path: &Path, _browser: NativeBrowser) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn register_manifest(manifest_path: &Path, browser: NativeBrowser) -> Result<(), String> {
+    let vendor = match browser {
+        NativeBrowser::Chrome => "Google\\Chrome",
+        NativeBrowser::Chromium => "Chromium",
+        NativeBrowser::Helium => "Helium",
+    };
+    let registry_key = format!(r"HKCU\Software\{vendor}\NativeMessagingHosts\{HOST_NAME}");
+    let absolute_manifest = fs::canonicalize(manifest_path)
+        .map_err(|error| format!("could not resolve {}: {error}", manifest_path.display()))?;
+    let status = Command::new("reg.exe")
+        .args(["ADD", &registry_key, "/ve", "/t", "REG_SZ", "/d"])
+        .arg(&absolute_manifest)
+        .arg("/f")
+        .status()
+        .map_err(|error| format!("could not run reg.exe: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "could not register the native host in {registry_key}"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_extension_id(extension_id: &str) -> Result<(), String> {
@@ -355,6 +417,42 @@ mod tests {
     }
 
     #[test]
+    fn native_host_uses_the_platform_executable_name() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(HOST_BINARY_NAME, "pm-native-host.exe");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(HOST_BINARY_NAME, "pm-native-host");
+    }
+
+    #[test]
+    fn native_manifest_directory_matches_the_current_platform() {
+        let base_dirs = BaseDirs::new().unwrap();
+        let host_dir = data_dir().join("native-messaging");
+        let chrome = native_manifest_dir(&base_dirs, NativeBrowser::Chrome, &host_dir);
+        let chromium = native_manifest_dir(&base_dirs, NativeBrowser::Chromium, &host_dir);
+        let helium = native_manifest_dir(&base_dirs, NativeBrowser::Helium, &host_dir);
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(chrome.ends_with("google-chrome/NativeMessagingHosts"));
+            assert!(chromium.ends_with("chromium/NativeMessagingHosts"));
+            assert!(helium.ends_with("net.imput.helium/NativeMessagingHosts"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(chrome.ends_with("Google/Chrome/NativeMessagingHosts"));
+            assert!(chromium.ends_with("Chromium/NativeMessagingHosts"));
+            assert!(helium.ends_with("Helium/NativeMessagingHosts"));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(chrome, host_dir);
+            assert_eq!(chromium, host_dir);
+            assert_eq!(helium, host_dir);
+        }
+    }
+
+    #[test]
     fn native_message_round_trip_uses_native_endian_framing() {
         let response = NativeResponse::success(7, json!({ "ok": true }));
         let mut encoded = Vec::new();
@@ -410,5 +508,57 @@ mod tests {
     fn rejects_oversized_native_messages() {
         let mut input = Cursor::new(((MAX_NATIVE_MESSAGE + 1) as u32).to_ne_bytes());
         assert!(read_message(&mut input).is_err());
+    }
+
+    #[test]
+    fn native_bridge_rejects_control_characters_and_oversized_fields() {
+        let mut newline = NativeRequest {
+            action: "saveCredentials".into(),
+            domain: Some("https://example.com\nforged".into()),
+            username: Some("alice".into()),
+            password: Some("secret".into()),
+            name: Some("example".into()),
+            ..NativeRequest::default()
+        };
+        assert!(command_for_request(&mut newline).is_err());
+
+        let mut oversized = NativeRequest {
+            action: "getCredentials".into(),
+            domain: Some("x".repeat(2049)),
+            ..NativeRequest::default()
+        };
+        assert!(command_for_request(&mut oversized).is_err());
+    }
+
+    #[test]
+    fn native_bridge_does_not_echo_rejected_credentials() {
+        let secret = "never-echo-this-password";
+        let request = json!({
+            "id": 91,
+            "action": "saveCredentials",
+            "domain": "https://example.com\ninvalid",
+            "username": "alice",
+            "password": secret,
+            "name": "example"
+        });
+        let payload = serde_json::to_vec(&request).unwrap();
+        let mut framed = (payload.len() as u32).to_ne_bytes().to_vec();
+        framed.extend_from_slice(&payload);
+        let mut output = Vec::new();
+
+        run_with_io(&mut Cursor::new(framed), &mut output).unwrap();
+
+        let length = u32::from_ne_bytes(output[..4].try_into().unwrap()) as usize;
+        let response: Value = serde_json::from_slice(&output[4..4 + length]).unwrap();
+        assert_eq!(response["id"], 91);
+        assert_eq!(response["success"], false);
+        assert!(!String::from_utf8_lossy(&output).contains(secret));
+    }
+
+    #[test]
+    fn native_bridge_rejects_truncated_frames() {
+        let mut framed = 12u32.to_ne_bytes().to_vec();
+        framed.extend_from_slice(b"short");
+        assert!(read_message(&mut Cursor::new(framed)).is_err());
     }
 }

@@ -368,4 +368,39 @@ mod test {
             &e2[SALT_OFFSET..SALT_OFFSET + SALT_LEN]
         );
     }
+
+    #[test]
+    fn authenticated_header_rejects_tampering() {
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
+        for offset in [8, 9, 10, 22, HEADER_LEN - 1] {
+            let mut tampered = encrypted.clone();
+            tampered[offset] ^= 1;
+            assert!(
+                decrypt_file(&mut pass, &tampered).is_none(),
+                "tampered header byte {offset} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_ciphertext_rejects_tampering_and_truncation() {
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
+        let mut tampered = encrypted.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(decrypt_file(&mut pass, &tampered).is_none());
+        assert!(decrypt_file(&mut pass, &encrypted[..encrypted.len() - 1]).is_none());
+    }
+
+    #[test]
+    fn hostile_kdf_parameters_are_rejected_before_derivation() {
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
+        for memory_kib in [0, 1024 * 1024 + 1] {
+            let mut hostile = encrypted.clone();
+            hostile[10..14].copy_from_slice(&(memory_kib as u32).to_be_bytes());
+            assert!(decrypt_file(&mut pass, &hostile).is_none());
+        }
+    }
 }

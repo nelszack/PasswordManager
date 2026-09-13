@@ -3,7 +3,7 @@ use crate::{
     clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, set_private_perms},
     types::*,
-    vault::{Vault, VaultAccess, VaultEntry, create_vault, delete_vault},
+    vault::{Vault, VaultAccess, VaultEntry, create_vault, delete_vault, restore_encrypted_backup},
 };
 use rand::Rng;
 use rand::rngs::OsRng;
@@ -602,6 +602,62 @@ async fn handle_connection(
             }
             Err(e) => respond(&format!("Export failed: {e}"), &mut stream, http).await,
         },
+        ServerCommand::Backup(mut request) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else if let Some(vault) = vlt.as_ref() {
+                let result = vault.encrypted_backup(
+                    request.path.clone(),
+                    &mut request.key_pass,
+                    request.force,
+                );
+                match result {
+                    Ok(()) => respond("Encrypted backup created.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(&format!("Backup failed: {error}"), &mut stream, http).await
+                    }
+                }
+            } else {
+                respond("Vault unavailable.", &mut stream, http).await;
+            }
+            request.zeroize();
+        }
+        ServerCommand::RestoreBackup(mut request) => {
+            if !server_info.locked {
+                respond(
+                    "Lock the current vault before restoring a backup.",
+                    &mut stream,
+                    http,
+                )
+                .await;
+            } else {
+                match restore_encrypted_backup(
+                    &request.path,
+                    &mut request.key_pass,
+                    request.force,
+                ) {
+                    Ok(filename) => {
+                        respond(
+                            &format!(
+                                "Encrypted backup restored as {filename}. Unlock it with the backup password/key."
+                            ),
+                            &mut stream,
+                            http,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        respond(
+                            &format!("Backup restore failed: {error}"),
+                            &mut stream,
+                            http,
+                        )
+                        .await
+                    }
+                }
+            }
+            request.zeroize();
+        }
         ServerCommand::Import(args) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked
@@ -885,6 +941,14 @@ mod test {
     use super::*;
     use crate::vault::{Vault, VaultEntry, VaultMetadata};
 
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
     #[test]
     fn test_server_info_default() {
         let info = ServerInfo::default();
@@ -1002,5 +1066,121 @@ mod test {
     #[test]
     fn test_addr_constant() {
         assert_eq!(ADDR, "127.0.0.1:7878");
+    }
+
+    #[test]
+    fn session_tokens_are_random_256_bit_hex_values() {
+        let first = random_token();
+        let second = random_token();
+        assert_eq!(first.len(), TOKEN_HEX_LEN);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_token_files_have_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(TOKEN_FILE);
+        write_token_file(&random_token(), &path);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_tcp_protocol_decodes_a_complete_command() {
+        let token = "a".repeat(TOKEN_HEX_LEN);
+        let command = bincode::serialize(&ServerCommand::Status).unwrap();
+        let mut request = token.as_bytes().to_vec();
+        request.extend_from_slice(&(command.len() as u32).to_be_bytes());
+        request.extend_from_slice(&command);
+
+        let (mut client, mut server) = tcp_pair().await;
+        client.write_all(&request).await.unwrap();
+
+        let parsed = handler(&mut server, &token).await;
+        assert!(matches!(parsed, Some((ServerCommand::Status, false))));
+    }
+
+    #[tokio::test]
+    async fn tcp_protocol_rejects_wrong_tokens_and_oversized_messages() {
+        let token = "a".repeat(TOKEN_HEX_LEN);
+        let (mut client, mut server) = tcp_pair().await;
+        client
+            .write_all(format!("{}{}", "b".repeat(TOKEN_HEX_LEN), "\0\0\0\0").as_bytes())
+            .await
+            .unwrap();
+        assert!(handler(&mut server, &token).await.is_none());
+
+        let (mut client, mut server) = tcp_pair().await;
+        let mut request = token.as_bytes().to_vec();
+        request.extend_from_slice(&((MAX_TCP_MSG as u32) + 1).to_be_bytes());
+        client.write_all(&request).await.unwrap();
+        assert!(handler(&mut server, &token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_protocol_requires_a_valid_bearer_token() {
+        let token = "c".repeat(TOKEN_HEX_LEN);
+        let body = r#"{"command":"status","extra_info":[]}"#;
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (mut client, mut server) = tcp_pair().await;
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        assert!(handler(&mut server, &token).await.is_none());
+        let mut response = [0u8; 128];
+        let length = client.read(&mut response).await.unwrap();
+        assert!(response[..length].starts_with(b"HTTP/1.1 401 Unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn authenticated_http_protocol_decodes_extension_commands() {
+        let token = "d".repeat(TOKEN_HEX_LEN);
+        let body = r#"{"command":"totp","extra_info":["47"]}"#;
+        let request = format!(
+            "POST / HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (mut client, mut server) = tcp_pair().await;
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        assert!(matches!(
+            handler(&mut server, &token).await,
+            Some((
+                ServerCommand::Totp(TotpCommand::Show {
+                    target: Target::Id(47),
+                    copy_timeout: None,
+                }),
+                true,
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn http_protocol_rejects_privileged_and_oversized_requests() {
+        let token = "e".repeat(TOKEN_HEX_LEN);
+        let body = r#"{"command":"backup","extra_info":[]}"#;
+        let request = format!(
+            "POST / HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (mut client, mut server) = tcp_pair().await;
+        client.write_all(request.as_bytes()).await.unwrap();
+        assert!(handler(&mut server, &token).await.is_none());
+
+        let request = format!(
+            "POST / HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
+            MAX_HTTP_REQ + 1
+        );
+        let (mut client, mut server) = tcp_pair().await;
+        client.write_all(request.as_bytes()).await.unwrap();
+        assert!(handler(&mut server, &token).await.is_none());
     }
 }

@@ -89,6 +89,11 @@ pub enum CliCommands {
         #[command(subcommand)]
         command: TotpCommands,
     },
+    /// Create or restore a complete encrypted vault backup.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommands,
+    },
     New {
         #[arg(long = "key")]
         key_path: Option<String>,
@@ -159,6 +164,32 @@ pub enum NativeHostCommands {
     },
     #[command(hide = true)]
     Run,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BackupCommands {
+    /// Export every vault record to a versioned encrypted backup.
+    Create {
+        #[arg(long)]
+        path: String,
+        /// Encrypt with an existing key file instead of a backup password.
+        #[arg(long = "key")]
+        key_path: Option<String>,
+        /// Atomically replace an existing backup file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Restore a complete backup as the vault associated with its password/key.
+    Restore {
+        #[arg(long)]
+        path: String,
+        /// Decrypt with a key file instead of a backup password.
+        #[arg(long = "key")]
+        key_path: Option<String>,
+        /// Replace an existing vault associated with the backup password/key.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -420,6 +451,45 @@ mod test {
             Some(CliCommands::NativeHost {
                 command: NativeHostCommands::Install {
                     browser: NativeBrowser::Chromium,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_encrypted_backup_commands_parse() {
+        let create = Cli::try_parse_from([
+            "pm",
+            "backup",
+            "create",
+            "--path",
+            "vault.pmbackup",
+            "--force",
+        ])
+        .unwrap();
+        assert!(matches!(
+            create.command,
+            Some(CliCommands::Backup {
+                command: BackupCommands::Create { force: true, .. }
+            })
+        ));
+
+        let restore = Cli::try_parse_from([
+            "pm",
+            "backup",
+            "restore",
+            "--path",
+            "vault.pmbackup",
+            "--key",
+            "backup.key",
+        ])
+        .unwrap();
+        assert!(matches!(
+            restore.command,
+            Some(CliCommands::Backup {
+                command: BackupCommands::Restore {
+                    key_path: Some(_),
                     ..
                 }
             })

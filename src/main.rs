@@ -10,7 +10,10 @@ mod server;
 mod types;
 mod vault;
 use crate::{
-    cli::{Cli, CliCommands, DeleteArgs, EntryArgs, NativeHostCommands, TotpCommands, cli_parse},
+    cli::{
+        BackupCommands, Cli, CliCommands, DeleteArgs, EntryArgs, NativeHostCommands, TotpCommands,
+        cli_parse,
+    },
     client::send_command,
     config::{read_config, update},
     encryption::prompt_for_password,
@@ -20,8 +23,8 @@ use crate::{
     },
     server::{is_running, server, start},
     types::{
-        EntryUpdate, ImportRequest, PasswordEntry, PasswordType, SearchFilter, ServerCommand,
-        Target, TotpCommand, UnlockInfo,
+        BackupRequest, EntryUpdate, ImportRequest, PasswordEntry, PasswordType, SearchFilter,
+        ServerCommand, Target, TotpCommand, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -307,6 +310,39 @@ async fn main() {
             TotpCommands::Remove { target } => {
                 send_command(ServerCommand::Totp(TotpCommand::Remove {
                     target: target_type(target),
+                }));
+            }
+        },
+        (CliCommands::Backup { command }, true) => match command {
+            BackupCommands::Create {
+                path,
+                key_path,
+                force,
+            } => send_command(ServerCommand::Backup(BackupRequest {
+                path,
+                key_pass: key_path.map_or_else(
+                    || PasswordType::Password(prompt_for_password()),
+                    PasswordType::Key,
+                ),
+                force,
+            })),
+            BackupCommands::Restore {
+                path,
+                key_path,
+                force,
+            } => {
+                let key_pass = key_path.map_or_else(
+                    || {
+                        PasswordType::Password(
+                            rpassword::prompt_password("Backup password: ").unwrap(),
+                        )
+                    },
+                    PasswordType::Key,
+                );
+                send_command(ServerCommand::RestoreBackup(BackupRequest {
+                    path,
+                    key_pass,
+                    force,
                 }));
             }
         },

@@ -8,9 +8,10 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, read},
     io::Write,
+    path::Path,
 };
 use tempfile::NamedTempFile;
 use tokio::net::TcpStream;
@@ -124,6 +125,24 @@ pub struct Vault {
     pub recovery: RecoveryData,
 }
 
+const BACKUP_MAGIC: &[u8; 8] = b"PMBACKUP";
+const BACKUP_VERSION: u8 = 1;
+const MAX_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
+
+#[derive(Serialize)]
+struct BackupEnvelopeRef<'a> {
+    version: u8,
+    created: String,
+    vault: &'a Vault,
+}
+
+#[derive(Deserialize)]
+struct BackupEnvelope {
+    version: u8,
+    created: String,
+    vault: Vault,
+}
+
 fn filename_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
     blake3::derive_key("vault-filename-v1", master_key)
 }
@@ -199,25 +218,171 @@ fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) -> Result<(), String> {
         // the running server never mutates a vault without an active key.
         return Ok(());
     }
+    write_vault_with_key(vlt, key_pass.keypass.as_mut().unwrap())
+}
+
+fn write_vault_with_key(vlt: &Vault, key_pass: &mut PasswordType) -> Result<(), String> {
     let fname = vlt.metadata.filename.clone();
     let file_path = data_dir().join(&fname);
-    let buf = rmp_serde::to_vec(&vlt).map_err(|e| format!("could not encode vault: {e}"))?;
-    let txt = try_encrypt_file(key_pass.keypass.as_mut().unwrap(), &buf[..])?;
-    let mut temporary = NamedTempFile::new_in(data_dir())
-        .map_err(|e| format!("could not create vault temp file: {e}"))?;
+    let mut buf = rmp_serde::to_vec(&vlt).map_err(|e| format!("could not encode vault: {e}"))?;
+    let mut txt = match try_encrypt_file(key_pass, &buf[..]) {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            buf.zeroize();
+            return Err(error);
+        }
+    };
+    let result = (|| {
+        let mut temporary = NamedTempFile::new_in(data_dir())
+            .map_err(|e| format!("could not create vault temp file: {e}"))?;
+        set_private_perms(temporary.path())
+            .map_err(|e| format!("could not protect vault temp file: {e}"))?;
+        temporary
+            .write_all(&txt)
+            .map_err(|e| format!("could not write encrypted vault: {e}"))?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|e| format!("could not sync encrypted vault: {e}"))?;
+        temporary
+            .persist(&file_path)
+            .map_err(|e| format!("could not atomically replace vault file: {}", e.error))?;
+        Ok(())
+    })();
+    buf.zeroize();
+    txt.zeroize();
+    result
+}
+
+fn persist_private_file(path: &Path, contents: &[u8], force: bool) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = NamedTempFile::new_in(parent)
+        .map_err(|error| format!("could not create backup temp file: {error}"))?;
     set_private_perms(temporary.path())
-        .map_err(|e| format!("could not protect vault temp file: {e}"))?;
+        .map_err(|error| format!("could not protect backup temp file: {error}"))?;
     temporary
-        .write_all(&txt)
-        .map_err(|e| format!("could not write encrypted vault: {e}"))?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|e| format!("could not sync encrypted vault: {e}"))?;
-    temporary
-        .persist(&file_path)
-        .map_err(|e| format!("could not atomically replace vault file: {}", e.error))?;
+        .write_all(contents)
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|error| format!("could not write backup file: {error}"))?;
+    if force {
+        temporary
+            .persist(path)
+            .map_err(|error| format!("could not replace backup file: {}", error.error))?;
+    } else {
+        temporary.persist_noclobber(path).map_err(|error| {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "backup file {:?} already exists; use --force to replace it",
+                    path
+                )
+            } else {
+                format!("could not create backup file: {}", error.error)
+            }
+        })?;
+    }
     Ok(())
+}
+
+fn validate_backup_vault(vault: &mut Vault) -> Result<(), String> {
+    let mut ids = HashSet::new();
+    for id in vault
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .chain(vault.recovery.trash.iter().map(|item| item.entry.id))
+    {
+        if id == 0 || !ids.insert(id) {
+            return Err("backup contains invalid or duplicate entry IDs".to_string());
+        }
+    }
+    if vault
+        .recovery
+        .password_history
+        .iter()
+        .any(|revision| !ids.contains(&revision.entry_id))
+        || vault
+            .recovery
+            .totp
+            .iter()
+            .any(|record| !ids.contains(&record.entry_id))
+    {
+        return Err("backup contains recovery records for unknown entries".to_string());
+    }
+    if vault.recovery.trash.iter().any(|item| {
+        item.history
+            .iter()
+            .any(|revision| revision.entry_id != item.entry.id)
+    }) {
+        return Err("backup contains mismatched trash history".to_string());
+    }
+    let mut totp_ids = HashSet::new();
+    if vault
+        .recovery
+        .totp
+        .iter()
+        .any(|record| !totp_ids.insert(record.entry_id))
+    {
+        return Err("backup contains duplicate TOTP records".to_string());
+    }
+    vault.ensure_next_entry_id()
+}
+
+pub fn restore_encrypted_backup(
+    path: &str,
+    key_pass: &mut PasswordType,
+    force: bool,
+) -> Result<String, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("could not open backup file {path:?}: {error}"))?;
+    if metadata.len() > MAX_BACKUP_BYTES {
+        return Err("backup file exceeds the 128 MiB limit".to_string());
+    }
+    let mut contents =
+        fs::read(path).map_err(|error| format!("could not read backup file {path:?}: {error}"))?;
+    if contents.len() < BACKUP_MAGIC.len() + 1
+        || &contents[..BACKUP_MAGIC.len()] != BACKUP_MAGIC
+        || contents[BACKUP_MAGIC.len()] != BACKUP_VERSION
+    {
+        contents.zeroize();
+        return Err("unsupported or invalid encrypted backup format".to_string());
+    }
+    let mut plaintext = match decrypt_file(key_pass, &contents[BACKUP_MAGIC.len() + 1..]) {
+        Some(plaintext) => plaintext,
+        None => {
+            contents.zeroize();
+            return Err("wrong backup password/key, or corrupted backup".to_string());
+        }
+    };
+    contents.zeroize();
+    let decoded = rmp_serde::from_slice::<BackupEnvelope>(&plaintext)
+        .map_err(|error| format!("could not decode backup: {error}"));
+    plaintext.zeroize();
+    let mut backup = decoded?;
+    if backup.version != BACKUP_VERSION {
+        backup.vault.zeroize();
+        backup.created.zeroize();
+        return Err("unsupported encrypted backup version".to_string());
+    }
+    let result = (|| {
+        validate_backup_vault(&mut backup.vault)?;
+        let filename = try_get_filename(key_pass, false)?;
+        let destination = data_dir().join(&filename);
+        if destination.exists() && !force {
+            return Err(
+                "a vault already exists for this backup password/key; use --force to replace it"
+                    .to_string(),
+            );
+        }
+        backup.vault.metadata.filename = filename.clone();
+        write_vault_with_key(&backup.vault, key_pass)?;
+        Ok(filename)
+    })();
+    backup.vault.zeroize();
+    backup.created.zeroize();
+    result
 }
 
 fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
@@ -1235,6 +1400,40 @@ impl Vault {
         wtr.flush()
             .map_err(|e| format!("could not finish export file {path:?}: {e}"))
     }
+
+    pub fn encrypted_backup(
+        &self,
+        path: String,
+        key_pass: &mut PasswordType,
+        force: bool,
+    ) -> Result<(), String> {
+        let vault_path = data_dir().join(&self.metadata.filename);
+        let backup_path = Path::new(&path);
+        if backup_path.exists()
+            && fs::canonicalize(backup_path).ok() == fs::canonicalize(&vault_path).ok()
+        {
+            return Err("backup path cannot overwrite the active vault file".to_string());
+        }
+        let envelope = BackupEnvelopeRef {
+            version: BACKUP_VERSION,
+            created: chrono::Utc::now().to_rfc3339(),
+            vault: self,
+        };
+        let mut plaintext = rmp_serde::to_vec(&envelope)
+            .map_err(|error| format!("could not encode backup: {error}"))?;
+        let encrypted = try_encrypt_file(key_pass, &plaintext);
+        plaintext.zeroize();
+        let mut encrypted = encrypted?;
+        let mut output = Vec::with_capacity(BACKUP_MAGIC.len() + 1 + encrypted.len());
+        output.extend_from_slice(BACKUP_MAGIC);
+        output.push(BACKUP_VERSION);
+        output.extend_from_slice(&encrypted);
+        encrypted.zeroize();
+        let result = persist_private_file(backup_path, &output, force);
+        output.zeroize();
+        result
+    }
+
     pub fn import(&mut self, path: String) -> Result<(), String> {
         let contents = fs::read_to_string(&path)
             .map_err(|e| format!("could not open import file {path:?}: {e}"))?;
@@ -3132,6 +3331,152 @@ mod test {
         vault.export(file.path().display().to_string()).unwrap();
         let exported = fs::read_to_string(file.path()).unwrap();
         assert!(!exported.contains(secret));
+    }
+
+    #[test]
+    fn encrypted_backup_round_trip_preserves_complete_vault_state() {
+        init_test_data_dir();
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("complete.pmbackup");
+        let totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let mut vault = recovery_test_vault(vec![recovery_test_entry(
+            1,
+            "active-service",
+            "alice",
+            "active-password",
+        )]);
+        vault.recovery.next_entry_id = 3;
+        vault.recovery.password_history.push(PasswordRevision {
+            entry_id: 1,
+            password: "previous-password".into(),
+            changed: "yesterday".into(),
+        });
+        vault.recovery.trash.push(TrashedEntry {
+            entry: recovery_test_entry(2, "deleted-service", "bob", "deleted-password"),
+            history: vec![PasswordRevision {
+                entry_id: 2,
+                password: "deleted-previous".into(),
+                changed: "last-week".into(),
+            }],
+            deleted: "today".into(),
+        });
+        vault.recovery.totp.extend([
+            TotpRecord {
+                entry_id: 1,
+                configuration: totp_secret.into(),
+            },
+            TotpRecord {
+                entry_id: 2,
+                configuration: totp_secret.into(),
+            },
+        ]);
+
+        let password = format!("backup-{:016x}", rand::random::<u64>());
+        let mut backup_key = PasswordType::Password(password.clone());
+        vault
+            .encrypted_backup(backup_path.display().to_string(), &mut backup_key, false)
+            .unwrap();
+        let encrypted = fs::read(&backup_path).unwrap();
+        assert!(encrypted.starts_with(BACKUP_MAGIC));
+        assert!(
+            !encrypted
+                .windows(totp_secret.len())
+                .any(|part| part == totp_secret.as_bytes())
+        );
+        assert!(
+            vault
+                .encrypted_backup(backup_path.display().to_string(), &mut backup_key, false,)
+                .is_err()
+        );
+        assert_eq!(fs::read(&backup_path).unwrap(), encrypted);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let mut wrong_key = PasswordType::Password("wrong-backup-password".into());
+        assert!(
+            restore_encrypted_backup(backup_path.to_str().unwrap(), &mut wrong_key, false).is_err()
+        );
+
+        let filename =
+            restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, false)
+                .unwrap();
+        let mut restored_info = ServerInfo {
+            locked: true,
+            keypass: Some(PasswordType::Password(password)),
+        };
+        let restored = unlock_vault(&mut restored_info).unwrap();
+        assert_eq!(restored.entries, vault.entries);
+        assert_eq!(restored.recovery, vault.recovery);
+        assert_eq!(restored.metadata.filename, filename);
+
+        assert!(
+            restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, false)
+                .unwrap_err()
+                .contains("--force")
+        );
+        assert_eq!(
+            restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, true).unwrap(),
+            filename
+        );
+        fs::remove_file(data_dir().join(filename)).unwrap();
+    }
+
+    #[test]
+    fn encrypted_backup_rejects_tampering_and_invalid_vault_state() {
+        init_test_data_dir();
+        let directory = tempfile::tempdir().unwrap();
+        let tampered_path = directory.path().join("tampered.pmbackup");
+        let invalid_path = directory.path().join("invalid.pmbackup");
+        let password = format!("adversarial-backup-{:016x}", rand::random::<u64>());
+        let mut key = PasswordType::Password(password);
+
+        let vault =
+            recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
+        vault
+            .encrypted_backup(tampered_path.display().to_string(), &mut key, false)
+            .unwrap();
+        let mut tampered = fs::read(&tampered_path).unwrap();
+        *tampered.last_mut().unwrap() ^= 1;
+        fs::write(&tampered_path, tampered).unwrap();
+        assert!(
+            restore_encrypted_backup(tampered_path.to_str().unwrap(), &mut key, false)
+                .unwrap_err()
+                .contains("corrupted")
+        );
+
+        let mut invalid =
+            recovery_test_vault(vec![recovery_test_entry(1, "active", "alice", "password")]);
+        invalid.recovery.trash.push(TrashedEntry {
+            entry: recovery_test_entry(1, "deleted", "bob", "password"),
+            history: Vec::new(),
+            deleted: "today".into(),
+        });
+        let envelope = BackupEnvelopeRef {
+            version: BACKUP_VERSION,
+            created: chrono::Utc::now().to_rfc3339(),
+            vault: &invalid,
+        };
+        let plaintext = rmp_serde::to_vec(&envelope).unwrap();
+        let encrypted = try_encrypt_file(&mut key, &plaintext).unwrap();
+        let mut contents = BACKUP_MAGIC.to_vec();
+        contents.push(BACKUP_VERSION);
+        contents.extend_from_slice(&encrypted);
+        fs::write(&invalid_path, contents).unwrap();
+
+        let destination = data_dir().join(try_get_filename(&mut key, false).unwrap());
+        assert!(!destination.exists());
+        assert!(
+            restore_encrypted_backup(invalid_path.to_str().unwrap(), &mut key, false)
+                .unwrap_err()
+                .contains("duplicate entry IDs")
+        );
+        assert!(!destination.exists());
     }
 
     #[test]
