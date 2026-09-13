@@ -4,8 +4,8 @@ use crate::{
     file::{data_dir, file_exists, set_private_perms},
     server::{ServerInfo, respond},
     types::{
-        EntryUpdate, ItemKind, ListOptions, PasswordEntry, PasswordType, SearchFilter, SortField,
-        Target, TypedEntry, TypedUpdate,
+        ConflictPolicy, CustomField, EntryUpdate, ItemKind, ListOptions, PasswordEntry,
+        PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,8 @@ pub struct EntryMetadata {
     pub additional_urls: Vec<String>,
     #[serde(default)]
     pub password_changed: Option<String>,
+    #[serde(default)]
+    pub custom_fields: Vec<CustomField>,
 }
 
 struct MetadataUpdate<'a> {
@@ -71,6 +73,9 @@ struct MetadataUpdate<'a> {
     clear_urls: bool,
     primary_url: Option<&'a str>,
     password_changed: bool,
+    set_fields: &'a [CustomField],
+    remove_fields: &'a [String],
+    clear_fields: bool,
 }
 
 impl std::fmt::Debug for TotpRecord {
@@ -137,10 +142,11 @@ impl Zeroize for EntryMetadata {
         self.entry_id.zeroize();
         self.additional_urls.zeroize();
         self.password_changed.zeroize();
+        self.custom_fields.zeroize();
         *self = Self::default();
     }
 }
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct VaultMetadata {
     pub filename: String,
 }
@@ -151,13 +157,38 @@ impl Zeroize for VaultMetadata {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct Vault {
     #[serde(alias = "enteries")]
     pub entries: Vec<VaultEntry>,
     pub metadata: VaultMetadata,
     #[serde(default)]
     pub recovery: RecoveryData,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ImportReport {
+    pub total: usize,
+    pub added: usize,
+    pub replaced: usize,
+    pub skipped: usize,
+    pub renamed: usize,
+    pub preview: bool,
+}
+
+impl std::fmt::Display for ImportReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Import {}: {} parsed, {} added, {} replaced, {} kept with a new name, {} skipped.",
+            if self.preview { "preview" } else { "finished" },
+            self.total,
+            self.added,
+            self.replaced,
+            self.renamed,
+            self.skipped
+        )
+    }
 }
 
 const BACKUP_MAGIC: &[u8; 8] = b"PMBACKUP";
@@ -782,28 +813,45 @@ impl Vault {
         }
     }
 
-    fn push_password_history(&mut self, entry_id: usize, password: String) {
+    fn push_password_history_with_limit(
+        &mut self,
+        entry_id: usize,
+        mut password: String,
+        limit: usize,
+    ) {
+        if limit == 0 {
+            password.zeroize();
+            return;
+        }
         self.recovery.password_history.push(PasswordRevision {
             entry_id,
             password,
             changed: chrono::Local::now().to_string(),
         });
-        let count = self
+        let mut count = self
             .recovery
             .password_history
             .iter()
             .filter(|revision| revision.entry_id == entry_id)
             .count();
-        if count > Self::MAX_PASSWORD_HISTORY
-            && let Some(index) = self
+        while count > limit {
+            let Some(index) = self
                 .recovery
                 .password_history
                 .iter()
                 .position(|revision| revision.entry_id == entry_id)
-        {
+            else {
+                break;
+            };
             let mut removed = self.recovery.password_history.remove(index);
             removed.zeroize();
+            count -= 1;
         }
+    }
+
+    #[allow(dead_code)]
+    fn push_password_history(&mut self, entry_id: usize, password: String) {
+        self.push_password_history_with_limit(entry_id, password, Self::MAX_PASSWORD_HISTORY);
     }
 
     fn metadata(&self, entry_id: usize) -> Option<&EntryMetadata> {
@@ -832,12 +880,41 @@ impl Vault {
             .unwrap_or(&entry.created)
     }
 
+    fn custom_fields(&self, entry_id: usize) -> &[CustomField] {
+        self.metadata(entry_id)
+            .map_or(&[], |record| record.custom_fields.as_slice())
+    }
+
+    fn entry_details(&self, entry: &VaultEntry) -> String {
+        let fields = self
+            .custom_fields(entry.id)
+            .iter()
+            .map(|field| format!("{}={}", field.name, field.value))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Type: {}\nURLs: {:?}\n{:?}{}{}\n",
+            self.item_kind(entry.id),
+            self.all_urls(entry).collect::<Vec<_>>(),
+            entry,
+            if fields.is_empty() {
+                ""
+            } else {
+                "\nCustom fields:\n"
+            },
+            fields
+        )
+    }
+
     fn apply_metadata_update(&mut self, entry_id: usize, update: MetadataUpdate<'_>) -> bool {
         let requested = update.kind.is_some()
             || !update.add_urls.is_empty()
             || !update.remove_urls.is_empty()
             || update.clear_urls
-            || update.password_changed;
+            || update.password_changed
+            || !update.set_fields.is_empty()
+            || !update.remove_fields.is_empty()
+            || update.clear_fields;
         if !requested {
             return false;
         }
@@ -877,6 +954,34 @@ impl Vault {
         }
         if update.password_changed {
             record.password_changed = Some(chrono::Local::now().to_string());
+        }
+        if update.clear_fields {
+            record.custom_fields.zeroize();
+            record.custom_fields.clear();
+        }
+        for name in update.remove_fields {
+            let name = name.trim();
+            let mut retained = Vec::with_capacity(record.custom_fields.len());
+            for mut field in std::mem::take(&mut record.custom_fields) {
+                if field.name.eq_ignore_ascii_case(name) {
+                    field.zeroize();
+                } else {
+                    retained.push(field);
+                }
+            }
+            record.custom_fields = retained;
+        }
+        for field in update.set_fields {
+            if let Some(existing) = record
+                .custom_fields
+                .iter_mut()
+                .find(|existing| existing.name.eq_ignore_ascii_case(&field.name))
+            {
+                existing.zeroize();
+                *existing = field.clone();
+            } else {
+                record.custom_fields.push(field.clone());
+            }
         }
         *record != before
     }
@@ -937,34 +1042,14 @@ impl Vault {
                     respond("Invalid id.", stream, http).await;
                     return;
                 };
-                respond(
-                    &format!(
-                        "Type: {}\nURLs: {:?}\n{:?}\n",
-                        self.item_kind(entry.id),
-                        self.all_urls(entry).collect::<Vec<_>>(),
-                        entry
-                    ),
-                    stream,
-                    http,
-                )
-                .await;
+                respond(&self.entry_details(entry), stream, http).await;
                 if !entry.password.is_empty() {
                     copy_in_background(entry.password.clone(), 15);
                 }
             }
             Target::Name(name) => {
                 if let Some(entry) = self.entries.iter().find(|entry| entry.name == name) {
-                    respond(
-                        &format!(
-                            "Type: {}\nURLs: {:?}\n{:?}\n",
-                            self.item_kind(entry.id),
-                            self.all_urls(entry).collect::<Vec<_>>(),
-                            entry
-                        ),
-                        stream,
-                        http,
-                    )
-                    .await;
+                    respond(&self.entry_details(entry), stream, http).await;
                     if !entry.password.is_empty() {
                         copy_in_background(entry.password.clone(), 15);
                     }
@@ -988,6 +1073,19 @@ impl Vault {
         }
     }
 
+    pub async fn get_secret(&self, target: Target, stream: &mut TcpStream, http: bool) {
+        let entry = match target {
+            Target::Id(id) => self.entries.iter().find(|entry| entry.id == id),
+            Target::Name(name) => self.entries.iter().find(|entry| entry.name == name),
+            Target::Url(_) | Target::Vault(_) => None,
+        };
+        if let Some(entry) = entry {
+            respond(&entry.password, stream, http).await;
+        } else {
+            respond("Not found.\n", stream, http).await;
+        }
+    }
+
     pub fn add_entry(
         &mut self,
         info: PasswordEntry,
@@ -998,6 +1096,7 @@ impl Vault {
                 entry: info,
                 kind: ItemKind::Login,
                 additional_urls: Vec::new(),
+                custom_fields: Vec::new(),
             },
             key_pass,
         )
@@ -1012,6 +1111,7 @@ impl Vault {
             entry: mut info,
             kind,
             additional_urls,
+            custom_fields,
         } = request;
         info.url = info
             .url
@@ -1049,13 +1149,15 @@ impl Vault {
             created: now.clone(),
             modified: now,
         });
-        let metadata_added = kind != ItemKind::Login || !normalized_urls.is_empty();
+        let metadata_added =
+            kind != ItemKind::Login || !normalized_urls.is_empty() || !custom_fields.is_empty();
         if metadata_added {
             self.recovery.entry_metadata.push(EntryMetadata {
                 entry_id: id,
                 kind,
                 additional_urls: normalized_urls,
                 password_changed,
+                custom_fields,
             });
         }
         if let Err(error) = write_vault(self, key_pass) {
@@ -1106,27 +1208,51 @@ impl Vault {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn update_entry(
         &mut self,
         change: EntryUpdate,
         key_pass: &mut ServerInfo,
     ) -> Result<bool, String> {
-        self.update_typed_entry(
+        self.update_entry_with_limit(change, key_pass, Self::MAX_PASSWORD_HISTORY)
+    }
+
+    pub fn update_entry_with_limit(
+        &mut self,
+        change: EntryUpdate,
+        key_pass: &mut ServerInfo,
+        password_history_limit: usize,
+    ) -> Result<bool, String> {
+        self.update_typed_entry_with_limit(
             TypedUpdate {
                 entry: change,
                 kind: None,
                 add_url: Vec::new(),
                 remove_url: Vec::new(),
                 clear_urls: false,
+                set_fields: Vec::new(),
+                remove_fields: Vec::new(),
+                clear_fields: false,
             },
             key_pass,
+            password_history_limit,
         )
     }
 
+    #[allow(dead_code)]
     pub fn update_typed_entry(
         &mut self,
         change: TypedUpdate,
         key_pass: &mut ServerInfo,
+    ) -> Result<bool, String> {
+        self.update_typed_entry_with_limit(change, key_pass, Self::MAX_PASSWORD_HISTORY)
+    }
+
+    pub fn update_typed_entry_with_limit(
+        &mut self,
+        change: TypedUpdate,
+        key_pass: &mut ServerInfo,
+        password_history_limit: usize,
     ) -> Result<bool, String> {
         let TypedUpdate {
             entry: change,
@@ -1134,6 +1260,9 @@ impl Vault {
             add_url,
             remove_url,
             clear_urls,
+            set_fields,
+            remove_fields,
+            clear_fields,
         } = change;
         let EntryUpdate {
             target,
@@ -1161,6 +1290,9 @@ impl Vault {
                 clear_urls,
                 primary_url: update.url.as_deref(),
                 password_changed,
+                set_fields: &set_fields,
+                remove_fields: &remove_fields,
+                clear_fields,
             },
         );
         let mut modified = apply_update(&mut self.entries[index], update, password);
@@ -1178,7 +1310,11 @@ impl Vault {
             self.entries[index].modified = chrono::Local::now().to_string();
         }
         if let Some(old_password) = old_password {
-            self.push_password_history(original.id, old_password);
+            self.push_password_history_with_limit(
+                original.id,
+                old_password,
+                password_history_limit,
+            );
         }
         if (modified || metadata_modified)
             && let Err(error) = write_vault(self, key_pass)
@@ -1362,6 +1498,9 @@ impl Vault {
                 clear_urls: false,
                 primary_url: None,
                 password_changed: true,
+                set_fields: &[],
+                remove_fields: &[],
+                clear_fields: false,
             },
         );
         if let Err(error) = write_vault(self, key_pass) {
@@ -1484,6 +1623,56 @@ impl Vault {
         }
         recovery_before.zeroize();
         Ok(changed)
+    }
+
+    pub fn purge_expired_trash(
+        &mut self,
+        retention_days: u64,
+        key_pass: &mut ServerInfo,
+    ) -> Result<usize, String> {
+        if retention_days == 0 || self.recovery.trash.is_empty() {
+            return Ok(0);
+        }
+        let max_days = i64::MAX / 86_400;
+        let days = i64::try_from(retention_days)
+            .unwrap_or(max_days)
+            .min(max_days);
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(days))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+        let removed_ids = self
+            .recovery
+            .trash
+            .iter()
+            .filter_map(|item| {
+                chrono::DateTime::parse_from_str(&item.deleted, "%Y-%m-%d %H:%M:%S%.f %:z")
+                    .ok()
+                    .filter(|deleted| deleted.with_timezone(&chrono::Utc) <= cutoff)
+                    .map(|_| item.entry.id)
+            })
+            .collect::<Vec<_>>();
+        if removed_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut recovery_before = self.recovery.clone();
+        let mut retained = Vec::with_capacity(self.recovery.trash.len() - removed_ids.len());
+        for mut item in std::mem::take(&mut self.recovery.trash) {
+            if removed_ids.contains(&item.entry.id) {
+                item.zeroize();
+            } else {
+                retained.push(item);
+            }
+        }
+        self.recovery.trash = retained;
+        self.remove_totp_records(&removed_ids);
+        self.remove_metadata_records(&removed_ids);
+        if let Err(error) = write_vault(self, key_pass) {
+            self.recovery.zeroize();
+            self.recovery = std::mem::take(&mut recovery_before);
+            return Err(error);
+        }
+        recovery_before.zeroize();
+        Ok(removed_ids.len())
     }
 
     fn remove_totp_records(&mut self, entry_ids: &[usize]) {
@@ -1634,14 +1823,26 @@ impl Vault {
     fn entry_summary(&self, entry: &VaultEntry) -> String {
         let totp = self.totp_marker(entry.id);
         let urls = self.all_urls(entry).collect::<Vec<_>>().join(", ");
+        let fields = self
+            .custom_fields(entry.id)
+            .iter()
+            .map(|field| {
+                if field.secret {
+                    format!("{} [secret]", field.name)
+                } else {
+                    format!("{}={}", field.name, field.value)
+                }
+            })
+            .collect::<Vec<_>>();
         format!(
-            "{}. {} [{}] {:?} {:?} {:?}{}\n",
+            "{}. {} [{}] {:?} {:?} {:?} {:?}{}\n",
             entry.id,
             entry.name,
             self.item_kind(entry.id),
             entry.username,
             (!urls.is_empty()).then_some(urls),
             entry.notes,
+            fields,
             totp
         )
     }
@@ -1685,6 +1886,10 @@ impl Vault {
                             .notes
                             .as_deref()
                             .is_some_and(|value| value.to_lowercase().contains(query))
+                        || self.custom_fields(entry.id).iter().any(|field| {
+                            field.name.to_lowercase().contains(query)
+                                || (!field.secret && field.value.to_lowercase().contains(query))
+                        })
                 });
                 query_matches
                     && field_matches(Some(&entry.name), filter.name.as_deref())
@@ -1774,7 +1979,14 @@ impl Vault {
         result
     }
 
-    pub fn import(&mut self, path: String) -> Result<(), String> {
+    pub fn import_with_options(
+        &mut self,
+        path: String,
+        conflicts: ConflictPolicy,
+        preview: bool,
+        password_history_limit: usize,
+        key_pass: &mut ServerInfo,
+    ) -> Result<ImportReport, String> {
         let contents = fs::read_to_string(&path)
             .map_err(|e| format!("could not open import file {path:?}: {e}"))?;
         let trimmed = contents.trim_start();
@@ -1783,18 +1995,95 @@ impl Vault {
         } else {
             import_csv(&contents, &path)?
         };
+        let mut report = ImportReport {
+            total: imported.len(),
+            preview,
+            ..ImportReport::default()
+        };
+        let mut entries_before = self.entries.clone();
+        let mut recovery_before = self.recovery.clone();
         for mut entry in imported {
-            let duplicate = self.entries.iter().any(|existing| {
+            let duplicate = self.entries.iter().position(|existing| {
                 existing.name == entry.name
                     && existing.username == entry.username
                     && existing.url == entry.url
             });
-            if !duplicate {
-                entry.id = self.allocate_entry_id()?;
-                self.entries.push(entry);
+            match (duplicate, conflicts) {
+                (Some(_), ConflictPolicy::Skip) => report.skipped += 1,
+                (Some(index), ConflictPolicy::Replace) => {
+                    report.replaced += 1;
+                    if !preview {
+                        let id = self.entries[index].id;
+                        let created = self.entries[index].created.clone();
+                        if self.entries[index].password != entry.password {
+                            self.push_password_history_with_limit(
+                                id,
+                                self.entries[index].password.clone(),
+                                password_history_limit,
+                            );
+                        }
+                        entry.id = id;
+                        entry.created = created;
+                        entry.modified = chrono::Local::now().to_string();
+                        self.entries[index].zeroize();
+                        self.entries[index] = entry;
+                    }
+                }
+                (Some(_), ConflictPolicy::KeepBoth) => {
+                    report.added += 1;
+                    report.renamed += 1;
+                    if !preview {
+                        let base = entry.name.clone();
+                        let mut suffix = 1usize;
+                        loop {
+                            let candidate = if suffix == 1 {
+                                format!("{base} (imported)")
+                            } else {
+                                format!("{base} (imported {suffix})")
+                            };
+                            if !self.entries.iter().any(|existing| {
+                                existing.name == candidate && existing.username == entry.username
+                            }) {
+                                entry.name = candidate;
+                                break;
+                            }
+                            suffix += 1;
+                        }
+                        entry.id = self.allocate_entry_id()?;
+                        self.entries.push(entry);
+                    }
+                }
+                (None, _) => {
+                    report.added += 1;
+                    if !preview {
+                        entry.id = self.allocate_entry_id()?;
+                        self.entries.push(entry);
+                    }
+                }
             }
         }
-        Ok(())
+        if !preview && let Err(error) = write_vault(self, key_pass) {
+            self.entries.zeroize();
+            self.entries = std::mem::take(&mut entries_before);
+            self.recovery.zeroize();
+            self.recovery = std::mem::take(&mut recovery_before);
+            return Err(error);
+        }
+        entries_before.zeroize();
+        recovery_before.zeroize();
+        Ok(report)
+    }
+
+    #[allow(dead_code)]
+    pub fn import(&mut self, path: String) -> Result<(), String> {
+        self.import_with_options(
+            path,
+            ConflictPolicy::Skip,
+            false,
+            Self::MAX_PASSWORD_HISTORY,
+            &mut ServerInfo::default(),
+        )
+        .map(|_| ())
     }
 }
 
@@ -1832,8 +2121,10 @@ fn apply_update(
     modified
 }
 
+#[allow(dead_code)]
 pub trait VaultAccess {
     async fn get_entry(&self, a: Target, stream: &mut TcpStream, http: bool);
+    async fn get_secret(&self, target: Target, stream: &mut TcpStream, http: bool);
     fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo)
     -> Result<bool, String>;
     fn add_typed_entry(
@@ -1844,22 +2135,47 @@ pub trait VaultAccess {
     fn delete_entry(&mut self, id: Target, key_pass: &mut ServerInfo) -> Result<bool, String>;
     fn update_entry(&mut self, add: EntryUpdate, key_pass: &mut ServerInfo)
     -> Result<bool, String>;
+    fn update_entry_with_limit(
+        &mut self,
+        update: EntryUpdate,
+        key_pass: &mut ServerInfo,
+        password_history_limit: usize,
+    ) -> Result<bool, String>;
     fn update_typed_entry(
         &mut self,
         update: TypedUpdate,
         key_pass: &mut ServerInfo,
+    ) -> Result<bool, String>;
+    fn update_typed_entry_with_limit(
+        &mut self,
+        update: TypedUpdate,
+        key_pass: &mut ServerInfo,
+        password_history_limit: usize,
     ) -> Result<bool, String>;
     async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream, http: bool);
     fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), String>;
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), String>;
     fn export(&self, path: String) -> Result<(), String>;
     fn import(&mut self, path: String) -> Result<(), String>;
+    fn import_with_options(
+        &mut self,
+        path: String,
+        conflicts: ConflictPolicy,
+        preview: bool,
+        password_history_limit: usize,
+        key_pass: &mut ServerInfo,
+    ) -> Result<ImportReport, String>;
 }
 
 impl VaultAccess for Option<Vault> {
     async fn get_entry(&self, a: Target, stream: &mut TcpStream, http: bool) {
         if let Some(vlt) = self {
             vlt.get_entry(a, stream, http).await
+        }
+    }
+    async fn get_secret(&self, target: Target, stream: &mut TcpStream, http: bool) {
+        if let Some(vault) = self {
+            vault.get_secret(target, stream, http).await;
         }
     }
     fn add_entry(
@@ -1899,6 +2215,17 @@ impl VaultAccess for Option<Vault> {
             None => Err("vault is locked".to_string()),
         }
     }
+    fn update_entry_with_limit(
+        &mut self,
+        update: EntryUpdate,
+        key_pass: &mut ServerInfo,
+        password_history_limit: usize,
+    ) -> Result<bool, String> {
+        match self {
+            Some(vault) => vault.update_entry_with_limit(update, key_pass, password_history_limit),
+            None => Err("vault is locked".to_string()),
+        }
+    }
     fn update_typed_entry(
         &mut self,
         update: TypedUpdate,
@@ -1906,6 +2233,19 @@ impl VaultAccess for Option<Vault> {
     ) -> Result<bool, String> {
         match self {
             Some(vlt) => vlt.update_typed_entry(update, key_pass),
+            None => Err("vault is locked".to_string()),
+        }
+    }
+    fn update_typed_entry_with_limit(
+        &mut self,
+        update: TypedUpdate,
+        key_pass: &mut ServerInfo,
+        password_history_limit: usize,
+    ) -> Result<bool, String> {
+        match self {
+            Some(vault) => {
+                vault.update_typed_entry_with_limit(update, key_pass, password_history_limit)
+            }
             None => Err("vault is locked".to_string()),
         }
     }
@@ -1947,6 +2287,25 @@ impl VaultAccess for Option<Vault> {
             vlt.import(path)
         } else {
             Err("vault is locked".to_string())
+        }
+    }
+    fn import_with_options(
+        &mut self,
+        path: String,
+        conflicts: ConflictPolicy,
+        preview: bool,
+        password_history_limit: usize,
+        key_pass: &mut ServerInfo,
+    ) -> Result<ImportReport, String> {
+        match self {
+            Some(vault) => vault.import_with_options(
+                path,
+                conflicts,
+                preview,
+                password_history_limit,
+                key_pass,
+            ),
+            None => Err("vault is locked".to_string()),
         }
     }
 }
@@ -3595,12 +3954,14 @@ mod test {
                 kind: ItemKind::Login,
                 additional_urls: vec!["https://accounts.example.net/login".into()],
                 password_changed: None,
+                custom_fields: Vec::new(),
             },
             EntryMetadata {
                 entry_id: 4,
                 kind: ItemKind::SecureNote,
                 additional_urls: vec!["https://notes.example.net".into()],
                 password_changed: None,
+                custom_fields: Vec::new(),
             },
         ];
         let mut vault = recovery_test_vault(vec![login.clone(), note.clone()]);
@@ -3639,6 +4000,18 @@ mod test {
                             "https://backup-router.example".into(),
                             "https://backup-router.example".into(),
                         ],
+                        custom_fields: vec![
+                            CustomField {
+                                name: "location".into(),
+                                value: "upstairs".into(),
+                                secret: false,
+                            },
+                            CustomField {
+                                name: "admin-pin".into(),
+                                value: "8192".into(),
+                                secret: true,
+                            },
+                        ],
                     },
                     &mut server_info,
                 )
@@ -3646,6 +4019,24 @@ mod test {
         );
         let entry_id = vault.entries[0].id;
         assert_eq!(vault.item_kind(entry_id), ItemKind::Wifi);
+        assert_eq!(vault.custom_fields(entry_id).len(), 2);
+        assert_eq!(
+            vault
+                .search_entries(&SearchFilter {
+                    query: Some("upstairs".into()),
+                    ..SearchFilter::default()
+                })
+                .len(),
+            1
+        );
+        assert!(
+            vault
+                .search_entries(&SearchFilter {
+                    query: Some("8192".into()),
+                    ..SearchFilter::default()
+                })
+                .is_empty()
+        );
         assert_eq!(
             vault.all_urls(&vault.entries[0]).collect::<Vec<_>>(),
             ["https://router.example", "https://backup-router.example"]
@@ -3671,6 +4062,13 @@ mod test {
                         add_url: vec!["https://new.example".into()],
                         remove_url: vec!["https://router.example".into()],
                         clear_urls: false,
+                        set_fields: vec![CustomField {
+                            name: "location".into(),
+                            value: "downstairs".into(),
+                            secret: false,
+                        }],
+                        remove_fields: vec!["admin-pin".into()],
+                        clear_fields: false,
                     },
                     &mut server_info,
                 )
@@ -3678,9 +4076,102 @@ mod test {
         );
         assert_eq!(vault.item_kind(entry_id), ItemKind::Login);
         assert_eq!(
+            vault.custom_fields(entry_id),
+            [CustomField {
+                name: "location".into(),
+                value: "downstairs".into(),
+                secret: false,
+            }]
+        );
+        assert_eq!(
             vault.all_urls(&vault.entries[0]).collect::<Vec<_>>(),
             ["https://backup-router.example", "https://new.example"]
         );
+    }
+
+    #[test]
+    fn import_preview_and_conflict_policies_are_deterministic() {
+        let mut existing = recovery_test_entry(7, "Example", "alice", "old-password");
+        existing.url = Some("https://example.com".into());
+        let mut vault = recovery_test_vault(vec![existing]);
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "name,username,password,url").unwrap();
+        writeln!(file, "Example,alice,new-password,https://example.com").unwrap();
+        let path = file.path().display().to_string();
+        let mut server_info = ServerInfo::default();
+
+        let before = vault.clone();
+        let preview = vault
+            .import_with_options(
+                path.clone(),
+                ConflictPolicy::Replace,
+                true,
+                1,
+                &mut server_info,
+            )
+            .unwrap();
+        assert_eq!(preview.total, 1);
+        assert_eq!(preview.replaced, 1);
+        assert_eq!(vault, before);
+
+        let replaced = vault
+            .import_with_options(
+                path.clone(),
+                ConflictPolicy::Replace,
+                false,
+                1,
+                &mut server_info,
+            )
+            .unwrap();
+        assert_eq!(replaced.replaced, 1);
+        assert_eq!(vault.entries[0].id, 7);
+        assert_eq!(vault.entries[0].password, "new-password");
+        assert_eq!(vault.recovery.password_history.len(), 1);
+
+        let kept = vault
+            .import_with_options(path, ConflictPolicy::KeepBoth, false, 1, &mut server_info)
+            .unwrap();
+        assert_eq!(kept.renamed, 1);
+        assert_eq!(vault.entries.len(), 2);
+        assert_eq!(vault.entries[1].name, "Example (imported)");
+    }
+
+    #[test]
+    fn recovery_limits_bound_history_and_expire_old_trash() {
+        let mut vault = recovery_test_vault(Vec::new());
+        vault.push_password_history_with_limit(1, "one".into(), 2);
+        vault.push_password_history_with_limit(1, "two".into(), 2);
+        vault.push_password_history_with_limit(1, "three".into(), 2);
+        assert_eq!(vault.recovery.password_history.len(), 2);
+        vault.push_password_history_with_limit(1, "discarded".into(), 0);
+        assert_eq!(vault.recovery.password_history.len(), 2);
+
+        let old = TrashedEntry {
+            entry: recovery_test_entry(11, "old", "alice", "secret"),
+            history: Vec::new(),
+            deleted: (chrono::Local::now() - chrono::Duration::days(60)).to_string(),
+        };
+        let recent = TrashedEntry {
+            entry: recovery_test_entry(12, "recent", "bob", "secret"),
+            history: Vec::new(),
+            deleted: chrono::Local::now().to_string(),
+        };
+        vault.recovery.trash = vec![old, recent];
+        vault.recovery.entry_metadata.push(EntryMetadata {
+            entry_id: 11,
+            ..EntryMetadata::default()
+        });
+        vault.recovery.totp.push(TotpRecord {
+            entry_id: 11,
+            configuration: "secret".into(),
+        });
+        let purged = vault
+            .purge_expired_trash(30, &mut ServerInfo::default())
+            .unwrap();
+        assert_eq!(purged, 1);
+        assert_eq!(vault.recovery.trash[0].entry.id, 12);
+        assert!(vault.recovery.entry_metadata.is_empty());
+        assert!(vault.recovery.totp.is_empty());
     }
 
     #[test]
@@ -3695,6 +4186,7 @@ mod test {
             kind: ItemKind::Wifi,
             additional_urls: Vec::new(),
             password_changed: Some("2025-01-01".into()),
+            custom_fields: Vec::new(),
         }];
         vault.recovery.totp.push(TotpRecord {
             entry_id: 8,

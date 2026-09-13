@@ -19,6 +19,7 @@ pub enum ServerCommand {
     Add(PasswordEntry),
     AddTyped(TypedEntry),
     Get(Target),
+    GetSecret(Target),
     Delete(Target),
     History(Target),
     RestorePassword { target: Target, revision: usize },
@@ -49,6 +50,31 @@ pub enum ItemKind {
     SoftwareLicense,
     SshKey,
     ApiSecret,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConflictPolicy {
+    #[default]
+    Skip,
+    Replace,
+    KeepBoth,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+pub struct CustomField {
+    pub name: String,
+    pub value: String,
+    pub secret: bool,
+}
+
+impl Zeroize for CustomField {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.value.zeroize();
+        self.secret.zeroize();
+        *self = Self::default();
+    }
 }
 
 impl std::fmt::Display for ItemKind {
@@ -134,6 +160,7 @@ pub struct TypedEntry {
     pub entry: PasswordEntry,
     pub kind: ItemKind,
     pub additional_urls: Vec<String>,
+    pub custom_fields: Vec<CustomField>,
 }
 
 impl std::fmt::Debug for TypedEntry {
@@ -143,6 +170,7 @@ impl std::fmt::Debug for TypedEntry {
             .field("name", &self.entry.name)
             .field("kind", &self.kind)
             .field("additional_urls", &self.additional_urls)
+            .field("custom_field_count", &self.custom_fields.len())
             .field("secret", &"<redacted>")
             .finish()
     }
@@ -227,6 +255,9 @@ pub struct TypedUpdate {
     pub add_url: Vec<String>,
     pub remove_url: Vec<String>,
     pub clear_urls: bool,
+    pub set_fields: Vec<CustomField>,
+    pub remove_fields: Vec<String>,
+    pub clear_fields: bool,
 }
 
 impl std::fmt::Debug for TypedUpdate {
@@ -238,6 +269,9 @@ impl std::fmt::Debug for TypedUpdate {
             .field("add_url", &self.add_url)
             .field("remove_url", &self.remove_url)
             .field("clear_urls", &self.clear_urls)
+            .field("custom_field_count", &self.set_fields.len())
+            .field("remove_fields", &self.remove_fields)
+            .field("clear_fields", &self.clear_fields)
             .field(
                 "secret",
                 &self.entry.password.as_ref().map(|_| "<redacted>"),
@@ -250,6 +284,9 @@ pub struct ImportRequest {
     pub path: String,
     pub new: bool,
     pub key_pass: PasswordType,
+    pub preview: bool,
+    pub conflicts: ConflictPolicy,
+    pub password_history_limit: usize,
 }
 
 #[cfg(test)]
@@ -278,6 +315,7 @@ mod test {
         assert!(!totp_debug.contains(totp_secret));
 
         let item_secret = "typed-item-secret-that-must-not-leak";
+        let custom_secret = "custom-field-secret-that-must-not-leak";
         let item = TypedEntry {
             entry: PasswordEntry {
                 name: "API credential".into(),
@@ -289,9 +327,15 @@ mod test {
             },
             kind: ItemKind::ApiSecret,
             additional_urls: Vec::new(),
+            custom_fields: vec![CustomField {
+                name: "token".into(),
+                value: custom_secret.into(),
+                secret: true,
+            }],
         };
         let item_debug = format!("{item:?}");
         assert!(item_debug.contains("<redacted>"));
         assert!(!item_debug.contains(item_secret));
+        assert!(!item_debug.contains(custom_secret));
     }
 }

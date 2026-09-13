@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[derive(Parser, Debug)]
 pub struct Cli {
+    /// Wrap command output in a stable JSON object.
+    #[arg(long, global = true, conflicts_with = "quiet")]
+    pub json: bool,
+    /// Suppress successful command output.
+    #[arg(long, global = true, conflicts_with = "json")]
+    pub quiet: bool,
     #[command(subcommand)]
     pub command: Option<CliCommands>,
 }
@@ -116,6 +122,12 @@ pub enum CliCommands {
         kind: ItemKind,
         #[arg(long)]
         notes: Option<String>,
+        /// Add a searchable custom field as NAME=VALUE.
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        fields: Vec<String>,
+        /// Prompt privately for the value of this custom field.
+        #[arg(long = "secret-field", value_name = "NAME")]
+        secret_fields: Vec<String>,
         #[arg(long = "generate-password")]
         generate_password: bool,
         #[arg(long)]
@@ -137,6 +149,9 @@ pub enum CliCommands {
     Get {
         #[command(flatten)]
         target: EntryArgs,
+        /// Print only the primary secret, without copying it to the clipboard.
+        #[arg(long)]
+        password_only: bool,
     },
     Import {
         #[arg(long)]
@@ -145,6 +160,12 @@ pub enum CliCommands {
         new: bool,
         #[arg(long = "key")]
         key_path: Option<String>,
+        /// Show import counts and conflicts without changing the vault.
+        #[arg(long)]
+        preview: bool,
+        /// How duplicate name/username/URL records are handled.
+        #[arg(long, value_enum, default_value_t = crate::types::ConflictPolicy::Skip)]
+        conflicts: crate::types::ConflictPolicy,
     },
     Export {
         #[arg(long)]
@@ -211,7 +232,7 @@ pub struct Timeout {
     pub timeout: Option<u64>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct ConfigArgs {
     #[arg(long)]
     pub reset: bool,
@@ -226,6 +247,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     #[arg(value_parser = parse_duration)]
     pub unlock_timeout: Option<u64>,
+    #[arg(long)]
+    pub password_history_limit: Option<usize>,
+    /// Automatically purge trash older than this many days; zero disables it.
+    #[arg(long)]
+    pub trash_retention_days: Option<u64>,
 }
 
 fn parse_duration(value: &str) -> Result<u64, String> {
@@ -281,6 +307,28 @@ pub struct MetadataArgs {
     /// Remove every URL from the item.
     #[arg(long, conflicts_with_all = ["url", "add_url", "remove_url"])]
     pub clear_urls: bool,
+    /// Set a searchable custom field as NAME=VALUE.
+    #[arg(
+        long = "field",
+        value_name = "NAME=VALUE",
+        conflicts_with = "clear_fields"
+    )]
+    pub fields: Vec<String>,
+    /// Prompt privately for the value of this custom field.
+    #[arg(
+        long = "secret-field",
+        value_name = "NAME",
+        conflicts_with = "clear_fields"
+    )]
+    pub secret_fields: Vec<String>,
+    #[arg(
+        long = "remove-field",
+        value_name = "NAME",
+        conflicts_with = "clear_fields"
+    )]
+    pub remove_fields: Vec<String>,
+    #[arg(long, conflicts_with_all = ["fields", "secret_fields", "remove_fields"])]
+    pub clear_fields: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -406,7 +454,7 @@ mod test {
     fn test_get_by_entry_name_parses() {
         let cli = Cli::try_parse_from(["pm", "get", "--entry-name", "foo"]).unwrap();
         match cli.command {
-            Some(CliCommands::Get { target }) => {
+            Some(CliCommands::Get { target, .. }) => {
                 assert_eq!(target.id, None);
                 assert_eq!(target.entry_name.as_deref(), Some("foo"));
             }
@@ -443,7 +491,7 @@ mod test {
     fn test_get_by_id_parses() {
         let cli = Cli::try_parse_from(["pm", "get", "--id", "3"]).unwrap();
         match cli.command {
-            Some(CliCommands::Get { target }) => {
+            Some(CliCommands::Get { target, .. }) => {
                 assert_eq!(target.id, Some(3));
                 assert_eq!(target.entry_name, None);
             }
@@ -623,6 +671,50 @@ mod test {
         assert!(
             Cli::try_parse_from(["pm", "update", "--id", "1", "--url", "a", "--clear-urls"])
                 .is_err()
+        );
+
+        let scripted =
+            Cli::try_parse_from(["pm", "--json", "get", "--id", "2", "--password-only"]).unwrap();
+        assert!(scripted.json);
+        assert!(matches!(
+            scripted.command,
+            Some(CliCommands::Get {
+                password_only: true,
+                ..
+            })
+        ));
+
+        let import = Cli::try_parse_from([
+            "pm",
+            "import",
+            "--path",
+            "vault.csv",
+            "--preview",
+            "--conflicts",
+            "replace",
+        ])
+        .unwrap();
+        assert!(matches!(
+            import.command,
+            Some(CliCommands::Import {
+                preview: true,
+                conflicts: crate::types::ConflictPolicy::Replace,
+                ..
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "pm",
+                "update",
+                "--id",
+                "1",
+                "--field",
+                "environment=production",
+                "--secret-field",
+                "token",
+            ])
+            .is_ok()
         );
     }
 

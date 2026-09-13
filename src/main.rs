@@ -23,8 +23,8 @@ use crate::{
     },
     server::{is_running, server, start},
     types::{
-        BackupRequest, EntryUpdate, ImportRequest, PasswordEntry, PasswordType, SearchFilter,
-        ServerCommand, Target, TotpCommand, UnlockInfo,
+        BackupRequest, CustomField, EntryUpdate, ImportRequest, PasswordEntry, PasswordType,
+        SearchFilter, ServerCommand, Target, TotpCommand, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -40,6 +40,43 @@ fn target_type(target: EntryArgs) -> Target {
     } else {
         unreachable!("clap requires either --id or --entry-name")
     }
+}
+
+fn custom_fields(
+    fields: Vec<String>,
+    secret_fields: Vec<String>,
+) -> Result<Vec<CustomField>, String> {
+    let mut parsed = Vec::new();
+    for field in fields {
+        let (name, value) = field
+            .split_once('=')
+            .ok_or_else(|| format!("custom field {field:?} must use NAME=VALUE"))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("custom field names cannot be empty".to_string());
+        }
+        parsed.retain(|existing: &CustomField| !existing.name.eq_ignore_ascii_case(name));
+        parsed.push(CustomField {
+            name: name.to_string(),
+            value: value.to_string(),
+            secret: false,
+        });
+    }
+    for name in secret_fields {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("custom field names cannot be empty".to_string());
+        }
+        let value = rpassword::prompt_password(format!("{name}: "))
+            .map_err(|error| format!("could not read custom field {name:?}: {error}"))?;
+        parsed.retain(|existing| !existing.name.eq_ignore_ascii_case(name));
+        parsed.push(CustomField {
+            name: name.to_string(),
+            value,
+            secret: true,
+        });
+    }
+    Ok(parsed)
 }
 
 struct SilentPipe(io::Stdout);
@@ -71,6 +108,7 @@ async fn main() {
     fs::create_dir_all(data_path).unwrap();
     let config_file = config_path.join("config.toml");
     let cli = cli_parse();
+    client::configure_output(cli.json, cli.quiet);
     let conf = read_config(&config_file);
     let server_running = is_running();
     let Some(command) = cli.command else {
@@ -187,7 +225,13 @@ async fn main() {
         }
         (CliCommands::Start, false) => start(),
         (CliCommands::Start, true) => start(),
-        (CliCommands::Run, false) => server().await,
+        (CliCommands::Run, false) => {
+            server(
+                conf.recovery.password_history_limit,
+                conf.recovery.trash_retention_days,
+            )
+            .await
+        }
         (CliCommands::Run, true) => println!("Server is already running."),
         (CliCommands::New { key_path }, true) => {
             send_command(ServerCommand::New(if let Some(kp) = key_path {
@@ -210,12 +254,20 @@ async fn main() {
                 url,
                 kind,
                 notes,
+                fields,
+                secret_fields,
                 generate_password,
                 copy,
                 no_copy,
             },
             true,
         ) => {
+            let custom_fields = match custom_fields(fields, secret_fields) {
+                Ok(fields) => fields,
+                Err(error) => {
+                    client::exit_error(&error, 2);
+                }
+            };
             let mut urls = url.into_iter();
             let primary_url = urls.next();
             let password = if matches!(kind, crate::types::ItemKind::Identity) {
@@ -240,6 +292,7 @@ async fn main() {
                 },
                 kind,
                 additional_urls: urls.collect(),
+                custom_fields,
             }));
         }
         (
@@ -374,6 +427,12 @@ async fn main() {
             } else {
                 None
             };
+            let set_fields = match custom_fields(metadata.fields, metadata.secret_fields) {
+                Ok(fields) => fields,
+                Err(error) => {
+                    client::exit_error(&error, 2);
+                }
+            };
             send_command(ServerCommand::UpdateTyped(crate::types::TypedUpdate {
                 entry: EntryUpdate {
                     target: target_type(target),
@@ -384,10 +443,23 @@ async fn main() {
                 add_url: metadata.add_url,
                 remove_url: metadata.remove_url,
                 clear_urls: metadata.clear_urls,
+                set_fields,
+                remove_fields: metadata.remove_fields,
+                clear_fields: metadata.clear_fields,
             }));
         }
-        (CliCommands::Get { target }, true) => {
-            send_command(ServerCommand::Get(target_type(target)));
+        (
+            CliCommands::Get {
+                target,
+                password_only,
+            },
+            true,
+        ) => {
+            send_command(if password_only {
+                ServerCommand::GetSecret(target_type(target))
+            } else {
+                ServerCommand::Get(target_type(target))
+            });
         }
         (CliCommands::Export { path }, true) => {
             send_command(ServerCommand::Export(path));
@@ -397,19 +469,28 @@ async fn main() {
                 path,
                 new,
                 key_path,
+                preview,
+                conflicts,
             },
             true,
         ) => {
-            let keypass = match key_path {
-                Some(path) => PasswordType::Key(path),
-                None => PasswordType::Password(prompt_for_password()),
+            let keypass = if preview && new {
+                PasswordType::Password(String::new())
+            } else {
+                match key_path {
+                    Some(path) => PasswordType::Key(path),
+                    None => PasswordType::Password(prompt_for_password()),
+                }
             };
             send_command(ServerCommand::Import(ImportRequest {
                 path,
                 new,
                 key_pass: keypass,
+                preview,
+                conflicts,
+                password_history_limit: conf.recovery.password_history_limit,
             }));
         }
-        (_, false) => println!("Server is not running. Start it with `pm start`."),
+        (_, false) => client::exit_error("Server is not running. Start it with `pm start`.", 1),
     };
 }

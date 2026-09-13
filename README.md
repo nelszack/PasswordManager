@@ -14,11 +14,14 @@ A secure, local-first password manager with a CLI interface and browser extensio
   software licenses, SSH keys, and API secrets
 - **Multiple URLs**: Associate several explicitly approved sites with one login
 - **Sorting and Rich Filters**: Sort listings and filter by type, TOTP, or weakness
+- **Custom Fields**: Searchable fields and privately prompted secret fields
 - **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
 - **TOTP Authenticator**: Encrypted per-entry authenticator secrets with current-code generation
 - **Browser Extension**: Native-messaging bridge, on-page autofill, TOTP, and save/update prompts
+- **In-page Password Generation**: Fill new-password and confirmation fields securely
 - **Clipboard Integration**: Secure clipboard with auto-clear timeout
 - **Import/Export**: CSV and JSON, including common browser and password-manager exports
+- **Import Planning**: Non-mutating previews with skip, replace, and keep-both policies
 - **Encrypted Backups**: Versioned, authenticated full-vault backup and disaster recovery
 - **Background Server**: Long-running server for quick access
 
@@ -89,6 +92,14 @@ number; for Wi-Fi it is the network password; and for licenses, SSH, and API
 items it is the corresponding key or secret. These values are read through the
 hidden prompt and handled like login passwords.
 
+Add searchable custom fields with `--field NAME=VALUE`. For sensitive values,
+use `--secret-field NAME`; the value is read through a hidden prompt and is not
+included in search results or ordinary listings:
+
+```bash
+pm add --name "Hosting" --field environment=production --secret-field recovery-code
+```
+
 ### View All Entries
 
 ```bash
@@ -143,6 +154,10 @@ pm update --id 3 --type login
 pm update --id 3 --add-url https://login.example.net
 pm update --id 3 --remove-url https://old.example.com
 pm update --id 3 --clear-urls
+pm update --id 3 --field environment=staging
+pm update --id 3 --secret-field api-token
+pm update --id 3 --remove-field environment
+pm update --id 3 --clear-fields
 ```
 
 ### Delete an Entry
@@ -164,14 +179,18 @@ pm purge --all
 `restore` and `purge --id` use the IDs shown by `pm trash`. Purging is
 permanent.
 
+Trash retention can optionally purge old items whenever a vault is unlocked.
+It is disabled by default; configure a number of days to enable it.
+
 Active entry IDs are persistent: deleting or restoring a different entry does
 not renumber them. Restoring a trashed entry also restores its original ID, and
 imports receive new local IDs instead of trusting IDs from the source file.
 
 ### Password History
 
-Changing a password retains the ten most recent previous passwords inside the
-encrypted vault. History output shows timestamps, not password values:
+Changing a password retains previous passwords inside the encrypted vault. The
+default limit is ten revisions and can be configured or set to zero to disable
+new history. History output shows timestamps, not password values:
 
 ```bash
 pm history --entry-name "github.com"
@@ -217,8 +236,9 @@ shorter secrets remain rejected.
 Authenticator configurations are stored only inside the encrypted vault. They
 remain attached to an entry in trash and after restoration, and are securely
 removed when that trash entry is purged. Plaintext CSV and JSON exports omit
-authenticator configurations, item types, additional URLs, and password-age
-metadata. Use an encrypted backup when those fields must be preserved.
+authenticator configurations, item types, additional URLs, custom fields, and
+password-age metadata. Use an encrypted backup when those fields must be
+preserved.
 
 ### Lock/Unlock
 
@@ -250,8 +270,8 @@ vault. An old key file is left in place, but no vault remains encrypted with it.
 ### Import/Export
 
 For a complete backup that preserves entries, stable IDs, item types, additional
-URLs, password-age metadata, password history, trash, and TOTP configurations,
-use the encrypted backup commands:
+URLs, custom fields, password-age metadata, password history, trash, and TOTP
+configurations, use the encrypted backup commands:
 
 ```bash
 # Prompts for and confirms an independent backup password
@@ -287,6 +307,19 @@ pm import --path bitwarden.json --new
 pm export --path backup.json
 ```
 
+Preview an import without creating or changing entries, then choose how exact
+name/username/URL conflicts are handled:
+
+```bash
+pm import --path backup.csv --preview
+pm import --path backup.csv --conflicts skip
+pm import --path backup.csv --conflicts replace
+pm import --path backup.csv --conflicts keep-both
+```
+
+`replace` preserves the existing stable ID and records a changed password in
+history. `keep-both` adds a new stable ID and appends an `(imported)` suffix.
+
 The format is detected from the input content; exports use JSON when the path
 ends in `.json`, otherwise CSV. Supported inputs are this application's CSV or
 JSON, Chrome/Chromium CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV.
@@ -304,6 +337,26 @@ pm passcheck --password "mypassword123"
 
 ```bash
 pm config --length 24 --stats true --clipboard-timeout 30 --unlock-timeout 15m
+pm config --password-history-limit 20 --trash-retention-days 30
+```
+
+Recovery settings are loaded when the server starts. Restart a running server
+after changing them. A history limit or trash retention value of `0` disables
+that behavior.
+
+### Structured and Scripted Output
+
+Server-backed commands accept global `--json` and `--quiet` flags. JSON output
+uses a stable object containing `ok` plus either `output` or `error`. Transport,
+vault, and availability failures exit with status 1; CLI or local-input errors
+use status 2; missing records use status 3; and conflicts use status 4. Quiet
+mode still prints errors. Retrieve only a primary secret without clipboard
+activity with `get --password-only`:
+
+```bash
+pm --json view --sort name
+pm --quiet lock
+pm get --id 3 --password-only
 ```
 
 ### Shell Completions
@@ -383,6 +436,11 @@ Autofill is form-aware: choosing an account fills only the username and current
 password fields associated with that control. Other login forms and
 new/confirmation-password fields on the page are left unchanged. Forms created
 or revealed after page load are detected automatically.
+
+New-password fields receive a generator button. It creates a 20-character
+password locally with the browser's cryptographic random-number generator and
+fills matching new/confirmation fields. The generated value is not sent across
+the extension bridge unless the user submits and chooses to save it.
 
 For entries configured with TOTP, the extension also places an authenticator
 button beside fields marked `autocomplete="one-time-code"` or clearly labelled

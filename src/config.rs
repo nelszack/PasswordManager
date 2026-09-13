@@ -9,6 +9,8 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     pub unlock: UnlockConfig,
     pub copy: CopyConfig,
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -34,6 +36,22 @@ pub struct UnlockConfig {
     pub timeout: u64,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub struct RecoveryConfig {
+    pub password_history_limit: usize,
+    /// Zero disables automatic trash expiration.
+    pub trash_retention_days: u64,
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            password_history_limit: 10,
+            trash_retention_days: 0,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -45,6 +63,7 @@ impl Default for Config {
             clipboard: ClipboardConfig { timeout: 15 },
             unlock: UnlockConfig { timeout: 15 * 60 },
             copy: CopyConfig { passwords: true },
+            recovery: RecoveryConfig::default(),
         }
     }
 }
@@ -85,6 +104,8 @@ fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
         genpass_stats: None,
         clipboard_timeout: None,
         unlock_timeout: None,
+        password_history_limit: None,
+        trash_retention_days: None,
     };
     for section in old_config_txt.split("\n\n") {
         let mut lines = section.lines();
@@ -132,6 +153,16 @@ fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
                         new.unlock_timeout = Some(v);
                     }
                 }
+                ("recovery", "password_history_limit") => {
+                    if let Ok(v) = value.trim().parse() {
+                        new.password_history_limit = Some(v);
+                    }
+                }
+                ("recovery", "trash_retention_days") => {
+                    if let Ok(v) = value.trim().parse() {
+                        new.trash_retention_days = Some(v);
+                    }
+                }
                 _ => {}
             }
         }
@@ -156,6 +187,12 @@ pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
     }
     if let Some(i) = modify.unlock_timeout {
         config.unlock.timeout = i
+    }
+    if let Some(i) = modify.password_history_limit {
+        config.recovery.password_history_limit = i;
+    }
+    if let Some(i) = modify.trash_retention_days {
+        config.recovery.trash_retention_days = i;
     }
     write_file(&config, config_path);
 }
@@ -186,7 +223,8 @@ mod test {
                 },
                 clipboard: ClipboardConfig { timeout: 15 },
                 unlock: UnlockConfig { timeout: 15 * 60 },
-                copy: CopyConfig { passwords: true }
+                copy: CopyConfig { passwords: true },
+                recovery: RecoveryConfig::default(),
             }
         );
         write_file(&conf1, config_path);
@@ -204,6 +242,8 @@ mod test {
                 genpass_copy: Some(true),
                 clipboard_timeout: Some(12),
                 unlock_timeout: Some(15),
+                password_history_limit: Some(25),
+                trash_retention_days: Some(30),
             },
             config_path,
         );
@@ -217,7 +257,11 @@ mod test {
                 },
                 clipboard: ClipboardConfig { timeout: 12 },
                 unlock: UnlockConfig { timeout: 15 },
-                copy: CopyConfig { passwords: true }
+                copy: CopyConfig { passwords: true },
+                recovery: RecoveryConfig {
+                    password_history_limit: 25,
+                    trash_retention_days: 30,
+                },
             }
         );
         write_file(&conf1, config_path);
@@ -247,6 +291,7 @@ mod test {
                 genpass_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -264,6 +309,8 @@ mod test {
         assert_eq!(config.clipboard.timeout, 15);
         assert_eq!(config.unlock.timeout, 15 * 60);
         assert!(config.copy.passwords);
+        assert_eq!(config.recovery.password_history_limit, 10);
+        assert_eq!(config.recovery.trash_retention_days, 0);
     }
     #[test]
     fn test_reset_to_default() {
@@ -277,6 +324,7 @@ mod test {
                 genpass_copy: Some(false),
                 clipboard_timeout: Some(30),
                 unlock_timeout: Some(5),
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -289,6 +337,7 @@ mod test {
                 genpass_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -342,6 +391,7 @@ copy_pass = false
                 genpass_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -355,6 +405,7 @@ copy_pass = false
                 genpass_copy: Some(false),
                 clipboard_timeout: Some(45),
                 unlock_timeout: Some(10),
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -381,6 +432,7 @@ copy_pass = false
             clipboard: ClipboardConfig { timeout: 60 },
             unlock: UnlockConfig { timeout: 15 },
             copy: CopyConfig { passwords: false },
+            recovery: RecoveryConfig::default(),
         };
 
         write_file(&original, &config_path);
@@ -403,6 +455,7 @@ copy_pass = false
                 genpass_copy: None,
                 clipboard_timeout: Some(0),
                 unlock_timeout: Some(0),
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -425,6 +478,7 @@ copy_pass = false
                 genpass_copy: Some(false),
                 clipboard_timeout: Some(u8::MAX),
                 unlock_timeout: Some(u64::MAX),
+                ..ConfigArgs::default()
             },
             &config_path,
         );
@@ -449,6 +503,7 @@ copy_pass = false
                 genpass_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
+                ..ConfigArgs::default()
             },
             &config_path,
         );

@@ -1,6 +1,7 @@
 use crate::file::{TOKEN_FILE, data_dir};
 use crate::server::ADDR;
 use crate::types::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -9,10 +10,76 @@ use std::{
 };
 use zeroize::Zeroize;
 
+static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
+static QUIET_OUTPUT: AtomicBool = AtomicBool::new(false);
+
+pub fn configure_output(json: bool, quiet: bool) {
+    JSON_OUTPUT.store(json, Ordering::Relaxed);
+    QUIET_OUTPUT.store(quiet, Ordering::Relaxed);
+}
+
+pub fn print_error(error: &str) {
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        println!("{}", serde_json::json!({ "ok": false, "error": error }));
+    } else {
+        eprintln!("Error: {error}");
+    }
+}
+
+pub fn exit_error(error: &str, code: i32) -> ! {
+    print_error(error);
+    std::process::exit(code);
+}
+
 pub fn send_command(command: ServerCommand) {
     match request(command) {
-        Ok(response) => print!("{response}"),
-        Err(error) => eprintln!("Error: {error}"),
+        Ok(response) => {
+            let exit_code = response_exit_code(&response);
+            if JSON_OUTPUT.load(Ordering::Relaxed) {
+                if exit_code == 0 {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "ok": true, "output": response.trim_end() })
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "ok": false, "error": response.trim_end(), "code": exit_code })
+                    );
+                }
+            } else if !QUIET_OUTPUT.load(Ordering::Relaxed) || exit_code != 0 {
+                if exit_code == 0 {
+                    print!("{response}");
+                } else {
+                    eprint!("{response}");
+                }
+            }
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Err(error) => exit_error(&error, 1),
+    }
+}
+
+fn response_exit_code(response: &str) -> i32 {
+    let response = response.trim().to_ascii_lowercase();
+    if response.contains("not found")
+        || response.starts_with("invalid id")
+        || response.starts_with("no matching entries")
+    {
+        3
+    } else if response.contains("already exists") || response.contains("duplicate") {
+        4
+    } else if response.starts_with("vault locked")
+        || response.contains(" failed")
+        || response.contains(" unavailable:")
+        || response.starts_with("wrong ")
+        || response.starts_with("could not ")
+    {
+        1
+    } else {
+        0
     }
 }
 
@@ -69,4 +136,18 @@ pub fn request(command: ServerCommand) -> Result<String, String> {
         }
     }
     String::from_utf8(total).map_err(|_| "server returned invalid UTF-8".to_string())
+}
+
+#[cfg(test)]
+mod test {
+    use super::response_exit_code;
+
+    #[test]
+    fn server_responses_have_stable_exit_code_classes() {
+        assert_eq!(response_exit_code("Entry added."), 0);
+        assert_eq!(response_exit_code("Vault is already locked."), 0);
+        assert_eq!(response_exit_code("Vault locked."), 1);
+        assert_eq!(response_exit_code("Entry not found."), 3);
+        assert_eq!(response_exit_code("Entry already exists."), 4);
+    }
 }
