@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     fs,
+    io::Cursor,
     path::Path,
     process::{Command, Stdio},
     sync::{
@@ -736,7 +737,15 @@ async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerComman
     if message.read_exact(&mut buf).await.is_err() {
         return None;
     }
-    let msg: ServerCommand = bincode::deserialize(&buf).ok()?;
+    let mut cursor = Cursor::new(buf.as_slice());
+    let msg = {
+        let mut deserializer = rmp_serde::Deserializer::new(&mut cursor);
+        ServerCommand::deserialize(&mut deserializer).ok()?
+    };
+    if cursor.position() != buf.len() as u64 {
+        buf.zeroize();
+        return None;
+    }
     buf.zeroize();
     Some(msg)
 }
@@ -1094,7 +1103,7 @@ mod test {
     #[tokio::test]
     async fn authenticated_tcp_protocol_decodes_a_complete_command() {
         let token = "a".repeat(TOKEN_HEX_LEN);
-        let command = bincode::serialize(&ServerCommand::Status).unwrap();
+        let command = rmp_serde::to_vec(&ServerCommand::Status).unwrap();
         let mut request = token.as_bytes().to_vec();
         request.extend_from_slice(&(command.len() as u32).to_be_bytes());
         request.extend_from_slice(&command);
@@ -1119,6 +1128,15 @@ mod test {
         let (mut client, mut server) = tcp_pair().await;
         let mut request = token.as_bytes().to_vec();
         request.extend_from_slice(&((MAX_TCP_MSG as u32) + 1).to_be_bytes());
+        client.write_all(&request).await.unwrap();
+        assert!(handler(&mut server, &token).await.is_none());
+
+        let (mut client, mut server) = tcp_pair().await;
+        let mut command = rmp_serde::to_vec(&ServerCommand::Status).unwrap();
+        command.push(0);
+        let mut request = token.as_bytes().to_vec();
+        request.extend_from_slice(&(command.len() as u32).to_be_bytes());
+        request.extend_from_slice(&command);
         client.write_all(&request).await.unwrap();
         assert!(handler(&mut server, &token).await.is_none());
     }
