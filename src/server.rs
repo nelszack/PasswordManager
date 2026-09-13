@@ -149,7 +149,6 @@ pub fn start() {
         let _ = child.wait();
     });
     println!("Server started (PID {})", pid);
-    println!("Session token file: {}", token_path.display());
 }
 
 fn schedule_auto_lock(
@@ -380,6 +379,26 @@ async fn handle_connection(
                 }
             }
         }
+        ServerCommand::AddTyped(info) => {
+            if server_info.locked {
+                respond("Vault locked.", &mut stream, http).await;
+            } else {
+                let mut pass = info.entry.copy.then(|| info.entry.password.clone());
+                match vlt.add_typed_entry(info, &mut server_info) {
+                    Ok(true) => {
+                        respond("Item added.", &mut stream, http).await;
+                        if let Some(password) = pass.as_deref() {
+                            copy_in_background(password.to_owned(), 10);
+                        }
+                    }
+                    Ok(false) => respond("Item already exists.", &mut stream, http).await,
+                    Err(error) => respond(&format!("Add failed: {error}"), &mut stream, http).await,
+                }
+                if let Some(password) = pass.as_mut() {
+                    password.zeroize();
+                }
+            }
+        }
         ServerCommand::Delete(id) => match id {
             Target::Vault(k) => {
                 lock_generation.fetch_add(1, Ordering::AcqRel);
@@ -556,9 +575,9 @@ async fn handle_connection(
                 respond("Vault unavailable.", &mut stream, http).await;
             }
         }
-        ServerCommand::View => {
+        ServerCommand::View(options) => {
             if !server_info.locked {
-                vlt.view_entries(&mut stream, http).await;
+                vlt.view_entries(options, &mut stream, http).await;
             } else {
                 respond("Vault locked.", &mut stream, http).await;
             }
@@ -584,6 +603,19 @@ async fn handle_connection(
                 match vlt.update_entry(a, &mut server_info) {
                     Ok(true) => respond("Entry updated.", &mut stream, http).await,
                     Ok(false) => respond("Entry not found.", &mut stream, http).await,
+                    Err(error) => {
+                        respond(&format!("Update failed: {error}"), &mut stream, http).await
+                    }
+                }
+            } else {
+                respond("Vault locked.", &mut stream, http).await;
+            }
+        }
+        ServerCommand::UpdateTyped(update) => {
+            if !server_info.locked {
+                match vlt.update_typed_entry(update, &mut server_info) {
+                    Ok(true) => respond("Item updated.", &mut stream, http).await,
+                    Ok(false) => respond("Item not found or unchanged.", &mut stream, http).await,
                     Err(error) => {
                         respond(&format!("Update failed: {error}"), &mut stream, http).await
                     }
@@ -838,7 +870,7 @@ async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerComma
     }
     let mut extra = request.extra_info.into_iter();
     match request.command.as_str() {
-        "view" | "veiw" => Some(ServerCommand::View),
+        "view" | "veiw" => Some(ServerCommand::View(ListOptions::default())),
         "lock" => match extra.next().flatten().as_deref() {
             Some("true") => Some(ServerCommand::Lock(true)),
             Some("false") => Some(ServerCommand::Lock(false)),

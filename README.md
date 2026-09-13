@@ -10,6 +10,10 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **Security Audit**: Find weak, reused, and duplicate active logins without exposing passwords
 - **Recovery**: Bounded password history and encrypted trash with restore/purge controls
 - **Search and Filtering**: Case-insensitive searches across non-secret entry fields
+- **Typed Items**: Logins, secure notes, payment cards, identities, Wi-Fi,
+  software licenses, SSH keys, and API secrets
+- **Multiple URLs**: Associate several explicitly approved sites with one login
+- **Sorting and Rich Filters**: Sort listings and filter by type, TOTP, or weakness
 - **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
 - **TOTP Authenticator**: Encrypted per-entry authenticator secrets with current-code generation
 - **Browser Extension**: Native-messaging bridge, on-page autofill, TOTP, and save/update prompts
@@ -34,9 +38,9 @@ The binary will be at `target/release/pm`.
 pm start
 ```
 
-The server prints the location of its session token file (e.g.
-`~/.local/share/password_manager/session.key`). CLI and native-messaging clients
-read this protected file automatically; it is never stored in the extension.
+The server creates a private session token automatically. CLI and
+native-messaging clients read it from the protected application data directory;
+it is not displayed to the user or stored in the extension.
 
 ### Generate a Password
 
@@ -56,10 +60,48 @@ Character classes can be disabled with `--no-uppercase`, `--no-lowercase`,
 pm add --name "github.com" --username "user@email.com" --generate-password --copy
 ```
 
+Login items are the default. Repeat `--url` to associate several sites with the
+same login; the first URL is primary and every additional URL participates in
+search and browser-extension matching:
+
+```bash
+pm add --name "Example account" --username alice \
+  --url https://example.com --url https://accounts.example.net
+```
+
+Other encrypted item types use the same compact field model: `--name` is the
+display name, `--username` is an optional account/owner identifier, the hidden
+password prompt stores the primary secret, and `--notes` stores supporting
+details. Identity items have no primary-secret prompt.
+
+```bash
+pm add --type secure-note --name "Alarm code"
+pm add --type payment-card --name "Personal Visa" --username "Alice Example"
+pm add --type identity --name "Shipping identity" --username "alice@example.com" --notes "Home address"
+pm add --type wifi --name "Office Wi-Fi" --username WPA3
+pm add --type software-license --name "Design app" --username "Alice Example"
+pm add --type ssh-key --name "Production SSH" --username deploy
+pm add --type api-secret --name "Deployment API" --username key-id-123
+```
+
+For secure notes the primary secret is the note body; for cards it is the card
+number; for Wi-Fi it is the network password; and for licenses, SSH, and API
+items it is the corresponding key or secret. These values are read through the
+hidden prompt and handled like login passwords.
+
 ### View All Entries
 
 ```bash
 pm view
+```
+
+Listings can be sorted by stable ID, name, creation time, modification time, or
+password age. Add `--descending` to reverse the selected order:
+
+```bash
+pm view --sort name
+pm view --sort modified --descending
+pm view --sort password-age
 ```
 
 ### Search and Filter Entries
@@ -70,10 +112,17 @@ Search across names, usernames, URLs, and notes (passwords are never searched):
 pm search github
 pm search --username alice --url github.com
 pm search work --name git --notes account
+pm search --type wifi
+pm search --totp --sort name
+pm search --weak --sort password-age
 ```
 
 The general search term matches any non-secret field. Field-specific filters are
 combined, so every supplied filter must match. Matching is case-insensitive.
+The `--type`, `--totp`, `--no-totp`, and `--weak` filters work with both
+`view` and `search`. Supported types are `login`, `secure-note`,
+`payment-card`, `identity`, `wifi`, `software-license`, `ssh-key`, and
+`api-secret`. Weakness filtering ignores items with no primary secret.
 
 ### Get a Password
 
@@ -85,6 +134,15 @@ pm get --entry-name "github.com"
 
 ```bash
 pm update --name "New Name" --entry-name "github.com"
+```
+
+Item types and URL associations can be changed without altering the secret:
+
+```bash
+pm update --id 3 --type login
+pm update --id 3 --add-url https://login.example.net
+pm update --id 3 --remove-url https://old.example.com
+pm update --id 3 --clear-urls
 ```
 
 ### Delete an Entry
@@ -159,7 +217,8 @@ shorter secrets remain rejected.
 Authenticator configurations are stored only inside the encrypted vault. They
 remain attached to an entry in trash and after restoration, and are securely
 removed when that trash entry is purged. Plaintext CSV and JSON exports omit
-authenticator configurations.
+authenticator configurations, item types, additional URLs, and password-age
+metadata. Use an encrypted backup when those fields must be preserved.
 
 ### Lock/Unlock
 
@@ -190,8 +249,9 @@ vault. An old key file is left in place, but no vault remains encrypted with it.
 
 ### Import/Export
 
-For a complete backup that preserves entries, stable IDs, password history,
-trash, and TOTP configurations, use the encrypted backup commands:
+For a complete backup that preserves entries, stable IDs, item types, additional
+URLs, password-age metadata, password history, trash, and TOTP configurations,
+use the encrypted backup commands:
 
 ```bash
 # Prompts for and confirms an independent backup password
@@ -292,6 +352,17 @@ source ~/.bashrc
 
    Use `--browser chromium` for Chromium or `--browser helium` for Helium.
    Reload the extension after installing the host.
+
+   **Windows Helium note:** Helium currently does not detect the registry
+   location written by `--browser helium`. Register it through Helium's
+   Chromium-compatible location instead:
+
+   ```powershell
+   pm native-host install --extension-id YOUR_EXTENSION_ID --browser chromium
+   ```
+
+   Fully exit Helium, including any background processes, and reopen it after
+   running the command.
 3. Start and unlock the password-manager server.
 4. Visit a login page and use the key button beside a credential field to
    choose an account. The extension can offer to save or update credentials

@@ -1,3 +1,4 @@
+use crate::types::{ItemKind, ListOptions, SortField};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
@@ -108,8 +109,11 @@ pub enum CliCommands {
         name: String,
         #[arg(long)]
         username: Option<String>,
+        /// Associate one or more URLs with this item. The first is primary.
         #[arg(long)]
-        url: Option<String>,
+        url: Vec<String>,
+        #[arg(long = "type", value_enum, default_value_t = ItemKind::Login)]
+        kind: ItemKind,
         #[arg(long)]
         notes: Option<String>,
         #[arg(long = "generate-password")]
@@ -120,13 +124,15 @@ pub enum CliCommands {
         #[arg(long("copy"), default_value_t = false)]
         copy: bool,
     },
-    View,
+    View(ListArgs),
     Search(SearchArgs),
     Update {
         #[command(flatten)]
         add: UpdateArgs,
         #[command(flatten)]
         target: EntryArgs,
+        #[command(flatten)]
+        metadata: MetadataArgs,
     },
     Get {
         #[command(flatten)]
@@ -262,6 +268,55 @@ pub struct UpdateArgs {
     pub notes: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Args)]
+pub struct MetadataArgs {
+    #[arg(long = "type", value_enum)]
+    pub kind: Option<ItemKind>,
+    /// Add another URL without replacing the primary URL.
+    #[arg(long, conflicts_with = "clear_urls")]
+    pub add_url: Vec<String>,
+    /// Remove a matching primary or additional URL.
+    #[arg(long, conflicts_with = "clear_urls")]
+    pub remove_url: Vec<String>,
+    /// Remove every URL from the item.
+    #[arg(long, conflicts_with_all = ["url", "add_url", "remove_url"])]
+    pub clear_urls: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ListArgs {
+    #[arg(long = "type", value_enum)]
+    pub kind: Option<ItemKind>,
+    #[arg(long, conflicts_with = "no_totp")]
+    pub totp: bool,
+    #[arg(long, conflicts_with = "totp")]
+    pub no_totp: bool,
+    #[arg(long)]
+    pub weak: bool,
+    #[arg(long, value_enum, default_value_t = SortField::Id)]
+    pub sort: SortField,
+    #[arg(long)]
+    pub descending: bool,
+}
+
+impl From<ListArgs> for ListOptions {
+    fn from(value: ListArgs) -> Self {
+        Self {
+            kind: value.kind,
+            has_totp: if value.totp {
+                Some(true)
+            } else if value.no_totp {
+                Some(false)
+            } else {
+                None
+            },
+            weak: value.weak,
+            sort: value.sort,
+            descending: value.descending,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
     #[arg(
@@ -289,7 +344,7 @@ pub struct PurgeArgs {
 #[derive(Args, Debug)]
 pub struct SearchArgs {
     /// Case-insensitive text matched across name, username, URL, and notes.
-    #[arg(required_unless_present_any = ["name", "username", "url", "notes"])]
+    #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak"])]
     pub query: Option<String>,
     /// Require this text in the entry name.
     #[arg(long)]
@@ -303,6 +358,8 @@ pub struct SearchArgs {
     /// Require this text in the notes.
     #[arg(long)]
     pub notes: Option<String>,
+    #[command(flatten)]
+    pub list: ListArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -516,6 +573,57 @@ mod test {
             _ => panic!("expected Search command"),
         }
         assert!(Cli::try_parse_from(["pm", "search"]).is_err());
+    }
+
+    #[test]
+    fn typed_items_multiple_urls_and_list_options_parse() {
+        let add = Cli::try_parse_from([
+            "pm",
+            "add",
+            "--name",
+            "Office Wi-Fi",
+            "--type",
+            "wifi",
+            "--url",
+            "https://router.example",
+            "--url",
+            "https://backup-router.example",
+        ])
+        .unwrap();
+        assert!(matches!(
+            add.command,
+            Some(CliCommands::Add {
+                kind: ItemKind::Wifi,
+                url,
+                ..
+            }) if url.len() == 2
+        ));
+
+        let view = Cli::try_parse_from([
+            "pm",
+            "view",
+            "--type",
+            "payment-card",
+            "--sort",
+            "modified",
+            "--descending",
+        ])
+        .unwrap();
+        assert!(matches!(
+            view.command,
+            Some(CliCommands::View(ListArgs {
+                kind: Some(ItemKind::PaymentCard),
+                sort: SortField::Modified,
+                descending: true,
+                ..
+            }))
+        ));
+
+        assert!(Cli::try_parse_from(["pm", "search", "--type", "secure-note"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["pm", "update", "--id", "1", "--url", "a", "--clear-urls"])
+                .is_err()
+        );
     }
 
     #[test]

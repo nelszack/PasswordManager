@@ -208,6 +208,7 @@ async fn main() {
                 name,
                 username,
                 url,
+                kind,
                 notes,
                 generate_password,
                 copy,
@@ -215,21 +216,30 @@ async fn main() {
             },
             true,
         ) => {
-            send_command(ServerCommand::Add(PasswordEntry {
-                name,
-                username,
-                password: if !generate_password {
-                    prompt_for_password()
-                } else {
-                    make_password(conf.genpass.length)
+            let mut urls = url.into_iter();
+            let primary_url = urls.next();
+            let password = if matches!(kind, crate::types::ItemKind::Identity) {
+                String::new()
+            } else if !generate_password {
+                prompt_for_password()
+            } else {
+                make_password(conf.genpass.length)
+            };
+            send_command(ServerCommand::AddTyped(crate::types::TypedEntry {
+                entry: PasswordEntry {
+                    name,
+                    username,
+                    password,
+                    url: primary_url,
+                    notes,
+                    copy: if !copy && !no_copy {
+                        kind == crate::types::ItemKind::Login && conf.copy.passwords
+                    } else {
+                        copy
+                    },
                 },
-                url,
-                notes,
-                copy: if !copy && !no_copy {
-                    conf.copy.passwords
-                } else {
-                    copy
-                },
+                kind,
+                additional_urls: urls.collect(),
             }));
         }
         (
@@ -256,8 +266,8 @@ async fn main() {
             }
             _ => unreachable!("clap requires exactly one delete target"),
         },
-        (CliCommands::View, true) => {
-            send_command(ServerCommand::View);
+        (CliCommands::View(options), true) => {
+            send_command(ServerCommand::View(options.into()));
         }
         (CliCommands::Search(args), true) => {
             send_command(ServerCommand::Search(SearchFilter {
@@ -266,6 +276,7 @@ async fn main() {
                 username: args.username,
                 url: args.url,
                 notes: args.notes,
+                list: args.list.into(),
             }));
         }
         (CliCommands::History { target }, true) => {
@@ -346,19 +357,33 @@ async fn main() {
                 }));
             }
         },
-        (CliCommands::Update { add, target }, true) => {
-            send_command(ServerCommand::Update(EntryUpdate {
-                target: target_type(target),
-                password: if add.password {
-                    if !add.generate_password {
-                        Some(prompt_for_password())
-                    } else {
-                        Some(make_password(conf.genpass.length))
-                    }
+        (
+            CliCommands::Update {
+                add,
+                target,
+                metadata,
+            },
+            true,
+        ) => {
+            let password = if add.password {
+                if !add.generate_password {
+                    Some(prompt_for_password())
                 } else {
-                    None
+                    Some(make_password(conf.genpass.length))
+                }
+            } else {
+                None
+            };
+            send_command(ServerCommand::UpdateTyped(crate::types::TypedUpdate {
+                entry: EntryUpdate {
+                    target: target_type(target),
+                    password,
+                    update: add,
                 },
-                update: add,
+                kind: metadata.kind,
+                add_url: metadata.add_url,
+                remove_url: metadata.remove_url,
+                clear_urls: metadata.clear_urls,
             }));
         }
         (CliCommands::Get { target }, true) => {
