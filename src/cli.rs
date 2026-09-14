@@ -252,6 +252,9 @@ pub struct ConfigArgs {
     pub genpass_stats: Option<bool>,
     #[arg(long = "copy")]
     pub genpass_copy: Option<bool>,
+    /// Copy newly added login passwords by default.
+    #[arg(long = "password-copy")]
+    pub password_copy: Option<bool>,
     #[arg(long)]
     pub clipboard_timeout: Option<u8>,
     #[arg(long)]

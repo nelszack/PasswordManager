@@ -1,3 +1,5 @@
+importScripts("relay.js");
+
 const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
 const STATUS_POLL_ALARM = "status-poll";
@@ -208,17 +210,33 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === "relayToParent") {
-        const tabId = sender.tab?.id;
-        const frameId = sender.frameId;
-        if (tabId != null && frameId != null) {
-            chrome.tabs.get(tabId, (tab) => {
-                if (chrome.runtime.lastError || !tab) return;
-                if (frameId !== 0) {
-                    chrome.tabs.sendMessage(tabId, request.data, { frameId: 0 });
-                }
-            });
+        const route = PasswordManagerRelay.requestRoute(request.data, sender);
+        if (route) {
+            chrome.tabs.sendMessage(
+                route.tabId,
+                route.message,
+                { frameId: route.frameId },
+                () => void chrome.runtime.lastError
+            );
+            sendResponse({ ok: true });
+        } else {
+            sendResponse({ ok: false });
         }
-        sendResponse({ ok: true });
+        return false;
+    }
+    if (request.action === "relayLoginResult") {
+        const route = PasswordManagerRelay.resultRoute(request, sender);
+        if (route) {
+            chrome.tabs.sendMessage(
+                route.tabId,
+                route.message,
+                { frameId: route.frameId },
+                () => void chrome.runtime.lastError
+            );
+            sendResponse({ ok: true });
+        } else {
+            sendResponse({ ok: false });
+        }
         return false;
     }
 });

@@ -21,6 +21,7 @@
         "<all_urls>"
       ],
       "js": [
+        "form_submission.js",
         "content.js"
       ],
       "run_at": "document_idle",

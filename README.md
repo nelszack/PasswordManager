@@ -349,6 +349,7 @@ pm passcheck --password "mypassword123"
 
 ```bash
 pm config --length 24 --stats true --clipboard-timeout 30 --unlock-timeout 15m
+pm config --password-copy false
 pm config --password-history-limit 20 --trash-retention-days 30
 ```
 

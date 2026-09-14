@@ -14,9 +14,9 @@ pub fn set_private_perms(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-pub fn set_private_dir_perms(path: &Path) {
+pub fn set_private_dir_perms(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
@@ -25,7 +25,9 @@ pub fn set_private_perms(_path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn set_private_dir_perms(_path: &Path) {}
+pub fn set_private_dir_perms(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 pub fn file_exists(file_path: impl AsRef<Path>) -> bool {
     file_path.as_ref().exists()
@@ -36,13 +38,22 @@ pub fn data_dir() -> PathBuf {
         .get()
         .map(|d| d.path().to_path_buf())
         .unwrap_or_else(project_data_dir);
-    fs::create_dir_all(&data_dir).unwrap();
-    set_private_dir_perms(&data_dir);
+    if let Err(error) = fs::create_dir_all(&data_dir).and_then(|_| set_private_dir_perms(&data_dir))
+    {
+        eprintln!(
+            "Error: could not initialize data directory {}: {error}",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
     data_dir
 }
 
 fn project_data_dir() -> PathBuf {
-    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
+        eprintln!("Error: could not locate the application data directory.");
+        std::process::exit(1);
+    };
     proj_dir.data_dir().to_path_buf()
 }
 

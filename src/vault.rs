@@ -2,7 +2,8 @@ use crate::{
     clipboard::copy_in_background,
     encryption::{decrypt_file, try_encrypt_file, try_gen_master_key, try_gen_master_key_legacy},
     file::{data_dir, file_exists, set_private_perms},
-    server::{ServerInfo, respond},
+    protocol::ResponseCode,
+    server::{ServerInfo, respond, respond_with_code},
     types::{
         AuditOptions, ConflictPolicy, CustomField, EntryUpdate, ItemKind, ListOptions,
         PasswordEntry, PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
@@ -22,7 +23,7 @@ use tokio::net::TcpStream;
 use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::Zeroize;
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct VaultEntry {
     pub id: usize,
     pub name: String,
@@ -34,18 +35,56 @@ pub struct VaultEntry {
     pub modified: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
+impl std::fmt::Debug for VaultEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultEntry")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("url", &self.url)
+            .field("notes", &self.notes.as_ref().map(|_| "<redacted>"))
+            .field("created", &self.created)
+            .field("modified", &self.modified)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct PasswordRevision {
     pub entry_id: usize,
     pub password: String,
     pub changed: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
+impl std::fmt::Debug for PasswordRevision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PasswordRevision")
+            .field("entry_id", &self.entry_id)
+            .field("password", &"<redacted>")
+            .field("changed", &self.changed)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct TrashedEntry {
     pub entry: VaultEntry,
     pub history: Vec<PasswordRevision>,
     pub deleted: String,
+}
+
+impl std::fmt::Debug for TrashedEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TrashedEntry")
+            .field("entry", &self.entry)
+            .field("history", &self.history)
+            .field("deleted", &self.deleted)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
@@ -218,6 +257,40 @@ struct PortableRevision {
     changed: String,
 }
 
+impl Zeroize for PortableRevision {
+    fn zeroize(&mut self) {
+        self.password.zeroize();
+        self.changed.zeroize();
+    }
+}
+
+impl Zeroize for PortableItem {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.name.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.created.zeroize();
+        self.modified.zeroize();
+        self.additional_urls.zeroize();
+        self.custom_fields.zeroize();
+        self.password_changed.zeroize();
+        self.password_history.zeroize();
+        self.totp.zeroize();
+    }
+}
+
+impl Zeroize for PortableExport {
+    fn zeroize(&mut self) {
+        self.format.zeroize();
+        self.version.zeroize();
+        self.exported_at.zeroize();
+        self.items.zeroize();
+    }
+}
+
 struct ImportedItem {
     portable: bool,
     entry: VaultEntry,
@@ -288,9 +361,12 @@ fn vault_filename_from_key(filename_key: &[u8; 32]) -> String {
 }
 
 fn try_get_filename(key_pass: &mut PasswordType, new: bool) -> Result<String, String> {
-    let master_key = try_gen_master_key(key_pass, new)?;
-    let filename_key = filename_key_from_master(&master_key);
-    Ok(vault_filename_from_key(&filename_key))
+    let mut master_key = try_gen_master_key(key_pass, new)?;
+    let mut filename_key = filename_key_from_master(&master_key);
+    master_key.zeroize();
+    let filename = vault_filename_from_key(&filename_key);
+    filename_key.zeroize();
+    Ok(filename)
 }
 
 #[cfg(test)]
@@ -299,9 +375,12 @@ fn get_filename(key_pass: &mut PasswordType, new: bool) -> String {
 }
 
 fn try_get_legacy_filename(key_pass: &mut PasswordType) -> Result<String, String> {
-    let master_key = try_gen_master_key_legacy(key_pass)?;
-    let filename_key = filename_key_from_master(&master_key);
-    Ok(vault_filename_from_key(&filename_key))
+    let mut master_key = try_gen_master_key_legacy(key_pass)?;
+    let mut filename_key = filename_key_from_master(&master_key);
+    master_key.zeroize();
+    let filename = vault_filename_from_key(&filename_key);
+    filename_key.zeroize();
+    Ok(filename)
 }
 
 pub fn create_vault(
@@ -394,17 +473,17 @@ fn persist_private_file(path: &Path, contents: &[u8], force: bool) -> Result<(),
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut temporary = NamedTempFile::new_in(parent)
-        .map_err(|error| format!("could not create backup temp file: {error}"))?;
+        .map_err(|error| format!("could not create private temp file: {error}"))?;
     set_private_perms(temporary.path())
-        .map_err(|error| format!("could not protect backup temp file: {error}"))?;
+        .map_err(|error| format!("could not protect private temp file: {error}"))?;
     temporary
         .write_all(contents)
         .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| format!("could not write backup file: {error}"))?;
+        .map_err(|error| format!("could not write private file: {error}"))?;
     if force {
         temporary
             .persist(path)
-            .map_err(|error| format!("could not replace backup file: {}", error.error))?;
+            .map_err(|error| format!("could not replace private file: {}", error.error))?;
     } else {
         temporary.persist_noclobber(path).map_err(|error| {
             if error.error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -413,7 +492,7 @@ fn persist_private_file(path: &Path, contents: &[u8], force: bool) -> Result<(),
                     path
                 )
             } else {
-                format!("could not create backup file: {}", error.error)
+                format!("could not create private file: {}", error.error)
             }
         })?;
     }
@@ -650,34 +729,78 @@ fn parse_pwned_range(body: &str, prefix: &str) -> HashMap<String, u64> {
         .collect()
 }
 
-async fn breached_hashes(
-    passwords: impl Iterator<Item = String>,
+async fn breached_hashes<'a>(
+    passwords: impl Iterator<Item = &'a str>,
 ) -> Result<HashMap<String, u64>, String> {
     let mut prefixes = HashSet::new();
     for password in passwords {
-        prefixes.insert(password_hash(&password)[..5].to_string());
+        prefixes.insert(password_hash(password)[..5].to_string());
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("password-manager/0.1 breach-audit")
         .build()
         .map_err(|error| format!("could not initialize breach checker: {error}"))?;
-    let mut matches = HashMap::new();
-    for prefix in prefixes {
-        let response = client
-            .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
-            .header("Add-Padding", "true")
-            .send()
-            .await
-            .map_err(|error| format!("Pwned Passwords request failed: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("Pwned Passwords returned an error: {error}"))?;
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("could not read Pwned Passwords response: {error}"))?;
-        matches.extend(parse_pwned_range(&body, &prefix));
+    const MAX_CONCURRENT_REQUESTS: usize = 8;
+    let mut pending = prefixes.into_iter();
+    let mut requests = tokio::task::JoinSet::new();
+    for prefix in pending.by_ref().take(MAX_CONCURRENT_REQUESTS) {
+        requests.spawn(fetch_breached_prefix(client.clone(), prefix));
     }
+
+    let mut matches = HashMap::new();
+    while let Some(result) = requests.join_next().await {
+        let prefix_matches =
+            result.map_err(|error| format!("breach-check task failed: {error}"))??;
+        matches.extend(prefix_matches);
+        if let Some(prefix) = pending.next() {
+            requests.spawn(fetch_breached_prefix(client.clone(), prefix));
+        }
+    }
+    Ok(matches)
+}
+
+async fn fetch_breached_prefix(
+    client: reqwest::Client,
+    prefix: String,
+) -> Result<HashMap<String, u64>, String> {
+    const MAX_RANGE_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+    let response = client
+        .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
+        .header("Add-Padding", "true")
+        .send()
+        .await
+        .map_err(|error| format!("Pwned Passwords request failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Pwned Passwords returned an error: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RANGE_RESPONSE_BYTES)
+    {
+        return Err("Pwned Passwords returned an oversized response".to_string());
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("could not read Pwned Passwords response: {error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_RANGE_RESPONSE_BYTES as usize {
+            body.zeroize();
+            return Err("Pwned Passwords returned an oversized response".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(error) => {
+            body.zeroize();
+            return Err(format!("Pwned Passwords returned invalid UTF-8: {error}"));
+        }
+    };
+    let matches = parse_pwned_range(text, &prefix);
+    body.zeroize();
     Ok(matches)
 }
 
@@ -1208,7 +1331,7 @@ impl Vault {
         match a {
             Target::Id(i) => {
                 let Some(entry) = self.entries.iter().find(|entry| entry.id == i) else {
-                    respond("Invalid id.", stream, http).await;
+                    respond_with_code(ResponseCode::NotFound, "Invalid id.", stream, http).await;
                     return;
                 };
                 respond(&self.entry_details(entry), stream, http).await;
@@ -1223,7 +1346,7 @@ impl Vault {
                         copy_in_background(entry.password.clone(), 15);
                     }
                 } else {
-                    respond("Not found.\n", stream, http).await;
+                    respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
                 }
             }
             Target::Url(u) => {
@@ -1235,10 +1358,18 @@ impl Vault {
                 ) {
                     respond(&json, stream, http).await;
                 } else {
-                    respond("Not found.\n", stream, http).await;
+                    respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
                 }
             }
-            Target::Vault(_) => respond("Invalid entry selector.", stream, http).await,
+            Target::Vault(_) => {
+                respond_with_code(
+                    ResponseCode::InvalidInput,
+                    "Invalid entry selector.",
+                    stream,
+                    http,
+                )
+                .await
+            }
         }
     }
 
@@ -1251,7 +1382,7 @@ impl Vault {
         if let Some(entry) = entry {
             respond(&entry.password, stream, http).await;
         } else {
-            respond("Not found.\n", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
         }
     }
 
@@ -1601,7 +1732,7 @@ impl Vault {
 
     pub async fn view_password_history(&self, target: Target, stream: &mut TcpStream, http: bool) {
         let Some(index) = self.entry_index(&target) else {
-            respond("Entry not found.", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "Entry not found.", stream, http).await;
             return;
         };
         let entry = &self.entries[index];
@@ -2021,7 +2152,7 @@ impl Vault {
                     self.entries
                         .iter()
                         .filter(|entry| self.item_kind(entry.id) == ItemKind::Login)
-                        .map(|entry| entry.password.clone()),
+                        .map(|entry| entry.password.as_str()),
                 )
                 .await,
             )
@@ -2033,7 +2164,18 @@ impl Vault {
             Some(Err(error)) => (None, Some(error.as_str())),
             None => (None, None),
         };
-        respond(&self.audit_report(&options, breached, error), stream, http).await;
+        let code = if error.is_some() {
+            ResponseCode::Failure
+        } else {
+            ResponseCode::Success
+        };
+        respond_with_code(
+            code,
+            &self.audit_report(&options, breached, error),
+            stream,
+            http,
+        )
+        .await;
     }
 
     fn is_weak(&self, entry: &VaultEntry) -> bool {
@@ -2115,7 +2257,7 @@ impl Vault {
         }
         let entries = self.apply_list_options(self.entries.iter().collect(), &options);
         if entries.is_empty() {
-            respond("No matching entries.", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "No matching entries.", stream, http).await;
             return;
         }
         for entry in entries {
@@ -2193,7 +2335,7 @@ impl Vault {
     pub async fn search(&self, filter: SearchFilter, stream: &mut TcpStream, http: bool) {
         let entries = self.apply_list_options(self.search_entries(&filter), &filter.list);
         if entries.is_empty() {
-            respond("No matching entries.", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "No matching entries.", stream, http).await;
             return;
         }
         for entry in entries {
@@ -2256,30 +2398,32 @@ impl Vault {
                     }
                 })
                 .collect();
-            let export = PortableExport {
+            let mut export = PortableExport {
                 format: PORTABLE_FORMAT.to_string(),
                 version: PORTABLE_VERSION,
                 exported_at: chrono::Utc::now().to_rfc3339(),
                 items,
             };
-            let encoded = serde_json::to_vec_pretty(&export)
-                .map_err(|e| format!("could not encode JSON export: {e}"))?;
-            fs::write(&path, encoded)
-                .map_err(|e| format!("could not create export file {path:?}: {e}"))?;
-            set_private_perms(std::path::Path::new(&path))
-                .map_err(|e| format!("could not protect export file {path:?}: {e}"))?;
-            return Ok(());
+            let encoded = serde_json::to_vec_pretty(&export);
+            export.zeroize();
+            let mut encoded = encoded.map_err(|e| format!("could not encode JSON export: {e}"))?;
+            let result = persist_private_file(Path::new(&path), &encoded, true)
+                .map_err(|e| format!("could not create export file {path:?}: {e}"));
+            encoded.zeroize();
+            return result;
         }
-        let mut wtr = csv::Writer::from_path(&path)
-            .map_err(|e| format!("could not create export file {path:?}: {e}"))?;
-        set_private_perms(std::path::Path::new(&path))
-            .map_err(|e| format!("could not protect export file {path:?}: {e}"))?;
+        let mut wtr = csv::Writer::from_writer(Vec::new());
         for i in &self.entries {
             wtr.serialize(i)
                 .map_err(|e| format!("could not write export file {path:?}: {e}"))?;
         }
-        wtr.flush()
-            .map_err(|e| format!("could not finish export file {path:?}: {e}"))
+        let mut encoded = wtr
+            .into_inner()
+            .map_err(|e| format!("could not finish export file {path:?}: {}", e.error()))?;
+        let result = persist_private_file(Path::new(&path), &encoded, true)
+            .map_err(|e| format!("could not create export file {path:?}: {e}"));
+        encoded.zeroize();
+        result
     }
 
     pub fn encrypted_backup(
@@ -4914,6 +5058,28 @@ mod test {
         let csv = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
         vault.export(csv.path().display().to_string()).unwrap();
         assert!(!fs::read_to_string(csv.path()).unwrap().contains(secret));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plaintext_exports_are_created_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let vault = recovery_test_vault(vec![recovery_test_entry(
+            1,
+            "service",
+            "alice",
+            "exported-secret",
+        )]);
+        for extension in ["json", "csv"] {
+            let path = directory.path().join(format!("export.{extension}"));
+            vault.export(path.display().to_string()).unwrap();
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

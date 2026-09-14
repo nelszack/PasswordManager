@@ -11,16 +11,40 @@ function escapeHtml(str) {
 // Track dropdowns so they can be repositioned
 // as the page loads / layout changes
 // ===============================
-const dropdownRegistry = [];
+const dropdownRegistry = new Set();
 let layoutObserverStarted = false;
+let repositionScheduled = false;
+
+function registerPositionedControl(input, button, menu, position, outsideClick = null) {
+    const record = { input, button, menu, position, outsideClick };
+    dropdownRegistry.add(record);
+    if (outsideClick) document.addEventListener("click", outsideClick);
+    startLayoutObserver();
+}
 
 function startLayoutObserver() {
     if (layoutObserverStarted) return;
     layoutObserverStarted = true;
 
-    const reposition = () => requestAnimationFrame(() => {
-        for (const dd of dropdownRegistry) dd.position();
-    });
+    const reposition = () => {
+        if (repositionScheduled) return;
+        repositionScheduled = true;
+        requestAnimationFrame(() => {
+            repositionScheduled = false;
+            for (const control of dropdownRegistry) {
+                if (!control.input.isConnected) {
+                    control.button.remove();
+                    control.menu?.remove();
+                    if (control.outsideClick) {
+                        document.removeEventListener("click", control.outsideClick);
+                    }
+                    dropdownRegistry.delete(control);
+                    continue;
+                }
+                control.position();
+            }
+        });
+    };
 
     window.addEventListener("load", reposition);
     window.addEventListener("scroll", reposition, true);
@@ -294,8 +318,10 @@ function createDropdownButton(input, accounts) {
     positionButton();
 
     // Keep the key glued to the field as the page finishes loading / layout shifts
-    dropdownRegistry.push({ position: positionButton });
-    startLayoutObserver();
+    const closeOnOutsideClick = (e) => {
+        if (!menu.contains(e.target) && e.target !== button) menu.style.display = "none";
+    };
+    registerPositionedControl(input, button, menu, positionButton, closeOnOutsideClick);
 
     function buildMenuItems(accountList) {
         menu.innerHTML = "";
@@ -364,11 +390,6 @@ function createDropdownButton(input, accounts) {
         positionMenu();
     });
 
-    document.addEventListener("click", (e) => {
-        if (!menu.contains(e.target) && e.target !== button) {
-            menu.style.display = "none";
-        }
-    });
 }
 
 function createTotpButton(input, accounts) {
@@ -490,8 +511,10 @@ function createTotpButton(input, accounts) {
 
     buildMenuItems(accounts);
     positionButton();
-    dropdownRegistry.push({ position: positionButton });
-    startLayoutObserver();
+    const closeOnOutsideClick = event => {
+        if (!menu.contains(event.target) && event.target !== button) menu.style.display = "none";
+    };
+    registerPositionedControl(input, button, menu, positionButton, closeOnOutsideClick);
 
     button.addEventListener("click", async (event) => {
         event.preventDefault();
@@ -506,9 +529,6 @@ function createTotpButton(input, accounts) {
         positionMenu();
     });
 
-    document.addEventListener("click", event => {
-        if (!menu.contains(event.target) && event.target !== button) menu.style.display = "none";
-    });
 }
 
 // Generate locally with the browser CSPRNG. Every generated password contains
@@ -592,8 +612,7 @@ function createGeneratorButton(input) {
     });
 
     positionButton();
-    dropdownRegistry.push({ position: positionButton });
-    startLayoutObserver();
+    registerPositionedControl(input, button, null, positionButton);
 }
 
 // ===============================
@@ -929,8 +948,10 @@ function createTypedAutofillButton(input, kind) {
     }
 
     positionButton();
-    dropdownRegistry.push({ position: positionButton });
-    startLayoutObserver();
+    const closeOnOutsideClick = event => {
+        if (!menu.contains(event.target) && event.target !== button) menu.style.display = "none";
+    };
+    registerPositionedControl(input, button, menu, positionButton, closeOnOutsideClick);
 
     button.addEventListener("click", async event => {
         if (!event.isTrusted) return;
@@ -943,9 +964,6 @@ function createTypedAutofillButton(input, kind) {
         const items = await fetchAutofillItems();
         buildMenu(items);
         positionMenu();
-    });
-    document.addEventListener("click", event => {
-        if (!menu.contains(event.target) && event.target !== button) menu.style.display = "none";
     });
 }
 
@@ -1129,11 +1147,6 @@ let modalOpen = false;
 
 function showPromptModal(title, message, showUpdateOption = false, oldUsername = "", oldPassword = "", showNameInput = false, existingName = "", showUsernameInput = false, usernameValue = "") {
     modalOpen = true;
-    const originalSubmit = HTMLFormElement.prototype.submit;
-    HTMLFormElement.prototype.submit = function() {
-        if (modalOpen) return;
-        return originalSubmit.call(this);
-    };
     return new Promise((resolve) => {
         const overlay = document.createElement("div");
         Object.assign(overlay.style, {
@@ -1192,7 +1205,6 @@ function showPromptModal(title, message, showUpdateOption = false, oldUsername =
 
         const cleanup = () => {
             modalOpen = false;
-            HTMLFormElement.prototype.submit = originalSubmit;
         };
 
         document.getElementById("pmAddBtn").addEventListener("click", (e) => {
@@ -1272,23 +1284,22 @@ async function promptForCredentials(username, password, accounts, domain = curre
 // When a login happens inside an iframe, relay it to the top
 // frame so the prompt is shown in the main window where it's visible.
 // ===============================
+const relayResolvers = new Map();
+
 function relayLoginToParent(username, password, accounts) {
     return new Promise((resolve) => {
-        const token = Math.random().toString(36).slice(2);
-
-        const handler = (event) => {
-            if (event.source !== window.parent) return;
-            if (event.data && event.data.type === "PM_LOGIN_RESULT" && event.data.token === token) {
-                window.removeEventListener("message", handler);
-                resolve(event.data);
-            }
-        };
-
-        window.addEventListener("message", handler);
+        const token = crypto.randomUUID();
+        const timeout = setTimeout(() => {
+            relayResolvers.delete(token);
+            resolve({ action: "ignore" });
+        }, 30000);
+        relayResolvers.set(token, data => {
+            clearTimeout(timeout);
+            resolve(data);
+        });
         chrome.runtime.sendMessage({
             action: "relayToParent",
             data: {
-                type: "PM_LOGIN",
                 token,
                 domain: currentDomain,
                 username,
@@ -1296,10 +1307,14 @@ function relayLoginToParent(username, password, accounts) {
                 accountName: accounts.length > 0 ? accounts[0].name : "",
                 hasAccounts: accounts.length > 0
             }
+        }, response => {
+            if (!chrome.runtime.lastError && response?.ok) return;
+            const resolver = relayResolvers.get(token);
+            if (resolver) {
+                relayResolvers.delete(token);
+                resolver({ action: "ignore", token });
+            }
         });
-
-        // If the parent never answers, don't block the login
-        setTimeout(() => resolve({ action: "ignore" }), 30000);
     });
 }
 
@@ -1309,22 +1324,11 @@ function relayLoginToParent(username, password, accounts) {
 let popupResolved = false;
 let currentDomain = window.location.hostname;
 
-function getBaseDomain(hostname) {
-    const parts = hostname.split(".");
-    if (parts.length <= 2) return hostname;
-    const twoLetterTld = /^[a-z]{2}$/.test(parts[parts.length - 1]);
-    return parts.slice(-(twoLetterTld && parts.length > 3 ? 3 : 2)).join(".");
-}
-
 function isSameSite(a, b) {
-    if (!a || !b) return false;
-    return a === b
-        || a.endsWith("." + b)
-        || b.endsWith("." + a)
-        || getBaseDomain(a) === getBaseDomain(b);
+    return Boolean(a && b && a === b);
 }
 
-const PENDING_TIMEOUT = 10 * 60 * 1000;
+const PENDING_TIMEOUT = 60 * 1000;
 
 function setPopupPending(pendingData, domain = currentDomain) {
     chrome.storage.session.set({
@@ -1347,12 +1351,12 @@ function isPopupPending() {
     return new Promise((resolve) => {
         chrome.storage.session.get("pmPopupPending", (result) => {
             const p = result.pmPopupPending;
+            // Pending credentials are single-use and should not remain in
+            // extension storage while the user considers the prompt.
+            clearPopupPending();
             if (p && isSameSite(p.domain, currentDomain) && Date.now() - p.time < PENDING_TIMEOUT) {
                 resolve(p);
             } else {
-                if (p && Date.now() - p.time >= PENDING_TIMEOUT) {
-                    clearPopupPending();
-                }
                 resolve(null);
             }
         });
@@ -1429,24 +1433,40 @@ async function initExtension() {
         return;
     }
 
-    document.addEventListener("submit", async (e) => {
-        if (modalOpen || popupResolved) return;
+    const resumeFormSubmission = (form, submitter, resumedForms) => {
+        try {
+            if (submitter instanceof HTMLElement && submitter.isConnected && submitter.form === form) {
+                HTMLFormElement.prototype.requestSubmit.call(form, submitter);
+            } else {
+                HTMLFormElement.prototype.requestSubmit.call(form);
+            }
+        } catch (_) {
+            // requestSubmit can fail if a framework removed the submitter or
+            // form while the prompt was open. Native submit is the last-resort
+            // fallback so the password manager never traps the user on-page.
+            resumedForms.delete(form);
+            HTMLFormElement.prototype.submit.call(form);
+        }
+    };
 
-        const { username: rawUsername, password } = findLoginCredentials(e.target);
-        if (!password) return;
-        const accounts = await fetchAccounts(currentDomain);
-        const username = resolveUsername(rawUsername, accounts);
-        if (rawUsername) storeUsernameForLater(rawUsername);
+    const submissionCoordinator = PasswordManagerFormSubmission.createSubmissionCoordinator({
+        isForm: form => form instanceof HTMLFormElement,
+        credentialsFor: form => findLoginCredentials(form),
+        shouldIgnore: () => modalOpen || popupResolved,
+        resume: resumeFormSubmission,
+        handle: async ({ credentials }) => {
+            const { username: rawUsername, password } = credentials;
+            const accounts = await fetchAccounts(currentDomain);
+            const username = resolveUsername(rawUsername, accounts);
+            if (rawUsername) storeUsernameForLater(rawUsername);
 
-        const match = findMatchingAccount(username, password, accounts);
-        if (!match) {
-            e.preventDefault();
+            const match = findMatchingAccount(username, password, accounts);
+            if (match) return;
 
             // Login happened inside an iframe: show the prompt in the top
             // window (visible there), then let the iframe submit.
             if (window !== window.top) {
                 await relayLoginToParent(username, password, accounts);
-                e.target.submit();
                 return;
             }
 
@@ -1479,66 +1499,75 @@ async function initExtension() {
                     id: updateTarget.id
                 });
             }
-            e.target.submit();
         }
+    });
+    document.addEventListener("submit", event => {
+        submissionCoordinator.onSubmit(event).catch(error => {
+            console.log("Password Manager submission error:", error);
+        });
     }, true);
 
-    // Top frame: handle logins relayed from login forms inside iframes.
-    if (window === window.top) {
-        window.addEventListener("message", async (event) => {
-            if (event.source === window) return;
-            const data = event.data;
-            if (!data || data.type !== "PM_LOGIN") return;
-            let sourceDomain = "";
-            try {
-                sourceDomain = new URL(event.origin).hostname;
-            } catch (_) {
-                return;
-            }
-            if (sourceDomain !== data.domain) return;
+    async function handleRelayedLogin(data) {
+        if (modalOpen || popupResolved) {
+            return { action: "ignore", token: data.token };
+        }
 
-            if (modalOpen || popupResolved) {
-                event.source.postMessage({ type: "PM_LOGIN_RESULT", action: "ignore", token: data.token }, event.origin);
-                return;
-            }
+        modalOpen = true;
+        const domainAccounts = await fetchAccounts(data.domain);
+        const { result, updateTarget } = await promptForCredentials(
+            data.username,
+            data.password,
+            domainAccounts,
+            data.domain
+        );
 
-            modalOpen = true;
-            const domainAccounts = await fetchAccounts(data.domain);
-            const { result, updateTarget } = await promptForCredentials(
-                data.username,
-                data.password,
-                domainAccounts,
-                data.domain
-            );
+        modalOpen = false;
+        popupResolved = true;
+        clearPopupPending();
 
-            modalOpen = false;
-            popupResolved = true;
-            clearPopupPending();
+        const saveUsername = result.username || data.username;
 
-            const saveUsername = result.username || data.username;
+        if (result.action === "add") {
+            chrome.runtime.sendMessage({
+                action: "saveCredentials",
+                domain: data.domain,
+                username: saveUsername,
+                password: data.password,
+                name: result.name
+            });
+        } else if (result.action === "update" && updateTarget) {
+            chrome.runtime.sendMessage({
+                action: "updateCredentials",
+                domain: data.domain,
+                username: saveUsername,
+                password: data.password,
+                name: updateTarget.name,
+                id: updateTarget.id
+            });
+        }
 
-            if (result.action === "add") {
-                chrome.runtime.sendMessage({
-                    action: "saveCredentials",
-                    domain: data.domain,
-                    username: saveUsername,
-                    password: data.password,
-                    name: result.name
-                });
-            } else if (result.action === "update" && updateTarget) {
-                chrome.runtime.sendMessage({
-                    action: "updateCredentials",
-                    domain: data.domain,
-                    username: saveUsername,
-                    password: data.password,
-                    name: updateTarget.name,
-                    id: updateTarget.id
-                });
-            }
-
-            event.source.postMessage({ type: "PM_LOGIN_RESULT", action: result.action, token: data.token }, event.origin);
-        });
+        return { action: result.action, token: data.token };
     }
+
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message.action === "relayedLoginResult") {
+            const resolver = relayResolvers.get(message.data?.token);
+            if (resolver) {
+                relayResolvers.delete(message.data.token);
+                resolver(message.data);
+            }
+            return;
+        }
+        if (message.action === "relayedLogin" && window === window.top) {
+            handleRelayedLogin(message.data)
+                .then(data => chrome.runtime.sendMessage({
+                    action: "relayLoginResult",
+                    sourceFrameId: message.sourceFrameId,
+                    data
+                }))
+                .catch(error => console.log("Password Manager relay error:", error));
+        }
+    });
 
     // Catch logins that navigate/redirect without a form submit event
     // (e.g. fetch + window.location, or form.submit() in JS), so the
@@ -1563,8 +1592,7 @@ async function initExtension() {
             chrome.runtime.sendMessage({
                 action: "relayToParent",
                 data: {
-                    type: "PM_LOGIN",
-                    token: Math.random().toString(36).slice(2),
+                    token: crypto.randomUUID(),
                     domain: currentDomain,
                     username,
                     password,
