@@ -1,17 +1,31 @@
+importScripts("relay.js");
+
 const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
+const STATUS_POLL_ALARM = "status-poll";
+const LIVE_STATUS_POLL_MS = 2000;
 
 let nativePort = null;
 let nextRequestId = 1;
 const pendingRequests = new Map();
+let cachedStatus = null;
+let statusRefresh = null;
 
 chrome.runtime.onInstalled.addListener(() => {
-    chrome.alarms.create("status-poll", { periodInMinutes: 1 });
-    refreshStatus();
+    startStatusMonitoring();
 });
 
+chrome.runtime.onStartup.addListener(() => {
+    startStatusMonitoring();
+});
+
+function startStatusMonitoring() {
+    chrome.alarms.create(STATUS_POLL_ALARM, { periodInMinutes: 1 });
+    refreshStatus();
+}
+
 chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === "status-poll") refreshStatus();
+    if (alarm.name === STATUS_POLL_ALARM) refreshStatus();
 });
 
 function closeNativePort(error) {
@@ -86,6 +100,25 @@ function setBadge(status) {
     chrome.action.setTitle({ title });
 }
 
+function sameStatus(left, right) {
+    return left?.native === right?.native
+        && left?.running === right?.running
+        && left?.locked === right?.locked
+        && left?.error === right?.error;
+}
+
+function publishStatus(status) {
+    setBadge(status);
+    if (sameStatus(cachedStatus, status)) return;
+
+    cachedStatus = status;
+    chrome.storage.local.set({ pmStatus: status });
+    chrome.runtime.sendMessage(
+        { action: "statusChanged", status },
+        () => void chrome.runtime.lastError
+    );
+}
+
 async function serverStatus() {
     try {
         const response = await nativeRequest("status");
@@ -102,18 +135,31 @@ async function serverStatus() {
     }
 }
 
-async function refreshStatus() {
-    const status = await serverStatus();
-    setBadge(status);
-    return status;
+function refreshStatus() {
+    if (statusRefresh) return statusRefresh;
+    statusRefresh = serverStatus()
+        .then(status => {
+            publishStatus(status);
+            return status;
+        })
+        .finally(() => {
+            statusRefresh = null;
+        });
+    return statusRefresh;
 }
 
-function sendAction(action, fields, sendResponse) {
+function sendAction(action, fields, sendResponse, refreshAfter = false) {
     nativeRequest(action, fields)
-        .then(response => sendResponse(response.success
-            ? { success: true, data: response.data }
-            : { success: false, error: response.error }))
-        .catch(error => sendResponse({ success: false, error: error.message }));
+        .then(response => {
+            sendResponse(response.success
+                ? { success: true, data: response.data }
+                : { success: false, error: response.error });
+            if (refreshAfter) refreshStatus();
+        })
+        .catch(error => {
+            sendResponse({ success: false, error: error.message });
+            if (refreshAfter) refreshStatus();
+        });
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -132,6 +178,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendAction("getCredentials", { domain: request.domain }, sendResponse);
         return true;
     }
+    if (request.action === "getAutofillItems") {
+        sendAction("getAutofillItems", {}, sendResponse);
+        return true;
+    }
     if (request.action === "getTotp") {
         sendAction("getTotp", { entryId: request.id }, sendResponse);
         return true;
@@ -142,7 +192,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             username: request.username,
             password: request.password,
             name: request.name
-        }, sendResponse);
+        }, sendResponse, true);
         return true;
     }
     if (request.action === "updateCredentials") {
@@ -152,25 +202,47 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             password: request.password,
             name: request.name,
             entryId: request.id
-        }, sendResponse);
+        }, sendResponse, true);
         return true;
     }
     if (request.action === "lockVault") {
-        sendAction("lock", {}, sendResponse);
+        sendAction("lock", {}, sendResponse, true);
         return true;
     }
     if (request.action === "relayToParent") {
-        const tabId = sender.tab?.id;
-        const frameId = sender.frameId;
-        if (tabId != null && frameId != null) {
-            chrome.tabs.get(tabId, (tab) => {
-                if (chrome.runtime.lastError || !tab) return;
-                if (frameId !== 0) {
-                    chrome.tabs.sendMessage(tabId, request.data, { frameId: 0 });
-                }
-            });
+        const route = PasswordManagerRelay.requestRoute(request.data, sender);
+        if (route) {
+            chrome.tabs.sendMessage(
+                route.tabId,
+                route.message,
+                { frameId: route.frameId },
+                () => void chrome.runtime.lastError
+            );
+            sendResponse({ ok: true });
+        } else {
+            sendResponse({ ok: false });
         }
-        sendResponse({ ok: true });
+        return false;
+    }
+    if (request.action === "relayLoginResult") {
+        const route = PasswordManagerRelay.resultRoute(request, sender);
+        if (route) {
+            chrome.tabs.sendMessage(
+                route.tabId,
+                route.message,
+                { frameId: route.frameId },
+                () => void chrome.runtime.lastError
+            );
+            sendResponse({ ok: true });
+        } else {
+            sendResponse({ ok: false });
+        }
         return false;
     }
 });
+
+// A connected native-messaging port keeps the Manifest V3 worker alive,
+// allowing state changes made by the CLI or auto-lock timer to reach the badge
+// and an open popup promptly. The alarm above covers worker suspension/restart.
+setInterval(refreshStatus, LIVE_STATUS_POLL_MS);
+startStatusMonitoring();

@@ -91,7 +91,17 @@ pub enum CliCommands {
         id: usize,
     },
     Purge(PurgeArgs),
-    Audit,
+    Audit {
+        /// Report passwords at least this many days old.
+        #[arg(long, value_name = "DAYS")]
+        stale_days: Option<u64>,
+        /// Privately check password hash prefixes against Pwned Passwords.
+        #[arg(long)]
+        breaches: bool,
+        /// Report login entries that do not have a TOTP authenticator.
+        #[arg(long)]
+        require_totp: bool,
+    },
     Totp {
         #[command(subcommand)]
         command: TotpCommands,
@@ -242,6 +252,9 @@ pub struct ConfigArgs {
     pub genpass_stats: Option<bool>,
     #[arg(long = "copy")]
     pub genpass_copy: Option<bool>,
+    /// Copy newly added login passwords by default.
+    #[arg(long = "password-copy")]
+    pub password_copy: Option<bool>,
     #[arg(long)]
     pub clipboard_timeout: Option<u8>,
     #[arg(long)]
@@ -341,6 +354,9 @@ pub struct ListArgs {
     pub no_totp: bool,
     #[arg(long)]
     pub weak: bool,
+    /// Show passwords at least this many days old.
+    #[arg(long, value_name = "DAYS")]
+    pub stale_days: Option<u64>,
     #[arg(long, value_enum, default_value_t = SortField::Id)]
     pub sort: SortField,
     #[arg(long)]
@@ -359,6 +375,7 @@ impl From<ListArgs> for ListOptions {
                 None
             },
             weak: value.weak,
+            stale_days: value.stale_days,
             sort: value.sort,
             descending: value.descending,
         }
@@ -392,7 +409,7 @@ pub struct PurgeArgs {
 #[derive(Args, Debug)]
 pub struct SearchArgs {
     /// Case-insensitive text matched across name, username, URL, and notes.
-    #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak"])]
+    #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak", "stale_days"])]
     pub query: Option<String>,
     /// Require this text in the entry name.
     #[arg(long)]
@@ -621,6 +638,28 @@ mod test {
             _ => panic!("expected Search command"),
         }
         assert!(Cli::try_parse_from(["pm", "search"]).is_err());
+        assert!(Cli::try_parse_from(["pm", "search", "--stale-days", "90"]).is_ok());
+    }
+
+    #[test]
+    fn security_health_options_parse() {
+        let cli = Cli::try_parse_from([
+            "pm",
+            "audit",
+            "--stale-days",
+            "365",
+            "--breaches",
+            "--require-totp",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommands::Audit {
+                stale_days: Some(365),
+                breaches: true,
+                require_totp: true,
+            })
+        ));
     }
 
     #[test]

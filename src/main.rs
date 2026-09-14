@@ -6,6 +6,7 @@ mod encryption;
 mod file;
 mod native_messaging;
 mod password;
+mod protocol;
 mod server;
 mod types;
 mod vault;
@@ -15,7 +16,7 @@ use crate::{
         cli_parse,
     },
     client::send_command,
-    config::{read_config, update},
+    config::{try_read_config, try_update},
     encryption::prompt_for_password,
     password::{
         PasswordOptions, generate_passphrase, generate_password as make_password,
@@ -23,8 +24,8 @@ use crate::{
     },
     server::{is_running, server, start},
     types::{
-        BackupRequest, CustomField, EntryUpdate, ImportRequest, PasswordEntry, PasswordType,
-        SearchFilter, ServerCommand, Target, TotpCommand, UnlockInfo,
+        AuditOptions, BackupRequest, CustomField, EntryUpdate, ImportRequest, PasswordEntry,
+        PasswordType, SearchFilter, ServerCommand, Target, TotpCommand, UnlockInfo,
     },
 };
 use clap::CommandFactory;
@@ -101,15 +102,24 @@ async fn main() {
         }
         return;
     }
-    let proj_dir = ProjectDirs::from("com", "myproject", "password_manager").unwrap();
+    let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
+        eprintln!("Error: could not locate the application data directory.");
+        return;
+    };
     let config_path = proj_dir.config_dir();
     let data_path = proj_dir.data_dir();
-    fs::create_dir_all(config_path).unwrap();
-    fs::create_dir_all(data_path).unwrap();
+    if let Err(error) = fs::create_dir_all(config_path).and_then(|_| fs::create_dir_all(data_path))
+    {
+        eprintln!("Error: could not create application directories: {error}");
+        return;
+    }
     let config_file = config_path.join("config.toml");
     let cli = cli_parse();
     client::configure_output(cli.json, cli.quiet);
-    let conf = read_config(&config_file);
+    let conf = match try_read_config(&config_file) {
+        Ok(config) => config,
+        Err(error) => client::exit_error(&error, 1),
+    };
     let server_running = is_running();
     let Some(command) = cli.command else {
         let _ = Cli::command().print_help();
@@ -182,7 +192,13 @@ async fn main() {
             if output.to_string_lossy() == "-" {
                 generate(shell, &mut cmd, "pm", &mut SilentPipe(io::stdout()));
             } else {
-                let mut file = fs::File::create(&output).unwrap();
+                let mut file = match fs::File::create(&output) {
+                    Ok(file) => file,
+                    Err(error) => client::exit_error(
+                        &format!("could not create {}: {error}", output.display()),
+                        1,
+                    ),
+                };
                 generate(shell, &mut cmd, "pm", &mut file);
                 println!("Completions written to {}", output.display());
             }
@@ -201,7 +217,11 @@ async fn main() {
                 }
             }
         },
-        (CliCommands::Config(command), _) => update(conf, command, &config_file),
+        (CliCommands::Config(command), _) => {
+            if let Err(error) = try_update(conf, command, &config_file) {
+                client::exit_error(&error, 1);
+            }
+        }
         (CliCommands::Lock, true) => {
             send_command(ServerCommand::Lock(true));
         }
@@ -211,7 +231,11 @@ async fn main() {
                     PasswordType::Key(k)
                 } else {
                     PasswordType::Password(
-                        rpassword::prompt_password("Enter master password: ").unwrap(),
+                        rpassword::prompt_password("Enter master password: ").unwrap_or_else(
+                            |error| {
+                                client::exit_error(&format!("could not read password: {error}"), 1)
+                            },
+                        ),
                     )
                 },
                 timeout: timeout.timeout.unwrap_or(conf.unlock.timeout),
@@ -223,14 +247,20 @@ async fn main() {
         (CliCommands::Kill, true) => {
             send_command(ServerCommand::Kill);
         }
-        (CliCommands::Start, false) => start(),
-        (CliCommands::Start, true) => start(),
+        (CliCommands::Start, false) | (CliCommands::Start, true) => {
+            if let Err(error) = start() {
+                client::exit_error(&error, 1);
+            }
+        }
         (CliCommands::Run, false) => {
-            server(
+            if let Err(error) = server(
                 conf.recovery.password_history_limit,
                 conf.recovery.trash_retention_days,
             )
             .await
+            {
+                client::exit_error(&error, 1);
+            }
         }
         (CliCommands::Run, true) => println!("Server is already running."),
         (CliCommands::New { key_path }, true) => {
@@ -350,8 +380,19 @@ async fn main() {
         (CliCommands::Purge(args), true) => {
             send_command(ServerCommand::PurgeTrash(args.id));
         }
-        (CliCommands::Audit, true) => {
-            send_command(ServerCommand::Audit);
+        (
+            CliCommands::Audit {
+                stale_days,
+                breaches,
+                require_totp,
+            },
+            true,
+        ) => {
+            send_command(ServerCommand::Audit(AuditOptions {
+                stale_days,
+                check_breaches: breaches,
+                require_totp,
+            }));
         }
         (CliCommands::Totp { command }, true) => match command {
             TotpCommands::Set { target } => {
@@ -398,7 +439,14 @@ async fn main() {
                 let key_pass = key_path.map_or_else(
                     || {
                         PasswordType::Password(
-                            rpassword::prompt_password("Backup password: ").unwrap(),
+                            rpassword::prompt_password("Backup password: ").unwrap_or_else(
+                                |error| {
+                                    client::exit_error(
+                                        &format!("could not read backup password: {error}"),
+                                        1,
+                                    )
+                                },
+                            ),
                         )
                     },
                     PasswordType::Key,

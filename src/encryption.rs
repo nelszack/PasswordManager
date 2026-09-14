@@ -9,6 +9,7 @@ use std::{
     fs::{self, OpenOptions, read},
     io::Write,
 };
+use zeroize::Zeroize;
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
@@ -25,8 +26,14 @@ const SALT_CONTEXT: &str = "vault-password-salt-v1";
 
 pub fn prompt_for_password() -> String {
     loop {
-        let p1 = rpassword::prompt_password("Enter a password: ").unwrap();
-        let p2 = rpassword::prompt_password("Re-enter the password: ").unwrap();
+        let p1 = rpassword::prompt_password("Enter a password: ").unwrap_or_else(|error| {
+            eprintln!("Error: could not read password: {error}");
+            std::process::exit(1);
+        });
+        let p2 = rpassword::prompt_password("Re-enter the password: ").unwrap_or_else(|error| {
+            eprintln!("Error: could not read password confirmation: {error}");
+            std::process::exit(1);
+        });
         if p1 == p2 {
             return p1;
         }
@@ -69,9 +76,13 @@ fn master_key_from_password_with_params(
     let params = Params::new(memory_kib, iterations, parallelism, Some(32)).ok()?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
-    argon2
+    if argon2
         .hash_password_into(password.as_bytes(), salt, &mut key)
-        .ok()?;
+        .is_err()
+    {
+        key.zeroize();
+        return None;
+    }
     Some(key)
 }
 
@@ -145,8 +156,11 @@ pub fn try_encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Result
         PasswordType::Password(_) => KDF_ARGON2ID,
         PasswordType::Key(_) => KDF_KEYFILE,
     };
-    let enc_key = encryption_key_from_master(&encryption_master(key_pass, &salt)?);
+    let mut master_key = encryption_master(key_pass, &salt)?;
+    let mut enc_key = encryption_key_from_master(&master_key);
+    master_key.zeroize();
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
+    enc_key.zeroize();
     let nonce = XNonce::generate();
     let mut header = Vec::with_capacity(HEADER_LEN);
     header.extend_from_slice(VAULT_MAGIC);
@@ -180,8 +194,11 @@ fn decrypt_with(
     nonce_bytes: &[u8],
     ciphertext: &[u8],
 ) -> Option<Vec<u8>> {
-    let enc_key = encryption_key_from_master(&encryption_master(key_pass, salt).ok()?);
+    let mut master_key = encryption_master(key_pass, salt).ok()?;
+    let mut enc_key = encryption_key_from_master(&master_key);
+    master_key.zeroize();
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
+    enc_key.zeroize();
     let nonce = XNonce::try_from(nonce_bytes).ok()?;
     cipher.decrypt(&nonce, ciphertext).ok()
 }
@@ -210,7 +227,7 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
         let nonce_start = 22 + SALT_LEN;
         let nonce_end = nonce_start + NONCE_LEN;
         let nonce = XNonce::try_from(&encrypted[nonce_start..nonce_end]).ok()?;
-        let master = match (&*key_pass, kdf) {
+        let mut master = match (&*key_pass, kdf) {
             (PasswordType::Password(password), KDF_ARGON2ID) => {
                 master_key_from_password_with_params(
                     password,
@@ -223,8 +240,10 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
             (PasswordType::Key(_), KDF_KEYFILE) => try_gen_master_key(key_pass, false).ok()?,
             _ => return None,
         };
-        let enc_key = encryption_key_from_master(&master);
+        let mut enc_key = encryption_key_from_master(&master);
+        master.zeroize();
         let cipher = XChaCha20Poly1305::new((&enc_key).into());
+        enc_key.zeroize();
         return cipher
             .decrypt(
                 &nonce,

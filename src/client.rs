@@ -1,6 +1,9 @@
 use crate::file::{TOKEN_FILE, data_dir};
-use crate::server::ADDR;
 use crate::types::*;
+use crate::{
+    protocol::{ProtocolResponse, ResponseCode, decode_responses},
+    server::ADDR,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs,
@@ -32,26 +35,26 @@ pub fn exit_error(error: &str, code: i32) -> ! {
 }
 
 pub fn send_command(command: ServerCommand) {
-    match request(command) {
+    match request_response(command) {
         Ok(response) => {
-            let exit_code = response_exit_code(&response);
+            let exit_code = response.code;
             if JSON_OUTPUT.load(Ordering::Relaxed) {
                 if exit_code == 0 {
                     println!(
                         "{}",
-                        serde_json::json!({ "ok": true, "output": response.trim_end() })
+                        serde_json::json!({ "ok": true, "output": response.message.trim_end() })
                     );
                 } else {
                     println!(
                         "{}",
-                        serde_json::json!({ "ok": false, "error": response.trim_end(), "code": exit_code })
+                        serde_json::json!({ "ok": false, "error": response.message.trim_end(), "code": exit_code })
                     );
                 }
             } else if !QUIET_OUTPUT.load(Ordering::Relaxed) || exit_code != 0 {
                 if exit_code == 0 {
-                    print!("{response}");
+                    print!("{}", response.message);
                 } else {
-                    eprint!("{response}");
+                    eprint!("{}", response.message);
                 }
             }
             if exit_code != 0 {
@@ -59,27 +62,6 @@ pub fn send_command(command: ServerCommand) {
             }
         }
         Err(error) => exit_error(&error, 1),
-    }
-}
-
-fn response_exit_code(response: &str) -> i32 {
-    let response = response.trim().to_ascii_lowercase();
-    if response.contains("not found")
-        || response.starts_with("invalid id")
-        || response.starts_with("no matching entries")
-    {
-        3
-    } else if response.contains("already exists") || response.contains("duplicate") {
-        4
-    } else if response.starts_with("vault locked")
-        || response.contains(" failed")
-        || response.contains(" unavailable:")
-        || response.starts_with("wrong ")
-        || response.starts_with("could not ")
-    {
-        1
-    } else {
-        0
     }
 }
 
@@ -96,10 +78,30 @@ fn server_token() -> Result<String, String> {
 }
 
 pub fn request(command: ServerCommand) -> Result<String, String> {
+    let response = request_response(command)?;
+    if response.code == ResponseCode::Success as i32 {
+        Ok(response.message)
+    } else {
+        Err(response.message.trim_end().to_string())
+    }
+}
+
+fn request_response(command: ServerCommand) -> Result<ProtocolResponse, String> {
+    let read_timeout = if matches!(
+        &command,
+        ServerCommand::Audit(AuditOptions {
+            check_breaches: true,
+            ..
+        })
+    ) {
+        Duration::from_secs(5 * 60)
+    } else {
+        Duration::from_secs(5)
+    };
     let mut connection = TcpStream::connect(ADDR)
         .map_err(|e| format!("could not connect to the password manager server: {e}"))?;
     connection
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|e| format!("could not configure server connection: {e}"))?;
     let mut token = server_token()?;
     let mut data =
@@ -135,19 +137,5 @@ pub fn request(command: ServerCommand) -> Result<String, String> {
             break;
         }
     }
-    String::from_utf8(total).map_err(|_| "server returned invalid UTF-8".to_string())
-}
-
-#[cfg(test)]
-mod test {
-    use super::response_exit_code;
-
-    #[test]
-    fn server_responses_have_stable_exit_code_classes() {
-        assert_eq!(response_exit_code("Entry added."), 0);
-        assert_eq!(response_exit_code("Vault is already locked."), 0);
-        assert_eq!(response_exit_code("Vault locked."), 1);
-        assert_eq!(response_exit_code("Entry not found."), 3);
-        assert_eq!(response_exit_code("Entry already exists."), 4);
-    }
+    decode_responses(&total)
 }

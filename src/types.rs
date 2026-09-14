@@ -3,10 +3,19 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub enum PasswordType {
     Password(String),
     Key(String),
+}
+
+impl std::fmt::Debug for PasswordType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password(_) => formatter.write_str("Password(<redacted>)"),
+            Self::Key(_) => formatter.write_str("Key(<redacted>)"),
+        }
+    }
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerCommand {
@@ -15,6 +24,7 @@ pub enum ServerCommand {
     Unlock(UnlockInfo),
     Status,
     View(ListOptions),
+    BrowserAutofill,
     Search(SearchFilter),
     Add(PasswordEntry),
     AddTyped(TypedEntry),
@@ -26,7 +36,7 @@ pub enum ServerCommand {
     Trash,
     RestoreTrash(usize),
     PurgeTrash(Option<usize>),
-    Audit,
+    Audit(AuditOptions),
     Totp(TotpCommand),
     Backup(BackupRequest),
     RestoreBackup(BackupRequest),
@@ -61,11 +71,22 @@ pub enum ConflictPolicy {
     KeepBoth,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CustomField {
     pub name: String,
     pub value: String,
     pub secret: bool,
+}
+
+impl std::fmt::Debug for CustomField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomField")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("secret", &self.secret)
+            .finish()
+    }
 }
 
 impl Zeroize for CustomField {
@@ -109,8 +130,19 @@ pub struct ListOptions {
     pub kind: Option<ItemKind>,
     pub has_totp: Option<bool>,
     pub weak: bool,
+    pub stale_days: Option<u64>,
     pub sort: SortField,
     pub descending: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct AuditOptions {
+    /// Report login passwords at least this many days old.
+    pub stale_days: Option<u64>,
+    /// Check SHA-1 hash prefixes against the Pwned Passwords range API.
+    pub check_breaches: bool,
+    /// Treat logins without an authenticator as a health finding.
+    pub require_totp: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -139,13 +171,23 @@ impl Zeroize for BackupRequest {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct UnlockInfo {
     pub key: PasswordType,
     pub timeout: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+impl std::fmt::Debug for UnlockInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnlockInfo")
+            .field("key", &"<redacted>")
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct PasswordEntry {
     pub name: String,
     pub username: Option<String>,
@@ -153,6 +195,20 @@ pub struct PasswordEntry {
     pub url: Option<String>,
     pub notes: Option<String>,
     pub copy: bool,
+}
+
+impl std::fmt::Debug for PasswordEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PasswordEntry")
+            .field("name", &self.name)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("url", &self.url)
+            .field("notes", &self.notes.as_ref().map(|_| "<redacted>"))
+            .field("copy", &self.copy)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -241,11 +297,26 @@ pub enum Target {
     Vault(PasswordType),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct EntryUpdate {
     pub target: Target,
     pub update: UpdateArgs,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for EntryUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EntryUpdate")
+            .field("target", &self.target)
+            .field("changes_name", &self.update.name.is_some())
+            .field("changes_username", &self.update.username.is_some())
+            .field("changes_password", &self.update.password)
+            .field("changes_url", &self.update.url.is_some())
+            .field("changes_notes", &self.update.notes.is_some())
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -279,7 +350,7 @@ impl std::fmt::Debug for TypedUpdate {
             .finish()
     }
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct ImportRequest {
     pub path: String,
     pub new: bool,
@@ -287,6 +358,20 @@ pub struct ImportRequest {
     pub preview: bool,
     pub conflicts: ConflictPolicy,
     pub password_history_limit: usize,
+}
+
+impl std::fmt::Debug for ImportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ImportRequest")
+            .field("path", &self.path)
+            .field("new", &self.new)
+            .field("key_pass", &"<redacted>")
+            .field("preview", &self.preview)
+            .field("conflicts", &self.conflicts)
+            .field("password_history_limit", &self.password_history_limit)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -337,5 +422,38 @@ mod test {
         assert!(item_debug.contains("<redacted>"));
         assert!(!item_debug.contains(item_secret));
         assert!(!item_debug.contains(custom_secret));
+
+        let master_secret = "master-password-that-must-not-leak";
+        let unlock = ServerCommand::Unlock(UnlockInfo {
+            key: PasswordType::Password(master_secret.into()),
+            timeout: 60,
+        });
+        assert!(!format!("{unlock:?}").contains(master_secret));
+
+        let update_secret = "updated-password-that-must-not-leak";
+        let update = ServerCommand::Update(EntryUpdate {
+            target: Target::Id(1),
+            update: UpdateArgs {
+                name: None,
+                username: None,
+                password: true,
+                generate_password: false,
+                url: None,
+                notes: None,
+            },
+            password: Some(update_secret.into()),
+        });
+        assert!(!format!("{update:?}").contains(update_secret));
+
+        let import_secret = "import-password-that-must-not-leak";
+        let import = ServerCommand::Import(ImportRequest {
+            path: "input.csv".into(),
+            new: true,
+            key_pass: PasswordType::Password(import_secret.into()),
+            preview: false,
+            conflicts: ConflictPolicy::Skip,
+            password_history_limit: 10,
+        });
+        assert!(!format!("{import:?}").contains(import_secret));
     }
 }

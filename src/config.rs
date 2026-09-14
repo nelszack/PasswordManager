@@ -1,8 +1,10 @@
-use crate::cli::ConfigArgs;
+use crate::{cli::ConfigArgs, file::set_private_perms};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
+use tempfile::NamedTempFile;
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
 pub struct Config {
     pub genpass: GeneratorConfig,
     #[serde(alias = "clpboard")]
@@ -14,23 +16,27 @@ pub struct Config {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
 pub struct GeneratorConfig {
     pub length: u8,
     pub stats: bool,
     pub copy: bool,
 }
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
 pub struct CopyConfig {
     #[serde(alias = "copy_pass")]
     pub passwords: bool,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
 pub struct ClipboardConfig {
     #[serde(alias = "clp_timeout")]
     pub timeout: u8,
 }
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
 pub struct UnlockConfig {
     #[serde(alias = "unlock_timeout")]
     pub timeout: u64,
@@ -52,126 +58,98 @@ impl Default for RecoveryConfig {
     }
 }
 
-impl Default for Config {
+impl Default for GeneratorConfig {
     fn default() -> Self {
         Self {
-            genpass: GeneratorConfig {
-                length: 12,
-                stats: false,
-                copy: true,
-            },
-            clipboard: ClipboardConfig { timeout: 15 },
-            unlock: UnlockConfig { timeout: 15 * 60 },
-            copy: CopyConfig { passwords: true },
-            recovery: RecoveryConfig::default(),
+            length: 12,
+            stats: false,
+            copy: true,
         }
     }
 }
 
-fn write_file(config: &Config, config_path: &Path) {
-    let toml_string = toml::to_string(config).unwrap();
-    fs::write(config_path, &toml_string).unwrap();
+impl Default for CopyConfig {
+    fn default() -> Self {
+        Self { passwords: true }
+    }
 }
-fn default_config(write_to_file: bool, config_path: &Path) -> Config {
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self { timeout: 15 }
+    }
+}
+
+impl Default for UnlockConfig {
+    fn default() -> Self {
+        Self { timeout: 15 * 60 }
+    }
+}
+
+fn write_file(config: &Config, config_path: &Path) -> Result<(), String> {
+    let toml_string = toml::to_string(config)
+        .map_err(|error| format!("could not encode configuration: {error}"))?;
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| "configuration path has no parent directory".to_string())?;
+    let mut temporary = NamedTempFile::new_in(parent)
+        .map_err(|error| format!("could not create configuration temp file: {error}"))?;
+    set_private_perms(temporary.path())
+        .map_err(|error| format!("could not protect configuration temp file: {error}"))?;
+    temporary
+        .write_all(toml_string.as_bytes())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|error| format!("could not write configuration: {error}"))?;
+    temporary
+        .persist(config_path)
+        .map_err(|error| format!("could not replace configuration: {}", error.error))?;
+    Ok(())
+}
+fn default_config(write_to_file: bool, config_path: &Path) -> Result<Config, String> {
     let config = Config::default();
     if write_to_file {
-        write_file(&config, config_path)
+        write_file(&config, config_path)?;
     }
-    config
+    Ok(config)
 }
 fn is_config(config_path: &Path) -> bool {
     config_path.exists()
 }
-pub fn read_config(config_path: &Path) -> Config {
+pub fn try_read_config(config_path: &Path) -> Result<Config, String> {
     if !is_config(config_path) {
         return default_config(true, config_path);
     }
-    let txt = std::fs::read_to_string(config_path).unwrap();
+    let txt = fs::read_to_string(config_path).map_err(|error| {
+        format!(
+            "could not read configuration at {}: {error}",
+            config_path.display()
+        )
+    })?;
+    toml::from_str(&txt).map_err(|error| {
+        format!(
+            "invalid configuration at {}; the file was left unchanged: {error}",
+            config_path.display()
+        )
+    })
+}
 
-    match toml::from_str(&txt) {
-        Ok(content) => content,
-        Err(_) => {
-            fix_new_config(default_config(false, config_path), &txt, config_path);
-            read_config(config_path)
-        }
-    }
+#[cfg(test)]
+fn read_config(config_path: &Path) -> Config {
+    try_read_config(config_path).expect("test configuration should be valid")
 }
-fn fix_new_config(config: Config, old_config_txt: &str, config_path: &Path) {
-    let mut new = ConfigArgs {
-        reset: false,
-        genpass_copy: None,
-        genpass_length: None,
-        genpass_stats: None,
-        clipboard_timeout: None,
-        unlock_timeout: None,
-        password_history_limit: None,
-        trash_retention_days: None,
-    };
-    for section in old_config_txt.split("\n\n") {
-        let mut lines = section.lines();
-        let Some(header) = lines.next() else {
-            continue;
-        };
-        let Some(trimmed) = header
-            .trim()
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-        else {
-            continue;
-        };
-        for line in lines {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once(" = ") else {
-                continue;
-            };
-            match (trimmed, key.trim()) {
-                ("genpass", "length") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.genpass_length = Some(v);
-                    }
-                }
-                ("genpass", "stats") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.genpass_stats = Some(v);
-                    }
-                }
-                ("genpass", "copy") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.genpass_copy = Some(v);
-                    }
-                }
-                ("clipboard" | "clpboard", "timeout" | "clp_timeout") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.clipboard_timeout = Some(v);
-                    }
-                }
-                ("unlock", "timeout" | "unlock_timeout") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.unlock_timeout = Some(v);
-                    }
-                }
-                ("recovery", "password_history_limit") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.password_history_limit = Some(v);
-                    }
-                }
-                ("recovery", "trash_retention_days") => {
-                    if let Ok(v) = value.trim().parse() {
-                        new.trash_retention_days = Some(v);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    update(config, new, config_path);
+
+#[cfg(test)]
+fn default_test_config(write_to_file: bool, config_path: &Path) -> Config {
+    default_config(write_to_file, config_path).expect("test configuration should be writable")
 }
-pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
+
+pub fn try_update(
+    mut config: Config,
+    modify: ConfigArgs,
+    config_path: &Path,
+) -> Result<(), String> {
     if modify.reset {
-        config = default_config(false, config_path);
+        config = Config::default();
     }
     if let Some(i) = modify.genpass_length {
         config.genpass.length = i;
@@ -181,6 +159,9 @@ pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
     }
     if let Some(i) = modify.genpass_copy {
         config.genpass.copy = i
+    }
+    if let Some(i) = modify.password_copy {
+        config.copy.passwords = i
     }
     if let Some(i) = modify.clipboard_timeout {
         config.clipboard.timeout = i
@@ -194,7 +175,12 @@ pub fn update(mut config: Config, modify: ConfigArgs, config_path: &Path) {
     if let Some(i) = modify.trash_retention_days {
         config.recovery.trash_retention_days = i;
     }
-    write_file(&config, config_path);
+    write_file(&config, config_path)
+}
+
+#[cfg(test)]
+fn update(config: Config, modify: ConfigArgs, config_path: &Path) {
+    try_update(config, modify, config_path).expect("test configuration update should succeed");
 }
 
 #[cfg(test)]
@@ -211,7 +197,7 @@ mod test {
     }
     fn test_read_write(config_path: &Path) {
         let conf1 = read_config(config_path);
-        default_config(true, config_path);
+        default_test_config(true, config_path);
         let conf2 = read_config(config_path);
         assert_eq!(
             conf2,
@@ -227,19 +213,20 @@ mod test {
                 recovery: RecoveryConfig::default(),
             }
         );
-        write_file(&conf1, config_path);
+        write_file(&conf1, config_path).unwrap();
         assert_eq!(read_config(config_path), conf1)
     }
 
     fn test_update(config_path: &Path) {
         let conf1 = read_config(config_path);
         update(
-            default_config(true, config_path),
+            default_test_config(true, config_path),
             ConfigArgs {
                 reset: false,
                 genpass_length: Some(100),
                 genpass_stats: Some(false),
                 genpass_copy: Some(true),
+                password_copy: None,
                 clipboard_timeout: Some(12),
                 unlock_timeout: Some(15),
                 password_history_limit: Some(25),
@@ -264,7 +251,7 @@ mod test {
                 },
             }
         );
-        write_file(&conf1, config_path);
+        write_file(&conf1, config_path).unwrap();
     }
     #[test]
     fn test_is_config_exists() {
@@ -281,7 +268,7 @@ mod test {
     #[test]
     fn test_update_single_field() {
         let config_path = env::temp_dir().join("test_single.toml");
-        default_config(true, &config_path);
+        default_test_config(true, &config_path);
         update(
             read_config(&config_path),
             ConfigArgs {
@@ -289,6 +276,7 @@ mod test {
                 genpass_length: Some(24),
                 genpass_stats: None,
                 genpass_copy: None,
+                password_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
                 ..ConfigArgs::default()
@@ -302,7 +290,7 @@ mod test {
     }
     #[test]
     fn test_default_config_values() {
-        let config = default_config(false, Path::new("dummy.toml"));
+        let config = default_test_config(false, Path::new("dummy.toml"));
         assert_eq!(config.genpass.length, 12);
         assert!(!config.genpass.stats);
         assert!(config.genpass.copy);
@@ -322,6 +310,7 @@ mod test {
                 genpass_length: Some(100),
                 genpass_stats: Some(true),
                 genpass_copy: Some(false),
+                password_copy: None,
                 clipboard_timeout: Some(30),
                 unlock_timeout: Some(5),
                 ..ConfigArgs::default()
@@ -335,6 +324,7 @@ mod test {
                 genpass_length: None,
                 genpass_stats: None,
                 genpass_copy: None,
+                password_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
                 ..ConfigArgs::default()
@@ -380,7 +370,7 @@ copy_pass = false
     #[test]
     fn test_multiple_updates() {
         let config_path = env::temp_dir().join("multiple.toml");
-        default_config(true, &config_path);
+        default_test_config(true, &config_path);
 
         update(
             read_config(&config_path),
@@ -389,6 +379,7 @@ copy_pass = false
                 genpass_length: Some(16),
                 genpass_stats: Some(true),
                 genpass_copy: None,
+                password_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
                 ..ConfigArgs::default()
@@ -403,6 +394,7 @@ copy_pass = false
                 genpass_length: None,
                 genpass_stats: None,
                 genpass_copy: Some(false),
+                password_copy: None,
                 clipboard_timeout: Some(45),
                 unlock_timeout: Some(10),
                 ..ConfigArgs::default()
@@ -435,7 +427,7 @@ copy_pass = false
             recovery: RecoveryConfig::default(),
         };
 
-        write_file(&original, &config_path);
+        write_file(&original, &config_path).unwrap();
         let loaded = read_config(&config_path);
 
         assert_eq!(original, loaded);
@@ -445,7 +437,7 @@ copy_pass = false
     #[test]
     fn test_config_update_zero_timeout() {
         let config_path = env::temp_dir().join("zero_timeout.toml");
-        default_config(true, &config_path);
+        default_test_config(true, &config_path);
         update(
             read_config(&config_path),
             ConfigArgs {
@@ -453,6 +445,7 @@ copy_pass = false
                 genpass_length: None,
                 genpass_stats: None,
                 genpass_copy: None,
+                password_copy: None,
                 clipboard_timeout: Some(0),
                 unlock_timeout: Some(0),
                 ..ConfigArgs::default()
@@ -468,7 +461,7 @@ copy_pass = false
     #[test]
     fn test_config_update_max_values() {
         let config_path = env::temp_dir().join("max_values.toml");
-        default_config(true, &config_path);
+        default_test_config(true, &config_path);
         update(
             read_config(&config_path),
             ConfigArgs {
@@ -476,6 +469,7 @@ copy_pass = false
                 genpass_length: Some(u8::MAX),
                 genpass_stats: Some(true),
                 genpass_copy: Some(false),
+                password_copy: None,
                 clipboard_timeout: Some(u8::MAX),
                 unlock_timeout: Some(u64::MAX),
                 ..ConfigArgs::default()
@@ -495,12 +489,13 @@ copy_pass = false
     fn test_config_preserves_unmodified_fields() {
         let config_path = env::temp_dir().join("preserve.toml");
         update(
-            default_config(false, &config_path),
+            default_test_config(false, &config_path),
             ConfigArgs {
                 reset: false,
                 genpass_length: Some(50),
                 genpass_stats: None,
                 genpass_copy: None,
+                password_copy: None,
                 clipboard_timeout: None,
                 unlock_timeout: None,
                 ..ConfigArgs::default()
@@ -514,5 +509,35 @@ copy_pass = false
         assert_eq!(conf.clipboard.timeout, 15);
         assert_eq!(conf.unlock.timeout, 15 * 60);
         fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn invalid_config_is_reported_without_overwriting_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let invalid = b"[genpass]\nlength = not-a-number\n";
+        fs::write(&config_path, invalid).unwrap();
+
+        let error = try_read_config(&config_path).unwrap_err();
+
+        assert!(error.contains("left unchanged"));
+        assert_eq!(fs::read(&config_path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn password_copy_default_is_configurable() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        try_update(
+            Config::default(),
+            ConfigArgs {
+                password_copy: Some(false),
+                ..ConfigArgs::default()
+            },
+            &config_path,
+        )
+        .unwrap();
+
+        assert!(!try_read_config(&config_path).unwrap().copy.passwords);
     }
 }
