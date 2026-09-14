@@ -3378,7 +3378,8 @@ mod test {
     }
     #[test]
     fn test_export_import() {
-        let file = NamedTempFile::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("export.csv");
 
         let vlt = Vault {
             entries: vec![VaultEntry {
@@ -3399,8 +3400,7 @@ mod test {
                 ..RecoveryData::default()
             },
         };
-        vlt.export(file.path().to_str().unwrap().to_string())
-            .unwrap();
+        vlt.export(path.display().to_string()).unwrap();
         let mut vlt1 = Vault {
             entries: vec![],
             metadata: VaultMetadata {
@@ -3408,8 +3408,7 @@ mod test {
             },
             recovery: RecoveryData::default(),
         };
-        vlt1.import(file.path().to_str().unwrap().to_string())
-            .unwrap();
+        vlt1.import(path.display().to_string()).unwrap();
         assert_eq!(vlt, vlt1);
     }
 
@@ -3461,7 +3460,8 @@ mod test {
 
     #[test]
     fn test_json_export_round_trip() {
-        let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("export.json");
         let vault = Vault {
             entries: vec![VaultEntry {
                 id: 1,
@@ -3498,13 +3498,13 @@ mod test {
                 ..RecoveryData::default()
             },
         };
-        vault.export(file.path().display().to_string()).unwrap();
+        vault.export(path.display().to_string()).unwrap();
         let exported: serde_json::Value =
-            serde_json::from_slice(&fs::read(file.path()).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(exported["format"], PORTABLE_FORMAT);
         assert_eq!(exported["version"], PORTABLE_VERSION);
         let mut imported = Vault::default();
-        imported.import(file.path().display().to_string()).unwrap();
+        imported.import(path.display().to_string()).unwrap();
         assert_eq!(imported.entries, vault.entries);
         assert_eq!(
             imported.recovery.entry_metadata,
@@ -5051,13 +5051,14 @@ mod test {
             .unwrap();
         assert!(!format!("{:?}", vault.recovery.totp[0]).contains(secret));
 
-        let json = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-        vault.export(json.path().display().to_string()).unwrap();
-        assert!(fs::read_to_string(json.path()).unwrap().contains(secret));
+        let directory = tempfile::tempdir().unwrap();
+        let json_path = directory.path().join("export.json");
+        vault.export(json_path.display().to_string()).unwrap();
+        assert!(fs::read_to_string(json_path).unwrap().contains(secret));
 
-        let csv = tempfile::Builder::new().suffix(".csv").tempfile().unwrap();
-        vault.export(csv.path().display().to_string()).unwrap();
-        assert!(!fs::read_to_string(csv.path()).unwrap().contains(secret));
+        let csv_path = directory.path().join("export.csv");
+        vault.export(csv_path.display().to_string()).unwrap();
+        assert!(!fs::read_to_string(csv_path).unwrap().contains(secret));
     }
 
     #[cfg(unix)]
