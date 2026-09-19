@@ -1,7 +1,7 @@
 use crate::{
     clipboard::copy_in_background,
     encryption::{decrypt_file, try_encrypt_file, try_gen_master_key, try_gen_master_key_legacy},
-    file::{data_dir, file_exists, set_private_perms},
+    file::{data_dir, file_exists, set_private_perms, sync_parent},
     protocol::ResponseCode,
     server::{ServerInfo, respond, respond_with_code},
     types::{
@@ -21,7 +21,7 @@ use std::{
 use tempfile::NamedTempFile;
 use tokio::net::TcpStream;
 use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct VaultEntry {
@@ -460,6 +460,7 @@ fn write_vault_with_key(vlt: &Vault, key_pass: &mut PasswordType) -> Result<(), 
         temporary
             .persist(&file_path)
             .map_err(|e| format!("could not atomically replace vault file: {}", e.error))?;
+        sync_parent(&file_path).map_err(|e| format!("could not sync vault directory: {e}"))?;
         Ok(())
     })();
     buf.zeroize();
@@ -496,6 +497,7 @@ fn persist_private_file(path: &Path, contents: &[u8], force: bool) -> Result<(),
             }
         })?;
     }
+    sync_parent(path).map_err(|error| format!("could not sync private file directory: {error}"))?;
     Ok(())
 }
 
@@ -629,8 +631,10 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
         }
     }
     let contents = read(file_path).ok()?;
-    let dec = decrypt_file(key_pass.keypass.as_mut().unwrap(), &contents)?;
-    let mut vault: Vault = rmp_serde::from_slice(&dec).ok()?;
+    let mut dec = decrypt_file(key_pass.keypass.as_mut().unwrap(), &contents)?;
+    let decoded = rmp_serde::from_slice(&dec);
+    dec.zeroize();
+    let mut vault: Vault = decoded.ok()?;
     vault.ensure_next_entry_id().ok()?;
     key_pass.locked = false;
     Some(vault)
@@ -2277,8 +2281,6 @@ impl Vault {
                         "name": entry.name,
                         "kind": kind,
                         "username": entry.username,
-                        "primary_secret": entry.password,
-                        "custom_fields": self.custom_fields(entry.id),
                     })
                 })
             })
@@ -2288,6 +2290,39 @@ impl Vault {
 
     pub async fn browser_autofill(&self, stream: &mut TcpStream, http: bool) {
         respond(&self.browser_autofill_json(), stream, http).await;
+    }
+
+    fn browser_autofill_item_json(&self, id: usize) -> Option<String> {
+        let entry = self.entries.iter().find(|entry| entry.id == id)?;
+        let kind = self.item_kind(entry.id);
+        if !matches!(kind, ItemKind::PaymentCard | ItemKind::Identity) {
+            return None;
+        }
+        Some(
+            json!({
+                "id": entry.id,
+                "name": entry.name,
+                "kind": kind,
+                "username": entry.username,
+                "primary_secret": entry.password,
+                "custom_fields": self.custom_fields(entry.id),
+            })
+            .to_string(),
+        )
+    }
+
+    pub async fn browser_autofill_item(&self, id: usize, stream: &mut TcpStream, http: bool) {
+        if let Some(item) = self.browser_autofill_item_json(id) {
+            respond(&item, stream, http).await;
+        } else {
+            respond_with_code(
+                ResponseCode::NotFound,
+                "Autofill item not found.",
+                stream,
+                http,
+            )
+            .await;
+        }
     }
 
     fn search_entries(&self, filter: &SearchFilter) -> Vec<&VaultEntry> {
@@ -2532,8 +2567,10 @@ impl Vault {
         password_history_limit: usize,
         key_pass: &mut ServerInfo,
     ) -> Result<ImportReport, String> {
-        let contents = fs::read_to_string(&path)
-            .map_err(|e| format!("could not open import file {path:?}: {e}"))?;
+        let contents = Zeroizing::new(
+            fs::read_to_string(&path)
+                .map_err(|e| format!("could not open import file {path:?}: {e}"))?,
+        );
         let trimmed = contents.trim_start();
         let imported = if trimmed.starts_with('{') || trimmed.starts_with('[') {
             import_json(&contents, &path)?
@@ -3018,10 +3055,16 @@ mod test {
         let items = parsed.as_array().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["kind"], "payment-card");
-        assert_eq!(items[0]["primary_secret"], "4111111111111111");
-        assert_eq!(items[0]["custom_fields"][0]["value"], "09");
+        assert!(items[0].get("primary_secret").is_none());
+        assert!(items[0].get("custom_fields").is_none());
         assert_eq!(items[1]["kind"], "identity");
         assert!(!vault.browser_autofill_json().contains("login-password"));
+
+        let card: serde_json::Value =
+            serde_json::from_str(&vault.browser_autofill_item_json(2).unwrap()).unwrap();
+        assert_eq!(card["primary_secret"], "4111111111111111");
+        assert_eq!(card["custom_fields"][0]["value"], "09");
+        assert!(vault.browser_autofill_item_json(1).is_none());
     }
 
     #[test]

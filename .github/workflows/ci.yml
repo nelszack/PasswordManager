@@ -31,6 +31,7 @@ jobs:
       - name: Validate browser extension sources
         run: |
           node --check extension/background.js
+          node --check extension/background_security.js
           node --check extension/form_submission.js
           node --check extension/relay.js
           node --check extension/content.js
@@ -39,8 +40,10 @@ jobs:
           node --test extension/*.test.js
       - name: Run tests
         run: cargo test --locked
+      - name: Check optional legacy HTTP compatibility
+        run: cargo check --locked --features legacy-http
       - name: Lint all targets
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   mac-architectures:
     name: Build macOS (${{ matrix.target }})

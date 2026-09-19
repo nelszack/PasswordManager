@@ -217,6 +217,20 @@ function fetchAutofillItems() {
     });
 }
 
+function fetchAutofillItem(id) {
+    return new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: "getAutofillItem", id }, (response) => {
+            if (chrome.runtime.lastError || !response?.success) return resolve(null);
+            try {
+                const item = JSON.parse(response.data);
+                resolve(item && item.id === id ? item : null);
+            } catch (_) {
+                resolve(null);
+            }
+        });
+    });
+}
+
 function fetchTotp(id) {
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage({ action: "getTotp", id }, (response) => {
@@ -936,11 +950,12 @@ function createTypedAutofillButton(input, kind) {
             });
             item.addEventListener("mouseenter", () => { item.style.background = "#eee"; });
             item.addEventListener("mouseleave", () => { item.style.background = "#fff"; });
-            item.addEventListener("click", event => {
+            item.addEventListener("click", async event => {
                 if (!event.isTrusted) return;
                 event.preventDefault();
                 event.stopPropagation();
-                fillTypedItem(input, saved);
+                const selected = await fetchAutofillItem(saved.id);
+                if (selected) fillTypedItem(input, selected);
                 menu.style.display = "none";
             });
             menu.appendChild(item);
@@ -1331,34 +1346,30 @@ function isSameSite(a, b) {
 const PENDING_TIMEOUT = 60 * 1000;
 
 function setPopupPending(pendingData, domain = currentDomain) {
-    chrome.storage.session.set({
-        pmPopupPending: {
-            domain: domain,
+    chrome.runtime.sendMessage({
+        action: "setPendingCredentials",
+        pending: {
+            domain,
             username: pendingData.username,
             password: pendingData.password,
             accountName: pendingData.accountName,
-            hasAccounts: pendingData.hasAccounts,
-            time: Date.now()
+            hasAccounts: pendingData.hasAccounts
         }
-    });
+    }, () => void chrome.runtime.lastError);
 }
 
 function clearPopupPending() {
-    chrome.storage.session.remove("pmPopupPending");
+    chrome.runtime.sendMessage({ action: "clearPendingCredentials" }, () => void chrome.runtime.lastError);
 }
 
 function isPopupPending() {
     return new Promise((resolve) => {
-        chrome.storage.session.get("pmPopupPending", (result) => {
-            const p = result.pmPopupPending;
-            // Pending credentials are single-use and should not remain in
-            // extension storage while the user considers the prompt.
-            clearPopupPending();
-            if (p && isSameSite(p.domain, currentDomain) && Date.now() - p.time < PENDING_TIMEOUT) {
-                resolve(p);
-            } else {
-                resolve(null);
-            }
+        chrome.runtime.sendMessage({ action: "consumePendingCredentials" }, response => {
+            if (chrome.runtime.lastError || !response?.success) return resolve(null);
+            const p = response.pending;
+            resolve(p && isSameSite(p.domain, currentDomain) && Date.now() - p.time < PENDING_TIMEOUT
+                ? p
+                : null);
         });
     });
 }

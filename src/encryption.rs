@@ -1,4 +1,4 @@
-use crate::file::{data_dir, set_private_perms};
+use crate::file::{data_dir, set_private_perms, sync_parent};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -58,6 +58,10 @@ fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
         .and_then(|_| {
             set_private_perms(path)
                 .map_err(|e| format!("could not protect key file {}: {e}", path.display()))
+        })
+        .and_then(|_| {
+            sync_parent(path)
+                .map_err(|e| format!("could not sync key directory {}: {e}", path.display()))
         });
     if let Err(error) = result {
         let _ = fs::remove_file(path);

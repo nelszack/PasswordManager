@@ -17,6 +17,105 @@ impl std::fmt::Debug for PasswordType {
         }
     }
 }
+
+impl Zeroize for PasswordEntry {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.copy.zeroize();
+    }
+}
+
+impl Zeroize for TypedEntry {
+    fn zeroize(&mut self) {
+        self.entry.zeroize();
+        self.additional_urls.zeroize();
+        self.custom_fields.zeroize();
+    }
+}
+
+impl Zeroize for UnlockInfo {
+    fn zeroize(&mut self) {
+        self.key.zeroize();
+        self.timeout.zeroize();
+    }
+}
+
+impl Zeroize for Target {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Id(id) => id.zeroize(),
+            Self::Name(name) | Self::Url(name) => name.zeroize(),
+            Self::Vault(key) => key.zeroize(),
+        }
+    }
+}
+
+impl Zeroize for EntryUpdate {
+    fn zeroize(&mut self) {
+        self.target.zeroize();
+        self.update.name.zeroize();
+        self.update.username.zeroize();
+        self.update.url.zeroize();
+        self.update.notes.zeroize();
+        self.password.zeroize();
+    }
+}
+
+impl Zeroize for TypedUpdate {
+    fn zeroize(&mut self) {
+        self.entry.zeroize();
+        self.add_url.zeroize();
+        self.remove_url.zeroize();
+        self.set_fields.zeroize();
+        self.remove_fields.zeroize();
+    }
+}
+
+impl Zeroize for ServerCommand {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Unlock(info) => info.zeroize(),
+            Self::Add(entry) => entry.zeroize(),
+            Self::AddTyped(entry) => entry.zeroize(),
+            Self::Get(target)
+            | Self::GetSecret(target)
+            | Self::Delete(target)
+            | Self::History(target) => target.zeroize(),
+            Self::RestorePassword { target, revision } => {
+                target.zeroize();
+                revision.zeroize();
+            }
+            Self::Totp(command) => command.zeroize(),
+            Self::Backup(request) | Self::RestoreBackup(request) => request.zeroize(),
+            Self::Update(update) => update.zeroize(),
+            Self::UpdateTyped(update) => update.zeroize(),
+            Self::Export(path) => path.zeroize(),
+            Self::Import(request) => request.zeroize(),
+            Self::New(key) | Self::Rekey(key) => key.zeroize(),
+            Self::Search(filter) => {
+                filter.query.zeroize();
+                filter.name.zeroize();
+                filter.username.zeroize();
+                filter.url.zeroize();
+                filter.notes.zeroize();
+            }
+            Self::Kill
+            | Self::Lock(_)
+            | Self::Status
+            | Self::View(_)
+            | Self::BrowserAutofill
+            | Self::BrowserAutofillItem(_)
+            | Self::Trash
+            | Self::RestoreTrash(_)
+            | Self::PurgeTrash(_)
+            | Self::Audit(_) => {}
+        }
+    }
+}
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerCommand {
     Kill,
@@ -25,6 +124,7 @@ pub enum ServerCommand {
     Status,
     View(ListOptions),
     BrowserAutofill,
+    BrowserAutofillItem(usize),
     Search(SearchFilter),
     Add(PasswordEntry),
     AddTyped(TypedEntry),
@@ -374,6 +474,14 @@ impl std::fmt::Debug for ImportRequest {
     }
 }
 
+impl Zeroize for ImportRequest {
+    fn zeroize(&mut self) {
+        self.path.zeroize();
+        self.key_pass.zeroize();
+        self.password_history_limit.zeroize();
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -455,5 +563,39 @@ mod test {
             password_history_limit: 10,
         });
         assert!(!format!("{import:?}").contains(import_secret));
+    }
+
+    #[test]
+    fn sensitive_commands_are_zeroized_after_transport_encoding() {
+        let mut command = ServerCommand::Unlock(UnlockInfo {
+            key: PasswordType::Password("master-secret".into()),
+            timeout: 60,
+        });
+        command.zeroize();
+        assert!(matches!(
+            command,
+            ServerCommand::Unlock(UnlockInfo {
+                key: PasswordType::Password(ref password),
+                timeout: 0,
+            }) if password.is_empty()
+        ));
+
+        let mut command = ServerCommand::Add(PasswordEntry {
+            name: "service".into(),
+            username: Some("alice".into()),
+            password: "entry-secret".into(),
+            url: Some("example.com".into()),
+            notes: Some("private note".into()),
+            copy: true,
+        });
+        command.zeroize();
+        assert!(matches!(
+            command,
+            ServerCommand::Add(PasswordEntry {
+                ref password,
+                ref notes,
+                ..
+            }) if password.is_empty() && notes.as_deref().is_none_or(str::is_empty)
+        ));
     }
 }

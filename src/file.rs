@@ -20,12 +20,74 @@ pub fn set_private_dir_perms(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg(not(target_os = "windows"))]
 pub fn set_private_perms(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
 #[cfg(not(unix))]
+#[cfg(not(target_os = "windows"))]
 pub fn set_private_dir_perms(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn current_user_sid() -> std::io::Result<String> {
+    use std::{io, process::Command};
+    let output = Command::new("whoami.exe")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(
+            "whoami.exe could not determine the user SID",
+        ));
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
+    output
+        .split([',', '"', '\r', '\n'])
+        .map(str::trim)
+        .find(|field| field.starts_with("S-1-"))
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("whoami.exe returned no user SID"))
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_acl(path: &Path, directory: bool) -> std::io::Result<()> {
+    use std::{io, process::Command};
+    let sid = current_user_sid()?;
+    let grant = if directory {
+        format!("*{sid}:(OI)(CI)(F)")
+    } else {
+        format!("*{sid}:(F)")
+    };
+    let status = Command::new("icacls.exe")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", &grant])
+        .status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| io::Error::other(format!("icacls.exe failed for {}", path.display())))
+}
+
+#[cfg(target_os = "windows")]
+pub fn set_private_perms(path: &Path) -> std::io::Result<()> {
+    set_windows_acl(path, false)
+}
+
+#[cfg(target_os = "windows")]
+pub fn set_private_dir_perms(path: &Path) -> std::io::Result<()> {
+    set_windows_acl(path, true)
+}
+
+#[cfg(unix)]
+pub fn sync_parent(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+pub fn sync_parent(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

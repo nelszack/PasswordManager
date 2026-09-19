@@ -1,13 +1,16 @@
+#[cfg(feature = "legacy-http")]
+use crate::cli::UpdateArgs;
 use crate::{
-    cli::UpdateArgs,
     clipboard::copy_in_background,
-    file::{TOKEN_FILE, data_dir, set_private_perms},
+    file::{TOKEN_FILE, data_dir, set_private_perms, sync_parent},
     protocol::{ResponseCode, decode_responses, encode_response},
     types::*,
     vault::{Vault, VaultAccess, VaultEntry, create_vault, delete_vault, restore_encrypted_backup},
 };
 use rand::RngExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(feature = "legacy-http")]
+use serde::Serialize;
 use serde_json::json;
 use std::{
     fs,
@@ -24,7 +27,7 @@ use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Semaphore, mpsc},
 };
 use zeroize::Zeroize;
 
@@ -89,8 +92,11 @@ impl Zeroize for VaultEntry {
 pub const ADDR: &str = "127.0.0.1:7878";
 
 const MAX_TCP_MSG: usize = 16 * 1024 * 1024;
+#[cfg(feature = "legacy-http")]
 const MAX_HTTP_REQ: usize = 1024 * 1024;
 const TOKEN_HEX_LEN: usize = 64;
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CLIENT_CONNECTIONS: usize = 128;
 pub fn is_running() -> bool {
     let path = data_dir().join(TOKEN_FILE);
     let Ok(mut token) = fs::read_to_string(path) else {
@@ -154,6 +160,8 @@ fn write_token_file(token: &str, path: &Path) -> Result<(), String> {
     temporary
         .persist(path)
         .map_err(|error| format!("could not replace session token: {}", error.error))?;
+    sync_parent(path)
+        .map_err(|error| format!("could not sync session token directory: {error}"))?;
     Ok(())
 }
 
@@ -276,6 +284,7 @@ pub async fn server(
     let lock_generation = Arc::new(AtomicU64::new(0));
     let inactivity_timeout = Arc::new(AtomicU64::new(0));
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
+    let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
 
     loop {
         tokio::select! {
@@ -298,7 +307,14 @@ pub async fn server(
                     password_history_limit,
                     trash_retention_days,
                 };
-                tokio::spawn(handle_connection(stream, state));
+                let permit = match Arc::clone(&connection_slots).acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    handle_connection(stream, state).await;
+                });
             }
         }
     }
@@ -328,7 +344,9 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
         password_history_limit,
         trash_retention_days,
     } = state;
-    let Some((msg, http)) = handler(&mut stream, &token).await else {
+    let Ok(Some((msg, http))) =
+        tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &token)).await
+    else {
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
         return;
@@ -423,6 +441,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                         respond("Vault unlocked.", &mut stream, http).await;
                     }
                     Err(e) => {
+                        server_info.zeroize();
                         respond_failure(&format!("Unlock failed: {}", e), &mut stream, http).await
                     }
                 }
@@ -758,6 +777,15 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 respond_failure("Vault locked.", &mut stream, http).await;
             }
         }
+        ServerCommand::BrowserAutofillItem(id) => {
+            if !server_info.locked {
+                if let Some(vault) = vlt.as_ref() {
+                    vault.browser_autofill_item(id, &mut stream, http).await;
+                }
+            } else {
+                respond_failure("Vault locked.", &mut stream, http).await;
+            }
+        }
         ServerCommand::Search(filter) => {
             if !server_info.locked {
                 if let Some(vault) = vlt.as_ref() {
@@ -997,12 +1025,14 @@ async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerComman
     buf.zeroize();
     Some(msg)
 }
+#[cfg(feature = "legacy-http")]
 #[derive(Serialize, Deserialize, Debug)]
 struct HttpInfo {
     command: String,
     extra_info: Vec<Option<String>>,
 }
 
+#[cfg(feature = "legacy-http")]
 fn browser_totp_command(extra_info: &[Option<String>]) -> Option<ServerCommand> {
     extra_info
         .first()
@@ -1016,6 +1046,7 @@ fn browser_totp_command(extra_info: &[Option<String>]) -> Option<ServerCommand> 
         })
 }
 
+#[cfg(feature = "legacy-http")]
 async fn handle_http(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
     let mut request_str = String::new();
     let mut buf = [0u8; 1024];
@@ -1166,7 +1197,14 @@ async fn handler(message: &mut TcpStream, token: &str) -> Option<(ServerCommand,
     ];
     let is_http = METHODS.iter().any(|m| buff.starts_with(m.as_bytes()));
     if is_http {
-        Some((handle_http(message, token).await?, true))
+        #[cfg(feature = "legacy-http")]
+        {
+            Some((handle_http(message, token).await?, true))
+        }
+        #[cfg(not(feature = "legacy-http"))]
+        {
+            None
+        }
     } else {
         Some((handle_tcp(message, token).await?, false))
     }
@@ -1287,6 +1325,7 @@ mod test {
         assert!(info.keypass.is_none());
     }
 
+    #[cfg(feature = "legacy-http")]
     #[test]
     fn test_browser_totp_command_requires_numeric_entry_id() {
         let command = browser_totp_command(&[Some("42".to_string())]).unwrap();
@@ -1452,6 +1491,7 @@ mod test {
         assert!(handler(&mut server, &token).await.is_none());
     }
 
+    #[cfg(feature = "legacy-http")]
     #[tokio::test]
     async fn http_protocol_requires_a_valid_bearer_token() {
         let token = "c".repeat(TOKEN_HEX_LEN);
@@ -1469,6 +1509,7 @@ mod test {
         assert!(response[..length].starts_with(b"HTTP/1.1 401 Unauthorized"));
     }
 
+    #[cfg(feature = "legacy-http")]
     #[tokio::test]
     async fn authenticated_http_protocol_decodes_extension_commands() {
         let token = "d".repeat(TOKEN_HEX_LEN);
@@ -1492,6 +1533,7 @@ mod test {
         ));
     }
 
+    #[cfg(feature = "legacy-http")]
     #[tokio::test]
     async fn http_protocol_rejects_privileged_and_oversized_requests() {
         let token = "e".repeat(TOKEN_HEX_LEN);

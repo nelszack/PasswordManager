@@ -1,4 +1,7 @@
-use crate::{cli::ConfigArgs, file::set_private_perms};
+use crate::{
+    cli::ConfigArgs,
+    file::{set_private_perms, sync_parent},
+};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use tempfile::NamedTempFile;
@@ -103,6 +106,8 @@ fn write_file(config: &Config, config_path: &Path) -> Result<(), String> {
     temporary
         .persist(config_path)
         .map_err(|error| format!("could not replace configuration: {}", error.error))?;
+    sync_parent(config_path)
+        .map_err(|error| format!("could not sync configuration directory: {error}"))?;
     Ok(())
 }
 fn default_config(write_to_file: bool, config_path: &Path) -> Result<Config, String> {

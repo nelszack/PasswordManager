@@ -343,6 +343,11 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             2048,
         )?))),
         "getAutofillItems" => Ok(ServerCommand::BrowserAutofill),
+        "getAutofillItem" => Ok(ServerCommand::BrowserAutofillItem(
+            request
+                .entry_id
+                .ok_or_else(|| "missing entry ID".to_string())?,
+        )),
         "getTotp" => Ok(ServerCommand::Totp(TotpCommand::Show {
             target: Target::Id(
                 request
@@ -492,6 +497,16 @@ mod tests {
         assert!(matches!(
             command_for_request(&mut autofill).unwrap(),
             ServerCommand::BrowserAutofill
+        ));
+
+        let mut selected_autofill = NativeRequest {
+            action: "getAutofillItem".into(),
+            entry_id: Some(9),
+            ..NativeRequest::default()
+        };
+        assert!(matches!(
+            command_for_request(&mut selected_autofill).unwrap(),
+            ServerCommand::BrowserAutofillItem(9)
         ));
 
         let mut request = NativeRequest {

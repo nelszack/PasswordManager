@@ -1,4 +1,4 @@
-importScripts("relay.js");
+importScripts("relay.js", "background_security.js");
 
 const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
@@ -162,6 +162,85 @@ function sendAction(action, fields, sendResponse, refreshAfter = false) {
         });
 }
 
+function setPendingCredentials(request, sender, sendResponse) {
+    const key = PasswordManagerSecurity.pendingStorageKey(sender);
+    const domain = PasswordManagerSecurity.senderDomain(sender);
+    const pending = request.pending;
+    if (!key || !domain || !pending || typeof pending.password !== "string") {
+        sendResponse({ success: false, error: "Invalid pending credentials" });
+        return;
+    }
+    chrome.storage.session.set({
+        [key]: {
+            domain,
+            username: String(pending.username || ""),
+            password: pending.password,
+            accountName: String(pending.accountName || ""),
+            hasAccounts: Boolean(pending.hasAccounts),
+            time: Date.now()
+        }
+    }, () => sendResponse(chrome.runtime.lastError
+        ? { success: false, error: chrome.runtime.lastError.message }
+        : { success: true }));
+}
+
+function consumePendingCredentials(sender, sendResponse) {
+    const key = PasswordManagerSecurity.pendingStorageKey(sender);
+    const domain = PasswordManagerSecurity.senderDomain(sender);
+    if (!key || !domain) {
+        sendResponse({ success: false, error: "Invalid page origin" });
+        return;
+    }
+    chrome.storage.session.get(key, result => {
+        const error = chrome.runtime.lastError?.message;
+        const pending = result?.[key] || null;
+        chrome.storage.session.remove(key, () => void chrome.runtime.lastError);
+        if (error) sendResponse({ success: false, error });
+        else if (pending?.domain === domain && Date.now() - pending.time < 60_000) {
+            sendResponse({ success: true, pending });
+        } else {
+            sendResponse({ success: true, pending: null });
+        }
+    });
+}
+
+function clearPendingCredentials(sender, sendResponse) {
+    const key = PasswordManagerSecurity.pendingStorageKey(sender);
+    if (!key) {
+        sendResponse({ success: false, error: "Invalid tab" });
+        return;
+    }
+    chrome.storage.session.remove(key, () => sendResponse(chrome.runtime.lastError
+        ? { success: false, error: chrome.runtime.lastError.message }
+        : { success: true }));
+}
+
+function sendTotpForPage(request, sender, sendResponse) {
+    const domain = PasswordManagerSecurity.senderDomain(sender);
+    if (!domain || !Number.isSafeInteger(request.id) || request.id <= 0) {
+        sendResponse({ success: false, error: "Invalid TOTP request" });
+        return;
+    }
+    nativeRequest("getCredentials", { domain })
+        .then(response => {
+            if (!response.success) throw new Error(response.error || "Credentials unavailable");
+            let accounts;
+            try {
+                accounts = JSON.parse(response.data);
+            } catch (_) {
+                throw new Error("Invalid credential response");
+            }
+            if (!PasswordManagerSecurity.totpEntryAllowed(accounts, request.id)) {
+                throw new Error("TOTP entry is not authorized for this site");
+            }
+            return nativeRequest("getTotp", { entryId: request.id });
+        })
+        .then(response => sendResponse(response.success
+            ? { success: true, data: response.data }
+            : { success: false, error: response.error }))
+        .catch(error => sendResponse({ success: false, error: error.message }));
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getStatus") {
         refreshStatus()
@@ -175,20 +254,34 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === "getCredentials") {
-        sendAction("getCredentials", { domain: request.domain }, sendResponse);
+        const domain = PasswordManagerSecurity.senderDomain(sender);
+        if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
+        else sendAction("getCredentials", { domain }, sendResponse);
         return true;
     }
     if (request.action === "getAutofillItems") {
         sendAction("getAutofillItems", {}, sendResponse);
         return true;
     }
+    if (request.action === "getAutofillItem") {
+        if (!PasswordManagerSecurity.senderDomain(sender)
+            || !Number.isSafeInteger(request.id)
+            || request.id <= 0) {
+            sendResponse({ success: false, error: "Invalid autofill request" });
+        } else {
+            sendAction("getAutofillItem", { entryId: request.id }, sendResponse);
+        }
+        return true;
+    }
     if (request.action === "getTotp") {
-        sendAction("getTotp", { entryId: request.id }, sendResponse);
+        sendTotpForPage(request, sender, sendResponse);
         return true;
     }
     if (request.action === "saveCredentials") {
-        sendAction("saveCredentials", {
-            domain: request.domain,
+        const domain = PasswordManagerSecurity.senderDomain(sender);
+        if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
+        else sendAction("saveCredentials", {
+            domain,
             username: request.username,
             password: request.password,
             name: request.name
@@ -196,13 +289,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === "updateCredentials") {
-        sendAction("updateCredentials", {
-            domain: request.domain,
+        const domain = PasswordManagerSecurity.senderDomain(sender);
+        if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
+        else sendAction("updateCredentials", {
+            domain,
             username: request.username,
             password: request.password,
             name: request.name,
             entryId: request.id
         }, sendResponse, true);
+        return true;
+    }
+    if (request.action === "setPendingCredentials") {
+        setPendingCredentials(request, sender, sendResponse);
+        return true;
+    }
+    if (request.action === "consumePendingCredentials") {
+        consumePendingCredentials(sender, sendResponse);
+        return true;
+    }
+    if (request.action === "clearPendingCredentials") {
+        clearPendingCredentials(sender, sendResponse);
         return true;
     }
     if (request.action === "lockVault") {

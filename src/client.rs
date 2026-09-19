@@ -86,7 +86,7 @@ pub fn request(command: ServerCommand) -> Result<String, String> {
     }
 }
 
-fn request_response(command: ServerCommand) -> Result<ProtocolResponse, String> {
+fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, String> {
     let read_timeout = if matches!(
         &command,
         ServerCommand::Audit(AuditOptions {
@@ -104,8 +104,9 @@ fn request_response(command: ServerCommand) -> Result<ProtocolResponse, String> 
         .set_read_timeout(Some(read_timeout))
         .map_err(|e| format!("could not configure server connection: {e}"))?;
     let mut token = server_token()?;
-    let mut data =
-        rmp_serde::to_vec(&command).map_err(|e| format!("could not encode command: {e}"))?;
+    let encoded = rmp_serde::to_vec(&command).map_err(|e| format!("could not encode command: {e}"));
+    command.zeroize();
+    let mut data = encoded?;
     let send_result = connection
         .write_all(token.as_bytes())
         .and_then(|_| connection.write_all(&(data.len() as u32).to_be_bytes()))

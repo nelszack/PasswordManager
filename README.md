@@ -438,7 +438,11 @@ The service worker talks to `com.myproject.password_manager` through Chrome's
 native-messaging API. Chrome launches the registered `pm-native-host` link,
 which forwards a small, validated command set to the authenticated local
 server. The extension no longer requests localhost access or stores the server
-session token. On Linux and macOS the installer creates a host link and writes
+session token. Page origins are derived from trusted browser sender metadata;
+content scripts cannot select a different vault hostname or request a TOTP code
+for an unrelated entry. Pending save prompts are held briefly in service-worker
+session storage and are isolated by tab and hostname. On Linux and macOS the
+installer creates a host link and writes
 the browser manifest in the browser's per-user application-support directory.
 On Windows it installs `pm-native-host.exe` and registers the manifest under
 the current user's browser registry key, so administrator rights are not
@@ -462,8 +466,9 @@ code. Only the generated code and its remaining lifetime are returned to the
 extension; the encrypted TOTP secret never leaves the vault server.
 
 Payment-card and identity fields also receive contextual picker buttons. These
-pickers retrieve matching typed items only when clicked and fill controls in the
-same form. Cardholder/email fall back to the item's `--username`, and the card
+pickers retrieve secret-free item labels only when clicked, then retrieve the
+single selected item after a trusted user click and fill controls in the same
+form. Cardholder/email fall back to the item's `--username`, and the card
 number comes from the card item's primary secret. Other values are read from
 custom fields using common names, for example:
 
@@ -519,7 +524,12 @@ on-page controls.
 - Configurable inactivity-based auto-lock timeout
 - The local server requires a random session token on every TCP and HTTP
   connection; vault, key and token files use owner-only `0600` permissions on
-  Linux/macOS and the current user's application-data directories on Windows
+  Linux/macOS and explicit current-user-only ACLs on Windows
+
+The legacy loopback HTTP protocol is disabled by default. Builds that still
+need compatibility with an older client can opt in with
+`--features legacy-http`; native messaging and the CLI use the authenticated
+binary protocol.
 
 Existing unversioned vaults remain readable. The next successful vault write
 automatically stores them in the versioned format.
@@ -530,7 +540,8 @@ Run the complete unit, protocol-integration, and security regression suite with:
 
 ```bash
 cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+node --test extension/*.test.js
 ```
 
 The suite covers authenticated TCP and HTTP framing, native-message validation,
