@@ -16,6 +16,24 @@
         );
     }
 
+    function accountsFromLookup(response) {
+        if (!response?.success) {
+            const error = String(response?.error || "Credentials unavailable").trim();
+            // The server uses NotFound when a URL has no credentials. For a
+            // save prompt that is the expected new-site state, not a failure.
+            if (/^not found\.?$/i.test(error)) return [];
+            throw new Error(error);
+        }
+        let accounts;
+        try {
+            accounts = JSON.parse(response.data);
+        } catch (_) {
+            throw new Error("Invalid credential response");
+        }
+        if (!Array.isArray(accounts)) throw new Error("Invalid credential response");
+        return accounts;
+    }
+
     function describe(accounts, username, domain) {
         const validAccounts = Array.isArray(accounts)
             ? accounts.filter(account => Number.isSafeInteger(account?.id) && account.id > 0)
@@ -81,5 +99,5 @@
         return { action, fields };
     }
 
-    return { accountUsername, hasExactMatch, describe, operation };
+    return { accountUsername, accountsFromLookup, hasExactMatch, describe, operation };
 });

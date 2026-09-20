@@ -428,9 +428,9 @@ async function loadCredentialPrompt(token) {
     const pending = pendingCredentialPrompts.get(token);
     if (!pending) return;
     try {
-        const accounts = parseNativeItems(await nativeRequest(
-            "getCredentials", { domain: pending.domain }
-        ));
+        const accounts = PasswordManagerCredentialPrompt.accountsFromLookup(
+            await nativeRequest("getCredentials", { domain: pending.domain })
+        );
         if (!pendingCredentialPrompts.has(token)) return;
         if (PasswordManagerCredentialPrompt.hasExactMatch(
             accounts, pending.username, pending.password
