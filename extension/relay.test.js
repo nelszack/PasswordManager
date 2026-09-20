@@ -30,6 +30,15 @@ test("credential relay rejects top frames, mismatched origins, and malformed tok
     assert.equal(requestRoute({ ...data, token: "predictable" }, {
         tab: { id: 42 }, frameId: 7, url: "https://login.example.com"
     }), null);
+    assert.equal(requestRoute({ ...data, username: null }, {
+        tab: { id: 42 }, frameId: 7, url: "https://login.example.com"
+    }), null);
+    assert.equal(requestRoute(data, {
+        tab: { id: 42 }, frameId: 7, url: "file:///tmp/login.html"
+    }), null);
+    assert.equal(requestRoute(data, {
+        tab: {}, frameId: 7, url: "https://login.example.com"
+    }), null);
 });
 
 test("relayed credential operations require the authorized top frame and token", () => {
@@ -56,4 +65,37 @@ test("only the top frame can return a validated result to its source iframe", ()
     assert.equal(resultRoute({ ...request, data: { token, action: "unknown" } }, {
         tab: { id: 42 }, frameId: 0
     }), null);
+});
+
+test("authorization is isolated by tab and can be consumed exactly once", () => {
+    const pending = new Map([[relayKey(42, token), {
+        sourceFrameId: 7,
+        domain: "https://login.example.com",
+        expiresAt: Date.now() + 1000
+    }]]);
+    const request = { token, sourceFrameId: 7 };
+
+    assert.equal(authorizeCredentialRequest(request, {
+        tab: { id: 41 }, frameId: 0
+    }, pending), null);
+    assert.ok(authorizeCredentialRequest(request, {
+        tab: { id: 42 }, frameId: 0
+    }, pending, true));
+    assert.equal(authorizeCredentialRequest(request, {
+        tab: { id: 42 }, frameId: 0
+    }, pending), null);
+});
+
+test("expired relay authorizations are rejected and removed", () => {
+    const key = relayKey(42, token);
+    const pending = new Map([[key, {
+        sourceFrameId: 7,
+        domain: "https://login.example.com",
+        expiresAt: Date.now()
+    }]]);
+
+    assert.equal(authorizeCredentialRequest({ token, sourceFrameId: 7 }, {
+        tab: { id: 42 }, frameId: 0
+    }, pending), null);
+    assert.equal(pending.has(key), false);
 });

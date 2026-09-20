@@ -317,10 +317,52 @@ mod test {
     }
 
     #[test]
+    fn invalid_or_empty_character_sets_are_rejected() {
+        let no_characters = PasswordOptions {
+            uppercase: false,
+            lowercase: false,
+            digits: false,
+            symbols: None,
+            exclude_ambiguous: false,
+        };
+        assert!(generate_password_with_options(16, &no_characters).is_err());
+
+        let empty_symbols = PasswordOptions {
+            symbols: Some(""),
+            ..no_characters
+        };
+        assert!(generate_password_with_options(16, &empty_symbols).is_err());
+
+        let non_ascii_symbols = PasswordOptions {
+            symbols: Some("🔐"),
+            ..no_characters
+        };
+        assert!(generate_password_with_options(16, &non_ascii_symbols).is_err());
+    }
+
+    #[test]
+    fn short_passwords_still_use_only_the_requested_characters() {
+        let symbols_only = PasswordOptions {
+            uppercase: false,
+            lowercase: false,
+            digits: false,
+            symbols: Some("xy"),
+            exclude_ambiguous: false,
+        };
+        for length in 0..=3 {
+            let password = generate_password_with_options(length, &symbols_only).unwrap();
+            assert_eq!(password.len(), length as usize);
+            assert!(password.bytes().all(|byte| matches!(byte, b'x' | b'y')));
+        }
+    }
+
+    #[test]
     fn test_passphrase_word_count_and_separator() {
         let phrase = generate_passphrase(6, ".").unwrap();
         assert_eq!(phrase.split('.').count(), 6);
         assert!(generate_passphrase(0, "-").is_err());
+        assert!(generate_passphrase(2, "\n").is_err());
+        assert!(generate_passphrase(2, "\r\n").is_err());
     }
 
     #[test]

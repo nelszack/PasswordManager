@@ -7,6 +7,7 @@
 
     function createSubmissionCoordinator(options) {
         const resumedForms = new WeakSet();
+        const pendingForms = new WeakSet();
 
         async function onSubmit(event) {
             const form = event.target;
@@ -14,11 +15,20 @@
             if (resumedForms.delete(form)) return;
             if (!event.isTrusted) return;
 
+            // A double click can dispatch another submit event while the
+            // credential prompt for this form is still open. Keep that event
+            // from navigating away, but do not open a second prompt.
+            if (pendingForms.has(form)) {
+                event.preventDefault();
+                return;
+            }
+
             const credentials = options.credentialsFor(form);
             if (!credentials.password || options.shouldIgnore()) return;
 
             // This must run before the first await in this function.
             event.preventDefault();
+            pendingForms.add(form);
             try {
                 await options.handle({
                     form,
@@ -26,6 +36,7 @@
                     credentials
                 });
             } finally {
+                pendingForms.delete(form);
                 resumedForms.add(form);
                 options.resume(form, event.submitter, resumedForms);
             }

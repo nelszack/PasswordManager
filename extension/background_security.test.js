@@ -18,6 +18,8 @@ test("sender origins preserve the trusted scheme and port", () => {
 
 test("pending credentials are isolated by browser tab", () => {
     assert.equal(security.pendingStorageKey({ tab: { id: 42 } }), "pmPopupPending:42");
+    assert.equal(security.pendingStorageKey({ tab: { id: 0 } }), "pmPopupPending:0");
+    assert.equal(security.pendingStorageKey({ tab: { id: "42" } }), null);
     assert.equal(security.pendingStorageKey({ tab: {} }), null);
     assert.equal(security.pendingStorageKey({}), null);
 });
@@ -30,6 +32,9 @@ test("TOTP IDs must belong to a matching site credential", () => {
     assert.equal(security.totpEntryAllowed(accounts, 7), true);
     assert.equal(security.totpEntryAllowed(accounts, 8), false);
     assert.equal(security.totpEntryAllowed(accounts, 9), false);
+    assert.equal(security.totpEntryAllowed(accounts, 7.5), false);
+    assert.equal(security.totpEntryAllowed(accounts, "7"), false);
+    assert.equal(security.totpEntryAllowed(accounts, 0), false);
     assert.equal(security.totpEntryAllowed(null, 7), false);
 });
 
@@ -51,4 +56,28 @@ test("secure picker messages only come from the extension picker page", () => {
         id: "abcdefghijklmnop",
         url: "https://example.com/picker.html"
     }, "abcdefghijklmnop", picker), false);
+    assert.equal(security.securePickerSender({
+        id: "abcdefghijklmnop",
+        url: "chrome-extension://abcdefghijklmnop/picker.html.evil"
+    }, "abcdefghijklmnop", picker), false);
+    assert.equal(security.securePickerSender(null, "abcdefghijklmnop", picker), false);
+
+    const credentialPrompt = "chrome-extension://abcdefghijklmnop/credential_prompt.html";
+    assert.equal(security.securePickerSender({
+        id: "abcdefghijklmnop",
+        url: `${credentialPrompt}?token=secret`
+    }, "abcdefghijklmnop", credentialPrompt), true);
+    assert.equal(security.securePickerSender({
+        id: "abcdefghijklmnop",
+        url: picker
+    }, "abcdefghijklmnop", credentialPrompt), false);
+});
+
+test("untrusted sender URL data never falls back to a valid tab URL", () => {
+    const sender = {
+        url: "not a url",
+        tab: { url: "https://trusted.example/login" }
+    };
+    assert.equal(security.senderDomain(sender), null);
+    assert.equal(security.senderOrigin(sender), null);
 });

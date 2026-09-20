@@ -189,26 +189,6 @@ function fetchAccounts(domain) {
     });
 }
 
-function fetchRelayedAccounts(token, sourceFrameId) {
-    return new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-            { action: "getRelayedCredentials", token, sourceFrameId },
-            (response) => {
-                let accounts = [];
-                if (response && response.success) {
-                    try {
-                        accounts = JSON.parse(response.data);
-                        if (!Array.isArray(accounts)) accounts = [];
-                    } catch (_) {
-                        accounts = [];
-                    }
-                }
-                resolve(accounts);
-            }
-        );
-    });
-}
-
 // Card and identity data is fetched only after the user opens its picker.
 // This avoids placing unrelated plaintext vault items into every page at load.
 function fetchAutofillItems() {
@@ -257,6 +237,7 @@ function fetchTotp(id) {
 }
 
 const securePickerResolvers = new Map();
+const credentialPromptResolvers = new Map();
 
 function openSecurePicker(kind) {
     return new Promise((resolve, reject) => {
@@ -281,12 +262,45 @@ function openSecurePicker(kind) {
     });
 }
 
+function openCredentialPrompt(username, password) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ action: "openCredentialPrompt", username, password }, response => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+                return;
+            }
+            if (response?.matched) {
+                resolve({ action: "matched" });
+                return;
+            }
+            if (!response?.success || !response.token) {
+                reject(new Error(response?.error || "Could not open credential prompt"));
+                return;
+            }
+            const timer = setTimeout(() => {
+                credentialPromptResolvers.delete(response.token);
+                resolve({ action: "cancel" });
+            }, 125_000);
+            credentialPromptResolvers.set(response.token, result => {
+                clearTimeout(timer);
+                resolve(result);
+            });
+        });
+    });
+}
+
 chrome.runtime.onMessage.addListener(message => {
-    if (message.action !== "securePickerResult") return;
-    const resolver = securePickerResolvers.get(message.token);
-    if (!resolver) return;
-    securePickerResolvers.delete(message.token);
-    resolver(message.payload);
+    if (message.action === "securePickerResult") {
+        const resolver = securePickerResolvers.get(message.token);
+        if (!resolver) return;
+        securePickerResolvers.delete(message.token);
+        resolver(message.payload);
+    } else if (message.action === "credentialPromptResult") {
+        const resolver = credentialPromptResolvers.get(message.token);
+        if (!resolver) return;
+        credentialPromptResolvers.delete(message.token);
+        resolver(message.result);
+    }
 });
 
 function createSecurePickerButton(input, kind, icon, title, onSelection) {
@@ -1258,10 +1272,6 @@ function findMatchingAccount(username, password, accounts) {
     });
 }
 
-function findAccountByUsername(username, accounts) {
-    return accounts.find(acc => accountUsername(acc) === username);
-}
-
 // On password-only logins the username field may be missing; fall back to
 // the last username seen on this domain, or the site's only saved account.
 function resolveUsername(username, accounts) {
@@ -1275,265 +1285,11 @@ function resolveUsername(username, accounts) {
     return "";
 }
 
-// ===============================
-// Show custom prompt modal
-// ===============================
+// The add/update prompt is an extension-owned window so it survives page
+// navigation. The background retains the password and performs the operation.
 let modalOpen = false;
-
-function showPromptModal(title, message, showUpdateOption = false, oldUsername = "", oldPassword = "", showNameInput = false, existingName = "", showUsernameInput = false, usernameValue = "") {
-    modalOpen = true;
-    return new Promise((resolve) => {
-        const host = document.createElement("div");
-        Object.assign(host.style, {
-            position: "fixed", inset: "0", zIndex: "2147483647", pointerEvents: "all"
-        });
-        const shadow = host.attachShadow({ mode: "closed" });
-        const overlay = document.createElement("div");
-        Object.assign(overlay.style, {
-            position: "fixed",
-            top: "0",
-            left: "0",
-            width: "100%",
-            height: "100%",
-            background: "rgba(0,0,0,0.5)",
-            zIndex: "2147483647",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            pointerEvents: "all"
-        });
-
-        overlay.addEventListener("click", (e) => e.stopPropagation());
-        overlay.addEventListener("submit", (e) => e.preventDefault());
-        overlay.addEventListener("keydown", (e) => e.preventDefault());
-
-        const modal = document.createElement("div");
-        Object.assign(modal.style, {
-            background: "#fff",
-            padding: "20px",
-            borderRadius: "8px",
-            maxWidth: "320px",
-            width: "90%",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
-            pointerEvents: "all"
-        });
-        modal.addEventListener("click", (e) => e.stopPropagation());
-        modal.addEventListener("keydown", (e) => e.stopPropagation());
-
-        const heading = document.createElement("h3");
-        heading.textContent = title;
-        heading.style.margin = "0 0 10px 0";
-        modal.appendChild(heading);
-
-        const description = document.createElement("p");
-        description.textContent = message;
-        Object.assign(description.style, { margin: "0 0 15px 0", color: "#666" });
-        modal.appendChild(description);
-
-        const makeInput = (placeholder, value) => {
-            const field = document.createElement("input");
-            field.type = "text";
-            field.placeholder = placeholder;
-            field.value = value;
-            Object.assign(field.style, {
-                padding: "8px", marginBottom: "15px", width: "100%",
-                boxSizing: "border-box", border: "1px solid #ccc", borderRadius: "4px"
-            });
-            modal.appendChild(field);
-            return field;
-        };
-        const usernameInput = showUsernameInput ? makeInput("Username", usernameValue) : null;
-        const nameInput = showNameInput
-            ? makeInput("Name (e.g., Work, Personal)", existingName)
-            : null;
-
-        const actions = document.createElement("div");
-        Object.assign(actions.style, { display: "flex", flexDirection: "column", gap: "8px" });
-        modal.appendChild(actions);
-        const makeButton = (label, background) => {
-            const control = document.createElement("button");
-            control.type = "button";
-            control.textContent = label;
-            Object.assign(control.style, {
-                padding: "10px", background, color: background === "#ccc" ? "#333" : "white",
-                border: "none", borderRadius: "4px", cursor: "pointer"
-            });
-            actions.appendChild(control);
-            return control;
-        };
-        const addButton = makeButton("Add as New Account", "#4285f4");
-        const updateButton = showUpdateOption ? makeButton("Update Existing", "#34a853") : null;
-        const cancelButton = makeButton("Ignore", "#ccc");
-
-        overlay.appendChild(modal);
-        shadow.appendChild(overlay);
-        document.documentElement.appendChild(host);
-
-        const cleanup = () => {
-            modalOpen = false;
-        };
-
-        addButton.addEventListener("click", (e) => {
-            if (!e.isTrusted) return;
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            const name = nameInput ? nameInput.value.trim() : "";
-            const username = usernameInput ? usernameInput.value.trim() : "";
-            host.remove();
-            cleanup();
-            resolve({ action: "add", name, username });
-        });
-
-        if (updateButton) {
-            updateButton.addEventListener("click", (e) => {
-                if (!e.isTrusted) return;
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation();
-                const name = nameInput ? nameInput.value.trim() : existingName;
-                const username = usernameInput ? usernameInput.value.trim() : "";
-                host.remove();
-                cleanup();
-                resolve({ action: "update", name, username });
-            });
-        }
-
-        cancelButton.addEventListener("click", (e) => {
-            if (!e.isTrusted) return;
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            host.remove();
-            cleanup();
-            resolve({ action: "cancel" });
-        });
-    });
-}
-
-// ===============================
-// Ask the user whether to save/update when credentials
-// don't match an existing entry exactly
-// ===============================
-async function promptForCredentials(
-    username,
-    password,
-    accounts,
-    domain = currentDomain,
-    trackPending = true
-) {
-    const existing = findAccountByUsername(username, accounts);
-    const hasAccounts = accounts.length > 0;
-    const updateTarget = existing || (hasAccounts ? accounts[0] : null);
-
-    if (trackPending) {
-        setPopupPending({
-            username,
-            password,
-            accountName: updateTarget ? updateTarget.name : "",
-            hasAccounts
-        }, domain);
-    }
-
-    const message = existing
-        ? `An account with this username already exists, but the password is different. What would you like to do?`
-        : hasAccounts
-            ? "These credentials don't match any saved account. What would you like to do?"
-            : "Would you like to save these credentials?";
-
-    const result = await showPromptModal(
-        "Save Credentials",
-        message,
-        hasAccounts,
-        existing ? existing.username : "",
-        existing ? existing.password : "",
-        true,
-        updateTarget ? updateTarget.name : "",
-        !username,
-        existing ? existing.username : ""
-    );
-
-    return { result, updateTarget };
-}
-
-// ===============================
-// When a login happens inside an iframe, relay it to the top
-// frame so the prompt is shown in the main window where it's visible.
-// ===============================
-const relayResolvers = new Map();
-
-function relayLoginToParent(username, password, accounts) {
-    return new Promise((resolve) => {
-        const token = crypto.randomUUID();
-        const timeout = setTimeout(() => {
-            relayResolvers.delete(token);
-            resolve({ action: "ignore" });
-        }, 30000);
-        relayResolvers.set(token, data => {
-            clearTimeout(timeout);
-            resolve(data);
-        });
-        chrome.runtime.sendMessage({
-            action: "relayToParent",
-            data: {
-                token,
-                domain: currentDomain,
-                username,
-                password,
-                accountName: accounts.length > 0 ? accounts[0].name : "",
-                hasAccounts: accounts.length > 0
-            }
-        }, response => {
-            if (!chrome.runtime.lastError && response?.ok) return;
-            const resolver = relayResolvers.get(token);
-            if (resolver) {
-                relayResolvers.delete(token);
-                resolver({ action: "ignore", token });
-            }
-        });
-    });
-}
-
-// ===============================
-// Track popup state across pages
-// ===============================
 let popupResolved = false;
 let currentDomain = window.location.origin.toLowerCase();
-
-function isSameSite(a, b) {
-    return Boolean(a && b && a === b);
-}
-
-const PENDING_TIMEOUT = 60 * 1000;
-
-function setPopupPending(pendingData, domain = currentDomain) {
-    chrome.runtime.sendMessage({
-        action: "setPendingCredentials",
-        pending: {
-            domain,
-            username: pendingData.username,
-            password: pendingData.password,
-            accountName: pendingData.accountName,
-            hasAccounts: pendingData.hasAccounts
-        }
-    }, () => void chrome.runtime.lastError);
-}
-
-function clearPopupPending() {
-    chrome.runtime.sendMessage({ action: "clearPendingCredentials" }, () => void chrome.runtime.lastError);
-}
-
-function isPopupPending() {
-    return new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: "consumePendingCredentials" }, response => {
-            if (chrome.runtime.lastError || !response?.success) return resolve(null);
-            const p = response.pending;
-            resolve(p && isSameSite(p.domain, currentDomain) && Date.now() - p.time < PENDING_TIMEOUT
-                ? p
-                : null);
-        });
-    });
-}
 
 // ===============================
 // Request credentials from background
@@ -1559,51 +1315,6 @@ async function initExtension() {
             lastCredentialInput = e.target;
         }
     }, true);
-
-    const pendingPopup = await isPopupPending();
-    if (pendingPopup && !modalOpen) {
-        modalOpen = true;
-        const pendingDomain = pendingPopup.domain;
-        const domainAccounts = await fetchAccounts(pendingDomain);
-        if (findMatchingAccount(pendingPopup.username, pendingPopup.password, domainAccounts)) {
-            modalOpen = false;
-            popupResolved = true;
-            clearPopupPending();
-            return;
-        }
-        const { result, updateTarget } = await promptForCredentials(
-            pendingPopup.username,
-            pendingPopup.password,
-            domainAccounts,
-            pendingDomain
-        );
-
-        modalOpen = false;
-        popupResolved = true;
-        clearPopupPending();
-
-        const saveUsername = result.username || pendingPopup.username;
-
-        if (result.action === "add") {
-            chrome.runtime.sendMessage({
-                action: "saveCredentials",
-                domain: pendingDomain,
-                username: saveUsername,
-                password: pendingPopup.password,
-                name: result.name
-            });
-        } else if (result.action === "update" && updateTarget) {
-            chrome.runtime.sendMessage({
-                action: "updateCredentials",
-                domain: pendingDomain,
-                username: saveUsername,
-                password: pendingPopup.password,
-                name: updateTarget.name,
-                id: updateTarget.id
-            });
-        }
-        return;
-    }
 
     const resumeFormSubmission = (form, submitter, resumedForms) => {
         try {
@@ -1635,41 +1346,12 @@ async function initExtension() {
             const match = findMatchingAccount(username, password, accounts);
             if (match) return;
 
-            // Login happened inside an iframe: show the prompt in the top
-            // window (visible there), then let the iframe submit.
-            if (window !== window.top) {
-                await relayLoginToParent(username, password, accounts);
-                return;
-            }
-
             modalOpen = true;
-            const domain = currentDomain;
-
-            const { result, updateTarget } = await promptForCredentials(username, password, accounts, domain);
-
-            modalOpen = false;
-            popupResolved = true;
-            clearPopupPending();
-
-            const saveUsername = result.username || username;
-
-            if (result.action === "add") {
-                chrome.runtime.sendMessage({
-                    action: "saveCredentials",
-                    domain: domain,
-                    username: saveUsername,
-                    password: password,
-                    name: result.name
-                });
-            } else if (result.action === "update" && updateTarget) {
-                chrome.runtime.sendMessage({
-                    action: "updateCredentials",
-                    domain: domain,
-                    username: saveUsername,
-                    password: password,
-                    name: updateTarget.name,
-                    id: updateTarget.id
-                });
+            try {
+                await openCredentialPrompt(username, password);
+                popupResolved = true;
+            } finally {
+                modalOpen = false;
             }
         }
     });
@@ -1679,73 +1361,9 @@ async function initExtension() {
         });
     }, true);
 
-    async function handleRelayedLogin(data, sourceFrameId) {
-        if (modalOpen || popupResolved) {
-            return { action: "ignore", token: data.token };
-        }
-
-        modalOpen = true;
-        const domainAccounts = await fetchRelayedAccounts(data.token, sourceFrameId);
-        const { result, updateTarget } = await promptForCredentials(
-            data.username,
-            data.password,
-            domainAccounts,
-            data.domain,
-            false
-        );
-
-        modalOpen = false;
-        popupResolved = true;
-
-        const saveUsername = result.username || data.username;
-
-        if (result.action === "add") {
-            chrome.runtime.sendMessage({
-                action: "saveRelayedCredentials",
-                token: data.token,
-                sourceFrameId,
-                username: saveUsername,
-                password: data.password,
-                name: result.name
-            });
-        } else if (result.action === "update" && updateTarget) {
-            chrome.runtime.sendMessage({
-                action: "updateRelayedCredentials",
-                token: data.token,
-                sourceFrameId,
-                username: saveUsername,
-                password: data.password,
-                name: updateTarget.name,
-                id: updateTarget.id
-            });
-        }
-
-        return { action: result.action, token: data.token };
-    }
-
-    chrome.runtime.onMessage.addListener((message) => {
-        if (message.action === "relayedLoginResult") {
-            const resolver = relayResolvers.get(message.data?.token);
-            if (resolver) {
-                relayResolvers.delete(message.data.token);
-                resolver(message.data);
-            }
-            return;
-        }
-        if (message.action === "relayedLogin" && window === window.top) {
-            handleRelayedLogin(message.data, message.sourceFrameId)
-                .then(data => chrome.runtime.sendMessage({
-                    action: "relayLoginResult",
-                    sourceFrameId: message.sourceFrameId,
-                    data
-                }))
-                .catch(error => console.log("Password Manager relay error:", error));
-        }
-    });
-
     // Catch logins that navigate/redirect without a form submit event
-    // (e.g. fetch + window.location, or form.submit() in JS), so the
-    // save/update prompt still appears on the landing page.
+    // (e.g. fetch + window.location, or form.submit() in JS). The extension
+    // window and background-owned operation survive the page being destroyed.
     window.addEventListener("pagehide", () => {
         if (modalOpen || popupResolved) return;
 
@@ -1754,27 +1372,10 @@ async function initExtension() {
         const username = resolveUsername(rawUsername, []);
         if (rawUsername) storeUsernameForLater(rawUsername);
 
-        setPopupPending({
-            username,
-            password,
-            accountName: "",
-            hasAccounts: false
-        });
-
-        // Relay from a subframe so the parent can show the prompt live.
-        if (window !== window.top) {
-            chrome.runtime.sendMessage({
-                action: "relayToParent",
-                data: {
-                    token: crypto.randomUUID(),
-                    domain: currentDomain,
-                    username,
-                    password,
-                    accountName: "",
-                    hasAccounts: false
-                }
-            });
-        }
+        chrome.runtime.sendMessage(
+            { action: "openCredentialPrompt", username, password },
+            () => void chrome.runtime.lastError
+        );
     });
 }
 

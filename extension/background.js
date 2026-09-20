@@ -1,4 +1,4 @@
-importScripts("relay.js", "background_security.js");
+importScripts("relay.js", "background_security.js", "credential_prompt_state.js");
 
 const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
@@ -11,6 +11,8 @@ const pendingRequests = new Map();
 const pendingRelays = new Map();
 const pendingPickers = new Map();
 const pickerWindows = new Map();
+const pendingCredentialPrompts = new Map();
+const credentialPromptWindows = new Map();
 let cachedStatus = null;
 let statusRefresh = null;
 
@@ -336,6 +338,121 @@ async function openSecurePicker(request, sender) {
     });
 }
 
+function credentialPromptSenderAllowed(sender) {
+    return PasswordManagerSecurity.securePickerSender(
+        sender,
+        chrome.runtime.id,
+        chrome.runtime.getURL("credential_prompt.html")
+    );
+}
+
+function notifyCredentialPrompt(token, pending, action) {
+    chrome.tabs.sendMessage(
+        pending.tabId,
+        { action: "credentialPromptResult", token, result: { action } },
+        { frameId: pending.frameId },
+        () => void chrome.runtime.lastError
+    );
+}
+
+function discardCredentialPrompt(token, action = "cancel", closeWindow = true) {
+    const pending = pendingCredentialPrompts.get(token);
+    if (!pending) return;
+    pendingCredentialPrompts.delete(token);
+    notifyCredentialPrompt(token, pending, action);
+    if (!Number.isInteger(pending.windowId)) return;
+    credentialPromptWindows.delete(pending.windowId);
+    if (closeWindow) {
+        chrome.windows.remove(pending.windowId, () => void chrome.runtime.lastError);
+    }
+}
+
+async function openCredentialPrompt(request, sender) {
+    const domain = PasswordManagerSecurity.senderOrigin(sender);
+    const tabId = sender?.tab?.id;
+    const frameId = sender?.frameId;
+    const username = request?.username;
+    const password = request?.password;
+    if (!domain || !Number.isInteger(tabId) || !Number.isInteger(frameId)
+        || typeof username !== "string" || username.length > 4096
+        || typeof password !== "string" || !password || password.length > 64 * 1024
+        || /[\0\r\n]/.test(username) || /[\0\r\n]/.test(password)) {
+        throw new Error("Invalid credential prompt request");
+    }
+
+    const accounts = parseNativeItems(await nativeRequest("getCredentials", { domain }));
+    const exactMatch = PasswordManagerCredentialPrompt.hasExactMatch(
+        accounts, username, password
+    );
+    if (exactMatch) return { success: true, matched: true };
+
+    const token = crypto.randomUUID();
+    const pending = {
+        tabId,
+        frameId,
+        domain,
+        username,
+        password,
+        data: PasswordManagerCredentialPrompt.describe(accounts, username, domain),
+        expiresAt: Date.now() + 2 * 60_000,
+        windowId: null,
+        completing: false
+    };
+    pendingCredentialPrompts.set(token, pending);
+
+    return new Promise((resolve, reject) => {
+        chrome.windows.create({
+            url: chrome.runtime.getURL(
+                `credential_prompt.html?token=${encodeURIComponent(token)}`
+            ),
+            type: "popup",
+            width: 400,
+            height: 430,
+            focused: true
+        }, window => {
+            const error = chrome.runtime.lastError?.message;
+            if (error || !window?.id) {
+                pendingCredentialPrompts.delete(token);
+                reject(new Error(error || "Could not open credential prompt"));
+                return;
+            }
+            pending.windowId = window.id;
+            credentialPromptWindows.set(window.id, token);
+            setTimeout(() => discardCredentialPrompt(token), 2 * 60_000);
+            resolve({ success: true, token });
+        });
+    });
+}
+
+async function completeCredentialPrompt(request, sender) {
+    if (!credentialPromptSenderAllowed(sender)) throw new Error("Invalid credential prompt sender");
+    const pending = pendingCredentialPrompts.get(request?.token);
+    if (!pending || pending.expiresAt <= Date.now()) {
+        discardCredentialPrompt(request?.token);
+        throw new Error("Credential prompt expired");
+    }
+    if (pending.completing) throw new Error("Credential operation is already in progress");
+    const operation = PasswordManagerCredentialPrompt.operation(pending, request.selection);
+    if (operation.action === "cancel") {
+        discardCredentialPrompt(request.token, "cancel", false);
+        return { success: true };
+    }
+
+    const nativeAction = operation.action === "update" ? "updateCredentials" : "saveCredentials";
+    pending.completing = true;
+    let response;
+    try {
+        response = await nativeRequest(nativeAction, operation.fields);
+        if (!response.success) throw new Error(response.error || "Could not save credentials");
+    } catch (error) {
+        pending.completing = false;
+        throw error;
+    }
+    discardCredentialPrompt(request.token, operation.action, false);
+    refreshStatus();
+    return { success: true };
+}
+
 async function completeSecurePicker(request, sender) {
     if (!pickerSenderAllowed(sender)) throw new Error("Invalid picker sender");
     const pending = pendingPickers.get(request?.token);
@@ -377,6 +494,17 @@ async function completeSecurePicker(request, sender) {
 }
 
 chrome.windows.onRemoved.addListener(windowId => {
+    const credentialToken = credentialPromptWindows.get(windowId);
+    if (credentialToken) {
+        credentialPromptWindows.delete(windowId);
+        const pending = pendingCredentialPrompts.get(credentialToken);
+        if (pending?.completing) {
+            pending.windowId = null;
+            return;
+        }
+        discardCredentialPrompt(credentialToken, "cancel", false);
+        return;
+    }
     const token = pickerWindows.get(windowId);
     if (!token) return;
     pickerWindows.delete(windowId);
@@ -384,6 +512,29 @@ chrome.windows.onRemoved.addListener(windowId => {
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "openCredentialPrompt") {
+        openCredentialPrompt(request, sender)
+            .then(sendResponse)
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
+    if (request.action === "getCredentialPromptData") {
+        if (!credentialPromptSenderAllowed(sender)) {
+            sendResponse({ success: false, error: "Invalid credential prompt sender" });
+        } else {
+            const pending = pendingCredentialPrompts.get(request.token);
+            sendResponse(pending && pending.expiresAt > Date.now()
+                ? { success: true, data: pending.data }
+                : { success: false, error: "Credential prompt expired" });
+        }
+        return true;
+    }
+    if (request.action === "completeCredentialPrompt") {
+        completeCredentialPrompt(request, sender)
+            .then(sendResponse)
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
     if (request.action === "openSecurePicker") {
         openSecurePicker(request, sender)
             .then(sendResponse)

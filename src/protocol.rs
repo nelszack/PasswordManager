@@ -92,4 +92,21 @@ mod tests {
         assert_eq!(response.code, ResponseCode::Conflict as i32);
         assert_eq!(response.message, "wording may change freely\n");
     }
+
+    #[test]
+    fn framing_preserves_utf8_and_does_not_duplicate_existing_newlines() {
+        let mut frames = encode_response(ResponseCode::Success, "héllo 🔐\n");
+        frames.extend(encode_response(ResponseCode::Success, "done"));
+        let response = decode_responses(&frames).unwrap();
+        assert_eq!(response.message, "héllo 🔐\ndone\n");
+    }
+
+    #[test]
+    fn empty_and_invalid_utf8_responses_are_rejected() {
+        assert!(decode_responses(&[]).is_err());
+
+        let mut frame = encode_response(ResponseCode::Success, "x");
+        *frame.last_mut().unwrap() = 0xff;
+        assert!(decode_responses(&frame).is_err());
+    }
 }
