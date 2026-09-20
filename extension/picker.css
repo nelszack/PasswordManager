@@ -9,5 +9,8 @@ h1 { font-size: 18px; margin: 0 0 8px; }
   border-radius: 6px; background: ButtonFace; color: ButtonText;
   text-align: left; cursor: pointer;
 }
-#items small { display: block; color: GrayText; margin-top: 3px; }
+#items small {
+  display: block; margin-top: 3px; color: ButtonText;
+  font-size: 0.85em; font-weight: 400;
+}
 #cancel { margin-top: 16px; text-align: center; }
