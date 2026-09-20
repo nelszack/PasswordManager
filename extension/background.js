@@ -380,12 +380,6 @@ async function openCredentialPrompt(request, sender) {
         throw new Error("Invalid credential prompt request");
     }
 
-    const accounts = parseNativeItems(await nativeRequest("getCredentials", { domain }));
-    const exactMatch = PasswordManagerCredentialPrompt.hasExactMatch(
-        accounts, username, password
-    );
-    if (exactMatch) return { success: true, matched: true };
-
     const token = crypto.randomUUID();
     const pending = {
         tabId,
@@ -393,7 +387,9 @@ async function openCredentialPrompt(request, sender) {
         domain,
         username,
         password,
-        data: PasswordManagerCredentialPrompt.describe(accounts, username, domain),
+        data: null,
+        loading: true,
+        error: null,
         expiresAt: Date.now() + 2 * 60_000,
         windowId: null,
         completing: false
@@ -420,8 +416,36 @@ async function openCredentialPrompt(request, sender) {
             credentialPromptWindows.set(window.id, token);
             setTimeout(() => discardCredentialPrompt(token), 2 * 60_000);
             resolve({ success: true, token });
+            // Create the durable extension window before doing native I/O.
+            // This matters during pagehide, when Helium may destroy the
+            // originating document while the account lookup is in flight.
+            setTimeout(() => loadCredentialPrompt(token), 0);
         });
     });
+}
+
+async function loadCredentialPrompt(token) {
+    const pending = pendingCredentialPrompts.get(token);
+    if (!pending) return;
+    try {
+        const accounts = parseNativeItems(await nativeRequest(
+            "getCredentials", { domain: pending.domain }
+        ));
+        if (!pendingCredentialPrompts.has(token)) return;
+        if (PasswordManagerCredentialPrompt.hasExactMatch(
+            accounts, pending.username, pending.password
+        )) {
+            discardCredentialPrompt(token, "matched");
+            return;
+        }
+        pending.data = PasswordManagerCredentialPrompt.describe(
+            accounts, pending.username, pending.domain
+        );
+    } catch (error) {
+        pending.error = error?.message || "Credentials unavailable";
+    } finally {
+        pending.loading = false;
+    }
 }
 
 async function completeCredentialPrompt(request, sender) {
@@ -431,6 +455,8 @@ async function completeCredentialPrompt(request, sender) {
         discardCredentialPrompt(request?.token);
         throw new Error("Credential prompt expired");
     }
+    if (pending.loading) throw new Error("Credential prompt is still loading");
+    if (pending.error) throw new Error(pending.error);
     if (pending.completing) throw new Error("Credential operation is already in progress");
     const operation = PasswordManagerCredentialPrompt.operation(pending, request.selection);
     if (operation.action === "cancel") {
@@ -524,7 +550,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         } else {
             const pending = pendingCredentialPrompts.get(request.token);
             sendResponse(pending && pending.expiresAt > Date.now()
-                ? { success: true, data: pending.data }
+                ? {
+                    success: true,
+                    data: pending.data,
+                    loading: pending.loading,
+                    error: pending.error
+                }
                 : { success: false, error: "Credential prompt expired" });
         }
         return true;

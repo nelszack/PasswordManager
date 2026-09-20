@@ -32,6 +32,8 @@ jobs:
         run: |
           node --check extension/background.js
           node --check extension/background_security.js
+          node --check extension/credential_prompt.js
+          node --check extension/credential_prompt_state.js
           node --check extension/form_submission.js
           node --check extension/relay.js
           node --check extension/content.js
