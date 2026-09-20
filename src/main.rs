@@ -21,7 +21,7 @@ use crate::{
     file::{resolve_key_path, resolve_new_key_path},
     password::{
         PasswordOptions, generate_passphrase, generate_password as make_password,
-        generate_password_with_options, print_generated_password, print_password_strength,
+        generate_password_with_options, generated_password_output, password_strength_output,
     },
     server::{is_running, server, start},
     types::{
@@ -32,7 +32,7 @@ use crate::{
 use clap::CommandFactory;
 use clap_complete::generate;
 use directories::ProjectDirs;
-use std::{fs, io};
+use std::fs;
 
 fn target_type(target: EntryArgs) -> Target {
     if let Some(id) = target.id {
@@ -95,33 +95,19 @@ fn resolved_key(path: String) -> PasswordType {
     )
 }
 
-struct SilentPipe(io::Stdout);
-
-impl io::Write for SilentPipe {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self.0.write(buf) {
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(buf.len()),
-            r => r,
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let invoked_as_native_host = native_messaging::invoked_directly();
     let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
         eprintln!("Error: could not locate the application data directory.");
-        return;
+        std::process::exit(1);
     };
     let config_path = proj_dir.config_dir();
     let data_path = proj_dir.data_dir();
     if let Err(error) = fs::create_dir_all(config_path).and_then(|_| fs::create_dir_all(data_path))
     {
         eprintln!("Error: could not create application directories: {error}");
-        return;
+        std::process::exit(1);
     }
     let config_file = config_path.join("config.toml");
     if invoked_as_native_host {
@@ -129,12 +115,13 @@ async fn main() {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("Native messaging host error: {error}");
-                return;
+                std::process::exit(1);
             }
         };
         client::configure_port(conf.server.port);
         if let Err(error) = native_messaging::run() {
             eprintln!("Native messaging host error: {error}");
+            std::process::exit(1);
         }
         return;
     }
@@ -208,20 +195,38 @@ async fn main() {
                 )
             };
             match generated {
-                Ok(password) => print_generated_password(
-                    password,
-                    show_stats,
-                    should_copy,
-                    copy_time.unwrap_or(conf.clipboard.timeout),
-                ),
-                Err(error) => eprintln!("Error: {error}"),
+                Ok(password) => {
+                    let (output, warning) = generated_password_output(
+                        password,
+                        show_stats,
+                        should_copy,
+                        copy_time.unwrap_or(conf.clipboard.timeout),
+                    );
+                    client::print_success(&output);
+                    if let Some(warning) = warning {
+                        client::print_warning(&warning);
+                    }
+                }
+                Err(error) => client::exit_error(&error, 2),
             }
         }
-        (CliCommands::Passcheck { password }, _) => print_password_strength(&password),
+        (CliCommands::Passcheck { password }, _) => {
+            let password = password.unwrap_or_else(|| {
+                rpassword::prompt_password("Password to check: ").unwrap_or_else(|error| {
+                    client::exit_error(&format!("could not read password: {error}"), 1)
+                })
+            });
+            client::print_success(&password_strength_output(&password));
+        }
         (CliCommands::Completions { shell, output }, _) => {
             let mut cmd = Cli::command();
             if output.to_string_lossy() == "-" {
-                generate(shell, &mut cmd, "pm", &mut SilentPipe(io::stdout()));
+                let mut generated = Vec::new();
+                generate(shell, &mut cmd, "pm", &mut generated);
+                let generated = String::from_utf8(generated).unwrap_or_else(|error| {
+                    client::exit_error(&format!("completion output was not UTF-8: {error}"), 1)
+                });
+                client::print_success(&generated);
             } else {
                 let mut file = match fs::File::create(&output) {
                     Ok(file) => file,
@@ -231,7 +236,7 @@ async fn main() {
                     ),
                 };
                 generate(shell, &mut cmd, "pm", &mut file);
-                println!("Completions written to {}", output.display());
+                client::print_success(&format!("Completions written to {}", output.display()));
             }
         }
         (CliCommands::NativeHost { command }, _) => match command {
@@ -239,19 +244,25 @@ async fn main() {
                 extension_id,
                 browser,
             } => match native_messaging::install(&extension_id, browser) {
-                Ok(path) => println!("Native messaging host installed at {}", path.display()),
-                Err(error) => eprintln!("Error: {error}"),
+                Ok(path) => client::print_success(&format!(
+                    "Native messaging host installed at {}",
+                    path.display()
+                )),
+                Err(error) => client::exit_error(&error, 1),
             },
             NativeHostCommands::Run => {
                 if let Err(error) = native_messaging::run() {
-                    eprintln!("Native messaging host error: {error}");
+                    client::exit_error(&format!("Native messaging host error: {error}"), 1);
                 }
             }
         },
         (CliCommands::Config(command), _) => {
-            if command
-                .server_port
-                .is_some_and(|new_port| new_port != conf.server.port)
+            let requested_port = if command.reset {
+                Some(crate::server::DEFAULT_PORT)
+            } else {
+                command.server_port
+            };
+            if requested_port.is_some_and(|new_port| new_port != conf.server.port)
                 && configured_server_running
             {
                 client::exit_error(
@@ -259,8 +270,24 @@ async fn main() {
                     1,
                 );
             }
-            if let Err(error) = try_update(conf, command, &config_file) {
-                client::exit_error(&error, 1);
+            let restart_required = configured_server_running
+                && (command.reset
+                    || command.password_history_limit.is_some()
+                    || command.trash_retention_days.is_some());
+            let effective = if command.has_updates() {
+                try_update(conf, command, &config_file)
+                    .unwrap_or_else(|error| client::exit_error(&error, 1))
+            } else {
+                conf
+            };
+            let output = toml::to_string_pretty(&effective).unwrap_or_else(|error| {
+                client::exit_error(&format!("could not display configuration: {error}"), 1)
+            });
+            client::print_success(&output);
+            if restart_required {
+                client::print_warning(
+                    "restart the server before the updated recovery settings take effect",
+                );
             }
         }
         (CliCommands::Lock, true) => {
@@ -288,11 +315,10 @@ async fn main() {
         (CliCommands::Kill, true) => {
             send_command(ServerCommand::Kill);
         }
-        (CliCommands::Start, false) | (CliCommands::Start, true) => {
-            if let Err(error) = start(port) {
-                client::exit_error(&error, 1);
-            }
-        }
+        (CliCommands::Start, false) | (CliCommands::Start, true) => match start(port) {
+            Ok(message) => client::print_success(&message),
+            Err(error) => client::exit_error(&error, 1),
+        },
         (CliCommands::Run, false) => {
             if let Err(error) = server(
                 port,
@@ -304,7 +330,7 @@ async fn main() {
                 client::exit_error(&error, 1);
             }
         }
-        (CliCommands::Run, true) => println!("Server is already running."),
+        (CliCommands::Run, true) => client::print_success("Server is already running."),
         (CliCommands::New { key_path }, true) => {
             send_command(ServerCommand::New(if let Some(kp) = key_path {
                 resolved_new_key(kp)
@@ -334,6 +360,9 @@ async fn main() {
             },
             true,
         ) => {
+            if matches!(kind, crate::types::ItemKind::Identity) && generate_password {
+                client::exit_error("identity items do not have a primary secret to generate", 2);
+            }
             let custom_fields = match custom_fields(fields, secret_fields) {
                 Ok(fields) => fields,
                 Err(error) => {
@@ -349,23 +378,26 @@ async fn main() {
             } else {
                 make_password(conf.genpass.length)
             };
-            send_command(ServerCommand::AddTyped(crate::types::TypedEntry {
-                entry: PasswordEntry {
-                    name,
-                    username,
-                    password,
-                    url: primary_url,
-                    notes,
-                    copy: if !copy && !no_copy {
-                        kind == crate::types::ItemKind::Login && conf.copy.passwords
-                    } else {
-                        copy
+            send_command(ServerCommand::AddTypedWithOptions {
+                entry: crate::types::TypedEntry {
+                    entry: PasswordEntry {
+                        name,
+                        username,
+                        password,
+                        url: primary_url,
+                        notes,
+                        copy: if !copy && !no_copy {
+                            kind == crate::types::ItemKind::Login && conf.copy.passwords
+                        } else {
+                            copy
+                        },
                     },
+                    kind,
+                    additional_urls: urls.collect(),
+                    custom_fields,
                 },
-                kind,
-                additional_urls: urls.collect(),
-                custom_fields,
-            }));
+                copy_timeout: conf.clipboard.timeout,
+            });
         }
         (
             CliCommands::Delete(DeleteArgs {
@@ -447,7 +479,10 @@ async fn main() {
                         target: target_type(target),
                         configuration,
                     })),
-                    Err(error) => eprintln!("Could not read TOTP configuration: {error}"),
+                    Err(error) => client::exit_error(
+                        &format!("could not read TOTP configuration: {error}"),
+                        1,
+                    ),
                 }
             }
             TotpCommands::Show {
@@ -552,7 +587,10 @@ async fn main() {
             send_command(if password_only {
                 ServerCommand::GetSecret(target_type(target))
             } else {
-                ServerCommand::Get(target_type(target))
+                ServerCommand::GetWithOptions {
+                    target: target_type(target),
+                    copy_timeout: conf.clipboard.timeout,
+                }
             });
         }
         (CliCommands::Export { path }, true) => {
@@ -568,14 +606,16 @@ async fn main() {
             },
             true,
         ) => {
-            let keypass = if preview && new {
-                PasswordType::Password(String::new())
+            if !new && key_path.is_some() {
+                client::exit_error("--key can only be used together with --new", 2);
+            }
+            let keypass = if preview || !new {
+                None
             } else {
-                match key_path {
-                    Some(path) if new => resolved_new_key(path),
-                    Some(path) => resolved_key(path),
+                Some(match key_path {
+                    Some(path) => resolved_new_key(path),
                     None => PasswordType::Password(prompt_for_password()),
-                }
+                })
             };
             send_command(ServerCommand::Import(ImportRequest {
                 path,

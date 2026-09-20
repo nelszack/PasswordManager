@@ -1,5 +1,5 @@
-use crate::types::{ItemKind, ListOptions, SortField};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use crate::types::{ItemKind, ListOptions, SortField, UpdateArgs};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -37,7 +37,7 @@ pub enum CliCommands {
     )]
     Genpass {
         /// Password length; defaults to the configured generator length.
-        #[arg(short, long)]
+        #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..))]
         length: Option<u8>,
         /// Hide password strength/statistics, overriding configuration.
         #[arg(long("no-stats"), default_value_t = false, conflicts_with = "stats")]
@@ -67,32 +67,54 @@ pub enum CliCommands {
         #[arg(long)]
         no_symbols: bool,
         /// Use this exact symbol set instead of the built-in set.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "no_symbols")]
         symbols: Option<String>,
         /// Exclude visually ambiguous characters such as 0, O, 1, and l.
         #[arg(long)]
         exclude_ambiguous: bool,
         /// Generate a word-based passphrase instead of a character password.
-        #[arg(long, conflicts_with = "length")]
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "length",
+                "no_uppercase",
+                "no_lowercase",
+                "no_digits",
+                "no_symbols",
+                "symbols",
+                "exclude_ambiguous"
+            ]
+        )]
         passphrase: bool,
         /// Number of words in a passphrase.
-        #[arg(long, default_value_t = 6, requires = "passphrase")]
+        #[arg(
+            long,
+            default_value_t = 6,
+            requires = "passphrase",
+            value_parser = clap::value_parser!(u8).range(1..)
+        )]
         words: u8,
         /// Text placed between passphrase words.
         #[arg(long, default_value = "-", requires = "passphrase")]
         separator: String,
     },
-    /// Estimate the strength of a supplied password without storing it.
-    #[command(after_help = "Example:\n  pm passcheck --password 'correct horse battery staple'")]
+    /// Estimate password strength without storing it.
+    #[command(
+        after_help = "Examples:\n  pm passcheck\n  pm passcheck --password 'correct horse battery staple'"
+    )]
     Passcheck {
-        /// Password to evaluate. Be aware that command-line arguments may be visible to other processes.
+        /// Password to evaluate; omit to use a private prompt.
+        ///
+        /// Command-line arguments may be visible to other processes or retained
+        /// in shell history, so the prompt is recommended for interactive use.
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
     },
     /// View or update persistent defaults.
     ///
-    /// Supplying no options leaves the configuration unchanged. Boolean
-    /// settings accept `true` or `false`. `--reset` restores every default.
+    /// Supplying no options displays the effective configuration. Boolean
+    /// settings accept `true` or `false`. `--reset` restores every default and
+    /// cannot be combined with setting overrides.
     #[command(
         after_help = "Examples:\n  pm config\n  pm config --server-port 8787 --unlock-timeout 30m\n  pm config --reset"
     )]
@@ -184,6 +206,7 @@ pub enum CliCommands {
     ///
     /// Without `--key`, securely prompts twice for a new master password.
     #[command(after_help = "Examples:\n  pm new\n  pm new --key ./keys/vault.key")]
+    #[command(visible_aliases = ["init", "create"])]
     New {
         /// Create a key outside application data; relative paths use the current directory.
         #[arg(long = "key")]
@@ -238,6 +261,7 @@ pub enum CliCommands {
     #[command(
         after_help = "Examples:\n  pm view\n  pm view --type login --sort name\n  pm view --weak --descending"
     )]
+    #[command(visible_aliases = ["list", "ls"])]
     View(ListArgs),
     /// Search item metadata and apply optional health/type filters.
     #[command(
@@ -281,8 +305,8 @@ pub enum CliCommands {
         /// Create and import into a new vault instead of the unlocked vault.
         #[arg(long)]
         new: bool,
-        /// Use a key file instead of prompting for a master password.
-        #[arg(long = "key")]
+        /// Create the new imported vault's external key; requires `--new`.
+        #[arg(long = "key", requires = "new")]
         key_path: Option<String>,
         /// Show import counts and conflicts without changing the vault.
         #[arg(long)]
@@ -291,11 +315,12 @@ pub enum CliCommands {
         #[arg(long, value_enum, default_value_t = crate::types::ConflictPolicy::Skip)]
         conflicts: crate::types::ConflictPolicy,
     },
-    /// Export the complete unlocked vault as plaintext JSON.
+    /// Export the unlocked vault as portable JSON or interoperable CSV.
     ///
-    /// The output contains secrets and is created with private permissions.
+    /// A `.json` destination preserves rich metadata; other extensions use
+    /// CSV. Both formats contain plaintext secrets and use private permissions.
     Export {
-        /// Destination JSON file; an existing file is replaced.
+        /// Destination file; `.json` selects portable JSON, otherwise CSV.
         #[arg(long)]
         path: String,
     },
@@ -393,10 +418,23 @@ pub struct Timeout {
 #[derive(Args, Debug, Default)]
 pub struct ConfigArgs {
     /// Restore every setting to its built-in default.
-    #[arg(long)]
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "genpass_length",
+            "genpass_stats",
+            "genpass_copy",
+            "password_copy",
+            "clipboard_timeout",
+            "unlock_timeout",
+            "password_history_limit",
+            "trash_retention_days",
+            "server_port"
+        ]
+    )]
     pub reset: bool,
     /// Default character-password length used by generation commands.
-    #[arg(long = "length")]
+    #[arg(long = "length", value_parser = clap::value_parser!(u8).range(1..))]
     pub genpass_length: Option<u8>,
     /// Whether generated passwords show strength/statistics by default.
     #[arg(long = "stats")]
@@ -425,6 +463,21 @@ pub struct ConfigArgs {
     pub server_port: Option<u16>,
 }
 
+impl ConfigArgs {
+    pub fn has_updates(&self) -> bool {
+        self.reset
+            || self.genpass_length.is_some()
+            || self.genpass_stats.is_some()
+            || self.genpass_copy.is_some()
+            || self.password_copy.is_some()
+            || self.clipboard_timeout.is_some()
+            || self.unlock_timeout.is_some()
+            || self.password_history_limit.is_some()
+            || self.trash_retention_days.is_some()
+            || self.server_port.is_some()
+    }
+}
+
 fn parse_duration(value: &str) -> Result<u64, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -443,32 +496,6 @@ fn parse_duration(value: &str) -> Result<u64, String> {
         .map_err(|_| "duration must be a positive whole number".to_string())?
         .checked_mul(multiplier)
         .ok_or_else(|| "duration is too large".to_string())
-}
-
-#[derive(Serialize, Deserialize, Debug, Args)]
-pub struct UpdateArgs {
-    /// Replace the item's display name.
-    #[arg(long)]
-    pub name: Option<String>,
-    /// Replace the username or secondary identifier.
-    #[arg(long)]
-    pub username: Option<String>,
-    /// Prompt for and replace the primary secret.
-    #[arg(long, default_value_t = false)]
-    pub password: bool,
-    /// Generate the replacement secret instead of prompting for it.
-    #[arg(
-        long = "generate-password",
-        default_value_t = false,
-        requires = "password"
-    )]
-    pub generate_password: bool,
-    /// Replace the primary URL.
-    #[arg(long)]
-    pub url: Option<String>,
-    /// Replace the notes text.
-    #[arg(long)]
-    pub notes: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Args)]
@@ -641,16 +668,18 @@ pub enum TotpCommands {
 }
 
 #[derive(Args, Debug)]
+#[command(group(
+    ArgGroup::new("entry_selector")
+        .required(true)
+        .multiple(false)
+        .args(["id", "entry_name"])
+))]
 pub struct EntryArgs {
     /// Select an entry by its stable numeric ID.
-    #[arg(
-        long,
-        conflicts_with = "entry_name",
-        required_unless_present = "entry_name"
-    )]
+    #[arg(long)]
     pub id: Option<usize>,
     /// Select an entry by exact name.
-    #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+    #[arg(long)]
     pub entry_name: Option<String>,
 }
 
@@ -794,6 +823,36 @@ mod test {
             }
             _ => panic!("expected Genpass command"),
         }
+    }
+
+    #[test]
+    fn generator_rejects_empty_and_ignored_option_combinations() {
+        assert!(Cli::try_parse_from(["pm", "genpass", "--length", "0"]).is_err());
+        assert!(Cli::try_parse_from(["pm", "genpass", "--passphrase", "--words", "0"]).is_err());
+        assert!(
+            Cli::try_parse_from(["pm", "genpass", "--no-symbols", "--symbols", "abc"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["pm", "genpass", "--passphrase", "--no-uppercase"]).is_err());
+    }
+
+    #[test]
+    fn config_reset_is_exclusive_and_noop_is_detectable() {
+        assert!(!ConfigArgs::default().has_updates());
+        assert!(Cli::try_parse_from(["pm", "config", "--reset"]).is_ok());
+        assert!(Cli::try_parse_from(["pm", "config", "--reset", "--length", "24"]).is_err());
+    }
+
+    #[test]
+    fn passcheck_can_prompt_and_command_aliases_parse() {
+        assert!(Cli::try_parse_from(["pm", "passcheck"]).is_ok());
+        assert!(matches!(
+            Cli::try_parse_from(["pm", "list"]).unwrap().command,
+            Some(CliCommands::View(_))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["pm", "init"]).unwrap().command,
+            Some(CliCommands::New { .. })
+        ));
     }
 
     #[test]
@@ -993,6 +1052,10 @@ mod test {
                 ..
             })
         ));
+        assert!(
+            Cli::try_parse_from(["pm", "import", "--path", "vault.csv", "--key", "key.bin"])
+                .is_err()
+        );
 
         assert!(
             Cli::try_parse_from([

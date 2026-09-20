@@ -168,6 +168,12 @@ pub fn try_read_config(config_path: &Path) -> Result<Config, String> {
             config_path.display()
         )
     })?;
+    if config.genpass.length == 0 {
+        return Err(format!(
+            "invalid configuration at {}; genpass.length must be between 1 and 255; the file was left unchanged",
+            config_path.display()
+        ));
+    }
     if config.server.port == 0 {
         return Err(format!(
             "invalid configuration at {}; server.port must be between 1 and 65535; the file was left unchanged",
@@ -198,11 +204,14 @@ pub fn try_update(
     mut config: Config,
     modify: ConfigArgs,
     config_path: &Path,
-) -> Result<(), String> {
+) -> Result<Config, String> {
     if modify.reset {
         config = Config::default();
     }
     if let Some(i) = modify.genpass_length {
+        if i == 0 {
+            return Err("generator length must be at least 1".to_string());
+        }
         config.genpass.length = i;
     }
     if let Some(i) = modify.genpass_stats {
@@ -229,12 +238,14 @@ pub fn try_update(
     if let Some(i) = modify.server_port {
         config.server.port = i;
     }
-    write_file(&config, config_path)
+    write_file(&config, config_path)?;
+    Ok(config)
 }
 
 #[cfg(test)]
 fn update(config: Config, modify: ConfigArgs, config_path: &Path) {
-    try_update(config, modify, config_path).expect("test configuration update should succeed");
+    let _ =
+        try_update(config, modify, config_path).expect("test configuration update should succeed");
 }
 
 #[cfg(test)]
@@ -594,6 +605,19 @@ copy_pass = false
         let error = try_read_config(&config_path).unwrap_err();
 
         assert!(error.contains("server.port must be between 1 and 65535"));
+        assert_eq!(fs::read(&config_path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn zero_generator_length_is_rejected_without_overwriting_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let invalid = b"[genpass]\nlength = 0\n";
+        fs::write(&config_path, invalid).unwrap();
+
+        let error = try_read_config(&config_path).unwrap_err();
+
+        assert!(error.contains("genpass.length must be between 1 and 255"));
         assert_eq!(fs::read(&config_path).unwrap(), invalid);
     }
 

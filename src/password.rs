@@ -24,7 +24,7 @@ impl Default for PasswordOptions<'_> {
 
 pub fn generate_password(len: u8) -> String {
     generate_password_with_options(len, &PasswordOptions::default())
-        .expect("the default character set is not empty")
+        .expect("password length must be nonzero and the default character set must be valid")
 }
 
 pub fn generate_password_with_options(
@@ -35,6 +35,9 @@ pub fn generate_password_with_options(
     const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
     const DIGITS: &str = "0123456789";
     const AMBIGUOUS: &str = "Il1O0o|`'\"";
+    if len == 0 {
+        return Err("password length must be at least one".to_string());
+    }
     if options.symbols.is_some_and(|symbols| !symbols.is_ascii()) {
         return Err("symbols must contain ASCII characters only".to_string());
     }
@@ -114,22 +117,30 @@ pub fn generate_passphrase(words: u8, separator: &str) -> Result<String, String>
         .join(separator))
 }
 
-pub fn print_generated_password(pass: String, stats: bool, copy: bool, copy_time: u8) {
-    println!("Password: {}", pass);
+pub fn generated_password_output(
+    pass: String,
+    stats: bool,
+    copy: bool,
+    copy_time: u8,
+) -> (String, Option<String>) {
+    let mut output = format!("Password: {pass}\n");
     if stats {
-        print_password_strength(&pass);
+        output.push_str(&password_strength_output(&pass));
     }
-    if copy && let Err(error) = copy_with_timeout(&pass, copy_time) {
-        eprintln!("Warning: {error}");
-    }
+    let warning = if copy {
+        copy_with_timeout(&pass, copy_time).err()
+    } else {
+        None
+    };
+    (output, warning)
 }
 
-pub fn print_password_strength(pass: &str) {
-    println!("Password stats:");
+pub fn password_strength_output(pass: &str) -> String {
+    let mut output = String::from("Password stats:\n");
     let estimate = zxcvbn(pass, &[]);
     let entropy = (estimate.guesses() as f64).log2();
-    println!("    Score (0-4): {}", estimate.score());
-    println!("    Entropy: {:.2} bits", entropy);
+    output.push_str(&format!("    Score (0-4): {}\n", estimate.score()));
+    output.push_str(&format!("    Entropy: {entropy:.2} bits\n"));
     let rating = match estimate.score() {
         Score::Zero => "Very Weak",
         Score::One => "Weak",
@@ -138,19 +149,20 @@ pub fn print_password_strength(pass: &str) {
         Score::Four => "Strong",
         _ => unreachable!(),
     };
-    println!("    Strength: {}", rating);
+    output.push_str(&format!("    Strength: {rating}\n"));
     if let Some(feedback) = estimate.feedback() {
         if let Some(warning) = feedback.warning() {
-            println!("    Warning: {}", warning)
+            output.push_str(&format!("    Warning: {warning}\n"));
         }
         let mut parts = Vec::new();
         for suggestion in feedback.suggestions() {
             parts.push(suggestion.to_string());
         }
         if !parts.is_empty() {
-            println!("    Suggestions: {}", parts.join(". "));
+            output.push_str(&format!("    Suggestions: {}\n", parts.join(". ")));
         }
     }
+    output
 }
 
 #[cfg(test)]
@@ -187,10 +199,8 @@ mod test {
     }
 
     #[test]
-    fn test_generate_password_empty() {
-        let pass = generate_password(0);
-        assert_eq!(pass.len(), 0);
-        assert_eq!(pass, "");
+    fn test_generate_password_empty_is_rejected() {
+        assert!(generate_password_with_options(0, &PasswordOptions::default()).is_err());
     }
 
     #[test]
@@ -349,7 +359,8 @@ mod test {
             symbols: Some("xy"),
             exclude_ambiguous: false,
         };
-        for length in 0..=3 {
+        assert!(generate_password_with_options(0, &symbols_only).is_err());
+        for length in 1..=3 {
             let password = generate_password_with_options(length, &symbols_only).unwrap();
             assert_eq!(password.len(), length as usize);
             assert!(password.bytes().all(|byte| matches!(byte, b'x' | b'y')));

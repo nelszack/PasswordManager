@@ -1,5 +1,8 @@
 # Password Manager
 
+See the browser-friendly [complete command and flag reference](docs/commands.html)
+for usage details and examples for every CLI command.
+
 A secure, local-first password manager with a CLI interface and browser extension.
 
 ## Features
@@ -55,7 +58,9 @@ pm genpass --passphrase --words 7 --separator "."
 
 Character classes can be disabled with `--no-uppercase`, `--no-lowercase`,
 `--no-digits`, and `--no-symbols`; replace the default symbol set with
-`--symbols`. At least one non-empty class must remain.
+`--symbols`. Lengths and passphrase word counts must be at least one, and at
+least one non-empty character class must remain. Character-set flags cannot be
+combined with passphrase generation.
 
 ### Add a New Entry
 
@@ -349,6 +354,10 @@ pm import --path backup.csv --conflicts replace
 pm import --path backup.csv --conflicts keep-both
 ```
 
+Imports into the current vault require it to be unlocked and leave it unlocked.
+Previewing does not prompt for the vault password or change its lock state.
+`--key` is used only with `--new`, where it creates the new vault's external key.
+
 `replace` preserves the existing stable ID and records a changed password in
 history. `keep-both` adds a new stable ID and appends an `(imported)` suffix.
 
@@ -365,12 +374,19 @@ exports should be protected or deleted after use.
 ### Check Password Strength
 
 ```bash
+# Prompt privately (recommended)
+pm passcheck
+
+# Explicit arguments are useful for scripts but may remain in shell history
 pm passcheck --password "mypassword123"
 ```
 
 ### Configure Settings
 
 ```bash
+# Display the effective configuration
+pm config
+
 pm config --length 24 --stats true --clipboard-timeout 30 --unlock-timeout 15m
 pm config --password-copy false
 pm config --password-history-limit 20 --trash-retention-days 30
@@ -402,7 +418,7 @@ server before changing its configured port, then start it again.
 
 ### Structured and Scripted Output
 
-Server-backed commands accept global `--json` and `--quiet` flags. JSON output
+Public commands accept global `--json` and `--quiet` flags. JSON output
 uses a stable object containing `ok` plus either `output` or `error`. Transport,
 vault, and availability failures exit with status 1; CLI or local-input errors
 use status 2; missing records use status 3; and conflicts use status 4. Quiet
@@ -553,6 +569,7 @@ on-page controls.
 - `src/config.rs` - Configuration management
 - `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - File import/export
+- `docs/commands.html` - Manually maintained browser-friendly CLI reference
 - `extension/` - Browser extension (Chrome/Chromium)
 
 ## Security
@@ -609,6 +626,10 @@ matching the version in `Cargo.toml`, for example:
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+The CLI/package version in `Cargo.toml` is the release version. The browser
+manifest has an independent extension-package version because browser stores
+require monotonically increasing extension revisions.
 
 Then open the **Release** workflow in GitHub Actions, choose **Run workflow**,
 and enter that existing tag. The pipeline reruns tests and strict linting, then

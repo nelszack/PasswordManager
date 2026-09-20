@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Complete command and flag reference for the pm password manager.">
+  <title>PM Command Reference</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7fb;
+      --panel: #ffffff;
+      --panel-soft: #eef1f7;
+      --text: #172033;
+      --muted: #58647a;
+      --border: #d8deea;
+      --accent: #3157d5;
+      --accent-soft: #e8edff;
+      --code: #111827;
+      --code-text: #e5edff;
+      --warning: #8a4b08;
+      --shadow: 0 10px 30px rgba(29, 42, 75, .08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e1420;
+        --panel: #151d2b;
+        --panel-soft: #1d2738;
+        --text: #edf2ff;
+        --muted: #aab5ca;
+        --border: #2d3950;
+        --accent: #8ea8ff;
+        --accent-soft: #202f55;
+        --code: #090d14;
+        --code-text: #e5edff;
+        --warning: #ffc36d;
+        --shadow: 0 10px 30px rgba(0, 0, 0, .22);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 15px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    code { background: var(--panel-soft); padding: .12rem .35rem; border-radius: 5px; }
+    .hero { background: linear-gradient(135deg, #172554, #3157d5); color: white; padding: 54px 24px; }
+    .hero-inner { max-width: 1180px; margin: auto; }
+    .eyebrow { font-weight: 700; letter-spacing: .12em; text-transform: uppercase; opacity: .76; }
+    h1 { margin: 6px 0 10px; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.05; }
+    .hero p { max-width: 760px; margin: 0; font-size: 1.08rem; opacity: .9; }
+    .layout { max-width: 1228px; margin: 0 auto; padding: 28px 24px 70px; display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 28px; }
+    aside { position: sticky; top: 20px; align-self: start; max-height: calc(100vh - 40px); overflow: auto; }
+    .search { width: 100%; padding: 10px 12px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; font: inherit; }
+    nav { margin-top: 14px; }
+    nav a { display: block; color: var(--muted); text-decoration: none; padding: 4px 8px; border-left: 2px solid transparent; }
+    nav a:hover, nav a:focus { color: var(--accent); border-color: var(--accent); }
+    nav .group { margin-top: 12px; color: var(--text); font-size: .78rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    main { min-width: 0; }
+    section { scroll-margin-top: 18px; }
+    .intro, .command, .reference {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      box-shadow: var(--shadow); padding: 22px; margin-bottom: 18px;
+    }
+    .command[hidden] { display: none; }
+    h2 { margin: 0 0 8px; font-size: 1.55rem; line-height: 1.25; }
+    h3 { margin: 22px 0 8px; font-size: 1rem; }
+    p { margin: 6px 0 12px; }
+    .summary { color: var(--muted); }
+    .usage { display: inline-block; margin: 8px 0 12px; font-weight: 700; color: var(--accent); }
+    .badge { display: inline-block; margin-left: 7px; padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 800; vertical-align: middle; }
+    .flags { display: grid; grid-template-columns: minmax(190px, 32%) 1fr; margin: 8px 0 0; border-top: 1px solid var(--border); }
+    .flags dt, .flags dd { margin: 0; padding: 9px 6px; border-bottom: 1px solid var(--border); }
+    .flags dt { font-weight: 700; overflow-wrap: anywhere; }
+    .flags dd { color: var(--muted); }
+    pre { position: relative; margin: 8px 0 0; padding: 15px 48px 15px 16px; overflow: auto; border-radius: 9px; background: var(--code); color: var(--code-text); line-height: 1.5; }
+    pre code { padding: 0; background: transparent; color: inherit; }
+    .copy { position: absolute; top: 8px; right: 8px; border: 1px solid #526078; border-radius: 6px; padding: 4px 7px; background: #263248; color: white; cursor: pointer; }
+    .note { border-left: 4px solid var(--accent); padding: 8px 12px; background: var(--accent-soft); border-radius: 0 8px 8px 0; }
+    .warning { color: var(--warning); font-weight: 650; }
+    .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(225px, 1fr)); gap: 12px; }
+    .mini { padding: 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-soft); }
+    .mini strong { display: block; margin-bottom: 3px; }
+    footer { color: var(--muted); text-align: center; padding: 0 20px 35px; }
+    .no-results { display: none; color: var(--muted); text-align: center; padding: 30px; }
+    .no-results.visible { display: block; }
+    @media (max-width: 820px) {
+      .layout { grid-template-columns: 1fr; padding: 18px 14px 50px; }
+      aside { position: static; max-height: none; }
+      nav { columns: 2; }
+      nav .group { break-after: avoid; }
+    }
+    @media (max-width: 560px) {
+      .hero { padding: 38px 18px; }
+      nav { columns: 1; }
+      .intro, .command, .reference { padding: 17px; }
+      .flags { grid-template-columns: 1fr; }
+      .flags dt { padding-bottom: 2px; border-bottom: 0; }
+      .flags dd { padding-top: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="eyebrow">Password Manager</div>
+      <h1>Command reference</h1>
+      <p>Every public <code>pm</code> command and flag, with practical examples. This page is self-contained and works offline.</p>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside aria-label="Documentation navigation">
+      <input id="search" class="search" type="search" placeholder="Filter commands…" aria-label="Filter commands">
+      <nav>
+        <a href="#getting-started">Getting started</a>
+        <a href="#global-options">Global options</a>
+        <a href="#help-command">help</a>
+        <div class="group">Vault lifecycle</div>
+        <a href="#start">start / status / kill</a><a href="#new">new</a><a href="#unlock">unlock / lock</a><a href="#rekey">rekey</a><a href="#delete">delete</a>
+        <div class="group">Items</div>
+        <a href="#add">add</a><a href="#view">view</a><a href="#search-command">search</a><a href="#get">get</a><a href="#update">update</a>
+        <div class="group">Recovery &amp; security</div>
+        <a href="#history">history / restore-password</a><a href="#trash">trash / restore / purge</a><a href="#audit">audit</a><a href="#totp">totp</a>
+        <div class="group">Data &amp; tools</div>
+        <a href="#backup">backup</a><a href="#import-export">import / export</a><a href="#genpass">genpass</a><a href="#passcheck">passcheck</a><a href="#config">config</a><a href="#native-host">native-host</a><a href="#completions">completions</a>
+        <div class="group">Reference</div>
+        <a href="#values">Accepted values</a><a href="#selectors">Entry selectors</a><a href="#internal">Internal commands</a>
+      </nav>
+    </aside>
+
+    <main>
+      <section id="getting-started" class="intro">
+        <h2>Getting started</h2>
+        <p>The CLI talks to a local background server. A typical password-based workflow is:</p>
+        <pre><code>pm start
+pm new
+pm unlock
+pm add --name github --username alice --url https://github.com
+pm view
+pm lock
+pm kill</code></pre>
+        <p>For a key-based vault, provide a key path to <code>new</code> and <code>unlock</code>. Explicit relative paths resolve from the current directory.</p>
+        <pre><code>pm new --key ./keys/vault.key
+pm unlock --key ./keys/vault.key</code></pre>
+        <div class="note"><strong>Help in the terminal:</strong> use <code>pm --help</code> or <code>pm &lt;command&gt; --help</code>. Global flags can appear before or after a subcommand.</div>
+      </section>
+
+      <section id="global-options" class="reference">
+        <h2>Global options</h2>
+        <p class="summary">These options are available with every public command, including local commands such as <code>genpass</code>, <code>passcheck</code>, <code>config</code>, and <code>completions</code>.</p>
+        <dl class="flags">
+          <dt><code>--port &lt;PORT&gt;</code></dt><dd>Use a different loopback port for this invocation. The client and server must use the same port. Does not change the config file.</dd>
+          <dt><code>--json</code></dt><dd>Wrap output in a stable JSON object for scripts. Conflicts with <code>--quiet</code>.</dd>
+          <dt><code>--quiet</code></dt><dd>Suppress successful output while still printing errors. Conflicts with <code>--json</code>.</dd>
+          <dt><code>-h, --help</code></dt><dd>Show command help.</dd>
+          <dt><code>-V, --version</code></dt><dd>Show the installed version.</dd>
+        </dl>
+        <pre><code>pm --port 8787 start
+pm --json view --sort name
+pm --quiet lock</code></pre>
+      </section>
+
+      <section id="help-command" class="command" data-command="help usage documentation">
+        <h2><code>help</code></h2>
+        <div class="usage">pm help [COMMAND] [SUBCOMMAND]</div>
+        <p>Show the same terminal documentation available through <code>--help</code>. Add a command and optional nested subcommand for more specific help.</p>
+        <pre><code>pm help
+pm help add
+pm help backup restore</code></pre>
+      </section>
+
+      <section id="start" class="command" data-command="start status kill server">
+        <h2><code>start</code>, <code>status</code>, and <code>kill</code></h2>
+        <p><code>start</code> launches the local server as a detached background process. <code>status</code> reports whether its vault is locked or unlocked. <code>kill</code> persists and locks the vault, then stops the server.</p>
+        <pre><code>pm start
+pm status
+pm kill
+
+# Use the same override for every server-backed command
+pm --port 8787 start
+pm --port 8787 status
+pm --port 8787 kill</code></pre>
+      </section>
+
+      <section id="new" class="command" data-command="new create vault key">
+        <h2><code>new</code></h2>
+        <div class="usage">pm new [--key &lt;PATH&gt;]</div>
+        <p>Create an empty vault and leave it locked. Without a key file, the command securely prompts twice for a master password. <code>init</code> and <code>create</code> are aliases.</p>
+        <dl class="flags"><dt><code>--key &lt;PATH&gt;</code></dt><dd>Create a new external key file. Relative paths resolve from the current directory; the key must remain outside application data.</dd></dl>
+        <pre><code>pm new
+pm new --key ./keys/vault.key</code></pre>
+      </section>
+
+      <section id="unlock" class="command" data-command="unlock lock timeout key">
+        <h2><code>unlock</code> and <code>lock</code></h2>
+        <div class="usage">pm unlock [--key &lt;PATH&gt;] [--timeout &lt;DURATION&gt;]</div>
+        <p><code>unlock</code> opens a vault using a prompted master password or key file. <code>lock</code> encrypts the in-memory vault and removes key material from the server.</p>
+        <dl class="flags">
+          <dt><code>--key &lt;PATH&gt;</code></dt><dd>Read the vault key from a file instead of prompting. Use <code>./name.key</code> for the current directory; a bare filename addresses a legacy app-data key.</dd>
+          <dt><code>--timeout &lt;DURATION&gt;</code></dt><dd>Override inactivity auto-lock for this session. Accepts seconds or <code>s</code>, <code>m</code>, <code>h</code>, and <code>d</code> suffixes. Zero disables auto-lock.</dd>
+        </dl>
+        <pre><code>pm unlock
+pm unlock --timeout 30m
+pm unlock --key ./keys/vault.key
+pm lock</code></pre>
+      </section>
+
+      <section id="rekey" class="command" data-command="rekey master password key">
+        <h2><code>rekey</code></h2>
+        <div class="usage">pm rekey [--key &lt;PATH&gt;]</div>
+        <p>Re-encrypt the unlocked vault with a new master password or a newly created key file. The replacement is persisted before the old vault is removed.</p>
+        <dl class="flags"><dt><code>--key &lt;PATH&gt;</code></dt><dd>Create and switch to a new external key. Existing external key files are never overwritten.</dd></dl>
+        <pre><code>pm rekey
+pm rekey --key ./keys/replacement.key</code></pre>
+      </section>
+
+      <section id="delete" class="command" data-command="delete entry vault key keep trash">
+        <h2><code>delete</code></h2>
+        <div class="usage">pm delete (--id &lt;ID&gt; | --entry-name &lt;NAME&gt; | --vault) [OPTIONS]</div>
+        <p>Move one entry to encrypted trash, or permanently delete a complete vault.</p>
+        <dl class="flags">
+          <dt><code>--id &lt;ID&gt;</code></dt><dd>Move the entry with this stable numeric ID to trash.</dd>
+          <dt><code>--entry-name &lt;NAME&gt;</code></dt><dd>Move the entry with this exact name to trash.</dd>
+          <dt><code>--vault</code></dt><dd>Permanently delete an entire vault. Conflicts with entry selectors.</dd>
+          <dt><code>--key &lt;PATH&gt;</code></dt><dd>Use a key file to open the vault being deleted. Otherwise, the command prompts for its password.</dd>
+          <dt><code>--keep-key</code></dt><dd>Preserve the supplied key after deleting its vault. Requires both <code>--vault</code> and <code>--key</code>.</dd>
+        </dl>
+        <p class="warning">Whole-vault deletion and key-file deletion cannot be undone.</p>
+        <pre><code>pm delete --id 12
+pm delete --entry-name github
+pm delete --vault
+pm delete --vault --key ./keys/vault.key
+pm delete --vault --key ./shared.key --keep-key</code></pre>
+      </section>
+
+      <section id="add" class="command" data-command="add item login secret custom field url">
+        <h2><code>add</code></h2>
+        <div class="usage">pm add --name &lt;NAME&gt; [OPTIONS]</div>
+        <p>Add a login or another typed secret to the unlocked vault. Unless generated, the primary secret is read through a private prompt.</p>
+        <dl class="flags">
+          <dt><code>--name &lt;NAME&gt;</code></dt><dd>Required display name used to identify and search for the item.</dd>
+          <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Login, email, cardholder, or other secondary identifier.</dd>
+          <dt><code>--url &lt;URL&gt;</code></dt><dd>Associate a URL. Repeat the flag for additional URLs; the first is primary.</dd>
+          <dt><code>--type &lt;TYPE&gt;</code></dt><dd>Item category. Defaults to <code>login</code>; see <a href="#values">accepted values</a>.</dd>
+          <dt><code>--notes &lt;TEXT&gt;</code></dt><dd>Free-form notes.</dd>
+          <dt><code>--field &lt;NAME=VALUE&gt;</code></dt><dd>Add a searchable custom field. May be repeated.</dd>
+          <dt><code>--secret-field &lt;NAME&gt;</code></dt><dd>Privately prompt for a custom-field value. May be repeated.</dd>
+          <dt><code>--generate-password</code></dt><dd>Generate the primary secret instead of prompting.</dd>
+          <dt><code>--copy</code></dt><dd>Copy the newly added primary secret.</dd>
+          <dt><code>--no-copy</code></dt><dd>Do not copy the new secret, overriding configuration. Conflicts with <code>--copy</code>.</dd>
+        </dl>
+        <pre><code>pm add --name github --username alice --url https://github.com
+pm add --name router --type wifi --field ssid=Home --secret-field passphrase
+pm add --name api --type api-secret --generate-password</code></pre>
+      </section>
+
+      <section id="view" class="command" data-command="view list filter sort weak stale totp">
+        <h2><code>view</code></h2>
+        <div class="usage">pm view [FILTERS]</div>
+        <p>List vault items without displaying their primary secrets. <code>list</code> and <code>ls</code> are aliases.</p>
+        <dl class="flags">
+          <dt><code>--type &lt;TYPE&gt;</code></dt><dd>Include only this item category.</dd>
+          <dt><code>--totp</code></dt><dd>Include only login items with an authenticator. Conflicts with <code>--no-totp</code>.</dd>
+          <dt><code>--no-totp</code></dt><dd>Include only login items without an authenticator.</dd>
+          <dt><code>--weak</code></dt><dd>Include only logins whose password is considered weak.</dd>
+          <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old.</dd>
+          <dt><code>--sort &lt;FIELD&gt;</code></dt><dd>Sort by <code>id</code>, <code>name</code>, <code>created</code>, <code>modified</code>, or <code>password-age</code>. Defaults to <code>id</code>.</dd>
+          <dt><code>--descending</code></dt><dd>Reverse the selected sort order.</dd>
+        </dl>
+        <pre><code>pm view
+pm view --type login --sort name
+pm view --weak --descending</code></pre>
+      </section>
+
+      <section id="search-command" class="command" data-command="search query name username url notes filter">
+        <h2><code>search</code></h2>
+        <div class="usage">pm search [&lt;QUERY&gt;] [FILTERS]</div>
+        <p>Search metadata and optionally combine field, type, health, TOTP, stale-password, and sorting filters. A query or at least one filter is required.</p>
+        <dl class="flags">
+          <dt><code>&lt;QUERY&gt;</code></dt><dd>Case-insensitive text matched across name, username, URL, and notes.</dd>
+          <dt><code>--name &lt;TEXT&gt;</code></dt><dd>Require text in the item name.</dd>
+          <dt><code>--username &lt;TEXT&gt;</code></dt><dd>Require text in the username.</dd>
+          <dt><code>--url &lt;TEXT&gt;</code></dt><dd>Require text in a URL.</dd>
+          <dt><code>--notes &lt;TEXT&gt;</code></dt><dd>Require text in notes.</dd>
+          <dt><code>Listing filters</code></dt><dd>Also accepts every <code>view</code> filter: <code>--type</code>, <code>--totp</code>, <code>--no-totp</code>, <code>--weak</code>, <code>--stale-days</code>, <code>--sort</code>, and <code>--descending</code>.</dd>
+        </dl>
+        <pre><code>pm search github
+pm search --username alice --type login
+pm search --no-totp --sort modified</code></pre>
+      </section>
+
+      <section id="get" class="command" data-command="get details password secret id entry name copy">
+        <h2><code>get</code></h2>
+        <div class="usage">pm get (--id &lt;ID&gt; | --entry-name &lt;NAME&gt;) [--password-only]</div>
+        <p>Display one item’s details or primary secret.</p>
+        <dl class="flags">
+          <dt><code>--id &lt;ID&gt;</code></dt><dd>Select by stable numeric ID.</dd>
+          <dt><code>--entry-name &lt;NAME&gt;</code></dt><dd>Select by exact name.</dd>
+          <dt><code>--password-only</code></dt><dd>Print only the primary secret without copying it to the clipboard.</dd>
+        </dl>
+        <pre><code>pm get --id 4
+pm get --entry-name github --password-only</code></pre>
+      </section>
+
+      <section id="update" class="command" data-command="update edit password metadata url field clear">
+        <h2><code>update</code></h2>
+        <div class="usage">pm update (--id &lt;ID&gt; | --entry-name &lt;NAME&gt;) [CHANGES]</div>
+        <p>Modify an existing item. Multiple compatible changes can be applied together.</p>
+        <dl class="flags">
+          <dt><code>--id &lt;ID&gt;</code>, <code>--entry-name &lt;NAME&gt;</code></dt><dd>Select the item by ID or exact name.</dd>
+          <dt><code>--name &lt;NAME&gt;</code></dt><dd>Replace the display name.</dd>
+          <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Replace the username or secondary identifier; an empty value clears it.</dd>
+          <dt><code>--password</code></dt><dd>Privately prompt for and replace the primary secret.</dd>
+          <dt><code>--generate-password</code></dt><dd>Generate the replacement secret. Requires <code>--password</code>.</dd>
+          <dt><code>--url &lt;URL&gt;</code></dt><dd>Replace the primary URL.</dd>
+          <dt><code>--notes &lt;TEXT&gt;</code></dt><dd>Replace notes; an empty value clears them.</dd>
+          <dt><code>--type &lt;TYPE&gt;</code></dt><dd>Change the item category.</dd>
+          <dt><code>--add-url &lt;URL&gt;</code></dt><dd>Add another URL. Repeatable; conflicts with <code>--clear-urls</code>.</dd>
+          <dt><code>--remove-url &lt;URL&gt;</code></dt><dd>Remove a matching URL. Repeatable; conflicts with <code>--clear-urls</code>.</dd>
+          <dt><code>--clear-urls</code></dt><dd>Remove every URL. Conflicts with URL replacement/addition/removal.</dd>
+          <dt><code>--field &lt;NAME=VALUE&gt;</code></dt><dd>Set a searchable custom field. Repeatable.</dd>
+          <dt><code>--secret-field &lt;NAME&gt;</code></dt><dd>Privately prompt for a custom-field value. Repeatable.</dd>
+          <dt><code>--remove-field &lt;NAME&gt;</code></dt><dd>Remove a custom field by case-insensitive name. Repeatable.</dd>
+          <dt><code>--clear-fields</code></dt><dd>Remove every custom field; conflicts with field changes.</dd>
+        </dl>
+        <pre><code>pm update --id 4 --username alice@example.com
+pm update --entry-name github --password --generate-password
+pm update --id 7 --field environment=production --add-url https://example.com</code></pre>
+      </section>
+
+      <section id="history" class="command" data-command="history restore password revision">
+        <h2><code>history</code> and <code>restore-password</code></h2>
+        <p><code>history</code> lists saved password revisions. <code>restore-password</code> makes a listed revision current.</p>
+        <dl class="flags">
+          <dt><code>--id &lt;ID&gt;</code>, <code>--entry-name &lt;NAME&gt;</code></dt><dd>Select an entry by stable ID or exact name.</dd>
+          <dt><code>--revision &lt;NUMBER&gt;</code></dt><dd>Revision shown by <code>history</code>; required by <code>restore-password</code>.</dd>
+        </dl>
+        <pre><code>pm history --entry-name github
+pm restore-password --entry-name github --revision 2</code></pre>
+      </section>
+
+      <section id="trash" class="command" data-command="trash restore purge deleted permanent">
+        <h2><code>trash</code>, <code>restore</code>, and <code>purge</code></h2>
+        <p><code>trash</code> lists deleted entries. <code>restore</code> returns one to the active vault. <code>purge</code> permanently erases one or all trashed entries.</p>
+        <dl class="flags">
+          <dt><code>restore --id &lt;ID&gt;</code></dt><dd>Restore the stable ID shown by <code>pm trash</code>.</dd>
+          <dt><code>purge --id &lt;ID&gt;</code></dt><dd>Permanently erase one trashed entry.</dd>
+          <dt><code>purge --all</code></dt><dd>Permanently erase every trashed entry.</dd>
+        </dl>
+        <pre><code>pm trash
+pm restore --id 12
+pm purge --id 12
+pm purge --all</code></pre>
+      </section>
+
+      <section id="audit" class="command" data-command="audit weak reused duplicate stale breach pwned totp">
+        <h2><code>audit</code></h2>
+        <div class="usage">pm audit [OPTIONS]</div>
+        <p>Report weak, reused, duplicate, stale, breached, or under-protected login credentials. Secrets are not included in the report.</p>
+        <dl class="flags">
+          <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Report passwords at least this many days old.</dd>
+          <dt><code>--breaches</code></dt><dd>Privately check password hash prefixes against Pwned Passwords. Requires network access.</dd>
+          <dt><code>--require-totp</code></dt><dd>Report logins without a configured TOTP authenticator.</dd>
+        </dl>
+        <pre><code>pm audit
+pm audit --stale-days 180 --require-totp
+pm audit --breaches</code></pre>
+      </section>
+
+      <section id="totp" class="command" data-command="totp authenticator otp code set show remove copy">
+        <h2><code>totp</code></h2>
+        <p>Store, generate, or remove time-based one-time-password authenticators.</p>
+        <dl class="flags">
+          <dt><code>totp set --id &lt;ID&gt;</code></dt><dd>Privately prompt for a Base32 secret or <code>otpauth://</code> URI. <code>--entry-name</code> may be used instead.</dd>
+          <dt><code>totp show --id &lt;ID&gt;</code></dt><dd>Generate the current authentication code.</dd>
+          <dt><code>--copy</code></dt><dd>With <code>totp show</code>, copy the code instead of only printing it.</dd>
+          <dt><code>--copy-time &lt;SECONDS&gt;</code></dt><dd>Clear the copied code after this many seconds. Requires <code>--copy</code>; otherwise uses clipboard configuration.</dd>
+          <dt><code>totp remove --id &lt;ID&gt;</code></dt><dd>Remove authenticator configuration. Every TOTP subcommand also accepts <code>--entry-name</code>.</dd>
+        </dl>
+        <pre><code>pm totp set --entry-name github
+pm totp show --entry-name github --copy --copy-time 20
+pm totp remove --entry-name github</code></pre>
+      </section>
+
+      <section id="backup" class="command" data-command="backup create restore encrypted force key">
+        <h2><code>backup create</code> and <code>backup restore</code></h2>
+        <p>Encrypted backups preserve the complete vault: item metadata, stable IDs, history, trash, and TOTP configuration.</p>
+        <dl class="flags">
+          <dt><code>--path &lt;PATH&gt;</code></dt><dd>Required destination for <code>create</code>, or encrypted input file for <code>restore</code>.</dd>
+          <dt><code>--key &lt;PATH&gt;</code></dt><dd>Encrypt or decrypt using an existing key file instead of prompting for a dedicated backup password.</dd>
+          <dt><code>--force</code></dt><dd>On create, atomically replace an existing backup. On restore, replace an existing vault associated with the backup password/key.</dd>
+        </dl>
+        <pre><code>pm backup create --path vault.pmbackup
+pm backup create --path vault.pmbackup --key ./backup.key --force
+pm backup restore --path vault.pmbackup
+pm backup restore --path vault.pmbackup --key ./backup.key --force</code></pre>
+      </section>
+
+      <section id="import-export" class="command" data-command="import export csv json bitwarden 1password plaintext conflict preview">
+        <h2><code>import</code> and <code>export</code></h2>
+        <p>Import CSV, JSON, Bitwarden JSON, or portable PM JSON. Imports into the current unlocked vault preserve its lock state. Export writes portable JSON for a <code>.json</code> destination and CSV for other extensions, always with private file permissions.</p>
+        <dl class="flags">
+          <dt><code>import --path &lt;PATH&gt;</code></dt><dd>Required input file.</dd>
+          <dt><code>--new</code></dt><dd>Create and import into a separate locked vault instead of the currently unlocked vault.</dd>
+          <dt><code>--key &lt;PATH&gt;</code></dt><dd>Create the new vault's external key. Requires <code>--new</code>.</dd>
+          <dt><code>--preview</code></dt><dd>Show counts and conflicts without changing a vault or its lock state.</dd>
+          <dt><code>--conflicts &lt;POLICY&gt;</code></dt><dd>Use <code>skip</code>, <code>replace</code>, or <code>keep-both</code>. Defaults to <code>skip</code>.</dd>
+          <dt><code>export --path &lt;PATH&gt;</code></dt><dd>Destination file. <code>.json</code> selects portable JSON; other extensions select CSV. An existing file is replaced.</dd>
+        </dl>
+        <p class="warning">Exports contain plaintext secrets. Protect or remove them when finished.</p>
+        <pre><code>pm import --path passwords.csv --preview
+pm import --path passwords.csv --conflicts keep-both
+pm import --path export.json --new --key ./keys/imported.key
+pm export --path vault.json</code></pre>
+      </section>
+
+      <section id="genpass" class="command" data-command="genpass generate password passphrase clipboard symbols">
+        <h2><code>genpass</code></h2>
+        <div class="usage">pm genpass [OPTIONS]</div>
+        <p>Generate a random character password or word-based passphrase without opening the vault.</p>
+        <dl class="flags">
+          <dt><code>-l, --length &lt;NUMBER&gt;</code></dt><dd>Password length of at least one; defaults to generator configuration.</dd>
+          <dt><code>--stats</code>, <code>--no-stats</code></dt><dd>Show or hide strength statistics, overriding configuration.</dd>
+          <dt><code>--copy</code>, <code>--no-copy</code></dt><dd>Enable or disable copying, overriding configuration.</dd>
+          <dt><code>--copy-time &lt;SECONDS&gt;</code></dt><dd>Clipboard-clearing delay; defaults to clipboard configuration.</dd>
+          <dt><code>--no-uppercase</code></dt><dd>Exclude ASCII uppercase letters.</dd>
+          <dt><code>--no-lowercase</code></dt><dd>Exclude ASCII lowercase letters.</dd>
+          <dt><code>--no-digits</code></dt><dd>Exclude decimal digits.</dd>
+          <dt><code>--no-symbols</code></dt><dd>Exclude symbols.</dd>
+          <dt><code>--symbols &lt;TEXT&gt;</code></dt><dd>Use this exact symbol set instead of the built-in set.</dd>
+          <dt><code>--exclude-ambiguous</code></dt><dd>Exclude visually ambiguous characters such as <code>0</code>, <code>O</code>, <code>1</code>, and <code>l</code>.</dd>
+          <dt><code>--passphrase</code></dt><dd>Generate words instead of characters. Conflicts with length and character-set flags.</dd>
+          <dt><code>--words &lt;NUMBER&gt;</code></dt><dd>Passphrase word count of at least one; defaults to 6 and requires <code>--passphrase</code>.</dd>
+          <dt><code>--separator &lt;TEXT&gt;</code></dt><dd>Text between passphrase words; defaults to <code>-</code> and requires <code>--passphrase</code>.</dd>
+        </dl>
+        <pre><code>pm genpass --length 24 --copy
+pm genpass --passphrase --words 7 --separator .
+pm genpass --no-symbols --exclude-ambiguous</code></pre>
+      </section>
+
+      <section id="passcheck" class="command" data-command="passcheck strength password">
+        <h2><code>passcheck</code></h2>
+        <div class="usage">pm passcheck [--password &lt;PASSWORD&gt;]</div>
+        <p>Estimate password strength without storing it. With no flag, the password is read through a private prompt.</p>
+        <dl class="flags"><dt><code>-p, --password &lt;PASSWORD&gt;</code></dt><dd>Provide the password as an argument for scripting. It may be visible to other processes or retained in shell history.</dd></dl>
+        <pre><code>pm passcheck
+pm passcheck --password 'correct horse battery staple'</code></pre>
+      </section>
+
+      <section id="config" class="command" data-command="config settings default port timeout clipboard history recovery">
+        <h2><code>config</code></h2>
+        <div class="usage">pm config [OPTIONS]</div>
+        <p>Show or update persistent defaults. Boolean values are <code>true</code> or <code>false</code>. Missing settings in older files are automatically added with current defaults.</p>
+        <dl class="flags">
+          <dt><code>--reset</code></dt><dd>Restore every setting to its built-in default. Cannot be combined with setting overrides.</dd>
+          <dt><code>--length &lt;NUMBER&gt;</code></dt><dd>Default character-password length of at least one.</dd>
+          <dt><code>--stats &lt;BOOL&gt;</code></dt><dd>Whether generated passwords show statistics by default.</dd>
+          <dt><code>--copy &lt;BOOL&gt;</code></dt><dd>Whether generated passwords are copied by default.</dd>
+          <dt><code>--password-copy &lt;BOOL&gt;</code></dt><dd>Whether newly added login passwords are copied by default.</dd>
+          <dt><code>--clipboard-timeout &lt;SECONDS&gt;</code></dt><dd>Delay before copied values are cleared.</dd>
+          <dt><code>--unlock-timeout &lt;DURATION&gt;</code></dt><dd>Default inactivity auto-lock duration. Accepts seconds or <code>s</code>, <code>m</code>, <code>h</code>, and <code>d</code>; zero disables.</dd>
+          <dt><code>--password-history-limit &lt;NUMBER&gt;</code></dt><dd>Prior passwords retained per entry; zero disables history.</dd>
+          <dt><code>--trash-retention-days &lt;DAYS&gt;</code></dt><dd>Automatically purge older trash; zero disables expiration.</dd>
+          <dt><code>--server-port &lt;PORT&gt;</code></dt><dd>Default loopback port for the client, server, and browser native host.</dd>
+        </dl>
+        <pre><code>pm config
+pm config --server-port 8787 --unlock-timeout 30m
+pm config --password-history-limit 20 --trash-retention-days 30
+pm config --reset</code></pre>
+      </section>
+
+      <section id="native-host" class="command" data-command="native host browser extension chrome chromium helium install">
+        <h2><code>native-host install</code></h2>
+        <div class="usage">pm native-host install --extension-id &lt;ID&gt; [--browser &lt;BROWSER&gt;]</div>
+        <p>Install and register the native-messaging bridge for an unpacked Chrome-family extension.</p>
+        <dl class="flags">
+          <dt><code>--extension-id &lt;ID&gt;</code></dt><dd>Required 32-character ID shown on <code>chrome://extensions</code>.</dd>
+          <dt><code>--browser &lt;BROWSER&gt;</code></dt><dd>Registration target: <code>chrome</code>, <code>chromium</code>, or <code>helium</code>. Defaults to <code>chrome</code>.</dd>
+        </dl>
+        <pre><code>pm native-host install \
+  --extension-id abcdefghijklmnopabcdefghijklmnop \
+  --browser chrome</code></pre>
+        <p>Reload the extension afterward. On Windows, fully close the browser before reinstalling an upgraded native host.</p>
+      </section>
+
+      <section id="completions" class="command" data-command="completions shell bash zsh fish powershell elvish autocomplete">
+        <h2><code>completions</code></h2>
+        <div class="usage">pm completions &lt;SHELL&gt; [--output &lt;PATH&gt;]</div>
+        <p>Generate shell completion definitions.</p>
+        <dl class="flags">
+          <dt><code>&lt;SHELL&gt;</code></dt><dd>Completion syntax: <code>bash</code>, <code>elvish</code>, <code>fish</code>, <code>powershell</code>, or <code>zsh</code>.</dd>
+          <dt><code>--output &lt;PATH&gt;</code></dt><dd>Destination file. Defaults to <code>-</code>, which writes to standard output.</dd>
+        </dl>
+        <pre><code>pm completions bash --output ~/.local/share/bash-completion/completions/pm
+pm completions fish --output ~/.config/fish/completions/pm.fish
+pm completions powershell --output pm.ps1</code></pre>
+      </section>
+
+      <section id="values" class="reference">
+        <h2>Accepted values</h2>
+        <div class="columns">
+          <div class="mini"><strong>Item types</strong><code>login</code>, <code>secure-note</code>, <code>payment-card</code>, <code>identity</code>, <code>wifi</code>, <code>software-license</code>, <code>ssh-key</code>, <code>api-secret</code></div>
+          <div class="mini"><strong>Sort fields</strong><code>id</code>, <code>name</code>, <code>created</code>, <code>modified</code>, <code>password-age</code></div>
+          <div class="mini"><strong>Import conflicts</strong><code>skip</code> keeps the current item; <code>replace</code> uses the import; <code>keep-both</code> imports another named item.</div>
+          <div class="mini"><strong>Durations</strong>Whole seconds such as <code>900</code>, or suffixes such as <code>30s</code>, <code>15m</code>, <code>1h</code>, and <code>1d</code>.</div>
+        </div>
+      </section>
+
+      <section id="selectors" class="reference">
+        <h2>Entry selectors</h2>
+        <p>Commands that operate on one item accept exactly one of:</p>
+        <dl class="flags">
+          <dt><code>--id &lt;ID&gt;</code></dt><dd>The stable numeric ID shown by <code>view</code>, <code>search</code>, or <code>trash</code>.</dd>
+          <dt><code>--entry-name &lt;NAME&gt;</code></dt><dd>An exact item name.</dd>
+        </dl>
+        <p>This applies to <code>get</code>, <code>update</code>, <code>history</code>, <code>restore-password</code>, and all <code>totp</code> subcommands. <code>delete</code> also supports these selectors.</p>
+      </section>
+
+      <section id="internal" class="reference">
+        <h2>Internal commands</h2>
+        <p><code>pm run</code> runs the server process, and <code>pm native-host run</code> runs the browser’s binary native-messaging protocol. They are intentionally hidden from normal help and should not be launched manually; use <code>pm start</code> and <code>pm native-host install</code>.</p>
+      </section>
+
+      <p id="no-results" class="no-results">No commands match that filter.</p>
+    </main>
+  </div>
+
+  <footer>Maintained alongside the public CLI in <code>src/cli.rs</code>. Terminal help remains the source of truth for the installed version.</footer>
+  <script>
+    const search = document.getElementById("search");
+    const commands = [...document.querySelectorAll(".command")];
+    const noResults = document.getElementById("no-results");
+    search.addEventListener("input", () => {
+      const query = search.value.trim().toLowerCase();
+      let visible = 0;
+      for (const command of commands) {
+        const match = !query || `${command.dataset.command} ${command.textContent}`.toLowerCase().includes(query);
+        command.hidden = !match;
+        if (match) visible++;
+      }
+      noResults.classList.toggle("visible", visible === 0);
+    });
+    for (const block of document.querySelectorAll("pre")) {
+      const button = document.createElement("button");
+      button.className = "copy";
+      button.type = "button";
+      button.textContent = "Copy";
+      button.setAttribute("aria-label", "Copy example");
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(block.querySelector("code").textContent);
+          button.textContent = "Copied";
+          setTimeout(() => { button.textContent = "Copy"; }, 1200);
+        } catch {
+          button.textContent = "Select";
+        }
+      });
+      block.appendChild(button);
+    }
+  </script>
+</body>
+</html>

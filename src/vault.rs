@@ -9,6 +9,7 @@ use crate::{
     types::{
         AuditOptions, ConflictPolicy, CustomField, EntryUpdate, ItemKind, ListOptions,
         PasswordEntry, PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
+        UpdateArgs,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1427,6 +1428,16 @@ impl Vault {
     }
 
     pub async fn get_entry(&self, a: Target, stream: &mut TcpStream, http: bool) {
+        self.get_entry_with_timeout(a, 15, stream, http).await;
+    }
+
+    pub async fn get_entry_with_timeout(
+        &self,
+        a: Target,
+        copy_timeout: u8,
+        stream: &mut TcpStream,
+        http: bool,
+    ) {
         match a {
             Target::Id(i) => {
                 let Some(entry) = self.entries.iter().find(|entry| entry.id == i) else {
@@ -1435,14 +1446,14 @@ impl Vault {
                 };
                 respond(&self.entry_details(entry), stream, http).await;
                 if !entry.password.is_empty() {
-                    copy_in_background(entry.password.clone(), 15);
+                    copy_in_background(entry.password.clone(), copy_timeout);
                 }
             }
             Target::Name(name) => {
                 if let Some(entry) = self.entries.iter().find(|entry| entry.name == name) {
                     respond(&self.entry_details(entry), stream, http).await;
                     if !entry.password.is_empty() {
-                        copy_in_background(entry.password.clone(), 15);
+                        copy_in_background(entry.password.clone(), copy_timeout);
                     }
                 } else {
                     respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
@@ -2479,9 +2490,6 @@ impl Vault {
         Ok(())
     }
     pub fn export(&self, path: String) -> Result<(), String> {
-        println!(
-            "WARNING: Export writes passwords, TOTP secrets, and other sensitive fields as plaintext. Delete the file after use."
-        );
         if std::path::Path::new(&path)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
@@ -2793,18 +2801,14 @@ impl Vault {
     }
 }
 
-fn apply_update(
-    entry: &mut VaultEntry,
-    update: crate::cli::UpdateArgs,
-    password: Option<String>,
-) -> bool {
+fn apply_update(entry: &mut VaultEntry, update: UpdateArgs, password: Option<String>) -> bool {
     let mut modified = false;
     if let Some(name) = update.name {
         entry.name = name;
         modified = true;
     }
     if let Some(notes) = update.notes {
-        entry.notes = Some(notes);
+        entry.notes = (!notes.is_empty()).then_some(notes);
         modified = true;
     }
     if update.password
@@ -2818,7 +2822,7 @@ fn apply_update(
         modified = true;
     }
     if let Some(username) = update.username {
-        entry.username = Some(username);
+        entry.username = (!username.is_empty()).then_some(username);
         modified = true;
     }
     if modified {
@@ -3039,7 +3043,6 @@ pub fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), String>
 mod test {
     #![allow(unused_must_use)]
     use super::*;
-    use crate::cli::UpdateArgs;
     use crate::encryption::gen_master_key;
     use crate::file::init_test_data_dir;
     use chrono::FixedOffset;

@@ -1,5 +1,5 @@
 #[cfg(feature = "legacy-http")]
-use crate::cli::UpdateArgs;
+use crate::types::UpdateArgs;
 use crate::{
     clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, set_private_perms, sync_parent},
@@ -188,10 +188,9 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-pub fn start(port: u16) -> Result<(), String> {
+pub fn start(port: u16) -> Result<String, String> {
     if is_running(port) {
-        println!("Server is already running.");
-        return Ok(());
+        return Ok("Server is already running.".to_string());
     }
     if std::net::TcpStream::connect_timeout(&server_addr(port), Duration::from_millis(250)).is_ok()
     {
@@ -251,8 +250,7 @@ pub fn start(port: u16) -> Result<(), String> {
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    println!("Server started (PID {})", pid);
-    Ok(())
+    Ok(format!("Server started (PID {pid})"))
 }
 
 fn schedule_auto_lock(
@@ -568,6 +566,31 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 }
             }
         }
+        ServerCommand::AddTypedWithOptions {
+            entry: info,
+            copy_timeout,
+        } => {
+            if server_info.locked {
+                respond_failure("Vault locked.", &mut stream, http).await;
+            } else {
+                let mut pass = info.entry.copy.then(|| info.entry.password.clone());
+                match vlt.add_typed_entry(info, &mut server_info) {
+                    Ok(true) => {
+                        respond("Item added.", &mut stream, http).await;
+                        if let Some(password) = pass.as_deref() {
+                            copy_in_background(password.to_owned(), copy_timeout);
+                        }
+                    }
+                    Ok(false) => respond_conflict("Item already exists.", &mut stream, http).await,
+                    Err(error) => {
+                        respond_failure(&format!("Add failed: {error}"), &mut stream, http).await
+                    }
+                }
+                if let Some(password) = pass.as_mut() {
+                    password.zeroize();
+                }
+            }
+        }
         ServerCommand::Delete(id) => match id {
             Target::Vault { key, keep_key } => {
                 lock_generation.fetch_add(1, Ordering::AcqRel);
@@ -819,6 +842,20 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 respond_failure("Vault locked.", &mut stream, http).await;
             }
         }
+        ServerCommand::GetWithOptions {
+            target,
+            copy_timeout,
+        } => {
+            if !server_info.locked {
+                if let Some(vault) = vlt.as_ref() {
+                    vault
+                        .get_entry_with_timeout(target, copy_timeout, &mut stream, http)
+                        .await;
+                }
+            } else {
+                respond_failure("Vault locked.", &mut stream, http).await;
+            }
+        }
         ServerCommand::GetSecret(target) => {
             if !server_info.locked {
                 vlt.get_secret(target, &mut stream, http).await;
@@ -861,7 +898,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
         ServerCommand::Export(path) => match vlt.export(path) {
             Ok(()) => {
                 respond(
-                    "Export finished. WARNING: the export contains plaintext passwords.",
+                    "Export finished. WARNING: the export contains plaintext secrets.",
                     &mut stream,
                     http,
                 )
@@ -926,14 +963,21 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
             request.zeroize();
         }
         ServerCommand::Import(args) => {
-            lock_generation.fetch_add(1, Ordering::AcqRel);
-            if args.new && args.preview {
+            let ImportRequest {
+                path,
+                new,
+                key_pass,
+                preview,
+                conflicts,
+                password_history_limit,
+            } = args;
+            if new && preview {
                 let mut preview_vault = Vault::default();
                 let result = preview_vault.import_with_options(
-                    args.path,
-                    args.conflicts,
+                    path,
+                    conflicts,
                     true,
-                    args.password_history_limit,
+                    password_history_limit,
                     &mut ServerInfo::default(),
                 );
                 match result {
@@ -952,6 +996,27 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 let _ = stream.shutdown().await;
                 return;
             }
+            if !new {
+                if server_info.locked {
+                    respond_failure("Vault locked.", &mut stream, http).await;
+                    return;
+                }
+                match vlt.import_with_options(
+                    path,
+                    conflicts,
+                    preview,
+                    password_history_limit,
+                    &mut server_info,
+                ) {
+                    Ok(report) => respond(&report.to_string(), &mut stream, http).await,
+                    Err(error) => {
+                        respond_failure(&format!("Import failed: {error}"), &mut stream, http).await
+                    }
+                }
+                return;
+            }
+
+            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked
                 && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
             {
@@ -966,31 +1031,30 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
             if let Some(mut old) = server_info.keypass.take() {
                 old.zeroize();
             }
-            let mut error = None;
-            if args.new {
-                *server_info = ServerInfo {
-                    locked: true,
-                    keypass: Some(args.key_pass),
-                };
-                if let Err(e) = create_vault(&mut vlt, &mut server_info, false) {
-                    error = Some(e);
-                }
-            } else if server_info.locked {
-                server_info.keypass = Some(args.key_pass);
-                if let Err(e) = vlt.unlock_vault(&mut server_info) {
-                    error = Some(e);
-                }
-            }
+            let Some(key_pass) = key_pass else {
+                respond_failure(
+                    "A password or key is required for a new imported vault.",
+                    &mut stream,
+                    http,
+                )
+                .await;
+                return;
+            };
+            *server_info = ServerInfo {
+                locked: true,
+                keypass: Some(key_pass),
+            };
+            let error = create_vault(&mut vlt, &mut server_info, false).err();
 
             match error {
                 Some(e) => {
                     respond_failure(&format!("Import failed: {}", e), &mut stream, http).await
                 }
                 None => match vlt.import_with_options(
-                    args.path,
-                    args.conflicts,
-                    args.preview,
-                    args.password_history_limit,
+                    path,
+                    conflicts,
+                    preview,
+                    password_history_limit,
                     &mut server_info,
                 ) {
                     Ok(report) => {

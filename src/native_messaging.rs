@@ -16,7 +16,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-use crate::cli::UpdateArgs;
+use crate::types::UpdateArgs;
 
 const HOST_NAME: &str = "com.myproject.password_manager";
 #[cfg(not(target_os = "windows"))]

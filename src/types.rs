@@ -1,5 +1,4 @@
-use crate::cli::UpdateArgs;
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -80,11 +79,18 @@ impl Zeroize for ServerCommand {
         match self {
             Self::Unlock(info) => info.zeroize(),
             Self::Add(entry) => entry.zeroize(),
-            Self::AddTyped(entry) => entry.zeroize(),
+            Self::AddTyped(entry) | Self::AddTypedWithOptions { entry, .. } => entry.zeroize(),
             Self::Get(target)
             | Self::GetSecret(target)
             | Self::Delete(target)
             | Self::History(target) => target.zeroize(),
+            Self::GetWithOptions {
+                target,
+                copy_timeout,
+            } => {
+                target.zeroize();
+                copy_timeout.zeroize();
+            }
             Self::RestorePassword { target, revision } => {
                 target.zeroize();
                 revision.zeroize();
@@ -128,7 +134,9 @@ pub enum ServerCommand {
     Search(SearchFilter),
     Add(PasswordEntry),
     AddTyped(TypedEntry),
+    AddTypedWithOptions { entry: TypedEntry, copy_timeout: u8 },
     Get(Target),
+    GetWithOptions { target: Target, copy_timeout: u8 },
     GetSecret(Target),
     Delete(Target),
     History(Target),
@@ -313,6 +321,32 @@ pub struct PasswordEntry {
     pub copy: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, Args)]
+pub struct UpdateArgs {
+    /// Replace the item's display name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Replace the username or secondary identifier; an empty value clears it.
+    #[arg(long)]
+    pub username: Option<String>,
+    /// Prompt for and replace the primary secret.
+    #[arg(long, default_value_t = false)]
+    pub password: bool,
+    /// Generate the replacement secret instead of prompting for it.
+    #[arg(
+        long = "generate-password",
+        default_value_t = false,
+        requires = "password"
+    )]
+    pub generate_password: bool,
+    /// Replace the primary URL.
+    #[arg(long)]
+    pub url: Option<String>,
+    /// Replace the notes text; an empty value clears it.
+    #[arg(long)]
+    pub notes: Option<String>,
+}
+
 impl std::fmt::Debug for PasswordEntry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -470,7 +504,7 @@ impl std::fmt::Debug for TypedUpdate {
 pub struct ImportRequest {
     pub path: String,
     pub new: bool,
-    pub key_pass: PasswordType,
+    pub key_pass: Option<PasswordType>,
     pub preview: bool,
     pub conflicts: ConflictPolicy,
     pub password_history_limit: usize,
@@ -573,7 +607,7 @@ mod test {
         let import = ServerCommand::Import(ImportRequest {
             path: "input.csv".into(),
             new: true,
-            key_pass: PasswordType::Password(import_secret.into()),
+            key_pass: Some(PasswordType::Password(import_secret.into())),
             preview: false,
             conflicts: ConflictPolicy::Skip,
             password_history_limit: 10,

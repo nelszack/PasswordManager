@@ -35,6 +35,28 @@ pub fn print_error(error: &str) {
     }
 }
 
+pub fn print_success(output: &str) {
+    let rendered = if JSON_OUTPUT.load(Ordering::Relaxed) {
+        format!(
+            "{}\n",
+            serde_json::json!({ "ok": true, "output": output.trim_end() })
+        )
+    } else if QUIET_OUTPUT.load(Ordering::Relaxed) {
+        return;
+    } else if output.ends_with('\n') {
+        output.to_string()
+    } else {
+        format!("{output}\n")
+    };
+    let _ = io::stdout().write_all(rendered.as_bytes());
+}
+
+pub fn print_warning(warning: &str) {
+    if !QUIET_OUTPUT.load(Ordering::Relaxed) {
+        eprintln!("Warning: {warning}");
+    }
+}
+
 pub fn exit_error(error: &str, code: i32) -> ! {
     print_error(error);
     std::process::exit(code);
