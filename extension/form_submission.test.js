@@ -1,6 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createSubmissionCoordinator } = require("./form_submission.js");
+const {
+    createSubmissionCoordinator,
+    scheduleCredentialAdvance
+} = require("./form_submission.js");
 
 function setup({ password = "secret", handle = async () => {}, shouldIgnore = () => false } = {}) {
     const form = {};
@@ -110,4 +113,43 @@ test("a later user submission is handled after the resumed event", async () => {
         "prevent", "handle", "resume",
         "prevent", "handle", "resume"
     ]);
+});
+
+test("multi-step advances remember usernames before navigation", () => {
+    const calls = [];
+    scheduleCredentialAdvance({ username: "alice", password: "" }, {
+        remember: username => calls.push(["remember", username]),
+        shouldIgnore: () => false,
+        prompt: () => calls.push(["prompt"]),
+        defer: callback => callback()
+    });
+    assert.deepEqual(calls, [["remember", "alice"]]);
+});
+
+test("scripted password advances prompt from the captured snapshot", () => {
+    const calls = [];
+    const credentials = { username: "alice", password: "secret" };
+    scheduleCredentialAdvance(credentials, {
+        remember: username => calls.push(["remember", username]),
+        shouldIgnore: () => false,
+        prompt: captured => calls.push(["prompt", captured]),
+        defer: callback => callback()
+    });
+    assert.deepEqual(calls, [
+        ["remember", "alice"],
+        ["prompt", credentials]
+    ]);
+});
+
+test("normal form submission suppresses the scripted-advance fallback", () => {
+    const calls = [];
+    let deferred;
+    scheduleCredentialAdvance({ username: "alice", password: "secret" }, {
+        remember: () => {},
+        shouldIgnore: () => true,
+        prompt: () => calls.push("prompt"),
+        defer: callback => { deferred = callback; }
+    });
+    deferred();
+    assert.deepEqual(calls, []);
 });

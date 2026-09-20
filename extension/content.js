@@ -1224,6 +1224,15 @@ function credentialsFromScope(scope) {
     };
 }
 
+function usernameFromScope(scope) {
+    const fields = scopeInputs(scope);
+    const candidates = usernameCandidates(fields).filter(field => field.value.trim());
+    const usernameField = candidates.find(field =>
+        autocompleteTokens(field).some(token => token === "username" || token === "email")
+    ) || candidates.find(hasUsernameHint) || candidates.at(-1) || null;
+    return usernameField ? usernameField.value.trim() : "";
+}
+
 function findLoginCredentials(source = null) {
     if (source instanceof HTMLFormElement) {
         return credentialsFromScope(source);
@@ -1260,6 +1269,27 @@ function storeUsernameForLater(username) {
     }
 }
 
+function rememberUsernameAcrossNavigation(username) {
+    storeUsernameForLater(username);
+    if (!username || window !== window.top) return;
+    chrome.runtime.sendMessage({
+        action: "setPendingCredentials",
+        pending: { username, password: "" }
+    }, () => void chrome.runtime.lastError);
+}
+
+function restoreUsernameFromPreviousStep() {
+    if (window !== window.top) return Promise.resolve();
+    return new Promise(resolve => {
+        chrome.runtime.sendMessage({ action: "consumePendingCredentials" }, response => {
+            if (!chrome.runtime.lastError && response?.success && response.pending?.username) {
+                storeUsernameForLater(String(response.pending.username));
+            }
+            resolve();
+        });
+    });
+}
+
 // ===============================
 // Check if credentials match saved ones
 // ===============================
@@ -1289,12 +1319,15 @@ function resolveUsername(username, accounts) {
 // navigation. The background retains the password and performs the operation.
 let modalOpen = false;
 let popupResolved = false;
+let credentialAttemptPending = false;
 let currentDomain = window.location.origin.toLowerCase();
 
 // ===============================
 // Request credentials from background
 // ===============================
 async function initExtension() {
+    await restoreUsernameFromPreviousStep();
+
     // Do not place plaintext vault credentials in every matching page at load.
     // The picker fetches on click, and save/update checks fetch on submission.
     observeInputs([]);
@@ -1335,40 +1368,102 @@ async function initExtension() {
     const submissionCoordinator = PasswordManagerFormSubmission.createSubmissionCoordinator({
         isForm: form => form instanceof HTMLFormElement,
         credentialsFor: form => findLoginCredentials(form),
-        shouldIgnore: () => modalOpen || popupResolved,
+        shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
         resume: resumeFormSubmission,
         handle: async ({ credentials }) => {
+            credentialAttemptPending = true;
             const { username: rawUsername, password } = credentials;
-            const accounts = await fetchAccounts(currentDomain);
-            const username = resolveUsername(rawUsername, accounts);
-            if (rawUsername) storeUsernameForLater(rawUsername);
-
-            const match = findMatchingAccount(username, password, accounts);
-            if (match) return;
-
-            modalOpen = true;
             try {
-                await openCredentialPrompt(username, password);
-                popupResolved = true;
+                const accounts = await fetchAccounts(currentDomain);
+                const username = resolveUsername(rawUsername, accounts);
+                if (rawUsername) rememberUsernameAcrossNavigation(rawUsername);
+
+                const match = findMatchingAccount(username, password, accounts);
+                if (match) return;
+
+                modalOpen = true;
+                try {
+                    await openCredentialPrompt(username, password);
+                    popupResolved = true;
+                } finally {
+                    modalOpen = false;
+                }
             } finally {
-                modalOpen = false;
+                credentialAttemptPending = false;
             }
         }
     });
     document.addEventListener("submit", event => {
+        if (event.target instanceof HTMLFormElement) {
+            const username = usernameFromScope(event.target);
+            if (username) rememberUsernameAcrossNavigation(username);
+        }
         submissionCoordinator.onSubmit(event).catch(error => {
             console.log("Password Manager submission error:", error);
         });
+    }, true);
+
+    // Multi-step login pages frequently use a type=button or a scripted
+    // control to swap the password step for TOTP without submitting a form or
+    // navigating. Capture the credential snapshot before that handler clears
+    // or removes the password input, then defer just long enough for a normal
+    // submit event to take ownership when one exists.
+    const handlePossibleAdvance = source => {
+        const input = source instanceof HTMLInputElement && isCredentialInput(source)
+            ? source
+            : lastCredentialInput;
+        const scope = source?.form
+            || source?.closest?.("form, [role='form'], dialog")
+            || (input ? credentialScope(input) : null);
+        if (!scope) return;
+        const username = usernameFromScope(scope);
+        const credentials = credentialsFromScope(scope);
+        PasswordManagerFormSubmission.scheduleCredentialAdvance({
+            username: username || credentials.username,
+            password: credentials.password
+        }, {
+            remember: rememberUsernameAcrossNavigation,
+            shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
+            prompt: captured => {
+                credentialAttemptPending = true;
+                const resolvedUsername = resolveUsername(captured.username, []);
+                openCredentialPrompt(resolvedUsername, captured.password)
+                    .then(() => { popupResolved = true; })
+                    .catch(error => console.log("Password Manager credential prompt error:", error))
+                    .finally(() => { credentialAttemptPending = false; });
+            }
+        });
+    };
+
+    document.addEventListener("click", event => {
+        if (!event.isTrusted || !(event.target instanceof Element)) return;
+        const control = event.target.closest(
+            "button, input[type='button'], input[type='submit'], input[type='image'], [role='button']"
+        );
+        if (!control || control.classList.contains("my-extension-ui")) return;
+        handlePossibleAdvance(control);
+    }, true);
+
+    document.addEventListener("keydown", event => {
+        if (!event.isTrusted || event.key !== "Enter" || event.isComposing) return;
+        if (!(event.target instanceof HTMLInputElement) || !isCredentialInput(event.target)) return;
+        handlePossibleAdvance(event.target);
     }, true);
 
     // Catch logins that navigate/redirect without a form submit event
     // (e.g. fetch + window.location, or form.submit() in JS). The extension
     // window and background-owned operation survive the page being destroyed.
     window.addEventListener("pagehide", () => {
-        if (modalOpen || popupResolved) return;
+        if (modalOpen || popupResolved || credentialAttemptPending) return;
 
         const { username: rawUsername, password } = findLoginCredentials();
-        if (!password) return;
+        if (!password) {
+            const username = lastCredentialInput
+                ? usernameFromScope(credentialScope(lastCredentialInput))
+                : "";
+            if (username) rememberUsernameAcrossNavigation(username);
+            return;
+        }
         const username = resolveUsername(rawUsername, []);
         if (rawUsername) storeUsernameForLater(rawUsername);
 

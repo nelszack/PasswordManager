@@ -45,5 +45,13 @@
         return { onSubmit };
     }
 
-    return { createSubmissionCoordinator };
+    function scheduleCredentialAdvance(credentials, options) {
+        if (credentials.username) options.remember(credentials.username);
+        if (!credentials.password) return;
+        (options.defer || queueMicrotask)(() => {
+            if (!options.shouldIgnore()) options.prompt(credentials);
+        });
+    }
+
+    return { createSubmissionCoordinator, scheduleCredentialAdvance };
 });
