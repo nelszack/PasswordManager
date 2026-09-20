@@ -12,6 +12,7 @@
             const form = event.target;
             if (!options.isForm(form)) return;
             if (resumedForms.delete(form)) return;
+            if (!event.isTrusted) return;
 
             const credentials = options.credentialsFor(form);
             if (!credentials.password || options.shouldIgnore()) return;

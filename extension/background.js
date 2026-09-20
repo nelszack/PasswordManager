@@ -8,6 +8,9 @@ const LIVE_STATUS_POLL_MS = 2000;
 let nativePort = null;
 let nextRequestId = 1;
 const pendingRequests = new Map();
+const pendingRelays = new Map();
+const pendingPickers = new Map();
+const pickerWindows = new Map();
 let cachedStatus = null;
 let statusRefresh = null;
 
@@ -164,7 +167,7 @@ function sendAction(action, fields, sendResponse, refreshAfter = false) {
 
 function setPendingCredentials(request, sender, sendResponse) {
     const key = PasswordManagerSecurity.pendingStorageKey(sender);
-    const domain = PasswordManagerSecurity.senderDomain(sender);
+    const domain = PasswordManagerSecurity.senderOrigin(sender);
     const pending = request.pending;
     if (!key || !domain || !pending || typeof pending.password !== "string") {
         sendResponse({ success: false, error: "Invalid pending credentials" });
@@ -186,7 +189,7 @@ function setPendingCredentials(request, sender, sendResponse) {
 
 function consumePendingCredentials(sender, sendResponse) {
     const key = PasswordManagerSecurity.pendingStorageKey(sender);
-    const domain = PasswordManagerSecurity.senderDomain(sender);
+    const domain = PasswordManagerSecurity.senderOrigin(sender);
     if (!key || !domain) {
         sendResponse({ success: false, error: "Invalid page origin" });
         return;
@@ -216,7 +219,7 @@ function clearPendingCredentials(sender, sendResponse) {
 }
 
 function sendTotpForPage(request, sender, sendResponse) {
-    const domain = PasswordManagerSecurity.senderDomain(sender);
+    const domain = PasswordManagerSecurity.senderOrigin(sender);
     if (!domain || !Number.isSafeInteger(request.id) || request.id <= 0) {
         sendResponse({ success: false, error: "Invalid TOTP request" });
         return;
@@ -241,7 +244,175 @@ function sendTotpForPage(request, sender, sendResponse) {
         .catch(error => sendResponse({ success: false, error: error.message }));
 }
 
+function parseNativeItems(response) {
+    if (!response?.success) throw new Error(response?.error || "Vault items unavailable");
+    const items = JSON.parse(response.data);
+    if (!Array.isArray(items)) throw new Error("Invalid vault item response");
+    return items;
+}
+
+function pickerSenderAllowed(sender) {
+    return PasswordManagerSecurity.securePickerSender(
+        sender,
+        chrome.runtime.id,
+        chrome.runtime.getURL("picker.html")
+    );
+}
+
+async function loadSecurePickerItems(kind, domain) {
+    let items;
+    if (kind === "login" || kind === "totp") {
+        items = parseNativeItems(await nativeRequest("getCredentials", { domain }));
+        if (kind === "totp") items = items.filter(item => item?.has_totp === true);
+    } else {
+        items = parseNativeItems(await nativeRequest("getAutofillItems"));
+        items = items.filter(item => item?.kind === kind);
+    }
+    const summaries = items.map(item => ({
+        id: item.id,
+        name: String(item.name || ""),
+        username: String(item.username || ""),
+        kind
+    })).filter(item => Number.isSafeInteger(item.id) && item.id > 0);
+    return { items, summaries };
+}
+
+async function openSecurePicker(request, sender) {
+    const domain = PasswordManagerSecurity.senderOrigin(sender);
+    const tabId = sender?.tab?.id;
+    const frameId = sender?.frameId;
+    const kind = request?.kind;
+    if (!domain || !Number.isInteger(tabId) || !Number.isInteger(frameId)
+        || !["login", "totp", "payment-card", "identity"].includes(kind)) {
+        throw new Error("Invalid secure picker request");
+    }
+
+    const token = crypto.randomUUID();
+    pendingPickers.set(token, {
+        tabId, frameId, kind,
+        items: [],
+        summaries: [],
+        loading: true,
+        error: null,
+        expiresAt: Date.now() + 60_000
+    });
+
+    return new Promise((resolve, reject) => {
+        chrome.windows.create({
+            url: chrome.runtime.getURL(`picker.html?token=${encodeURIComponent(token)}`),
+            type: "popup",
+            width: 380,
+            height: 480,
+            focused: true
+        }, window => {
+            const error = chrome.runtime.lastError?.message;
+            if (error || !window?.id) {
+                pendingPickers.delete(token);
+                reject(new Error(error || "Could not open secure picker"));
+                return;
+            }
+            pickerWindows.set(window.id, token);
+            loadSecurePickerItems(kind, domain)
+                .then(({ items, summaries }) => {
+                    const pending = pendingPickers.get(token);
+                    if (!pending) return;
+                    pending.items = items;
+                    pending.summaries = summaries;
+                    pending.loading = false;
+                })
+                .catch(loadError => {
+                    const pending = pendingPickers.get(token);
+                    if (!pending) return;
+                    pending.loading = false;
+                    pending.error = loadError.message || "Vault items unavailable";
+                });
+            setTimeout(() => {
+                if (!pendingPickers.has(token)) return;
+                pendingPickers.delete(token);
+                chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
+            }, 60_000);
+            resolve({ success: true, token });
+        });
+    });
+}
+
+async function completeSecurePicker(request, sender) {
+    if (!pickerSenderAllowed(sender)) throw new Error("Invalid picker sender");
+    const pending = pendingPickers.get(request?.token);
+    if (!pending || pending.expiresAt <= Date.now()) {
+        pendingPickers.delete(request?.token);
+        throw new Error("Secure picker expired");
+    }
+    if (request.cancel === true) {
+        pendingPickers.delete(request.token);
+        return { success: true };
+    }
+    if (pending.loading) throw new Error("Secure picker is still loading");
+    if (pending.error) throw new Error(pending.error);
+    if (!Number.isSafeInteger(request.id) || request.id <= 0) {
+        throw new Error("Invalid picker selection");
+    }
+    const selected = pending.items.find(item => item?.id === request.id);
+    if (!selected) throw new Error("Picker selection is unavailable");
+
+    let payload;
+    if (pending.kind === "login") {
+        payload = selected;
+    } else if (pending.kind === "totp") {
+        const response = await nativeRequest("getTotp", { entryId: selected.id });
+        if (!response.success) throw new Error(response.error || "TOTP unavailable");
+        payload = response.data;
+    } else {
+        const response = await nativeRequest("getAutofillItem", { entryId: selected.id });
+        if (!response.success) throw new Error(response.error || "Autofill item unavailable");
+        payload = JSON.parse(response.data);
+    }
+    pendingPickers.delete(request.token);
+    await chrome.tabs.sendMessage(
+        pending.tabId,
+        { action: "securePickerResult", token: request.token, payload },
+        { frameId: pending.frameId }
+    );
+    return { success: true };
+}
+
+chrome.windows.onRemoved.addListener(windowId => {
+    const token = pickerWindows.get(windowId);
+    if (!token) return;
+    pickerWindows.delete(windowId);
+    pendingPickers.delete(token);
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "openSecurePicker") {
+        openSecurePicker(request, sender)
+            .then(sendResponse)
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
+    if (request.action === "getSecurePickerData") {
+        if (!pickerSenderAllowed(sender)) {
+            sendResponse({ success: false, error: "Invalid picker sender" });
+        } else {
+            const pending = pendingPickers.get(request.token);
+            sendResponse(pending && pending.expiresAt > Date.now()
+                ? {
+                    success: true,
+                    kind: pending.kind,
+                    items: pending.summaries,
+                    loading: pending.loading,
+                    error: pending.error
+                }
+                : { success: false, error: "Secure picker expired" });
+        }
+        return true;
+    }
+    if (request.action === "completeSecurePicker") {
+        completeSecurePicker(request, sender)
+            .then(sendResponse)
+            .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
     if (request.action === "getStatus") {
         refreshStatus()
             .then(sendResponse)
@@ -254,31 +425,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === "getCredentials") {
-        const domain = PasswordManagerSecurity.senderDomain(sender);
+        const domain = PasswordManagerSecurity.senderOrigin(sender);
         if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
         else sendAction("getCredentials", { domain }, sendResponse);
         return true;
     }
-    if (request.action === "getAutofillItems") {
-        sendAction("getAutofillItems", {}, sendResponse);
-        return true;
-    }
-    if (request.action === "getAutofillItem") {
-        if (!PasswordManagerSecurity.senderDomain(sender)
-            || !Number.isSafeInteger(request.id)
-            || request.id <= 0) {
-            sendResponse({ success: false, error: "Invalid autofill request" });
-        } else {
-            sendAction("getAutofillItem", { entryId: request.id }, sendResponse);
-        }
-        return true;
-    }
-    if (request.action === "getTotp") {
-        sendTotpForPage(request, sender, sendResponse);
-        return true;
-    }
     if (request.action === "saveCredentials") {
-        const domain = PasswordManagerSecurity.senderDomain(sender);
+        const domain = PasswordManagerSecurity.senderOrigin(sender);
         if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
         else sendAction("saveCredentials", {
             domain,
@@ -289,7 +442,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === "updateCredentials") {
-        const domain = PasswordManagerSecurity.senderDomain(sender);
+        const domain = PasswordManagerSecurity.senderOrigin(sender);
         if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
         else sendAction("updateCredentials", {
             domain,
@@ -298,6 +451,33 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             name: request.name,
             entryId: request.id
         }, sendResponse, true);
+        return true;
+    }
+    if (request.action === "getRelayedCredentials") {
+        const relay = PasswordManagerRelay.authorizeCredentialRequest(
+            request, sender, pendingRelays
+        );
+        if (!relay) sendResponse({ success: false, error: "Invalid credential relay" });
+        else sendAction("getCredentials", { domain: relay.domain }, sendResponse);
+        return true;
+    }
+    if (request.action === "saveRelayedCredentials"
+        || request.action === "updateRelayedCredentials") {
+        const relay = PasswordManagerRelay.authorizeCredentialRequest(
+            request, sender, pendingRelays, true
+        );
+        if (!relay) {
+            sendResponse({ success: false, error: "Invalid credential relay" });
+        } else {
+            const update = request.action === "updateRelayedCredentials";
+            sendAction(update ? "updateCredentials" : "saveCredentials", {
+                domain: relay.domain,
+                username: request.username,
+                password: request.password,
+                name: request.name,
+                ...(update ? { entryId: request.id } : {})
+            }, sendResponse, true);
+        }
         return true;
     }
     if (request.action === "setPendingCredentials") {
@@ -319,6 +499,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "relayToParent") {
         const route = PasswordManagerRelay.requestRoute(request.data, sender);
         if (route) {
+            pendingRelays.set(
+                PasswordManagerRelay.relayKey(route.tabId, request.data.token),
+                {
+                    sourceFrameId: sender.frameId,
+                    domain: request.data.domain,
+                    expiresAt: Date.now() + 5 * 60_000
+                }
+            );
             chrome.tabs.sendMessage(
                 route.tabId,
                 route.message,

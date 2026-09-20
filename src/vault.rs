@@ -1,7 +1,9 @@
 use crate::{
     clipboard::copy_in_background,
     encryption::{decrypt_file, try_encrypt_file, try_gen_master_key, try_gen_master_key_legacy},
-    file::{data_dir, file_exists, set_private_perms, sync_parent},
+    file::{
+        data_dir, file_exists, key_file_path, new_key_file_path, set_private_perms, sync_parent,
+    },
     protocol::ResponseCode,
     server::{ServerInfo, respond, respond_with_code},
     types::{
@@ -302,6 +304,24 @@ struct ImportedItem {
     totp: Option<String>,
 }
 
+impl Zeroize for ImportedItem {
+    fn zeroize(&mut self) {
+        self.portable.zeroize();
+        self.entry.zeroize();
+        self.additional_urls.zeroize();
+        self.custom_fields.zeroize();
+        self.password_changed.zeroize();
+        self.password_history.zeroize();
+        self.totp.zeroize();
+    }
+}
+
+impl Drop for ImportedItem {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 impl ImportedItem {
     fn login(entry: VaultEntry) -> Self {
         Self {
@@ -335,6 +355,7 @@ impl std::fmt::Display for ImportReport {
 const BACKUP_MAGIC: &[u8; 8] = b"PMBACKUP";
 const BACKUP_VERSION: u8 = 1;
 const MAX_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_VAULT_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct BackupEnvelopeRef<'a> {
@@ -360,18 +381,22 @@ fn vault_filename_from_key(filename_key: &[u8; 32]) -> String {
     format!("{}.enc", hex::encode(short))
 }
 
-fn try_get_filename(key_pass: &mut PasswordType, new: bool) -> Result<String, String> {
-    let mut master_key = try_gen_master_key(key_pass, new)?;
+fn random_vault_filename() -> String {
+    loop {
+        let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
+        if !data_dir().join(&filename).exists() {
+            return filename;
+        }
+    }
+}
+
+fn try_get_deterministic_filename(key_pass: &mut PasswordType) -> Result<String, String> {
+    let mut master_key = try_gen_master_key(key_pass, false)?;
     let mut filename_key = filename_key_from_master(&master_key);
     master_key.zeroize();
     let filename = vault_filename_from_key(&filename_key);
     filename_key.zeroize();
     Ok(filename)
-}
-
-#[cfg(test)]
-fn get_filename(key_pass: &mut PasswordType, new: bool) -> String {
-    try_get_filename(key_pass, new).expect("could not derive vault filename")
 }
 
 fn try_get_legacy_filename(key_pass: &mut PasswordType) -> Result<String, String> {
@@ -383,18 +408,70 @@ fn try_get_legacy_filename(key_pass: &mut PasswordType) -> Result<String, String
     Ok(filename)
 }
 
+fn find_vault(key_pass: &mut PasswordType) -> Option<(String, Vault, bool)> {
+    let deterministic = try_get_deterministic_filename(key_pass).ok();
+    let legacy = try_get_legacy_filename(key_pass).ok();
+    let mut candidates: Vec<String> = deterministic.iter().chain(legacy.iter()).cloned().collect();
+    if let Ok(entries) = fs::read_dir(data_dir()) {
+        candidates.extend(
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| name.ends_with(".enc")),
+        );
+    }
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.clone()));
+
+    for filename in candidates {
+        let path = data_dir().join(&filename);
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_BYTES {
+            continue;
+        }
+        let Ok(contents) = read(path) else {
+            continue;
+        };
+        let Some(mut decrypted) = decrypt_file(key_pass, &contents) else {
+            continue;
+        };
+        let decoded = rmp_serde::from_slice::<Vault>(&decrypted);
+        decrypted.zeroize();
+        let Ok(mut vault) = decoded else {
+            continue;
+        };
+        if vault.ensure_next_entry_id().is_err() {
+            vault.zeroize();
+            continue;
+        }
+        let needs_migration =
+            deterministic.as_ref() == Some(&filename) || legacy.as_ref() == Some(&filename);
+        vault.metadata.filename = filename.clone();
+        return Some((filename, vault, needs_migration));
+    }
+    None
+}
+
 pub fn create_vault(
     vlt: &mut Option<Vault>,
     server_info: &mut ServerInfo,
     lock: bool,
 ) -> Result<(), String> {
     let generated_key_path = match server_info.keypass.as_ref() {
-        Some(PasswordType::Key(path)) if !data_dir().join(path).exists() => {
-            Some(data_dir().join(path))
+        Some(PasswordType::Key(path)) if !new_key_file_path(path)?.exists() => {
+            Some(new_key_file_path(path)?)
         }
         _ => None,
     };
-    let fname = try_get_filename(server_info.keypass.as_mut().unwrap(), true)?;
+    if matches!(server_info.keypass, Some(PasswordType::Key(_))) {
+        let mut key = try_gen_master_key(server_info.keypass.as_mut().unwrap(), true)?;
+        key.zeroize();
+    } else if find_vault(server_info.keypass.as_mut().unwrap()).is_some() {
+        return Err("A vault file with this password already exists.".to_string());
+    }
+    let fname = random_vault_filename();
     let file_path = data_dir().join(&fname);
     if file_exists(&file_path) {
         if let Some(path) = generated_key_path {
@@ -597,14 +674,17 @@ pub fn restore_encrypted_backup(
     }
     let result = (|| {
         validate_backup_vault(&mut backup.vault)?;
-        let filename = try_get_filename(key_pass, false)?;
-        let destination = data_dir().join(&filename);
-        if destination.exists() && !force {
+        let existing = find_vault(key_pass).map(|(filename, mut vault, _)| {
+            vault.zeroize();
+            filename
+        });
+        if existing.is_some() && !force {
             return Err(
                 "a vault already exists for this backup password/key; use --force to replace it"
                     .to_string(),
             );
         }
+        let filename = existing.unwrap_or_else(random_vault_filename);
         backup.vault.metadata.filename = filename.clone();
         write_vault_with_key(&backup.vault, key_pass)?;
         Ok(filename)
@@ -617,25 +697,24 @@ pub fn restore_encrypted_backup(
 fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
     let kp = key_pass.keypass.as_mut()?;
     if let PasswordType::Key(key) = kp
-        && !data_dir().join(key).is_file()
+        && !key_file_path(key).ok()?.is_file()
     {
         return None;
     }
-    let fname = try_get_filename(key_pass.keypass.as_mut().unwrap(), false).ok()?;
-    let mut file_path = data_dir().join(&fname);
-    if !file_path.exists() {
-        let legacy_fname = try_get_legacy_filename(key_pass.keypass.as_mut().unwrap()).ok()?;
-        file_path = data_dir().join(&legacy_fname);
-        if !file_path.exists() {
-            return None;
+    let (filename, mut vault, needs_migration) = find_vault(key_pass.keypass.as_mut().unwrap())?;
+    if needs_migration {
+        let preferred = random_vault_filename();
+        let file_path = data_dir().join(&filename);
+        {
+            let old_metadata_filename = vault.metadata.filename.clone();
+            vault.metadata.filename = preferred.clone();
+            if write_vault_with_key(&vault, key_pass.keypass.as_mut().unwrap()).is_ok() {
+                let _ = fs::remove_file(&file_path);
+            } else {
+                vault.metadata.filename = old_metadata_filename;
+            }
         }
     }
-    let contents = read(file_path).ok()?;
-    let mut dec = decrypt_file(key_pass.keypass.as_mut().unwrap(), &contents)?;
-    let decoded = rmp_serde::from_slice(&dec);
-    dec.zeroize();
-    let mut vault: Vault = decoded.ok()?;
-    vault.ensure_next_entry_id().ok()?;
     key_pass.locked = false;
     Some(vault)
 }
@@ -705,10 +784,20 @@ fn hostname(value: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+fn url_scheme(value: &str) -> Option<&str> {
+    let (scheme, _) = value.trim().split_once("://")?;
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")).then_some(scheme)
+}
+
 fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
     let (Some(saved), Some(requested)) = (hostname(saved_url), hostname(requested_url)) else {
         return false;
     };
+    if url_scheme(requested_url).is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
+        && !url_scheme(saved_url).is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
+    {
+        return false;
+    }
     if let Some(base) = saved.strip_prefix("*.") {
         // Wildcards must be rooted at a registrable domain, never a public
         // suffix such as "com", "co.uk", or "github.io".
@@ -1094,7 +1183,7 @@ impl Vault {
         match target {
             Target::Id(id) => self.entries.iter().position(|entry| entry.id == *id),
             Target::Name(name) => self.entries.iter().position(|entry| entry.name == *name),
-            Target::Url(_) | Target::Vault(_) => None,
+            Target::Url(_) | Target::Vault { .. } => None,
         }
     }
 
@@ -1288,16 +1377,22 @@ impl Vault {
         mut new_key: PasswordType,
     ) -> Result<(), String> {
         if let PasswordType::Key(path) = &new_key
-            && data_dir().join(path).exists()
+            && new_key_file_path(path)?.exists()
         {
             return Err("the new key file already exists".to_string());
         }
         let old_filename = self.metadata.filename.clone();
-        let new_filename = try_get_filename(&mut new_key, true)?;
+        if matches!(&new_key, PasswordType::Key(_)) {
+            let mut key = try_gen_master_key(&mut new_key, true)?;
+            key.zeroize();
+        } else if find_vault(&mut new_key).is_some() {
+            return Err("a vault already exists for the new password".to_string());
+        }
+        let new_filename = random_vault_filename();
         let new_path = data_dir().join(&new_filename);
         if new_path.exists() {
             if let PasswordType::Key(path) = &new_key {
-                let _ = fs::remove_file(data_dir().join(path));
+                let _ = fs::remove_file(new_key_file_path(path)?);
             }
             return Err("a vault already exists for the new password or key".to_string());
         }
@@ -1311,7 +1406,7 @@ impl Vault {
             replacement.zeroize();
             self.metadata.filename = old_filename;
             if let PasswordType::Key(path) = &new_key {
-                let _ = fs::remove_file(data_dir().join(path));
+                let _ = fs::remove_file(new_key_file_path(path)?);
             }
             return Err(error);
         }
@@ -1319,7 +1414,7 @@ impl Vault {
             replacement.zeroize();
             let _ = fs::remove_file(&new_path);
             if let PasswordType::Key(path) = &new_key {
-                let _ = fs::remove_file(data_dir().join(path));
+                let _ = fs::remove_file(new_key_file_path(path)?);
             }
             self.metadata.filename = old_filename;
             return Err(format!("could not replace the old vault: {error}"));
@@ -1365,7 +1460,7 @@ impl Vault {
                     respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
                 }
             }
-            Target::Vault(_) => {
+            Target::Vault { .. } => {
                 respond_with_code(
                     ResponseCode::InvalidInput,
                     "Invalid entry selector.",
@@ -1381,7 +1476,7 @@ impl Vault {
         let entry = match target {
             Target::Id(id) => self.entries.iter().find(|entry| entry.id == id),
             Target::Name(name) => self.entries.iter().find(|entry| entry.name == name),
-            Target::Url(_) | Target::Vault(_) => None,
+            Target::Url(_) | Target::Vault { .. } => None,
         };
         if let Some(entry) = entry {
             respond(&entry.password, stream, http).await;
@@ -2920,18 +3015,22 @@ impl VaultAccess for Option<Vault> {
         }
     }
 }
-pub fn delete_vault(mut key: PasswordType) -> Result<(), String> {
+pub fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), String> {
     let data = data_dir();
     if let PasswordType::Key(key_path) = &key
-        && !data.join(key_path).is_file()
+        && !key_file_path(key_path)?.is_file()
     {
         return Err("key file does not exist or is not a regular file".to_string());
     }
-    let filename = try_get_filename(&mut key, false)?;
+    let (filename, mut vault, _) = find_vault(&mut key)
+        .ok_or_else(|| "could not delete vault (is the key correct?)".to_string())?;
+    vault.zeroize();
     fs::remove_file(data.join(filename))
         .map_err(|e| format!("could not delete vault (is the key correct?): {e}"))?;
-    if let PasswordType::Key(key) = key {
-        fs::remove_file(data.join(key))
+    if let PasswordType::Key(key) = key
+        && !keep_key
+    {
+        fs::remove_file(key_file_path(&key)?)
             .map_err(|e| format!("vault deleted, but could not delete its key file: {e}"))?;
     }
     Ok(())
@@ -2944,7 +3043,7 @@ mod test {
     use crate::encryption::gen_master_key;
     use crate::file::init_test_data_dir;
     use chrono::FixedOffset;
-    use std::{fs, path::Path, thread};
+    use std::{fs, thread};
 
     fn time_close(time: String) -> bool {
         let thing =
@@ -3085,6 +3184,19 @@ mod test {
     #[test]
     fn test_hostname_ignores_scheme_path_port_and_case() {
         assert!(hosts_match("HTTPS://Example.COM:443/login", "example.com"));
+    }
+    #[test]
+    fn https_credentials_are_not_returned_to_http_pages() {
+        assert!(!hosts_match(
+            "https://example.com/login",
+            "http://example.com"
+        ));
+        assert!(hosts_match(
+            "https://example.com/login",
+            "https://example.com"
+        ));
+        assert!(!hosts_match("example.com", "http://example.com"));
+        assert!(hosts_match("http://example.com", "https://example.com"));
     }
     #[test]
     fn test_domain_matching_is_exact_by_default() {
@@ -3656,15 +3768,11 @@ mod test {
     #[test]
     fn test_lock_unlock_key() {
         init_test_data_dir();
-        let temp = Path::new("test_lock_unlock_key.pem");
-        gen_master_key(
-            &mut PasswordType::Key("test_lock_unlock_key.pem".to_string()),
-            true,
-        );
-        let filename = get_filename(
-            &mut PasswordType::Key(temp.to_str().unwrap().to_string()),
-            false,
-        );
+        let key_directory = tempfile::tempdir().unwrap();
+        let temp = key_directory.path().join("test_lock_unlock_key.pem");
+        let key_path = temp.to_string_lossy().into_owned();
+        gen_master_key(&mut PasswordType::Key(key_path.clone()), true);
+        let filename = random_vault_filename();
         let vlt = Vault {
             entries: vec![VaultEntry {
                 id: 1,
@@ -3681,8 +3789,8 @@ mod test {
             },
             recovery: RecoveryData::default(),
         };
-        let pass = PasswordType::Key(temp.to_str().unwrap().to_string());
-        let pass1 = PasswordType::Key(temp.to_str().unwrap().to_string());
+        let pass = PasswordType::Key(key_path.clone());
+        let pass1 = PasswordType::Key(key_path);
         vlt.lock_vault(&mut ServerInfo {
             locked: false,
             keypass: Some(pass),
@@ -3694,8 +3802,7 @@ mod test {
         .unwrap();
         let data_path = data_dir();
         let file_path = data_path.join(&filename);
-        let file_path2 = data_path.join(temp);
-        fs::remove_file(file_path2).unwrap();
+        fs::remove_file(temp).unwrap();
         fs::remove_file(file_path).unwrap();
         assert_eq!(vlt.entries, vlt1.entries);
         assert_eq!(vlt.metadata, vlt1.metadata);
@@ -3704,10 +3811,7 @@ mod test {
     #[test]
     fn test_lock_unlock_password() {
         init_test_data_dir();
-        let filename = get_filename(
-            &mut PasswordType::Password("test_password1234!".to_string()),
-            true,
-        );
+        let filename = random_vault_filename();
         let vlt = Vault {
             entries: vec![VaultEntry {
                 id: 1,
@@ -3742,28 +3846,54 @@ mod test {
         assert_eq!(vlt.metadata, vlt1.metadata);
         assert_eq!(vlt1.recovery.next_entry_id, 2);
     }
+
+    #[test]
+    fn unlock_migrates_deterministic_password_filename() {
+        init_test_data_dir();
+        let unique = format!("migration-{:016x}", rand::random::<u64>());
+        let mut password = PasswordType::Password(unique);
+        let old_filename = try_get_deterministic_filename(&mut password).unwrap();
+        let vault = Vault {
+            metadata: VaultMetadata {
+                filename: old_filename.clone(),
+            },
+            ..Vault::default()
+        };
+        write_vault_with_key(&vault, &mut password).unwrap();
+
+        let mut server_info = ServerInfo {
+            locked: true,
+            keypass: Some(password),
+        };
+        let migrated = unlock_vault(&mut server_info).unwrap();
+
+        let preferred_filename = migrated.metadata.filename.clone();
+        assert_ne!(old_filename, preferred_filename);
+        assert!(data_dir().join(&preferred_filename).is_file());
+        assert!(!data_dir().join(old_filename).exists());
+        fs::remove_file(data_dir().join(preferred_filename)).unwrap();
+    }
     #[test]
     fn test_create_vault_key() {
         init_test_data_dir();
+        let key_directory = tempfile::tempdir().unwrap();
+        let key_path = key_directory.path().join("create_vault.enc");
+        let key_path = key_path.to_string_lossy().into_owned();
         let mut vlt = None;
         create_vault(
             &mut vlt,
             &mut ServerInfo {
                 locked: true,
-                keypass: Some(PasswordType::Key("create_vault.enc".to_string())),
+                keypass: Some(PasswordType::Key(key_path.clone())),
             },
             false,
         )
         .unwrap();
-        let filename = get_filename(
-            &mut PasswordType::Key("create_vault.enc".to_string()),
-            false,
-        );
+        let filename = vlt.as_ref().unwrap().metadata.filename.clone();
         let data_path = data_dir();
         let file_path = data_path.join(&filename);
-        let file_path2 = data_path.join("create_vault.enc");
         fs::remove_file(file_path).unwrap();
-        fs::remove_file(file_path2).unwrap();
+        fs::remove_file(key_path).unwrap();
         assert_eq!(
             vlt,
             Some(Vault {
@@ -3776,26 +3906,71 @@ mod test {
     #[test]
     fn test_create_vault_key_lock() {
         init_test_data_dir();
+        let key_directory = tempfile::tempdir().unwrap();
+        let key_path = key_directory.path().join("create_vault_lock.enc");
+        let key_path = key_path.to_string_lossy().into_owned();
         let mut vlt = None;
         create_vault(
             &mut vlt,
             &mut ServerInfo {
                 locked: true,
-                keypass: Some(PasswordType::Key("create_vault_lock.enc".to_string())),
+                keypass: Some(PasswordType::Key(key_path.clone())),
             },
             true,
         )
         .unwrap();
-        let filename = get_filename(
-            &mut PasswordType::Key("create_vault_lock.enc".to_string()),
-            false,
-        );
+        let (filename, mut stored, _) =
+            find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
+        stored.zeroize();
         let data_path = data_dir();
         let file_path = data_path.join(&filename);
-        let file_path2 = data_path.join("create_vault_lock.enc");
         fs::remove_file(file_path).unwrap();
-        fs::remove_file(file_path2).unwrap();
+        fs::remove_file(key_path).unwrap();
         assert_eq!(vlt, None)
+    }
+
+    #[test]
+    fn delete_key_vault_removes_external_key_by_default() {
+        init_test_data_dir();
+        let key_directory = tempfile::tempdir().unwrap();
+        let key_path = key_directory.path().join("delete-vault.key");
+        let key_path = key_path.to_string_lossy().into_owned();
+        let mut vault = None;
+        let mut server_info = ServerInfo {
+            locked: true,
+            keypass: Some(PasswordType::Key(key_path.clone())),
+        };
+        create_vault(&mut vault, &mut server_info, true).unwrap();
+        let (filename, mut stored, _) =
+            find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
+        stored.zeroize();
+
+        delete_vault(PasswordType::Key(key_path.clone()), false).unwrap();
+
+        assert!(!data_dir().join(filename).exists());
+        assert!(!Path::new(&key_path).exists());
+    }
+
+    #[test]
+    fn delete_key_vault_can_preserve_external_key() {
+        init_test_data_dir();
+        let key_directory = tempfile::tempdir().unwrap();
+        let key_path = key_directory.path().join("keep-vault.key");
+        let key_path = key_path.to_string_lossy().into_owned();
+        let mut vault = None;
+        let mut server_info = ServerInfo {
+            locked: true,
+            keypass: Some(PasswordType::Key(key_path.clone())),
+        };
+        create_vault(&mut vault, &mut server_info, true).unwrap();
+        let (filename, mut stored, _) =
+            find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
+        stored.zeroize();
+
+        delete_vault(PasswordType::Key(key_path.clone()), true).unwrap();
+
+        assert!(!data_dir().join(filename).exists());
+        assert!(Path::new(&key_path).is_file());
     }
     #[test]
     fn test_create_vault_password() {
@@ -3810,10 +3985,7 @@ mod test {
             false,
         )
         .unwrap();
-        let filename = get_filename(
-            &mut PasswordType::Password("test123456!".to_string()),
-            false,
-        );
+        let filename = vlt.as_ref().unwrap().metadata.filename.clone();
         let data_path = data_dir();
         let file_path = data_path.join(&filename);
         fs::remove_file(file_path).unwrap();
@@ -3839,10 +4011,9 @@ mod test {
             true,
         )
         .unwrap();
-        let filename = get_filename(
-            &mut PasswordType::Password("test1234567!".to_string()),
-            false,
-        );
+        let (filename, mut stored, _) =
+            find_vault(&mut PasswordType::Password("test1234567!".to_string())).unwrap();
+        stored.zeroize();
         let data_path = data_dir();
         let file_path = data_path.join(&filename);
         fs::remove_file(file_path).unwrap();
@@ -5262,14 +5433,13 @@ mod test {
         contents.extend_from_slice(&encrypted);
         fs::write(&invalid_path, contents).unwrap();
 
-        let destination = data_dir().join(try_get_filename(&mut key, false).unwrap());
-        assert!(!destination.exists());
+        assert!(find_vault(&mut key).is_none());
         assert!(
             restore_encrypted_backup(invalid_path.to_str().unwrap(), &mut key, false)
                 .unwrap_err()
                 .contains("duplicate entry IDs")
         );
-        assert!(!destination.exists());
+        assert!(find_vault(&mut key).is_none());
     }
 
     #[test]

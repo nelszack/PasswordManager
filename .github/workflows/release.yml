@@ -44,9 +44,9 @@ jobs:
             exit 1
           fi
       - name: Run release tests
-        run: cargo test --locked
+        run: cargo test --locked --all-features
       - name: Run strict lint
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Generate shell completions
         shell: bash
         run: |

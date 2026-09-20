@@ -142,35 +142,40 @@ pub fn install(extension_id: &str, browser: NativeBrowser) -> Result<PathBuf, St
     Ok(manifest_path)
 }
 
-#[cfg(target_os = "linux")]
-fn native_manifest_dir(base_dirs: &BaseDirs, browser: NativeBrowser, _host_dir: &Path) -> PathBuf {
-    let browser_dir = match browser {
-        NativeBrowser::Chrome => "google-chrome",
-        NativeBrowser::Chromium => "chromium",
-        NativeBrowser::Helium => "net.imput.helium",
-    };
-    base_dirs
-        .config_dir()
-        .join(browser_dir)
-        .join("NativeMessagingHosts")
+#[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum NativePlatform {
+    Linux,
+    Macos,
+    Windows,
 }
 
-#[cfg(target_os = "macos")]
-fn native_manifest_dir(base_dirs: &BaseDirs, browser: NativeBrowser, _host_dir: &Path) -> PathBuf {
-    let browser_dir = match browser {
-        NativeBrowser::Chrome => Path::new("Google").join("Chrome"),
-        NativeBrowser::Chromium => PathBuf::from("Chromium"),
-        NativeBrowser::Helium => PathBuf::from("Helium"),
-    };
-    base_dirs
-        .config_dir()
-        .join(browser_dir)
-        .join("NativeMessagingHosts")
+fn native_manifest_dir(base_dirs: &BaseDirs, browser: NativeBrowser, host_dir: &Path) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    let platform = NativePlatform::Linux;
+    #[cfg(target_os = "macos")]
+    let platform = NativePlatform::Macos;
+    #[cfg(target_os = "windows")]
+    let platform = NativePlatform::Windows;
+    native_manifest_dir_for(base_dirs.config_dir(), browser, host_dir, platform)
 }
 
-#[cfg(target_os = "windows")]
-fn native_manifest_dir(_base_dirs: &BaseDirs, _browser: NativeBrowser, host_dir: &Path) -> PathBuf {
-    host_dir.to_path_buf()
+fn native_manifest_dir_for(
+    config_dir: &Path,
+    browser: NativeBrowser,
+    host_dir: &Path,
+    platform: NativePlatform,
+) -> PathBuf {
+    let browser_dir = match (platform, browser) {
+        (NativePlatform::Linux, NativeBrowser::Chrome) => PathBuf::from("google-chrome"),
+        (NativePlatform::Linux, NativeBrowser::Chromium) => PathBuf::from("chromium"),
+        (NativePlatform::Linux, NativeBrowser::Helium) => PathBuf::from("net.imput.helium"),
+        (NativePlatform::Macos, NativeBrowser::Chrome) => Path::new("Google").join("Chrome"),
+        (NativePlatform::Macos, NativeBrowser::Chromium) => PathBuf::from("Chromium"),
+        (NativePlatform::Macos, NativeBrowser::Helium) => PathBuf::from("net.imput.helium"),
+        (NativePlatform::Windows, _) => return host_dir.to_path_buf(),
+    };
+    config_dir.join(browser_dir).join("NativeMessagingHosts")
 }
 
 #[cfg(unix)]
@@ -216,11 +221,7 @@ fn register_manifest(_manifest_path: &Path, _browser: NativeBrowser) -> Result<(
 
 #[cfg(target_os = "windows")]
 fn register_manifest(manifest_path: &Path, browser: NativeBrowser) -> Result<(), String> {
-    let vendor = match browser {
-        NativeBrowser::Chrome => "Google\\Chrome",
-        NativeBrowser::Chromium => "Chromium",
-        NativeBrowser::Helium => "Helium",
-    };
+    let vendor = windows_registry_vendor(browser);
     let registry_key = format!(r"HKCU\Software\{vendor}\NativeMessagingHosts\{HOST_NAME}");
     let absolute_manifest = fs::canonicalize(manifest_path)
         .map_err(|error| format!("could not resolve {}: {error}", manifest_path.display()))?;
@@ -236,6 +237,17 @@ fn register_manifest(manifest_path: &Path, browser: NativeBrowser) -> Result<(),
         ));
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_registry_vendor(browser: NativeBrowser) -> &'static str {
+    match browser {
+        NativeBrowser::Chrome => "Google\\Chrome",
+        NativeBrowser::Chromium => "Chromium",
+        // Helium currently discovers native hosts through Chromium's registry
+        // location rather than a Helium-specific vendor key.
+        NativeBrowser::Helium => "Chromium",
+    }
 }
 
 fn validate_extension_id(extension_id: &str) -> Result<(), String> {
@@ -448,7 +460,7 @@ mod tests {
         {
             assert!(chrome.ends_with("Google/Chrome/NativeMessagingHosts"));
             assert!(chromium.ends_with("Chromium/NativeMessagingHosts"));
-            assert!(helium.ends_with("Helium/NativeMessagingHosts"));
+            assert!(helium.ends_with("net.imput.helium/NativeMessagingHosts"));
         }
         #[cfg(target_os = "windows")]
         {
@@ -456,6 +468,71 @@ mod tests {
             assert_eq!(chromium, host_dir);
             assert_eq!(helium, host_dir);
         }
+    }
+
+    #[test]
+    fn native_manifest_directories_cover_every_supported_platform() {
+        let config_dir = Path::new("config");
+        let host_dir = Path::new("host");
+
+        let cases = [
+            (
+                NativePlatform::Linux,
+                NativeBrowser::Chrome,
+                "config/google-chrome/NativeMessagingHosts",
+            ),
+            (
+                NativePlatform::Linux,
+                NativeBrowser::Chromium,
+                "config/chromium/NativeMessagingHosts",
+            ),
+            (
+                NativePlatform::Linux,
+                NativeBrowser::Helium,
+                "config/net.imput.helium/NativeMessagingHosts",
+            ),
+            (
+                NativePlatform::Macos,
+                NativeBrowser::Chrome,
+                "config/Google/Chrome/NativeMessagingHosts",
+            ),
+            (
+                NativePlatform::Macos,
+                NativeBrowser::Chromium,
+                "config/Chromium/NativeMessagingHosts",
+            ),
+            (
+                NativePlatform::Macos,
+                NativeBrowser::Helium,
+                "config/net.imput.helium/NativeMessagingHosts",
+            ),
+        ];
+        for (platform, browser, expected) in cases {
+            assert_eq!(
+                native_manifest_dir_for(config_dir, browser, host_dir, platform),
+                PathBuf::from(expected)
+            );
+        }
+        for browser in [
+            NativeBrowser::Chrome,
+            NativeBrowser::Chromium,
+            NativeBrowser::Helium,
+        ] {
+            assert_eq!(
+                native_manifest_dir_for(config_dir, browser, host_dir, NativePlatform::Windows),
+                host_dir
+            );
+        }
+    }
+
+    #[test]
+    fn windows_registry_locations_cover_supported_browsers() {
+        assert_eq!(
+            windows_registry_vendor(NativeBrowser::Chrome),
+            "Google\\Chrome"
+        );
+        assert_eq!(windows_registry_vendor(NativeBrowser::Chromium), "Chromium");
+        assert_eq!(windows_registry_vendor(NativeBrowser::Helium), "Chromium");
     }
 
     #[test]

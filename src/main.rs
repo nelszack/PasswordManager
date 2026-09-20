@@ -18,6 +18,7 @@ use crate::{
     client::send_command,
     config::{try_read_config, try_update},
     encryption::prompt_for_password,
+    file::{resolve_key_path, resolve_new_key_path},
     password::{
         PasswordOptions, generate_passphrase, generate_password as make_password,
         generate_password_with_options, print_generated_password, print_password_strength,
@@ -80,6 +81,20 @@ fn custom_fields(
     Ok(parsed)
 }
 
+fn resolved_new_key(path: String) -> PasswordType {
+    PasswordType::Key(
+        resolve_new_key_path(&path)
+            .unwrap_or_else(|error| client::exit_error(&format!("invalid key path: {error}"), 2)),
+    )
+}
+
+fn resolved_key(path: String) -> PasswordType {
+    PasswordType::Key(
+        resolve_key_path(&path)
+            .unwrap_or_else(|error| client::exit_error(&format!("invalid key path: {error}"), 2)),
+    )
+}
+
 struct SilentPipe(io::Stdout);
 
 impl io::Write for SilentPipe {
@@ -96,12 +111,7 @@ impl io::Write for SilentPipe {
 
 #[tokio::main]
 async fn main() {
-    if native_messaging::invoked_directly() {
-        if let Err(error) = native_messaging::run() {
-            eprintln!("Native messaging host error: {error}");
-        }
-        return;
-    }
+    let invoked_as_native_host = native_messaging::invoked_directly();
     let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
         eprintln!("Error: could not locate the application data directory.");
         return;
@@ -114,13 +124,34 @@ async fn main() {
         return;
     }
     let config_file = config_path.join("config.toml");
+    if invoked_as_native_host {
+        let conf = match try_read_config(&config_file) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("Native messaging host error: {error}");
+                return;
+            }
+        };
+        client::configure_port(conf.server.port);
+        if let Err(error) = native_messaging::run() {
+            eprintln!("Native messaging host error: {error}");
+        }
+        return;
+    }
     let cli = cli_parse();
     client::configure_output(cli.json, cli.quiet);
     let conf = match try_read_config(&config_file) {
         Ok(config) => config,
         Err(error) => client::exit_error(&error, 1),
     };
-    let server_running = is_running();
+    let port = cli.port.unwrap_or(conf.server.port);
+    client::configure_port(port);
+    let server_running = is_running(port);
+    let configured_server_running = if port == conf.server.port {
+        server_running
+    } else {
+        is_running(conf.server.port)
+    };
     let Some(command) = cli.command else {
         let _ = Cli::command().print_help();
         println!();
@@ -218,6 +249,16 @@ async fn main() {
             }
         },
         (CliCommands::Config(command), _) => {
+            if command
+                .server_port
+                .is_some_and(|new_port| new_port != conf.server.port)
+                && configured_server_running
+            {
+                client::exit_error(
+                    "stop the running server before changing its configured port",
+                    1,
+                );
+            }
             if let Err(error) = try_update(conf, command, &config_file) {
                 client::exit_error(&error, 1);
             }
@@ -228,7 +269,7 @@ async fn main() {
         (CliCommands::Unlock { key, timeout }, true) => {
             send_command(ServerCommand::Unlock(UnlockInfo {
                 key: if let Some(k) = key {
-                    PasswordType::Key(k)
+                    resolved_key(k)
                 } else {
                     PasswordType::Password(
                         rpassword::prompt_password("Enter master password: ").unwrap_or_else(
@@ -248,12 +289,13 @@ async fn main() {
             send_command(ServerCommand::Kill);
         }
         (CliCommands::Start, false) | (CliCommands::Start, true) => {
-            if let Err(error) = start() {
+            if let Err(error) = start(port) {
                 client::exit_error(&error, 1);
             }
         }
         (CliCommands::Run, false) => {
             if let Err(error) = server(
+                port,
                 conf.recovery.password_history_limit,
                 conf.recovery.trash_retention_days,
             )
@@ -265,14 +307,14 @@ async fn main() {
         (CliCommands::Run, true) => println!("Server is already running."),
         (CliCommands::New { key_path }, true) => {
             send_command(ServerCommand::New(if let Some(kp) = key_path {
-                PasswordType::Key(kp)
+                resolved_new_key(kp)
             } else {
                 PasswordType::Password(prompt_for_password())
             }));
         }
         (CliCommands::Rekey { key_path }, true) => {
             send_command(ServerCommand::Rekey(if let Some(kp) = key_path {
-                PasswordType::Key(kp)
+                resolved_new_key(kp)
             } else {
                 PasswordType::Password(prompt_for_password())
             }));
@@ -331,6 +373,7 @@ async fn main() {
                 entry_name,
                 vault,
                 key,
+                keep_key,
             }),
             true,
         ) => match (id, entry_name, vault) {
@@ -341,11 +384,14 @@ async fn main() {
                 send_command(ServerCommand::Delete(Target::Name(n)));
             }
             (None, None, true) => {
-                send_command(ServerCommand::Delete(Target::Vault(if let Some(k) = key {
-                    PasswordType::Key(k)
-                } else {
-                    PasswordType::Password(prompt_for_password())
-                })));
+                send_command(ServerCommand::Delete(Target::Vault {
+                    key: if let Some(k) = key {
+                        resolved_key(k)
+                    } else {
+                        PasswordType::Password(prompt_for_password())
+                    },
+                    keep_key,
+                }));
             }
             _ => unreachable!("clap requires exactly one delete target"),
         },
@@ -427,7 +473,7 @@ async fn main() {
                 path,
                 key_pass: key_path.map_or_else(
                     || PasswordType::Password(prompt_for_password()),
-                    PasswordType::Key,
+                    resolved_key,
                 ),
                 force,
             })),
@@ -449,7 +495,7 @@ async fn main() {
                             ),
                         )
                     },
-                    PasswordType::Key,
+                    resolved_key,
                 );
                 send_command(ServerCommand::RestoreBackup(BackupRequest {
                     path,
@@ -526,7 +572,8 @@ async fn main() {
                 PasswordType::Password(String::new())
             } else {
                 match key_path {
-                    Some(path) => PasswordType::Key(path),
+                    Some(path) if new => resolved_new_key(path),
+                    Some(path) => resolved_key(path),
                     None => PasswordType::Password(prompt_for_password()),
                 }
             };

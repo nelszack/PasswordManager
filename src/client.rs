@@ -2,9 +2,9 @@ use crate::file::{TOKEN_FILE, data_dir};
 use crate::types::*;
 use crate::{
     protocol::{ProtocolResponse, ResponseCode, decode_responses},
-    server::ADDR,
+    server::{DEFAULT_PORT, server_addr},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -15,10 +15,16 @@ use zeroize::Zeroize;
 
 static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
 static QUIET_OUTPUT: AtomicBool = AtomicBool::new(false);
+static SERVER_PORT: AtomicU16 = AtomicU16::new(DEFAULT_PORT);
+const MAX_SERVER_RESPONSE: usize = 128 * 1024 * 1024;
 
 pub fn configure_output(json: bool, quiet: bool) {
     JSON_OUTPUT.store(json, Ordering::Relaxed);
     QUIET_OUTPUT.store(quiet, Ordering::Relaxed);
+}
+
+pub fn configure_port(port: u16) {
+    SERVER_PORT.store(port, Ordering::Relaxed);
 }
 
 pub fn print_error(error: &str) {
@@ -98,7 +104,8 @@ fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, Stri
     } else {
         Duration::from_secs(5)
     };
-    let mut connection = TcpStream::connect(ADDR)
+    let address = server_addr(SERVER_PORT.load(Ordering::Relaxed));
+    let mut connection = TcpStream::connect(address)
         .map_err(|e| format!("could not connect to the password manager server: {e}"))?;
     connection
         .set_read_timeout(Some(read_timeout))
@@ -122,7 +129,13 @@ fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, Stri
     loop {
         match connection.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => total.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                if total.len().saturating_add(n) > MAX_SERVER_RESPONSE {
+                    total.zeroize();
+                    return Err("server response exceeds the 128 MiB limit".to_string());
+                }
+                total.extend_from_slice(&buf[..n]);
+            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -132,10 +145,6 @@ fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, Stri
                 return Err("server response timed out".to_string());
             }
             Err(e) => return Err(format!("could not read server response: {e}")),
-        }
-        if total.len() > 1024 * 1024 {
-            eprintln!("Response too large, truncating.");
-            break;
         }
     }
     decode_responses(&total)

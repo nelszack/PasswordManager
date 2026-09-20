@@ -16,6 +16,8 @@ pub struct Config {
     pub copy: CopyConfig,
     #[serde(default)]
     pub recovery: RecoveryConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -45,7 +47,14 @@ pub struct UnlockConfig {
     pub timeout: u64,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub port: u16,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[serde(default)]
 pub struct RecoveryConfig {
     pub password_history_limit: usize,
     /// Zero disables automatic trash expiration.
@@ -89,6 +98,14 @@ impl Default for UnlockConfig {
     }
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            port: crate::server::DEFAULT_PORT,
+        }
+    }
+}
+
 fn write_file(config: &Config, config_path: &Path) -> Result<(), String> {
     let toml_string = toml::to_string(config)
         .map_err(|error| format!("could not encode configuration: {error}"))?;
@@ -120,6 +137,21 @@ fn default_config(write_to_file: bool, config_path: &Path) -> Result<Config, Str
 fn is_config(config_path: &Path) -> bool {
     config_path.exists()
 }
+
+fn has_missing_fields(current: &serde_json::Value, complete: &serde_json::Value) -> bool {
+    let serde_json::Value::Object(complete) = complete else {
+        return false;
+    };
+    let serde_json::Value::Object(current) = current else {
+        return true;
+    };
+    complete.iter().any(|(name, complete_value)| {
+        current
+            .get(name)
+            .is_none_or(|current_value| has_missing_fields(current_value, complete_value))
+    })
+}
+
 pub fn try_read_config(config_path: &Path) -> Result<Config, String> {
     if !is_config(config_path) {
         return default_config(true, config_path);
@@ -130,12 +162,26 @@ pub fn try_read_config(config_path: &Path) -> Result<Config, String> {
             config_path.display()
         )
     })?;
-    toml::from_str(&txt).map_err(|error| {
+    let config: Config = toml::from_str(&txt).map_err(|error| {
         format!(
             "invalid configuration at {}; the file was left unchanged: {error}",
             config_path.display()
         )
-    })
+    })?;
+    if config.server.port == 0 {
+        return Err(format!(
+            "invalid configuration at {}; server.port must be between 1 and 65535; the file was left unchanged",
+            config_path.display()
+        ));
+    }
+    let current: serde_json::Value = toml::from_str(&txt)
+        .map_err(|error| format!("could not inspect configuration fields: {error}"))?;
+    let complete = serde_json::to_value(&config)
+        .map_err(|error| format!("could not inspect configuration defaults: {error}"))?;
+    if has_missing_fields(&current, &complete) {
+        write_file(&config, config_path)?;
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -180,6 +226,9 @@ pub fn try_update(
     if let Some(i) = modify.trash_retention_days {
         config.recovery.trash_retention_days = i;
     }
+    if let Some(i) = modify.server_port {
+        config.server.port = i;
+    }
     write_file(&config, config_path)
 }
 
@@ -216,6 +265,7 @@ mod test {
                 unlock: UnlockConfig { timeout: 15 * 60 },
                 copy: CopyConfig { passwords: true },
                 recovery: RecoveryConfig::default(),
+                server: ServerConfig::default(),
             }
         );
         write_file(&conf1, config_path).unwrap();
@@ -236,6 +286,7 @@ mod test {
                 unlock_timeout: Some(15),
                 password_history_limit: Some(25),
                 trash_retention_days: Some(30),
+                server_port: Some(8787),
             },
             config_path,
         );
@@ -254,6 +305,7 @@ mod test {
                     password_history_limit: 25,
                     trash_retention_days: 30,
                 },
+                server: ServerConfig { port: 8787 },
             }
         );
         write_file(&conf1, config_path).unwrap();
@@ -304,6 +356,7 @@ mod test {
         assert!(config.copy.passwords);
         assert_eq!(config.recovery.password_history_limit, 10);
         assert_eq!(config.recovery.trash_retention_days, 0);
+        assert_eq!(config.server.port, crate::server::DEFAULT_PORT);
     }
     #[test]
     fn test_reset_to_default() {
@@ -369,6 +422,7 @@ copy_pass = false
         assert_eq!(conf.clipboard.timeout, 30);
         assert_eq!(conf.unlock.timeout, 5);
         assert!(!conf.copy.passwords);
+        assert_eq!(conf.server.port, crate::server::DEFAULT_PORT);
         fs::remove_file(&config_path).unwrap();
     }
 
@@ -430,6 +484,7 @@ copy_pass = false
             unlock: UnlockConfig { timeout: 15 },
             copy: CopyConfig { passwords: false },
             recovery: RecoveryConfig::default(),
+            server: ServerConfig { port: 9876 },
         };
 
         write_file(&original, &config_path).unwrap();
@@ -530,6 +585,19 @@ copy_pass = false
     }
 
     #[test]
+    fn zero_server_port_is_rejected_without_overwriting_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let invalid = b"[server]\nport = 0\n";
+        fs::write(&config_path, invalid).unwrap();
+
+        let error = try_read_config(&config_path).unwrap_err();
+
+        assert!(error.contains("server.port must be between 1 and 65535"));
+        assert_eq!(fs::read(&config_path).unwrap(), invalid);
+    }
+
+    #[test]
     fn password_copy_default_is_configurable() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
@@ -544,5 +612,63 @@ copy_pass = false
         .unwrap();
 
         assert!(!try_read_config(&config_path).unwrap().copy.passwords);
+    }
+
+    #[test]
+    fn missing_settings_are_added_with_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"[genpass]
+length = 24
+
+[recovery]
+password_history_limit = 4
+"#,
+        )
+        .unwrap();
+
+        let config = try_read_config(&config_path).unwrap();
+
+        assert_eq!(config.genpass.length, 24);
+        assert_eq!(config.recovery.password_history_limit, 4);
+        assert_eq!(config.recovery.trash_retention_days, 0);
+        assert_eq!(config.server.port, crate::server::DEFAULT_PORT);
+        let updated = fs::read_to_string(&config_path).unwrap();
+        assert!(updated.contains("stats = false"));
+        assert!(updated.contains("trash_retention_days = 0"));
+        assert!(updated.contains(&format!("port = {}", crate::server::DEFAULT_PORT)));
+    }
+
+    #[test]
+    fn complete_config_is_not_rewritten_during_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let complete = format!(
+            r#"# Keep this comment and formatting.
+[genpass]
+length=12
+stats=false
+copy=true
+[clipboard]
+timeout=15
+[unlock]
+timeout=900
+[copy]
+passwords=true
+[recovery]
+password_history_limit=10
+trash_retention_days=0
+[server]
+port={}
+"#,
+            crate::server::DEFAULT_PORT
+        );
+        fs::write(&config_path, &complete).unwrap();
+
+        try_read_config(&config_path).unwrap();
+
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), complete);
     }
 }

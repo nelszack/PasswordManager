@@ -1,11 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { requestRoute, resultRoute } = require("./relay.js");
+const { requestRoute, resultRoute, relayKey, authorizeCredentialRequest } = require("./relay.js");
 
 const token = "01234567-89ab-4cde-8fab-0123456789ab";
 
 test("valid iframe credentials route only to the top frame", () => {
-    const data = { token, domain: "login.example.com", username: "alice", password: "secret" };
+    const data = { token, domain: "https://login.example.com", username: "alice", password: "secret" };
     const route = requestRoute(data, {
         tab: { id: 42 },
         frameId: 7,
@@ -20,7 +20,7 @@ test("valid iframe credentials route only to the top frame", () => {
 });
 
 test("credential relay rejects top frames, mismatched origins, and malformed tokens", () => {
-    const data = { token, domain: "login.example.com", username: "alice", password: "secret" };
+    const data = { token, domain: "https://login.example.com", username: "alice", password: "secret" };
     assert.equal(requestRoute(data, {
         tab: { id: 42 }, frameId: 0, url: "https://login.example.com"
     }), null);
@@ -30,6 +30,18 @@ test("credential relay rejects top frames, mismatched origins, and malformed tok
     assert.equal(requestRoute({ ...data, token: "predictable" }, {
         tab: { id: 42 }, frameId: 7, url: "https://login.example.com"
     }), null);
+});
+
+test("relayed credential operations require the authorized top frame and token", () => {
+    const pending = new Map([[relayKey(42, token), {
+        sourceFrameId: 7,
+        domain: "https://login.example.com",
+        expiresAt: Date.now() + 1000
+    }]]);
+    const sender = { tab: { id: 42 }, frameId: 0 };
+    assert.equal(authorizeCredentialRequest({ token, sourceFrameId: 7 }, sender, pending)?.domain,
+        "https://login.example.com");
+    assert.equal(authorizeCredentialRequest({ token, sourceFrameId: 8 }, sender, pending), null);
 });
 
 test("only the top frame can return a validated result to its source iframe", () => {

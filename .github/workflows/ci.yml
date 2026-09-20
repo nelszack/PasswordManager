@@ -39,9 +39,7 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
           node --test extension/*.test.js
       - name: Run tests
-        run: cargo test --locked
-      - name: Check optional legacy HTTP compatibility
-        run: cargo check --locked --features legacy-http
+        run: cargo test --locked --all-features
       - name: Lint all targets
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 

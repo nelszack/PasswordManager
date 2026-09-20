@@ -11,14 +11,16 @@
     function requestRoute(data, sender) {
         const tabId = sender?.tab?.id;
         const sourceFrameId = sender?.frameId;
-        let senderDomain;
+        let senderOrigin;
         try {
-            senderDomain = new URL(sender?.url).hostname;
+            const url = new URL(sender?.url);
+            if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+            senderOrigin = url.origin.toLowerCase();
         } catch (_) {
             return null;
         }
         if (tabId == null || !Number.isInteger(sourceFrameId) || sourceFrameId <= 0
-            || senderDomain !== data?.domain
+            || senderOrigin !== data?.domain
             || !TOKEN_RE.test(data?.token || "")
             || typeof data?.username !== "string"
             || typeof data?.password !== "string") {
@@ -48,5 +50,25 @@
         };
     }
 
-    return { requestRoute, resultRoute };
+
+    function relayKey(tabId, token) {
+        return `${tabId}:${token}`;
+    }
+
+    function authorizeCredentialRequest(request, sender, pendingRelays, consume = false) {
+        const tabId = sender?.tab?.id;
+        if (tabId == null || sender?.frameId !== 0 || !TOKEN_RE.test(request?.token || "")) {
+            return null;
+        }
+        const key = relayKey(tabId, request.token);
+        const relay = pendingRelays.get(key);
+        if (!relay || relay.sourceFrameId !== request.sourceFrameId || relay.expiresAt <= Date.now()) {
+            pendingRelays.delete(key);
+            return null;
+        }
+        if (consume) pendingRelays.delete(key);
+        return relay;
+    }
+
+    return { requestRoute, resultRoute, relayKey, authorizeCredentialRequest };
 });

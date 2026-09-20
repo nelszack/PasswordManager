@@ -1,4 +1,4 @@
-use crate::file::{data_dir, set_private_perms, sync_parent};
+use crate::file::{key_file_path, new_key_file_path, set_private_perms, sync_parent};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -48,20 +48,20 @@ fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
         .create_new(true)
         .open(path)
         .map_err(|e| format!("could not create key file {}: {e}", path.display()))?;
-    let result = file
-        .write_all(&key)
-        .map_err(|e| format!("could not write key file {}: {e}", path.display()))
+    let result = set_private_perms(path)
+        .map_err(|e| format!("could not protect key file {}: {e}", path.display()))
         .and_then(|_| {
-            file.sync_all()
-                .map_err(|e| format!("could not sync key file {}: {e}", path.display()))
-        })
-        .and_then(|_| {
-            set_private_perms(path)
-                .map_err(|e| format!("could not protect key file {}: {e}", path.display()))
-        })
-        .and_then(|_| {
-            sync_parent(path)
-                .map_err(|e| format!("could not sync key directory {}: {e}", path.display()))
+            file.write_all(&key)
+                .map_err(|e| format!("could not write key file {}: {e}", path.display()))
+                .and_then(|_| {
+                    file.sync_all()
+                        .map_err(|e| format!("could not sync key file {}: {e}", path.display()))
+                })
+                .and_then(|_| {
+                    sync_parent(path).map_err(|e| {
+                        format!("could not sync key directory {}: {e}", path.display())
+                    })
+                })
         });
     if let Err(error) = result {
         let _ = fs::remove_file(path);
@@ -107,7 +107,11 @@ pub fn try_gen_master_key(key_pass: &mut PasswordType, new: bool) -> Result<[u8;
     let key =
         match key_pass {
             PasswordType::Key(key) => {
-                let file_path = data_dir().join(key);
+                let file_path = if new {
+                    new_key_file_path(key)?
+                } else {
+                    key_file_path(key)?
+                };
                 if new {
                     master_key_from_keyfile(&generate_key(&file_path)?)
                 } else {
@@ -132,7 +136,7 @@ pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
 pub fn try_gen_master_key_legacy(key_pass: &mut PasswordType) -> Result<[u8; 32], String> {
     let key = match key_pass {
         PasswordType::Key(key) => {
-            let file_path = data_dir().join(key);
+            let file_path = key_file_path(key)?;
             master_key_from_keyfile(
                 &read(&file_path)
                     .map_err(|e| format!("could not read key file {}: {e}", file_path.display()))?,
@@ -276,7 +280,7 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{fs, path::Path};
+    use std::fs;
     #[test]
     fn test_encrypt_decrypt_pass() {
         let plaintext = "this is a test".as_bytes();
@@ -288,14 +292,17 @@ mod test {
     #[test]
     fn test_encrypt_decrypt_key() {
         crate::file::init_test_data_dir();
-        let temp = Path::new("temp.enc");
-        gen_master_key(&mut PasswordType::Key("temp.enc".to_string()), true);
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("temp.enc");
+        gen_master_key(
+            &mut PasswordType::Key(temp.to_string_lossy().into_owned()),
+            true,
+        );
         let plaintext = "this is a test".as_bytes();
         let mut pass = PasswordType::Key(temp.to_str().unwrap().to_string());
         let encrypt = encrypt_file(&mut pass, plaintext);
         let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        let file_path = data_dir().join(temp);
-        fs::remove_file(file_path).unwrap();
+        fs::remove_file(temp).unwrap();
         assert_eq!(decrypt, plaintext)
     }
     #[test]

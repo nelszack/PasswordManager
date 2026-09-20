@@ -49,7 +49,7 @@ impl Zeroize for Target {
         match self {
             Self::Id(id) => id.zeroize(),
             Self::Name(name) | Self::Url(name) => name.zeroize(),
-            Self::Vault(key) => key.zeroize(),
+            Self::Vault { key, .. } => key.zeroize(),
         }
     }
 }
@@ -151,23 +151,34 @@ pub enum ServerCommand {
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ItemKind {
+    /// Website or application credentials with username, password, and optional TOTP.
     #[default]
     Login,
+    /// Free-form confidential text.
     SecureNote,
+    /// Credit, debit, or other payment-card details.
     PaymentCard,
+    /// Personal identity or contact information.
     Identity,
+    /// Wireless network credentials.
     Wifi,
+    /// Software product key and license details.
     SoftwareLicense,
+    /// SSH private key or related connection details.
     SshKey,
+    /// API token, client secret, or other service credential.
     ApiSecret,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConflictPolicy {
+    /// Leave the existing item unchanged and omit the imported duplicate.
     #[default]
     Skip,
+    /// Replace the existing item with the imported item.
     Replace,
+    /// Import the duplicate as another item with a distinct name.
     KeepBoth,
 }
 
@@ -217,11 +228,16 @@ impl std::fmt::Display for ItemKind {
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum SortField {
+    /// Stable numeric entry ID.
     #[default]
     Id,
+    /// Item name, compared case-insensitively.
     Name,
+    /// Creation time.
     Created,
+    /// Last modification time.
     Modified,
+    /// Age of the current password.
     PasswordAge,
 }
 
@@ -394,7 +410,7 @@ pub enum Target {
     Id(usize),
     Name(String),
     Url(String),
-    Vault(PasswordType),
+    Vault { key: PasswordType, keep_key: bool },
 }
 
 #[derive(Serialize, Deserialize)]

@@ -1,13 +1,4 @@
 // ===============================
-// Sanitize user-controlled strings before inserting into HTML
-// ===============================
-function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.appendChild(document.createTextNode(str));
-    return div.innerHTML;
-}
-
-// ===============================
 // Track dropdowns so they can be repositioned
 // as the page loads / layout changes
 // ===============================
@@ -198,6 +189,26 @@ function fetchAccounts(domain) {
     });
 }
 
+function fetchRelayedAccounts(token, sourceFrameId) {
+    return new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+            { action: "getRelayedCredentials", token, sourceFrameId },
+            (response) => {
+                let accounts = [];
+                if (response && response.success) {
+                    try {
+                        accounts = JSON.parse(response.data);
+                        if (!Array.isArray(accounts)) accounts = [];
+                    } catch (_) {
+                        accounts = [];
+                    }
+                }
+                resolve(accounts);
+            }
+        );
+    });
+}
+
 // Card and identity data is fetched only after the user opens its picker.
 // This avoids placing unrelated plaintext vault items into every page at load.
 function fetchAutofillItems() {
@@ -243,6 +254,111 @@ function fetchTotp(id) {
             }
         });
     });
+}
+
+const securePickerResolvers = new Map();
+
+function openSecurePicker(kind) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ action: "openSecurePicker", kind }, response => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+                return;
+            }
+            if (!response?.success || !response.token) {
+                reject(new Error(response?.error || "Could not open secure picker"));
+                return;
+            }
+            const timer = setTimeout(() => {
+                securePickerResolvers.delete(response.token);
+                resolve(null);
+            }, 65_000);
+            securePickerResolvers.set(response.token, payload => {
+                clearTimeout(timer);
+                resolve(payload);
+            });
+        });
+    });
+}
+
+chrome.runtime.onMessage.addListener(message => {
+    if (message.action !== "securePickerResult") return;
+    const resolver = securePickerResolvers.get(message.token);
+    if (!resolver) return;
+    securePickerResolvers.delete(message.token);
+    resolver(message.payload);
+});
+
+function createSecurePickerButton(input, kind, icon, title, onSelection) {
+    const marker = `hasSecurePicker${kind.replace(/[^a-z]/g, "")}`;
+    if (input.dataset[marker]) return;
+    input.dataset[marker] = "true";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "my-extension-ui";
+    button.innerText = icon;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    Object.assign(button.style, {
+        position: "fixed", border: "none", background: "transparent", cursor: "pointer",
+        fontSize: "16px", zIndex: "2147483647", padding: "0", margin: "0", display: "none"
+    });
+    document.body.appendChild(button);
+    const positionButton = () => {
+        if (!isElementVisible(input)) {
+            button.style.display = "none";
+            return;
+        }
+        const rect = input.getBoundingClientRect();
+        button.style.display = rect.width && rect.height ? "" : "none";
+        button.style.left = rect.right - 24 + "px";
+        button.style.top = rect.top + rect.height / 2 - 14 + "px";
+    };
+    positionButton();
+    registerPositionedControl(input, button, null, positionButton, () => {});
+    button.addEventListener("click", async event => {
+        if (!event.isTrusted) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const originalIcon = button.innerText;
+        try {
+            const selection = await openSecurePicker(kind);
+            if (selection) onSelection(selection);
+        } catch (error) {
+            button.innerText = "⚠️";
+            button.title = error?.message || "Could not open secure picker";
+            setTimeout(() => {
+                button.innerText = originalIcon;
+                button.title = title;
+            }, 5000);
+        }
+    });
+}
+
+function createSecureCredentialButton(input) {
+    createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", account => {
+        const fields = credentialFields(input);
+        fillInput(fields.usernameField, accountUsername(account));
+        fillInput(fields.passwordField, account.password);
+        (fields.passwordField || fields.usernameField)?.focus();
+    });
+}
+
+function createSecureTotpButton(input) {
+    createSecurePickerButton(input, "totp", "🔐", "Choose authenticator code", totp => {
+        fillInput(input, totp.code);
+        input.focus();
+    });
+}
+
+function createSecureTypedButton(input, kind) {
+    createSecurePickerButton(
+        input,
+        kind,
+        kind === "payment-card" ? "💳" : "👤",
+        kind === "payment-card" ? "Choose payment card" : "Choose identity",
+        item => fillTypedItem(input, item)
+    );
 }
 
 function accountUsername(account) {
@@ -371,6 +487,7 @@ function createDropdownButton(input, accounts) {
             });
 
             item.addEventListener("click", (e) => {
+                if (!e.isTrusted) return;
                 e.preventDefault();
 
                 const fields = credentialFields(input);
@@ -388,6 +505,7 @@ function createDropdownButton(input, accounts) {
     buildMenuItems(accounts);
 
     button.addEventListener("click", async (e) => {
+        if (!e.isTrusted) return;
         e.preventDefault();
         e.stopPropagation();
 
@@ -503,6 +621,7 @@ function createTotpButton(input, accounts) {
             item.addEventListener("mouseenter", () => { item.style.background = "#eee"; });
             item.addEventListener("mouseleave", () => { item.style.background = "#fff"; });
             item.addEventListener("click", async (event) => {
+                if (!event.isTrusted) return;
                 event.preventDefault();
                 event.stopPropagation();
                 item.disabled = true;
@@ -531,6 +650,7 @@ function createTotpButton(input, accounts) {
     registerPositionedControl(input, button, menu, positionButton, closeOnOutsideClick);
 
     button.addEventListener("click", async (event) => {
+        if (!event.isTrusted) return;
         event.preventDefault();
         event.stopPropagation();
         positionButton();
@@ -991,15 +1111,15 @@ function attachToInputs(accounts) {
         if (input.classList.contains("my-extension-ui")) return;
         const typedKind = typedAutofillKind(input);
         if (typedKind) {
-            createTypedAutofillButton(input, typedKind);
+            createSecureTypedButton(input, typedKind);
         } else if (isCredentialInput(input)) {
-            createDropdownButton(input, accounts);
+            createSecureCredentialButton(input);
         }
         if (isUsableInput(input) && input.type === "password" && isNewPasswordInput(input)) {
             createGeneratorButton(input);
         }
         if (isTotpInput(input)) {
-            createTotpButton(input, accounts);
+            createSecureTotpButton(input);
         }
     });
 }
@@ -1044,7 +1164,7 @@ function observeInputs(accounts) {
 function getDomainFromUrl(url) {
     try {
         const urlObj = new URL(url);
-        return urlObj.hostname;
+        return urlObj.origin.toLowerCase();
     } catch {
         return url;
     }
@@ -1163,6 +1283,11 @@ let modalOpen = false;
 function showPromptModal(title, message, showUpdateOption = false, oldUsername = "", oldPassword = "", showNameInput = false, existingName = "", showUsernameInput = false, usernameValue = "") {
     modalOpen = true;
     return new Promise((resolve) => {
+        const host = document.createElement("div");
+        Object.assign(host.style, {
+            position: "fixed", inset: "0", zIndex: "2147483647", pointerEvents: "all"
+        });
+        const shadow = host.attachShadow({ mode: "closed" });
         const overlay = document.createElement("div");
         Object.assign(overlay.style, {
             position: "fixed",
@@ -1195,63 +1320,91 @@ function showPromptModal(title, message, showUpdateOption = false, oldUsername =
         modal.addEventListener("click", (e) => e.stopPropagation());
         modal.addEventListener("keydown", (e) => e.stopPropagation());
 
-        const nameInputHTML = showNameInput ? `
-            <input id="pmNameInput" type="text" placeholder="Name (e.g., Work, Personal)" value="${escapeHtml(existingName)}" style="padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;" />
-        ` : "";
+        const heading = document.createElement("h3");
+        heading.textContent = title;
+        heading.style.margin = "0 0 10px 0";
+        modal.appendChild(heading);
 
-        const usernameInputHTML = showUsernameInput ? `
-            <input id="pmUsernameInput" type="text" placeholder="Username" value="${escapeHtml(usernameValue)}" style="padding: 8px; margin-bottom: 15px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;" />
-        ` : "";
+        const description = document.createElement("p");
+        description.textContent = message;
+        Object.assign(description.style, { margin: "0 0 15px 0", color: "#666" });
+        modal.appendChild(description);
 
-        modal.innerHTML = `
-            <h3 style="margin: 0 0 10px 0;">${title}</h3>
-            <p style="margin: 0 0 15px 0; color: #666;">${message}</p>
-            ${usernameInputHTML}
-            ${nameInputHTML}
-            <div style="display: flex; flex-direction: column; gap: 8px;">
-                <button type="button" id="pmAddBtn" style="padding: 10px; background: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer;">Add as New Account</button>
-                ${showUpdateOption ? `<button type="button" id="pmUpdateBtn" style="padding: 10px; background: #34a853; color: white; border: none; border-radius: 4px; cursor: pointer;">Update Existing</button>` : ""}
-                <button type="button" id="pmCancelBtn" style="padding: 10px; background: #ccc; color: #333; border: none; border-radius: 4px; cursor: pointer;">Ignore</button>
-            </div>
-        `;
+        const makeInput = (placeholder, value) => {
+            const field = document.createElement("input");
+            field.type = "text";
+            field.placeholder = placeholder;
+            field.value = value;
+            Object.assign(field.style, {
+                padding: "8px", marginBottom: "15px", width: "100%",
+                boxSizing: "border-box", border: "1px solid #ccc", borderRadius: "4px"
+            });
+            modal.appendChild(field);
+            return field;
+        };
+        const usernameInput = showUsernameInput ? makeInput("Username", usernameValue) : null;
+        const nameInput = showNameInput
+            ? makeInput("Name (e.g., Work, Personal)", existingName)
+            : null;
+
+        const actions = document.createElement("div");
+        Object.assign(actions.style, { display: "flex", flexDirection: "column", gap: "8px" });
+        modal.appendChild(actions);
+        const makeButton = (label, background) => {
+            const control = document.createElement("button");
+            control.type = "button";
+            control.textContent = label;
+            Object.assign(control.style, {
+                padding: "10px", background, color: background === "#ccc" ? "#333" : "white",
+                border: "none", borderRadius: "4px", cursor: "pointer"
+            });
+            actions.appendChild(control);
+            return control;
+        };
+        const addButton = makeButton("Add as New Account", "#4285f4");
+        const updateButton = showUpdateOption ? makeButton("Update Existing", "#34a853") : null;
+        const cancelButton = makeButton("Ignore", "#ccc");
 
         overlay.appendChild(modal);
-        document.body.appendChild(overlay);
+        shadow.appendChild(overlay);
+        document.documentElement.appendChild(host);
 
         const cleanup = () => {
             modalOpen = false;
         };
 
-        document.getElementById("pmAddBtn").addEventListener("click", (e) => {
+        addButton.addEventListener("click", (e) => {
+            if (!e.isTrusted) return;
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            const name = showNameInput ? document.getElementById("pmNameInput").value.trim() : "";
-            const username = showUsernameInput ? document.getElementById("pmUsernameInput").value.trim() : "";
-            document.body.removeChild(overlay);
+            const name = nameInput ? nameInput.value.trim() : "";
+            const username = usernameInput ? usernameInput.value.trim() : "";
+            host.remove();
             cleanup();
             resolve({ action: "add", name, username });
         });
 
-        const updateBtn = document.getElementById("pmUpdateBtn");
-        if (updateBtn) {
-            updateBtn.addEventListener("click", (e) => {
+        if (updateButton) {
+            updateButton.addEventListener("click", (e) => {
+                if (!e.isTrusted) return;
                 e.preventDefault();
                 e.stopPropagation();
                 e.stopImmediatePropagation();
-                const name = showNameInput ? document.getElementById("pmNameInput").value.trim() : existingName;
-                const username = showUsernameInput ? document.getElementById("pmUsernameInput").value.trim() : "";
-                document.body.removeChild(overlay);
+                const name = nameInput ? nameInput.value.trim() : existingName;
+                const username = usernameInput ? usernameInput.value.trim() : "";
+                host.remove();
                 cleanup();
                 resolve({ action: "update", name, username });
             });
         }
 
-        document.getElementById("pmCancelBtn").addEventListener("click", (e) => {
+        cancelButton.addEventListener("click", (e) => {
+            if (!e.isTrusted) return;
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            document.body.removeChild(overlay);
+            host.remove();
             cleanup();
             resolve({ action: "cancel" });
         });
@@ -1262,17 +1415,25 @@ function showPromptModal(title, message, showUpdateOption = false, oldUsername =
 // Ask the user whether to save/update when credentials
 // don't match an existing entry exactly
 // ===============================
-async function promptForCredentials(username, password, accounts, domain = currentDomain) {
+async function promptForCredentials(
+    username,
+    password,
+    accounts,
+    domain = currentDomain,
+    trackPending = true
+) {
     const existing = findAccountByUsername(username, accounts);
     const hasAccounts = accounts.length > 0;
     const updateTarget = existing || (hasAccounts ? accounts[0] : null);
 
-    setPopupPending({
-        username,
-        password,
-        accountName: updateTarget ? updateTarget.name : "",
-        hasAccounts
-    }, domain);
+    if (trackPending) {
+        setPopupPending({
+            username,
+            password,
+            accountName: updateTarget ? updateTarget.name : "",
+            hasAccounts
+        }, domain);
+    }
 
     const message = existing
         ? `An account with this username already exists, but the password is different. What would you like to do?`
@@ -1337,7 +1498,7 @@ function relayLoginToParent(username, password, accounts) {
 // Track popup state across pages
 // ===============================
 let popupResolved = false;
-let currentDomain = window.location.hostname;
+let currentDomain = window.location.origin.toLowerCase();
 
 function isSameSite(a, b) {
     return Boolean(a && b && a === b);
@@ -1518,38 +1679,40 @@ async function initExtension() {
         });
     }, true);
 
-    async function handleRelayedLogin(data) {
+    async function handleRelayedLogin(data, sourceFrameId) {
         if (modalOpen || popupResolved) {
             return { action: "ignore", token: data.token };
         }
 
         modalOpen = true;
-        const domainAccounts = await fetchAccounts(data.domain);
+        const domainAccounts = await fetchRelayedAccounts(data.token, sourceFrameId);
         const { result, updateTarget } = await promptForCredentials(
             data.username,
             data.password,
             domainAccounts,
-            data.domain
+            data.domain,
+            false
         );
 
         modalOpen = false;
         popupResolved = true;
-        clearPopupPending();
 
         const saveUsername = result.username || data.username;
 
         if (result.action === "add") {
             chrome.runtime.sendMessage({
-                action: "saveCredentials",
-                domain: data.domain,
+                action: "saveRelayedCredentials",
+                token: data.token,
+                sourceFrameId,
                 username: saveUsername,
                 password: data.password,
                 name: result.name
             });
         } else if (result.action === "update" && updateTarget) {
             chrome.runtime.sendMessage({
-                action: "updateCredentials",
-                domain: data.domain,
+                action: "updateRelayedCredentials",
+                token: data.token,
+                sourceFrameId,
                 username: saveUsername,
                 password: data.password,
                 name: updateTarget.name,
@@ -1570,7 +1733,7 @@ async function initExtension() {
             return;
         }
         if (message.action === "relayedLogin" && window === window.top) {
-            handleRelayedLogin(message.data)
+            handleRelayedLogin(message.data, message.sourceFrameId)
                 .then(data => chrome.runtime.sendMessage({
                     action: "relayLoginResult",
                     sourceFrameId: message.sourceFrameId,

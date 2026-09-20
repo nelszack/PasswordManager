@@ -15,6 +15,7 @@ function setup({ password = "secret", handle = async () => {} } = {}) {
     const event = {
         target: form,
         submitter: {},
+        isTrusted: true,
         preventDefault: () => calls.push("prevent")
     };
     return { coordinator, event, calls };
@@ -35,6 +36,13 @@ test("submission is cancelled synchronously before asynchronous work", async () 
     release();
     await result;
     assert.deepEqual(context.calls, ["prevent", "handle", "resume"]);
+});
+
+test("synthetic submissions cannot open a credential prompt", async () => {
+    const context = setup();
+    context.event.isTrusted = false;
+    await context.coordinator.onSubmit(context.event);
+    assert.deepEqual(context.calls, []);
 });
 
 test("passwordless forms are not intercepted", async () => {

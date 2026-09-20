@@ -89,7 +89,11 @@ impl Zeroize for VaultEntry {
     }
 }
 
-pub const ADDR: &str = "127.0.0.1:7878";
+pub const DEFAULT_PORT: u16 = 7878;
+
+pub fn server_addr(port: u16) -> std::net::SocketAddr {
+    ([127, 0, 0, 1], port).into()
+}
 
 const MAX_TCP_MSG: usize = 16 * 1024 * 1024;
 #[cfg(feature = "legacy-http")]
@@ -97,7 +101,7 @@ const MAX_HTTP_REQ: usize = 1024 * 1024;
 const TOKEN_HEX_LEN: usize = 64;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CLIENT_CONNECTIONS: usize = 128;
-pub fn is_running() -> bool {
+pub fn is_running(port: u16) -> bool {
     let path = data_dir().join(TOKEN_FILE);
     let Ok(mut token) = fs::read_to_string(path) else {
         return false;
@@ -107,10 +111,9 @@ pub fn is_running() -> bool {
         token.zeroize();
         return false;
     }
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-        &ADDR.parse().expect("valid server address"),
-        Duration::from_millis(500),
-    ) else {
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&server_addr(port), Duration::from_millis(500))
+    else {
         token.zeroize();
         return false;
     };
@@ -185,35 +188,48 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-pub fn start() -> Result<(), String> {
-    if is_running() {
+pub fn start(port: u16) -> Result<(), String> {
+    if is_running(port) {
         println!("Server is already running.");
         return Ok(());
     }
-    if std::net::TcpStream::connect_timeout(
-        &ADDR.parse().expect("valid server address"),
-        Duration::from_millis(250),
-    )
-    .is_ok()
+    if std::net::TcpStream::connect_timeout(&server_addr(port), Duration::from_millis(250)).is_ok()
     {
-        return Err(format!("{ADDR} is already in use by another process"));
+        return Err(format!(
+            "{} is already in use by another process",
+            server_addr(port)
+        ));
     }
     let token = random_token();
     let token_path = data_dir().join(TOKEN_FILE);
     write_token_file(&token, &token_path)?;
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not locate the pm executable: {error}"))?;
-    let mut child = match Command::new(executable)
-        .arg("run")
+    let mut command = Command::new(executable);
+    command
+        .args(["--port", &port.to_string(), "run"])
         .stdin(Stdio::null())
-        .spawn()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return Err(format!("failed to start background process: {error}")),
     };
     let pid = child.id();
     for _ in 0..20 {
-        if is_running() {
+        if is_running(port) {
             break;
         }
         match child.try_wait() {
@@ -228,7 +244,7 @@ pub fn start() -> Result<(), String> {
             }
         }
     }
-    if !is_running() {
+    if !is_running(port) {
         let _ = child.kill();
         let _ = child.wait();
         return Err("server did not become ready within two seconds".to_string());
@@ -267,14 +283,16 @@ fn schedule_auto_lock(
     });
 }
 pub async fn server(
+    port: u16,
     password_history_limit: usize,
     trash_retention_days: u64,
 ) -> Result<(), String> {
     let token =
         load_or_create_token().map_err(|error| format!("could not initialize server: {error}"))?;
-    let listener = TcpListener::bind(ADDR)
+    let address = server_addr(port);
+    let listener = TcpListener::bind(address)
         .await
-        .map_err(|error| format!("could not bind password manager server to {ADDR}: {error}"))?;
+        .map_err(|error| format!("could not bind password manager server to {address}: {error}"))?;
 
     let server_info = Arc::new(Mutex::new(ServerInfo {
         locked: true,
@@ -552,7 +570,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
             }
         }
         ServerCommand::Delete(id) => match id {
-            Target::Vault(k) => {
+            Target::Vault { key, keep_key } => {
                 lock_generation.fetch_add(1, Ordering::AcqRel);
                 if let Err(error) = lock_vlt(&mut vlt, &mut server_info) {
                     respond_failure(
@@ -563,7 +581,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                     .await;
                     return;
                 }
-                match delete_vault(k) {
+                match delete_vault(key, keep_key) {
                     Ok(()) => respond("Vault deleted.", &mut stream, http).await,
                     Err(e) => {
                         respond_failure(&format!("Delete failed: {e}"), &mut stream, http).await
@@ -1423,8 +1441,8 @@ mod test {
     }
 
     #[test]
-    fn test_addr_constant() {
-        assert_eq!(ADDR, "127.0.0.1:7878");
+    fn default_address_uses_the_loopback_interface() {
+        assert_eq!(server_addr(DEFAULT_PORT).to_string(), "127.0.0.1:7878");
     }
 
     #[test]

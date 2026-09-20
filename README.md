@@ -187,6 +187,23 @@ Active entry IDs are persistent: deleting or restoring a different entry does
 not renumber them. Restoring a trashed entry also restores its original ID, and
 imports receive new local IDs instead of trusting IDs from the source file.
 
+To permanently delete an entire vault, supply its password or key:
+
+```bash
+# Prompt for the vault's master password
+pm delete --vault
+
+# Delete a key-based vault and its key file
+pm delete --vault --key ./keys/vault.key
+
+# Delete the vault but intentionally retain a shared or backup key
+pm delete --vault --key ./keys/vault.key --keep-key
+```
+
+Whole-vault deletion cannot be restored. A supplied key file is removed only
+after it has successfully opened the matching vault and that vault has been
+deleted.
+
 ### Password History
 
 Changing a password retains previous passwords inside the encrypted vault. The
@@ -269,9 +286,15 @@ Unlock the vault first, then run:
 # Prompt for and confirm a new master password
 pm rekey
 
-# Or create and switch to a new key file in the application data directory
-pm rekey --key replacement.key
+# Or create and switch to a new external key file
+pm rekey --key /secure/removable-media/replacement.key
 ```
+
+New key files must be outside the application data directory, so copying the
+encrypted vault does not also copy its key. Relative paths are resolved from
+the directory where `pm` is run. Bare filenames remain accepted when unlocking
+or migrating legacy colocated keys; use `./name.key` to select a key in the
+current directory explicitly.
 
 Rekeying persists the replacement vault before removing the old
 vault. An old key file is left in place, but no vault remains encrypted with it.
@@ -295,9 +318,9 @@ pm backup restore --path vault.pmbackup
 pm unlock
 ```
 
-Use `--key backup.key` on both commands to use an existing key file from the
-application data directory instead of a password. Keep that key separately;
-it is not embedded in the backup. Restore writes the complete backup as the
+Use `--key /absolute/path/to/backup.key` on both commands to use an existing
+external key file instead of a password. Keep that key separately; it is not
+embedded in the backup. Restore writes the complete backup as the
 vault associated with its backup password or key. If that destination vault
 already exists, restoration requires `--force`.
 
@@ -351,11 +374,31 @@ pm passcheck --password "mypassword123"
 pm config --length 24 --stats true --clipboard-timeout 30 --unlock-timeout 15m
 pm config --password-copy false
 pm config --password-history-limit 20 --trash-retention-days 30
+pm config --server-port 8787
 ```
 
 Recovery settings are loaded when the server starts. Restart a running server
 after changing them. A history limit or trash retention value of `0` disables
 that behavior.
+
+When an upgrade introduces a new setting, the first command that reads an older
+configuration adds the setting to `config.toml` with its current default value.
+Existing setting values are preserved.
+
+The server listens only on the loopback interface and uses port `7878` by
+default. The setting is stored as `port = 7878` under `[server]` in
+`config.toml`. A global flag overrides it for one invocation:
+
+```bash
+pm --port 8787 start
+pm --port 8787 status
+pm --port 8787 kill
+```
+
+Pass the same override to every server-backed CLI command. The browser native
+host reads the config file, so use `pm config --server-port PORT` instead of a
+one-time flag when the extension must use the alternate port. Stop the running
+server before changing its configured port, then start it again.
 
 ### Structured and Scripted Output
 
@@ -406,6 +449,10 @@ source ~/.bashrc
 
 ## Browser Extension
 
+Browser credential matching preserves the page scheme. Entries saved with an
+`https://` URL, or without an explicit scheme, are never offered to an HTTP
+page; use an explicit `http://` URL for a site that genuinely requires HTTP.
+
 1. Build or install `pm` at a stable path, then load the `extension` folder as
    an unpacked extension in Chrome, Chromium, or Helium on Linux, macOS, or
    Windows.
@@ -419,16 +466,9 @@ source ~/.bashrc
    Use `--browser chromium` for Chromium or `--browser helium` for Helium.
    Reload the extension after installing the host.
 
-   **Windows Helium note:** Helium currently does not detect the registry
-   location written by `--browser helium`. Register it through Helium's
-   Chromium-compatible location instead:
-
-   ```powershell
-   pm native-host install --extension-id YOUR_EXTENSION_ID --browser chromium
-   ```
-
-   Fully exit Helium, including any background processes, and reopen it after
-   running the command.
+   On Windows, `--browser helium` automatically uses Helium's
+   Chromium-compatible native-messaging registry location. Fully exit Helium,
+   including any background processes, and reopen it after registration.
 3. Start and unlock the password-manager server.
 4. Visit a login page and use the key button beside a credential field to
    choose an account. The extension can offer to save or update credentials
@@ -465,10 +505,11 @@ as OTP/2FA verification fields. Choose the account to fetch and fill a current
 code. Only the generated code and its remaining lifetime are returned to the
 extension; the encrypted TOTP secret never leaves the vault server.
 
-Payment-card and identity fields also receive contextual picker buttons. These
-pickers retrieve secret-free item labels only when clicked, then retrieve the
-single selected item after a trusted user click and fill controls in the same
-form. Cardholder/email fall back to the item's `--username`, and the card
+Payment-card and identity fields also receive contextual picker buttons. The
+actual selection happens in a separate extension-owned window that the webpage
+cannot inspect or restyle. Only secret-free labels enter that window; after the
+user selects one, the extension retrieves that single item and fills controls
+in the same form. Cardholder/email fall back to the item's `--username`, and the card
 number comes from the card item's primary secret. Other values are read from
 custom fields using common names, for example:
 
@@ -517,13 +558,17 @@ on-page controls.
 ## Security
 
 - Master passwords derived using Argon2id with a random salt on every vault write
+- Vault files use random, password-independent names; older deterministic
+  filenames migrate after a successful unlock
 - Vaults encrypted and authenticated with XChaCha20-Poly1305
 - A versioned, authenticated vault header records the format and KDF parameters
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
 - Configurable inactivity-based auto-lock timeout
+- New key files must be stored outside application data, while legacy
+  colocated keys remain readable for migration
 - The local server requires a random session token on every TCP and HTTP
-  connection; vault, key and token files use owner-only `0600` permissions on
+  connection; vault, key, and token files use owner-only `0600` permissions on
   Linux/macOS and explicit current-user-only ACLs on Windows
 
 The legacy loopback HTTP protocol is disabled by default. Builds that still
