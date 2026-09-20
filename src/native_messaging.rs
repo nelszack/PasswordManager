@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use crate::file::hidden_windows_command;
 use crate::{
     cli::NativeBrowser,
     client,
@@ -7,8 +9,6 @@ use crate::{
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(target_os = "windows")]
-use std::process::Command;
 use std::{
     fs,
     io::{self, Read, Write},
@@ -225,7 +225,7 @@ fn register_manifest(manifest_path: &Path, browser: NativeBrowser) -> Result<(),
     let registry_key = format!(r"HKCU\Software\{vendor}\NativeMessagingHosts\{HOST_NAME}");
     let absolute_manifest = fs::canonicalize(manifest_path)
         .map_err(|error| format!("could not resolve {}: {error}", manifest_path.display()))?;
-    let status = Command::new("reg.exe")
+    let status = hidden_windows_command("reg.exe")
         .args(["ADD", &registry_key, "/ve", "/t", "REG_SZ", "/d"])
         .arg(&absolute_manifest)
         .arg("/f")

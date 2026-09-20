@@ -5,6 +5,20 @@ use std::{
     sync::OnceLock,
 };
 
+#[cfg(target_os = "windows")]
+pub(crate) const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+pub(crate) fn hidden_windows_command(
+    program: impl AsRef<std::ffi::OsStr>,
+) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = std::process::Command::new(program);
+    command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    command
+}
+
 pub const TOKEN_FILE: &str = "session.key";
 
 #[cfg(unix)]
@@ -33,8 +47,8 @@ pub fn set_private_dir_perms(_path: &Path) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn current_user_sid() -> std::io::Result<String> {
-    use std::{io, process::Command};
-    let output = Command::new("whoami.exe")
+    use std::io;
+    let output = hidden_windows_command("whoami.exe")
         .args(["/user", "/fo", "csv", "/nh"])
         .output()?;
     if !output.status.success() {
@@ -53,7 +67,7 @@ fn current_user_sid() -> std::io::Result<String> {
 
 #[cfg(target_os = "windows")]
 fn set_windows_acl(path: &Path, directory: bool) -> std::io::Result<()> {
-    use std::{io, process::Command};
+    use std::io;
     let sid = current_user_sid()?;
     let grant = if directory {
         format!("*{sid}:(OI)(CI)(F)")
@@ -62,7 +76,7 @@ fn set_windows_acl(path: &Path, directory: bool) -> std::io::Result<()> {
     };
     // Native-messaging stdout is a binary protocol channel. Capture icacls'
     // normal "processed files" summary so it can never corrupt that channel.
-    let output = Command::new("icacls.exe")
+    let output = hidden_windows_command("icacls.exe")
         .arg(path)
         .args(["/inheritance:r", "/grant:r", &grant])
         .output()?;
