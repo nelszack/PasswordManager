@@ -3,8 +3,9 @@
 const fs = require("node:fs");
 
 const logPath = process.env.PM_E2E_NATIVE_LOG;
+const mode = process.env.PM_E2E_NATIVE_MODE || "normal";
 let buffered = Buffer.alloc(0);
-let accounts = [];
+let accounts = JSON.parse(process.env.PM_E2E_NATIVE_ACCOUNTS || "[]");
 
 function write(response) {
     const payload = Buffer.from(JSON.stringify(response));
@@ -20,18 +21,33 @@ function handle(request) {
     if (request.action === "status") {
         write({ id: request.id, success: true, data: "Status: unlocked" });
     } else if (request.action === "getCredentials") {
-        if (accounts.length === 0) {
+        if (mode === "timeout") return;
+        if (mode === "locked") {
+            write({ id: request.id, success: false, error: "Vault is locked" });
+            return;
+        }
+        if (mode === "unavailable") {
+            write({ id: request.id, success: false, error: "Server is unavailable" });
+            return;
+        }
+        if (mode === "malformed") {
+            write({ id: request.id, success: true, data: "not-json" });
+            return;
+        }
+        const matches = accounts.filter(account => !account.domain || account.domain === request.domain);
+        if (matches.length === 0) {
             write({ id: request.id, success: false, error: "Not found." });
         } else {
-            write({ id: request.id, success: true, data: JSON.stringify(accounts) });
+            write({ id: request.id, success: true, data: JSON.stringify(matches) });
         }
     } else if (request.action === "saveCredentials") {
         accounts.push({
-            id: 7,
+            id: 7 + accounts.length,
             name: request.name,
             username: request.username,
             password: request.password,
-            has_totp: false
+            has_totp: false,
+            domain: request.domain
         });
         write({ id: request.id, success: true, data: "Saved." });
     } else if (request.action === "updateCredentials") {
@@ -39,6 +55,12 @@ function handle(request) {
             ? { ...account, username: request.username, password: request.password }
             : account);
         write({ id: request.id, success: true, data: "Saved." });
+    } else if (request.action === "getTotp") {
+        write({
+            id: request.id,
+            success: true,
+            data: { code: "123456", expires_in: 24 }
+        });
     } else {
         write({ id: request.id, success: false, error: "Unsupported test action" });
     }

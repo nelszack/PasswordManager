@@ -72,8 +72,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - name: Build native host and server
+        run: cargo build --locked
       - name: Run browser end-to-end tests
         run: xvfb-run --auto-servernum npm run test:e2e
       - name: Upload browser test report
