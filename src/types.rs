@@ -6,6 +6,12 @@ use zeroize::Zeroize;
 pub enum PasswordType {
     Password(String),
     Key(String),
+    #[serde(skip)]
+    Session {
+        encryption_key: [u8; 32],
+        salt: [u8; 16],
+        kdf: u8,
+    },
 }
 
 impl std::fmt::Debug for PasswordType {
@@ -13,6 +19,7 @@ impl std::fmt::Debug for PasswordType {
         match self {
             Self::Password(_) => formatter.write_str("Password(<redacted>)"),
             Self::Key(_) => formatter.write_str("Key(<redacted>)"),
+            Self::Session { .. } => formatter.write_str("Session(<redacted>)"),
         }
     }
 }

@@ -5,12 +5,13 @@
 const dropdownRegistry = new Set();
 let layoutObserverStarted = false;
 let repositionScheduled = false;
+let controlResizeObserver = null;
 
 function registerPositionedControl(input, button, menu, position, outsideClick = null) {
     const record = { input, button, menu, position, outsideClick };
     dropdownRegistry.add(record);
-    if (outsideClick) document.addEventListener("click", outsideClick);
     startLayoutObserver();
+    controlResizeObserver?.observe(input);
 }
 
 function startLayoutObserver() {
@@ -26,9 +27,7 @@ function startLayoutObserver() {
                 if (!control.input.isConnected) {
                     control.button.remove();
                     control.menu?.remove();
-                    if (control.outsideClick) {
-                        document.removeEventListener("click", control.outsideClick);
-                    }
+                    controlResizeObserver?.unobserve(control.input);
                     dropdownRegistry.delete(control);
                     continue;
                 }
@@ -40,13 +39,18 @@ function startLayoutObserver() {
     window.addEventListener("load", reposition);
     window.addEventListener("scroll", reposition, true);
     window.addEventListener("resize", reposition);
+    document.addEventListener("click", event => {
+        for (const control of dropdownRegistry) control.outsideClick?.(event);
+    });
 
-    // Reposition when the page layout shifts (async content, lazy images, fonts)
+    controlResizeObserver = new ResizeObserver(reposition);
+    for (const control of dropdownRegistry) controlResizeObserver.observe(control.input);
+
+    // Child insertion can move controls without changing their own dimensions.
+    // Attribute changes are handled by the focused input observer below.
     new MutationObserver(reposition).observe(document.body, {
         childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class", "style", "hidden", "type"]
+        subtree: true
     });
 }
 
@@ -1119,10 +1123,9 @@ function createTypedAutofillButton(input, kind) {
 // ===============================
 // Attach to username/password inputs
 // ===============================
-function attachToInputs(accounts) {
-    document.querySelectorAll("input").forEach(input => {
+function attachInput(input) {
         // Ignore extension UI elements
-        if (input.classList.contains("my-extension-ui")) return;
+        if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
         const typedKind = typedAutofillKind(input);
         if (typedKind) {
             createSecureTypedButton(input, typedKind);
@@ -1135,30 +1138,40 @@ function attachToInputs(accounts) {
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
         }
-    });
+}
+
+function attachToInputs(root = document) {
+    if (root instanceof HTMLInputElement) attachInput(root);
+    root.querySelectorAll?.("input").forEach(attachInput);
 }
 
 // ===============================
 // Observe DOM safely (no loop)
 // ===============================
 function observeInputs(accounts) {
+    const pendingRoots = new Set();
+    let attachScheduled = false;
+    const scheduleAttach = root => {
+        pendingRoots.add(root);
+        if (attachScheduled) return;
+        attachScheduled = true;
+        requestAnimationFrame(() => {
+            attachScheduled = false;
+            for (const pending of pendingRoots) attachToInputs(pending);
+            pendingRoots.clear();
+        });
+    };
     const observer = new MutationObserver((mutations) => {
-        let foundNewInput = false;
-
         for (const mutation of mutations) {
             if (mutation.type === "attributes" && mutation.target instanceof HTMLInputElement) {
-                foundNewInput = true;
+                scheduleAttach(mutation.target);
             }
             for (const node of mutation.addedNodes) {
                 if (node.nodeType === 1 &&
                     (node.matches?.("input") || node.querySelector?.("input"))) {
-                    foundNewInput = true;
+                    scheduleAttach(node);
                 }
             }
-        }
-
-        if (foundNewInput) {
-            attachToInputs(accounts);
         }
     });
 
@@ -1170,7 +1183,7 @@ function observeInputs(accounts) {
     });
 
     // Initial run
-    attachToInputs(accounts);
+    attachToInputs();
 }
 // ===============================
 // Get domain from URL

@@ -3,7 +3,7 @@ use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, Generate, KeyInit, Payload},
+    aead::{Aead, AeadInOut, Generate, KeyInit, Payload},
 };
 use std::{
     fs::{self, OpenOptions, read},
@@ -80,14 +80,23 @@ fn master_key_from_password_with_params(
     let params = Params::new(memory_kib, iterations, parallelism, Some(32)).ok()?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
-    if argon2
-        .hash_password_into(password.as_bytes(), salt, &mut key)
-        .is_err()
-    {
+    let result =
+        run_cpu_intensive(|| argon2.hash_password_into(password.as_bytes(), salt, &mut key));
+    if result.is_err() {
         key.zeroize();
         return None;
     }
     Some(key)
+}
+
+fn run_cpu_intensive<T>(operation: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
+    }
 }
 
 fn master_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
@@ -124,6 +133,9 @@ pub fn try_gen_master_key(key_pass: &mut PasswordType, new: bool) -> Result<[u8;
                 pass,
                 &blake3::derive_key(SALT_CONTEXT, pass.as_bytes())[..SALT_LEN],
             ),
+            PasswordType::Session { .. } => {
+                return Err("an unlocked session key cannot derive another master key".to_string());
+            }
         };
     Ok(key)
 }
@@ -143,6 +155,9 @@ pub fn try_gen_master_key_legacy(key_pass: &mut PasswordType) -> Result<[u8; 32]
             )
         }
         PasswordType::Password(pass) => master_key_from_password(pass, LEGACY_SALT),
+        PasswordType::Session { .. } => {
+            return Err("an unlocked session key cannot derive a legacy master key".to_string());
+        }
     };
     Ok(key)
 }
@@ -155,40 +170,83 @@ fn encryption_master(key_pass: &mut PasswordType, salt: &[u8]) -> Result<[u8; 32
     match key_pass {
         PasswordType::Password(pass) => Ok(master_key_from_password(pass, salt)),
         PasswordType::Key(_) => try_gen_master_key(key_pass, false),
+        PasswordType::Session { .. } => {
+            Err("an unlocked session key cannot be used with a different salt".to_string())
+        }
     }
 }
 
+#[cfg(test)]
 pub fn try_encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    let salt = <[u8; SALT_LEN]>::generate();
-    let kdf = match key_pass {
-        PasswordType::Password(_) => KDF_ARGON2ID,
-        PasswordType::Key(_) => KDF_KEYFILE,
+    try_encrypt_file_in_place(key_pass, plaintext.to_vec())
+}
+
+pub fn try_encrypt_file_in_place(
+    key_pass: &mut PasswordType,
+    mut plaintext: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let cached = match key_pass {
+        PasswordType::Session {
+            encryption_key,
+            salt,
+            kdf,
+        } => Some((*encryption_key, *salt, *kdf)),
+        _ => None,
     };
-    let mut master_key = encryption_master(key_pass, &salt)?;
-    let mut enc_key = encryption_key_from_master(&master_key);
-    master_key.zeroize();
+    let salt = cached.map_or_else(<[u8; SALT_LEN]>::generate, |(_, salt, _)| salt);
+    let kdf = match cached {
+        Some((_, _, kdf)) => kdf,
+        None => match key_pass {
+            PasswordType::Password(_) => KDF_ARGON2ID,
+            PasswordType::Key(_) => KDF_KEYFILE,
+            PasswordType::Session { .. } => unreachable!(),
+        },
+    };
+    let mut enc_key = if let Some((key, _, _)) = cached {
+        key
+    } else {
+        let mut master_key = encryption_master(key_pass, &salt)?;
+        let key = encryption_key_from_master(&master_key);
+        master_key.zeroize();
+        key
+    };
+    let mut session_key = enc_key;
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
     enc_key.zeroize();
     let nonce = XNonce::generate();
-    let mut header = Vec::with_capacity(HEADER_LEN);
-    header.extend_from_slice(VAULT_MAGIC);
-    header.push(VAULT_VERSION);
-    header.push(kdf);
-    header.extend_from_slice(&ARGON_MEMORY_KIB.to_be_bytes());
-    header.extend_from_slice(&ARGON_ITERATIONS.to_be_bytes());
-    header.extend_from_slice(&ARGON_PARALLELISM.to_be_bytes());
-    header.extend_from_slice(&salt);
-    header.extend_from_slice(&nonce);
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad: &header,
-            },
-        )
-        .expect("encryption failure");
-    Ok([header.as_slice(), ciphertext.as_slice()].concat())
+    let mut header = [0u8; HEADER_LEN];
+    header[..8].copy_from_slice(VAULT_MAGIC);
+    header[8] = VAULT_VERSION;
+    header[9] = kdf;
+    header[10..14].copy_from_slice(&ARGON_MEMORY_KIB.to_be_bytes());
+    header[14..18].copy_from_slice(&ARGON_ITERATIONS.to_be_bytes());
+    header[18..22].copy_from_slice(&ARGON_PARALLELISM.to_be_bytes());
+    header[22..22 + SALT_LEN].copy_from_slice(&salt);
+    header[22 + SALT_LEN..HEADER_LEN].copy_from_slice(&nonce);
+    if cipher
+        .encrypt_in_place(&nonce, &header, &mut plaintext)
+        .is_err()
+    {
+        plaintext.zeroize();
+        session_key.zeroize();
+        return Err("encryption failure".to_string());
+    }
+    let ciphertext_len = plaintext.len();
+    plaintext.reserve(HEADER_LEN);
+    plaintext.resize(ciphertext_len + HEADER_LEN, 0);
+    plaintext.copy_within(..ciphertext_len, HEADER_LEN);
+    plaintext[..HEADER_LEN].copy_from_slice(&header);
+    if !matches!(key_pass, PasswordType::Session { .. }) {
+        let mut original = std::mem::replace(key_pass, PasswordType::Password(String::new()));
+        original.zeroize();
+        *key_pass = PasswordType::Session {
+            encryption_key: session_key,
+            salt,
+            kdf,
+        };
+    }
+    session_key.zeroize();
+    Ok(plaintext)
 }
 
 #[cfg(test)]
@@ -235,24 +293,38 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
         let nonce_start = 22 + SALT_LEN;
         let nonce_end = nonce_start + NONCE_LEN;
         let nonce = XNonce::try_from(&encrypted[nonce_start..nonce_end]).ok()?;
-        let mut master = match (&*key_pass, kdf) {
-            (PasswordType::Password(password), KDF_ARGON2ID) => {
-                master_key_from_password_with_params(
-                    password,
-                    salt,
-                    memory_kib,
-                    iterations,
-                    parallelism,
-                )?
-            }
-            (PasswordType::Key(_), KDF_KEYFILE) => try_gen_master_key(key_pass, false).ok()?,
-            _ => return None,
+        let cached_key = match &*key_pass {
+            PasswordType::Session {
+                encryption_key,
+                salt: cached_salt,
+                kdf: cached_kdf,
+            } if cached_salt.as_slice() == salt && *cached_kdf == kdf => Some(*encryption_key),
+            _ => None,
         };
-        let mut enc_key = encryption_key_from_master(&master);
-        master.zeroize();
+        let mut enc_key = if let Some(key) = cached_key {
+            key
+        } else {
+            let mut master = match (&*key_pass, kdf) {
+                (PasswordType::Password(password), KDF_ARGON2ID) => {
+                    master_key_from_password_with_params(
+                        password,
+                        salt,
+                        memory_kib,
+                        iterations,
+                        parallelism,
+                    )?
+                }
+                (PasswordType::Key(_), KDF_KEYFILE) => try_gen_master_key(key_pass, false).ok()?,
+                _ => return None,
+            };
+            let key = encryption_key_from_master(&master);
+            master.zeroize();
+            key
+        };
+        let session_key = enc_key;
         let cipher = XChaCha20Poly1305::new((&enc_key).into());
         enc_key.zeroize();
-        return cipher
+        let plaintext = cipher
             .decrypt(
                 &nonce,
                 Payload {
@@ -260,7 +332,17 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
                     aad: &encrypted[..nonce_end],
                 },
             )
-            .ok();
+            .ok()?;
+        if !matches!(key_pass, PasswordType::Session { .. }) {
+            let mut original = std::mem::replace(key_pass, PasswordType::Password(String::new()));
+            original.zeroize();
+            *key_pass = PasswordType::Session {
+                encryption_key: session_key,
+                salt: salt.try_into().ok()?,
+                kdf,
+            };
+        }
+        return Some(plaintext);
     }
 
     // Previous format: salt(16) || nonce(24) || ciphertext.
@@ -357,6 +439,17 @@ mod test {
         );
     }
     #[test]
+    fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
+        let expected = b"plaintext kept in the original allocation";
+        let mut plaintext = Vec::with_capacity(expected.len() + HEADER_LEN + 16);
+        plaintext.extend_from_slice(expected);
+        let allocation = plaintext.as_ptr();
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypted = try_encrypt_file_in_place(&mut pass, plaintext).unwrap();
+        assert_eq!(encrypted.as_ptr(), allocation);
+        assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
+    }
+    #[test]
     fn test_encrypted_data_contains_nonce() {
         let plaintext = "test".as_bytes();
         let mut pass = PasswordType::Password("test123".into());
@@ -383,16 +476,23 @@ mod test {
         assert_eq!(dec, plaintext);
     }
     #[test]
-    fn test_encrypt_uses_random_salt() {
+    fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
         let plaintext = b"same plaintext";
-        let mut pass = PasswordType::Password("test123".into());
-        let e1 = encrypt_file(&mut pass, plaintext);
-        let e2 = encrypt_file(&mut pass, plaintext);
+        let mut first_session = PasswordType::Password("test123".into());
+        let mut second_session = PasswordType::Password("test123".into());
+        let e1 = encrypt_file(&mut first_session, plaintext);
+        let e2 = encrypt_file(&mut second_session, plaintext);
+        let e3 = encrypt_file(&mut first_session, plaintext);
         const SALT_OFFSET: usize = 8 + 1 + 1 + 4 + 4 + 4;
         assert_ne!(
             &e1[SALT_OFFSET..SALT_OFFSET + SALT_LEN],
             &e2[SALT_OFFSET..SALT_OFFSET + SALT_LEN]
         );
+        assert_eq!(
+            &e1[SALT_OFFSET..SALT_OFFSET + SALT_LEN],
+            &e3[SALT_OFFSET..SALT_OFFSET + SALT_LEN]
+        );
+        assert_ne!(e1, e3, "every write still requires a fresh nonce");
     }
 
     #[test]

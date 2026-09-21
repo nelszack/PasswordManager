@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use std::{
+    cell::RefCell,
     fs,
     io::{Cursor, Read, Write},
     path::Path,
@@ -64,6 +65,16 @@ impl Zeroize for PasswordType {
                 p.zeroize();
                 *self = PasswordType::Password(String::new())
             }
+            PasswordType::Session {
+                encryption_key,
+                salt,
+                kdf,
+            } => {
+                encryption_key.zeroize();
+                salt.zeroize();
+                kdf.zeroize();
+                *self = PasswordType::Password(String::new())
+            }
         }
     }
 }
@@ -101,6 +112,22 @@ const MAX_HTTP_REQ: usize = 1024 * 1024;
 const TOKEN_HEX_LEN: usize = 64;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CLIENT_CONNECTIONS: usize = 128;
+
+struct BufferedResponse {
+    code: ResponseCode,
+    message: String,
+    http: bool,
+}
+
+impl Drop for BufferedResponse {
+    fn drop(&mut self) {
+        self.message.zeroize();
+    }
+}
+
+tokio::task_local! {
+    static RESPONSE_BUFFER: RefCell<Vec<BufferedResponse>>;
+}
 pub fn is_running(port: u16) -> bool {
     let path = data_dir().join(TOKEN_FILE);
     let Ok(mut token) = fs::read_to_string(path) else {
@@ -349,6 +376,18 @@ struct ConnectionState {
 }
 
 async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
+    RESPONSE_BUFFER
+        .scope(RefCell::new(Vec::new()), async {
+            handle_connection_inner(&mut stream, state).await;
+            flush_buffered_responses(&mut stream).await;
+        })
+        .await;
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+}
+
+#[allow(clippy::needless_borrow)]
+async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionState) {
     let ConnectionState {
         server_info,
         vlt,
@@ -362,8 +401,6 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
     let Ok(Some((msg, http))) =
         tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &token)).await
     else {
-        let _ = stream.flush().await;
-        let _ = stream.shutdown().await;
         return;
     };
     let server_info_handle = Arc::clone(&server_info);
@@ -403,9 +440,10 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 return;
             }
             respond("Server stopped.", &mut stream, http).await;
-            let _ = stream.shutdown().await;
+            drop(vlt);
+            drop(server_info);
+            flush_buffered_responses(&mut stream).await;
             let _ = kill_tx.send(()).await;
-            return;
         }
         ServerCommand::Lock(send) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
@@ -694,9 +732,6 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 drop(server_info);
                 audit_snapshot.audit(options, &mut stream, http).await;
                 audit_snapshot.zeroize();
-                let _ = stream.flush().await;
-                let _ = stream.shutdown().await;
-                return;
             }
         }
         ServerCommand::Totp(mut command) => {
@@ -992,8 +1027,6 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                     }
                 }
                 preview_vault.zeroize();
-                let _ = stream.flush().await;
-                let _ = stream.shutdown().await;
                 return;
             }
             if !new {
@@ -1070,8 +1103,6 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
             }
         }
     }
-    let _ = stream.flush().await;
-    let _ = stream.shutdown().await;
 }
 
 async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
@@ -1320,6 +1351,30 @@ pub async fn respond_with_code(
     stream: &mut TcpStream,
     http: bool,
 ) {
+    if RESPONSE_BUFFER
+        .try_with(|buffer| {
+            buffer.borrow_mut().push(BufferedResponse {
+                code,
+                message: message.to_owned(),
+                http,
+            });
+        })
+        .is_ok()
+    {
+        return;
+    }
+    write_response(code, message, stream, http).await;
+}
+
+async fn flush_buffered_responses(stream: &mut TcpStream) {
+    let responses = RESPONSE_BUFFER.with(|buffer| std::mem::take(&mut *buffer.borrow_mut()));
+    for mut response in responses {
+        write_response(response.code, &response.message, stream, response.http).await;
+        response.message.zeroize();
+    }
+}
+
+async fn write_response(code: ResponseCode, message: &str, stream: &mut TcpStream, http: bool) {
     if http {
         let body = json!({
             "ok": code == ResponseCode::Success,
@@ -1386,6 +1441,28 @@ mod test {
             response.message,
             "wording without classification keywords\n"
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_responses_are_buffered_until_state_work_finishes() {
+        let (mut client, mut server) = tcp_pair().await;
+        RESPONSE_BUFFER
+            .scope(RefCell::new(Vec::new()), async {
+                respond("buffered", &mut server, false).await;
+                let mut byte = [0u8; 1];
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), client.read_exact(&mut byte))
+                        .await
+                        .is_err(),
+                    "a response was written before the critical section completed"
+                );
+                flush_buffered_responses(&mut server).await;
+            })
+            .await;
+        server.shutdown().await.unwrap();
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(decode_responses(&bytes).unwrap().message, "buffered\n");
     }
 
     #[test]
