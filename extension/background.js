@@ -13,6 +13,7 @@ const pendingPickers = new Map();
 const pickerWindows = new Map();
 const pendingCredentialPrompts = new Map();
 const credentialPromptWindows = new Map();
+const pendingCredentialMemory = new Map();
 let cachedStatus = null;
 let statusRefresh = null;
 
@@ -175,16 +176,21 @@ function setPendingCredentials(request, sender, sendResponse) {
         sendResponse({ success: false, error: "Invalid pending credentials" });
         return;
     }
-    chrome.storage.session.set({
-        [key]: {
-            domain,
-            username: String(pending.username || ""),
-            password: pending.password,
-            accountName: String(pending.accountName || ""),
-            hasAccounts: Boolean(pending.hasAccounts),
-            time: Date.now()
+    const record = {
+        domain,
+        username: String(pending.username || ""),
+        password: pending.password,
+        accountName: String(pending.accountName || ""),
+        hasAccounts: Boolean(pending.hasAccounts),
+        time: Date.now()
+    };
+    pendingCredentialMemory.set(key, record);
+    setTimeout(() => {
+        if (pendingCredentialMemory.get(key) === record) {
+            pendingCredentialMemory.delete(key);
         }
-    }, () => sendResponse(chrome.runtime.lastError
+    }, 60_000);
+    chrome.storage.session.set({ [key]: record }, () => sendResponse(chrome.runtime.lastError
         ? { success: false, error: chrome.runtime.lastError.message }
         : { success: true }));
 }
@@ -196,9 +202,10 @@ function consumePendingCredentials(sender, sendResponse) {
         sendResponse({ success: false, error: "Invalid page origin" });
         return;
     }
+    const remembered = pendingCredentialMemory.get(key) || null;
     chrome.storage.session.get(key, result => {
         const error = chrome.runtime.lastError?.message;
-        const pending = result?.[key] || null;
+        const pending = remembered || result?.[key] || null;
         chrome.storage.session.remove(key, () => void chrome.runtime.lastError);
         if (error) sendResponse({ success: false, error });
         else if (pending?.domain === domain && Date.now() - pending.time < 60_000) {
@@ -215,6 +222,7 @@ function clearPendingCredentials(sender, sendResponse) {
         sendResponse({ success: false, error: "Invalid tab" });
         return;
     }
+    pendingCredentialMemory.delete(key);
     chrome.storage.session.remove(key, () => sendResponse(chrome.runtime.lastError
         ? { success: false, error: chrome.runtime.lastError.message }
         : { success: true }));
@@ -371,8 +379,14 @@ async function openCredentialPrompt(request, sender) {
     const domain = PasswordManagerSecurity.senderOrigin(sender);
     const tabId = sender?.tab?.id;
     const frameId = sender?.frameId;
-    const username = request?.username;
+    let username = request?.username;
     const password = request?.password;
+    const rememberedKey = PasswordManagerSecurity.pendingStorageKey(sender);
+    const remembered = rememberedKey ? pendingCredentialMemory.get(rememberedKey) : null;
+    if (!username && remembered?.domain === domain && Date.now() - remembered.time < 60_000) {
+        username = remembered.username;
+    }
+    if (rememberedKey) pendingCredentialMemory.delete(rememberedKey);
     if (!domain || !Number.isInteger(tabId) || !Number.isInteger(frameId)
         || typeof username !== "string" || username.length > 4096
         || typeof password !== "string" || !password || password.length > 64 * 1024

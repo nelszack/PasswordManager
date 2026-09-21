@@ -1,0 +1,11 @@
+{
+  "name": "password-manager-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:extension": "node --test extension/*.test.js",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
