@@ -1,6 +1,6 @@
 use directories::ProjectDirs;
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -20,6 +20,8 @@ pub(crate) fn hidden_windows_command(
 }
 
 pub const TOKEN_FILE: &str = "session.key";
+pub const CONFIG_DIR_ENV: &str = "PM_CONFIG_DIR";
+pub const DATA_DIR_ENV: &str = "PM_DATA_DIR";
 
 #[cfg(unix)]
 pub fn set_private_perms(path: &Path) -> std::io::Result<()> {
@@ -237,12 +239,30 @@ pub fn data_dir() -> PathBuf {
     data_dir
 }
 
+pub fn config_dir() -> PathBuf {
+    env::var_os(CONFIG_DIR_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(project_config_dir)
+}
+
 fn project_data_dir() -> PathBuf {
+    if let Some(path) = env::var_os(DATA_DIR_ENV).filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
     let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
         eprintln!("Error: could not locate the application data directory.");
         std::process::exit(1);
     };
     proj_dir.data_dir().to_path_buf()
+}
+
+fn project_config_dir() -> PathBuf {
+    let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
+        eprintln!("Error: could not locate the application config directory.");
+        std::process::exit(1);
+    };
+    proj_dir.config_dir().to_path_buf()
 }
 
 static TEST_DATA_DIR: OnceLock<&'static tempfile::TempDir> = OnceLock::new();

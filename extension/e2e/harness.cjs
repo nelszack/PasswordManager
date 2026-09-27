@@ -7,6 +7,9 @@ const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const EXTENSION_PATH = path.join(PROJECT_ROOT, "extension");
 const MOCK_HOST = path.join(__dirname, "native_host_mock.cjs");
 const HOST_NAME = "com.myproject.password_manager";
+const COVERAGE_DIR = process.env.PM_E2E_COVERAGE_DIR
+    ? path.resolve(PROJECT_ROOT, process.env.PM_E2E_COVERAGE_DIR)
+    : null;
 
 function installNativeManifest(testHome, profile, extensionId, hostPath) {
     const manifest = JSON.stringify({
@@ -50,6 +53,15 @@ async function launchExtension(options = {}) {
             `--load-extension=${EXTENSION_PATH}`
         ]
     });
+    const coveredPages = new Map();
+    async function coverPage(page) {
+        if (!COVERAGE_DIR || coveredPages.has(page)) return;
+        const started = page.coverage.startJSCoverage({ resetOnNavigation: false })
+            .then(() => true, () => false);
+        coveredPages.set(page, started);
+    }
+    context.on("page", page => void coverPage(page));
+    await Promise.all(context.pages().map(coverPage));
     let worker = context.serviceWorkers()[0];
     if (!worker) worker = await context.waitForEvent("serviceworker");
     const extensionId = new URL(worker.url()).host;
@@ -61,6 +73,17 @@ async function launchExtension(options = {}) {
     return {
         context, extensionId, nativeLog, profile, temporaryRoot, testHome,
         async close() {
+            if (COVERAGE_DIR) {
+                const coverage = [];
+                for (const [page, started] of coveredPages) {
+                    if (await started && !page.isClosed()) {
+                        coverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
+                    }
+                }
+                fs.mkdirSync(COVERAGE_DIR, { recursive: true });
+                const name = `coverage-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
+                fs.writeFileSync(path.join(COVERAGE_DIR, name), JSON.stringify(coverage));
+            }
             await context.close();
             fs.rmSync(temporaryRoot, { recursive: true, force: true });
         }

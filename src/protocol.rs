@@ -64,6 +64,22 @@ pub fn decode_responses(mut bytes: &[u8]) -> Result<ProtocolResponse, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_input_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = decode_responses(&bytes);
+        }
+
+        #[test]
+        fn arbitrary_utf8_messages_round_trip(message in ".{1,2048}") {
+            let response = decode_responses(&encode_response(ResponseCode::Success, &message)).unwrap();
+            prop_assert_eq!(response.code, ResponseCode::Success as i32);
+            let expected = if message.ends_with('\n') { message } else { format!("{message}\n") };
+            prop_assert_eq!(response.message, expected);
+        }
+    }
 
     #[test]
     fn structured_frames_round_trip_and_preserve_the_highest_error_code() {

@@ -604,6 +604,10 @@ Run the complete unit, protocol-integration, and security regression suite with:
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 node --test extension/*.test.js
+npm run test:extension:coverage
+npm run test:e2e:coverage
+# After installing cargo-llvm-cov:
+cargo llvm-cov --all-features --workspace --fail-under-lines 65
 ```
 
 The suite covers authenticated TCP and HTTP framing, native-message validation,

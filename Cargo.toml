@@ -37,3 +37,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 subtle = "2"
 totp-rs = { version = "6", default-features = false, features = ["otpauth", "zeroize"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+proptest = "1"

@@ -18,11 +18,62 @@ const VAULT_VERSION: u8 = 1;
 const KDF_KEYFILE: u8 = 0;
 const KDF_ARGON2ID: u8 = 1;
 const HEADER_LEN: usize = 8 + 1 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
-const ARGON_MEMORY_KIB: u32 = 64 * 1024;
-const ARGON_ITERATIONS: u32 = 3;
-const ARGON_PARALLELISM: u32 = 1;
 const LEGACY_SALT: &[u8] = b"vault-master-key-salt-v1";
 const SALT_CONTEXT: &str = "vault-password-salt-v1";
+
+#[derive(Clone, Copy)]
+pub(crate) struct KdfParameters {
+    pub(crate) memory_kib: u32,
+    pub(crate) iterations: u32,
+    pub(crate) parallelism: u32,
+}
+
+pub(crate) const PRODUCTION_KDF_PARAMETERS: KdfParameters = KdfParameters {
+    memory_kib: 64 * 1024,
+    iterations: 3,
+    parallelism: 1,
+};
+
+#[cfg(test)]
+const FAST_TEST_KDF_PARAMETERS: KdfParameters = KdfParameters {
+    memory_kib: 8 * 1024,
+    iterations: 1,
+    parallelism: 1,
+};
+
+#[cfg(test)]
+thread_local! {
+    static TEST_KDF_PARAMETERS: std::cell::Cell<KdfParameters> =
+        const { std::cell::Cell::new(FAST_TEST_KDF_PARAMETERS) };
+}
+
+fn active_kdf_parameters() -> KdfParameters {
+    #[cfg(test)]
+    {
+        TEST_KDF_PARAMETERS.get()
+    }
+    #[cfg(not(test))]
+    {
+        PRODUCTION_KDF_PARAMETERS
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_kdf_parameters<T>(
+    parameters: KdfParameters,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore(KdfParameters);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_KDF_PARAMETERS.set(self.0);
+        }
+    }
+
+    let previous = TEST_KDF_PARAMETERS.replace(parameters);
+    let _restore = Restore(previous);
+    operation()
+}
 
 pub fn prompt_for_password() -> String {
     loop {
@@ -100,12 +151,13 @@ fn run_cpu_intensive<T>(operation: impl FnOnce() -> T) -> T {
 }
 
 fn master_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
+    let parameters = active_kdf_parameters();
     master_key_from_password_with_params(
         password,
         salt,
-        ARGON_MEMORY_KIB,
-        ARGON_ITERATIONS,
-        ARGON_PARALLELISM,
+        parameters.memory_kib,
+        parameters.iterations,
+        parameters.parallelism,
     )
     .expect("the built-in Argon2 parameters are valid")
 }
@@ -185,6 +237,7 @@ pub fn try_encrypt_file_in_place(
     key_pass: &mut PasswordType,
     mut plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
+    let parameters = active_kdf_parameters();
     let cached = match key_pass {
         PasswordType::Session {
             encryption_key,
@@ -218,9 +271,9 @@ pub fn try_encrypt_file_in_place(
     header[..8].copy_from_slice(VAULT_MAGIC);
     header[8] = VAULT_VERSION;
     header[9] = kdf;
-    header[10..14].copy_from_slice(&ARGON_MEMORY_KIB.to_be_bytes());
-    header[14..18].copy_from_slice(&ARGON_ITERATIONS.to_be_bytes());
-    header[18..22].copy_from_slice(&ARGON_PARALLELISM.to_be_bytes());
+    header[10..14].copy_from_slice(&parameters.memory_kib.to_be_bytes());
+    header[14..18].copy_from_slice(&parameters.iterations.to_be_bytes());
+    header[18..22].copy_from_slice(&parameters.parallelism.to_be_bytes());
     header[22..22 + SALT_LEN].copy_from_slice(&salt);
     header[22 + SALT_LEN..HEADER_LEN].copy_from_slice(&nonce);
     if cipher
@@ -360,173 +413,5 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
-    use std::fs;
-    #[test]
-    fn test_encrypt_decrypt_pass() {
-        let plaintext = "this is a test".as_bytes();
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypt = encrypt_file(&mut pass, plaintext);
-        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        assert_eq!(decrypt, plaintext)
-    }
-    #[test]
-    fn test_encrypt_decrypt_key() {
-        crate::file::init_test_data_dir();
-        let directory = tempfile::tempdir().unwrap();
-        let temp = directory.path().join("temp.enc");
-        gen_master_key(
-            &mut PasswordType::Key(temp.to_string_lossy().into_owned()),
-            true,
-        );
-        let plaintext = "this is a test".as_bytes();
-        let mut pass = PasswordType::Key(temp.to_str().unwrap().to_string());
-        let encrypt = encrypt_file(&mut pass, plaintext);
-        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        fs::remove_file(temp).unwrap();
-        assert_eq!(decrypt, plaintext)
-    }
-    #[test]
-    fn test_encrypt_decrypt_empty_plaintext() {
-        let plaintext = b"";
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypt = encrypt_file(&mut pass, plaintext);
-        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        assert_eq!(decrypt, plaintext);
-    }
-    #[test]
-    fn test_encrypt_decrypt_large_plaintext() {
-        let plaintext = vec![0u8; 10000];
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypt = encrypt_file(&mut pass, &plaintext);
-        let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-        assert_eq!(decrypt, plaintext);
-    }
-    #[test]
-    fn test_decrypt_invalid_data_returns_none() {
-        let mut pass = PasswordType::Password("test123".into());
-        let result = decrypt_file(&mut pass, b"short");
-        assert!(result.is_none());
-    }
-    #[test]
-    fn test_decrypt_wrong_password_returns_none() {
-        let plaintext = "secret data".as_bytes();
-        let mut pass1 = PasswordType::Password("password1".into());
-        let encrypt = encrypt_file(&mut pass1, plaintext);
-        let mut pass2 = PasswordType::Password("password2".into());
-        let result = decrypt_file(&mut pass2, &encrypt);
-        assert!(result.is_none());
-    }
-    #[test]
-    fn test_decrypt_corrupted_ciphertext_returns_none() {
-        let plaintext = "test".as_bytes();
-        let mut pass = PasswordType::Password("test123".into());
-        let mut encrypt = encrypt_file(&mut pass, plaintext);
-        encrypt[24] ^= 0xFF;
-        let result = decrypt_file(&mut pass, &encrypt);
-        assert!(result.is_none());
-    }
-    #[test]
-    fn test_encrypt_produces_different_output_each_time() {
-        let plaintext = "test".as_bytes();
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypt1 = encrypt_file(&mut pass, plaintext);
-        let encrypt2 = encrypt_file(&mut pass, plaintext);
-        assert_ne!(
-            encrypt1, encrypt2,
-            "Encryption should produce unique ciphertexts due to random nonce"
-        );
-    }
-    #[test]
-    fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
-        let expected = b"plaintext kept in the original allocation";
-        let mut plaintext = Vec::with_capacity(expected.len() + HEADER_LEN + 16);
-        plaintext.extend_from_slice(expected);
-        let allocation = plaintext.as_ptr();
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypted = try_encrypt_file_in_place(&mut pass, plaintext).unwrap();
-        assert_eq!(encrypted.as_ptr(), allocation);
-        assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
-    }
-    #[test]
-    fn test_encrypted_data_contains_nonce() {
-        let plaintext = "test".as_bytes();
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypt = encrypt_file(&mut pass, plaintext);
-        assert!(
-            encrypt.len() > plaintext.len(),
-            "Encrypted data should be larger than plaintext"
-        );
-        assert!(
-            encrypt.len() >= 24 + plaintext.len(),
-            "Nonce (24 bytes) + ciphertext"
-        );
-    }
-    #[test]
-    fn test_legacy_format_still_decrypts() {
-        let plaintext = b"legacy vault data";
-        let mut pass = PasswordType::Password("test123".into());
-        let enc_key = encryption_key_from_master(&master_key_from_password("test123", LEGACY_SALT));
-        let cipher = XChaCha20Poly1305::new((&enc_key).into());
-        let nonce = XNonce::generate();
-        let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).unwrap();
-        let legacy = [nonce.as_slice(), ciphertext.as_slice()].concat();
-        let dec = decrypt_file(&mut pass, &legacy).unwrap();
-        assert_eq!(dec, plaintext);
-    }
-    #[test]
-    fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
-        let plaintext = b"same plaintext";
-        let mut first_session = PasswordType::Password("test123".into());
-        let mut second_session = PasswordType::Password("test123".into());
-        let e1 = encrypt_file(&mut first_session, plaintext);
-        let e2 = encrypt_file(&mut second_session, plaintext);
-        let e3 = encrypt_file(&mut first_session, plaintext);
-        const SALT_OFFSET: usize = 8 + 1 + 1 + 4 + 4 + 4;
-        assert_ne!(
-            &e1[SALT_OFFSET..SALT_OFFSET + SALT_LEN],
-            &e2[SALT_OFFSET..SALT_OFFSET + SALT_LEN]
-        );
-        assert_eq!(
-            &e1[SALT_OFFSET..SALT_OFFSET + SALT_LEN],
-            &e3[SALT_OFFSET..SALT_OFFSET + SALT_LEN]
-        );
-        assert_ne!(e1, e3, "every write still requires a fresh nonce");
-    }
-
-    #[test]
-    fn authenticated_header_rejects_tampering() {
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
-        for offset in [8, 9, 10, 22, HEADER_LEN - 1] {
-            let mut tampered = encrypted.clone();
-            tampered[offset] ^= 1;
-            assert!(
-                decrypt_file(&mut pass, &tampered).is_none(),
-                "tampered header byte {offset} was accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn authenticated_ciphertext_rejects_tampering_and_truncation() {
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
-        let mut tampered = encrypted.clone();
-        *tampered.last_mut().unwrap() ^= 1;
-        assert!(decrypt_file(&mut pass, &tampered).is_none());
-        assert!(decrypt_file(&mut pass, &encrypted[..encrypted.len() - 1]).is_none());
-    }
-
-    #[test]
-    fn hostile_kdf_parameters_are_rejected_before_derivation() {
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
-        for memory_kib in [0, 1024 * 1024 + 1] {
-            let mut hostile = encrypted.clone();
-            hostile[10..14].copy_from_slice(&(memory_kib as u32).to_be_bytes());
-            assert!(decrypt_file(&mut pass, &hostile).is_none());
-        }
-    }
-}
+#[path = "encryption_tests.rs"]
+mod test;

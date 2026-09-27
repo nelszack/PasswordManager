@@ -22,6 +22,7 @@
       ],
       "js": [
         "form_submission.js",
+        "content_fields.js",
         "content.js"
       ],
       "run_at": "document_idle",

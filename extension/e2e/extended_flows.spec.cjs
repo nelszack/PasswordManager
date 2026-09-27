@@ -64,39 +64,56 @@ async function openPrompt(context, button) {
     return opened;
 }
 
-test("autofill, exact matches, TOTP, SPA, registration, duplicates, and frames", async () => {
-    test.setTimeout(90_000);
-    test.skip(process.platform !== "linux");
-    const server = await startServer();
-    const origin = `http://127.0.0.1:${server.address().port}`;
-    const account = {
-        id: 7, name: "Alice", username: "alice@example.com", password: "saved-password",
-        has_totp: true, domain: origin
-    };
-    const secondAccount = {
-        id: 8, name: "Bob", username: "bob@example.com", password: "bob-password",
-        has_totp: false, domain: origin
-    };
-    const browser = await launchExtension({ accounts: [account, secondAccount] });
-    const page = browser.context.pages()[0] || await browser.context.newPage();
-    try {
-        // Existing-credential picker fills the intended form.
+test.describe("extended credential flows", () => {
+    test.describe.configure({ mode: "serial", timeout: 90_000 });
+    let server;
+    let origin;
+    let browser;
+    let page;
+
+    test.beforeAll(async () => {
+        test.skip(process.platform !== "linux");
+        server = await startServer();
+        origin = `http://127.0.0.1:${server.address().port}`;
+        browser = await launchExtension({ accounts: [
+            { id: 7, name: "Alice", username: "alice@example.com", password: "saved-password", has_totp: true, domain: origin },
+            { id: 8, name: "Bob", username: "bob@example.com", password: "bob-password", has_totp: false, domain: origin }
+        ] });
+        page = browser.context.pages()[0] || await browser.context.newPage();
+    });
+
+    test.afterAll(async () => {
+        await browser?.close();
+        if (server) await new Promise(resolve => server.close(resolve));
+    });
+
+    test("saved credentials fill the intended form", async () => {
         await page.goto(`${origin}/simple`);
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
         await picker.getByRole("button", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
+    });
 
-        // An exact match resumes submission without opening a save prompt.
-        const pagesBefore = browser.context.pages().length;
+    test("an exact match resumes without a save prompt", async () => {
+        await page.goto(`${origin}/simple`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        const promptsBefore = browser.context.pages().filter(candidate =>
+            candidate.url().includes("credential_prompt.html") && !candidate.isClosed()
+        ).length;
         await page.locator("#submit").click();
         await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes");
         await page.waitForTimeout(300);
-        expect(browser.context.pages().length).toBe(pagesBefore);
+        expect(browser.context.pages().filter(candidate =>
+            candidate.url().includes("credential_prompt.html") && !candidate.isClosed()
+        )).toHaveLength(promptsBefore);
+    });
 
-        // With multiple accounts, the submitted username selects the update target.
-        await page.reload();
+    test("a submitted username selects the matching update target", async () => {
+        await page.goto(`${origin}/simple`);
         await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
         await page.locator("#username").fill("alice@example.com");
         await page.locator("#password").fill("alice-updated-password");
@@ -107,15 +124,17 @@ test("autofill, exact matches, TOTP, SPA, registration, duplicates, and frames",
             request.action === "updateCredentials" && request.password === "alice-updated-password"
         );
         expect(updateRequest.entryId).toBe(7);
+    });
 
-        // TOTP is fetched only after the secure picker selection.
+    test("TOTP is fetched only after secure picker selection", async () => {
         await page.goto(`${origin}/totp`);
         const totpPicker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose authenticator code" }));
         await totpPicker.getByRole("button", { name: /Alice/ }).click();
         await expect(page.locator("#totp")).toHaveValue("123456");
+    });
 
-        // A JavaScript-only username/password/TOTP transition opens one durable prompt.
+    test("SPA credential transitions retain the captured username", async () => {
         await page.goto(`${origin}/spa`);
         await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
         await page.locator("#username").fill("spa@example.com");
@@ -126,8 +145,9 @@ test("autofill, exact matches, TOTP, SPA, registration, duplicates, and frames",
         await expect(page.locator("#totp")).toBeVisible();
         await expect(spaPrompt.locator("#username")).toHaveValue("spa@example.com");
         await spaPrompt.locator("#cancel").click();
+    });
 
-        // Registration captures the primary new password, not its confirmation as a second login.
+    test("registration captures the primary password once", async () => {
         await page.goto(`${origin}/registration`);
         await page.locator("#email").fill("new@example.com");
         await page.locator("#newPassword").fill("registration-password");
@@ -139,8 +159,9 @@ test("autofill, exact matches, TOTP, SPA, registration, duplicates, and frames",
         await waitForNativeRequest(browser.nativeLog, request =>
             request.action === "saveCredentials" && request.password === "registration-password"
         );
+    });
 
-        // Click + submit behavior must still create only one popup.
+    test("click and submit handling creates one prompt", async () => {
         await page.goto(`${origin}/duplicate`);
         await page.locator("#username").fill("duplicate@example.com");
         await page.locator("#password").fill("duplicate-password");
@@ -150,33 +171,28 @@ test("autofill, exact matches, TOTP, SPA, registration, duplicates, and frames",
             candidate.url().includes("credential_prompt.html") && !candidate.isClosed()
         )).toHaveLength(1);
         await duplicatePrompt.locator("#cancel").click();
+    });
 
-        // Same-origin frames may fill their own fields.
+    test("same-origin frames fill their own fields", async () => {
         await page.goto(`${origin}/iframe-same`);
         const sameFrame = page.frameLocator("#loginFrame");
         const framePicker = await openPicker(browser.context,
             sameFrame.getByRole("button", { name: "Choose saved credentials" }).first());
         await framePicker.getByRole("button", { name: /Alice/ }).click();
         await expect(sameFrame.locator("#username")).toHaveValue("alice@example.com");
+    });
 
-        // A cross-origin frame cannot use credentials authorized for the top origin.
+    test("cross-origin frames cannot reuse top-origin authorization", async () => {
         await page.goto(`${origin}/iframe-cross`);
         const crossFrame = page.frameLocator("#loginFrame");
         const crossPicker = await openPicker(browser.context,
             crossFrame.getByRole("button", { name: "Choose saved credentials" }).first());
         await expect(crossPicker.locator("#status")).toHaveText("Not found.");
         await crossPicker.locator("#cancel").click();
-    } finally {
-        await browser.close();
-        await new Promise(resolve => server.close(resolve));
-    }
+    });
 });
 
-test("native-host failures remain visible and never expose the form", async () => {
-    test.setTimeout(90_000);
-    test.skip(process.platform !== "linux");
-    const server = await startServer();
-    const origin = `http://127.0.0.1:${server.address().port}`;
+test.describe("native-host failures", () => {
     const cases = [
         { mode: "missing", installHost: false, message: /native messaging host not found/i },
         { mode: "locked", message: /vault is locked/i },
@@ -184,8 +200,13 @@ test("native-host failures remain visible and never expose the form", async () =
         { mode: "malformed", message: /invalid credential response/i },
         { mode: "timeout", message: /request timed out/i }
     ];
-    try {
-        for (const scenario of cases) {
+
+    for (const scenario of cases) {
+        test(`${scenario.mode} errors remain visible and hide the form`, async () => {
+            test.setTimeout(30_000);
+            test.skip(process.platform !== "linux");
+            const server = await startServer();
+            const origin = `http://127.0.0.1:${server.address().port}`;
             const browser = await launchExtension(scenario);
             try {
                 const page = browser.context.pages()[0] || await browser.context.newPage();
@@ -198,9 +219,8 @@ test("native-host failures remain visible and never expose the form", async () =
                 await expect(prompt.locator("#credentials")).toBeHidden();
             } finally {
                 await browser.close();
+                await new Promise(resolve => server.close(resolve));
             }
-        }
-    } finally {
-        await new Promise(resolve => server.close(resolve));
+        });
     }
 });

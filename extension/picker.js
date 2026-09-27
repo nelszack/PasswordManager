@@ -23,19 +23,13 @@ async function load() {
         return;
     }
     if (response.error) throw new Error(response.error);
-    const labels = {
-        login: "Choose saved credentials",
-        totp: "Choose authenticator",
-        "payment-card": "Choose payment card",
-        identity: "Choose identity"
-    };
-    title.textContent = labels[response.kind] || "Password Manager";
-    status.textContent = response.items.length ? "Select an item to fill" : "No matching items";
+    title.textContent = PasswordManagerPickerState.title(response.kind);
+    status.textContent = PasswordManagerPickerState.status(response.items);
     items.replaceChildren();
     for (const item of response.items) {
         const button = document.createElement("button");
         button.type = "button";
-        button.textContent = item.name || item.username || "Unnamed item";
+        button.textContent = PasswordManagerPickerState.itemLabel(item);
         if (item.username && item.username !== item.name) {
             const username = document.createElement("small");
             username.textContent = item.username;

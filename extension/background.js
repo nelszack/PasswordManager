@@ -1,4 +1,4 @@
-importScripts("relay.js", "background_security.js", "credential_prompt_state.js");
+importScripts("relay.js", "background_security.js", "background_state.js", "credential_prompt_state.js");
 
 const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
@@ -83,34 +83,14 @@ function nativeRequest(action, fields = {}) {
 }
 
 function setBadge(status) {
-    let text, color, title;
-    if (!status.native) {
-        text = "?";
-        color = "#f59e0b";
-        title = "Password Manager: native messaging host not installed";
-    } else if (!status.running) {
-        text = "N";
-        color = "#6b7280";
-        title = "Password Manager: server not running";
-    } else if (status.locked) {
-        text = "L";
-        color = "#ef4444";
-        title = "Password Manager: vault locked";
-    } else {
-        text = "U";
-        color = "#22c55e";
-        title = "Password Manager: vault unlocked";
-    }
+    const { text, color, title } = PasswordManagerBackgroundState.badge(status);
     chrome.action.setBadgeText({ text });
     chrome.action.setBadgeBackgroundColor({ color });
     chrome.action.setTitle({ title });
 }
 
 function sameStatus(left, right) {
-    return left?.native === right?.native
-        && left?.running === right?.running
-        && left?.locked === right?.locked
-        && left?.error === right?.error;
+    return PasswordManagerBackgroundState.equal(left, right);
 }
 
 function publishStatus(status) {

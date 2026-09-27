@@ -875,32 +875,11 @@ function explicitAutofillField(control, fields) {
 }
 
 function inferredCardField(control) {
-    const description = inputDescriptors(control).join(" ").toLowerCase();
-    if (/cvc|cvv|card.?security|security.?code/.test(description)) return "cc-csc";
-    if (/expir.*month|exp.?month|cc.?month/.test(description)) return "cc-exp-month";
-    if (/expir.*year|exp.?year|cc.?year/.test(description)) return "cc-exp-year";
-    if (/expir|card.?exp|cc.?exp/.test(description)) return "cc-exp";
-    if (/cardholder|name.?on.?card|cc.?name/.test(description)) return "cc-name";
-    if (/card.?number|cc.?number|credit.?card/.test(description)) return "cc-number";
-    return null;
+    return PasswordManagerContentFields.inferCard(inputDescriptors(control));
 }
 
 function inferredIdentityField(control) {
-    const description = inputDescriptors(control).join(" ").toLowerCase();
-    if (/postal|zip/.test(description)) return "postal-code";
-    if (/address.?line.?3/.test(description)) return "address-line3";
-    if (/address.?line.?2|apartment|suite|unit/.test(description)) return "address-line2";
-    if (/street|address.?line.?1/.test(description)) return "address-line1";
-    if (/city|town/.test(description)) return "address-level2";
-    if (/state|province|region|county/.test(description)) return "address-level1";
-    if (/country/.test(description)) return "country";
-    if (/first|given/.test(description) && /name/.test(description)) return "given-name";
-    if (/last|family|surname/.test(description)) return "family-name";
-    if (/full.?name|contact.?name/.test(description)) return "name";
-    if (/company|organization/.test(description)) return "organization";
-    if (/phone|mobile|telephone/.test(description)) return "tel";
-    if (/e-?mail/.test(description)) return "email";
-    return null;
+    return PasswordManagerContentFields.inferIdentity(inputDescriptors(control));
 }
 
 function autofillField(control, kind) {
@@ -930,15 +909,11 @@ function typedAutofillKind(input) {
 }
 
 function normalizedFieldName(value) {
-    return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    return PasswordManagerContentFields.normalize(value);
 }
 
 function customAutofillValue(item, aliases) {
-    const accepted = new Set(aliases.map(normalizedFieldName));
-    const field = (item.custom_fields || []).find(candidate =>
-        accepted.has(normalizedFieldName(candidate.name))
-    );
-    return field ? String(field.value ?? "") : "";
+    return PasswordManagerContentFields.customValue(item.custom_fields, aliases);
 }
 
 const AUTOFILL_ALIASES = {

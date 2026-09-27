@@ -18,7 +18,7 @@ use crate::{
     client::send_command,
     config::{try_read_config, try_update},
     encryption::prompt_for_password,
-    file::{resolve_key_path, resolve_new_key_path},
+    file::{config_dir, data_dir, resolve_key_path, resolve_new_key_path},
     password::{
         PasswordOptions, generate_passphrase, generate_password as make_password,
         generate_password_with_options, generated_password_output, password_strength_output,
@@ -31,7 +31,6 @@ use crate::{
 };
 use clap::CommandFactory;
 use clap_complete::generate;
-use directories::ProjectDirs;
 use std::fs;
 
 fn target_type(target: EntryArgs) -> Target {
@@ -98,13 +97,10 @@ fn resolved_key(path: String) -> PasswordType {
 #[tokio::main]
 async fn main() {
     let invoked_as_native_host = native_messaging::invoked_directly();
-    let Some(proj_dir) = ProjectDirs::from("com", "myproject", "password_manager") else {
-        eprintln!("Error: could not locate the application data directory.");
-        std::process::exit(1);
-    };
-    let config_path = proj_dir.config_dir();
-    let data_path = proj_dir.data_dir();
-    if let Err(error) = fs::create_dir_all(config_path).and_then(|_| fs::create_dir_all(data_path))
+    let config_path = config_dir();
+    let data_path = data_dir();
+    if let Err(error) =
+        fs::create_dir_all(&config_path).and_then(|_| fs::create_dir_all(&data_path))
     {
         eprintln!("Error: could not create application directories: {error}");
         std::process::exit(1);

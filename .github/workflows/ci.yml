@@ -79,7 +79,14 @@ jobs:
       - name: Build native host and server
         run: cargo build --locked
       - name: Run browser end-to-end tests
-        run: xvfb-run --auto-servernum npm run test:e2e
+        run: xvfb-run --auto-servernum npm run test:e2e:coverage
+      - name: Upload browser coverage
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: browser-coverage
+          path: test-results/e2e-coverage/
+          if-no-files-found: error
       - name: Upload browser test report
         if: failure()
         uses: actions/upload-artifact@v7
@@ -89,3 +96,29 @@ jobs:
             playwright-report/
             test-results/
           if-no-files-found: ignore
+
+  coverage:
+    name: Coverage baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: actions/setup-node@v6
+        with:
+          # --test-coverage-include-all requires Node 26.7 or newer.
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Measure Rust coverage
+        run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path rust-lcov.info --fail-under-lines 65
+      - name: Measure extension unit coverage
+        run: npm run test:extension:coverage
+      - uses: actions/upload-artifact@v6
+        with:
+          name: coverage-reports
+          path: rust-lcov.info
+          if-no-files-found: error
