@@ -49,7 +49,20 @@ for (const [name, script] of [...scripts].sort()) {
     total += script.source.length;
     console.log(`${name}: ${(100 * covered / script.source.length).toFixed(2)}% byte coverage`);
 }
-if (!scripts.has("content.js")) throw new Error("Playwright did not capture content.js coverage");
+const required = {
+    "content.js": 38,
+    "content_fields.js": 60,
+    "credential_prompt.js": 40,
+    "form_submission.js": 60
+};
+for (const [name, minimum] of Object.entries(required)) {
+    const script = scripts.get(name);
+    if (!script) throw new Error(`Playwright did not capture ${name} coverage`);
+    const percent = 100 * coveredBytes(script) / script.source.length;
+    if (percent < minimum) {
+        throw new Error(`${name} browser coverage ${percent.toFixed(2)}% is below ${minimum}%`);
+    }
+}
 const percent = total ? 100 * hit / total : 0;
 console.log(`Extension browser coverage: ${percent.toFixed(2)}% (${hit}/${total} bytes)`);
-if (percent < 20) throw new Error(`Extension browser coverage ${percent.toFixed(2)}% is below 20%`);
+if (percent < 40) throw new Error(`Extension browser coverage ${percent.toFixed(2)}% is below 40%`);

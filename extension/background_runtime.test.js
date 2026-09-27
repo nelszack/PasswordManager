@@ -57,6 +57,8 @@ test("background worker starts, publishes status, and rejects untrusted credenti
         PasswordManagerSecurity: require("./background_security.js"),
         PasswordManagerCredentialPrompt: require("./credential_prompt_state.js"),
         PasswordManagerBackgroundState: require("./background_state.js"),
+        PasswordManagerNativeProtocol: require("./native_protocol.js"),
+        PasswordManagerPendingCredentials: require("./pending_credentials.js"),
         importScripts() {},
         URL, Map, Set, Date, JSON, Promise, Error,
         setTimeout, clearTimeout, queueMicrotask,

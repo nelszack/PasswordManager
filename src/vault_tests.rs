@@ -529,7 +529,7 @@ fn test_export_import() {
             ..RecoveryData::default()
         },
     };
-    vlt.export(path.display().to_string()).unwrap();
+    vlt.export(path.display().to_string(), false).unwrap();
     let mut vlt1 = Vault {
         entries: vec![],
         metadata: VaultMetadata {
@@ -627,7 +627,7 @@ fn test_json_export_round_trip() {
             ..RecoveryData::default()
         },
     };
-    vault.export(path.display().to_string()).unwrap();
+    vault.export(path.display().to_string(), false).unwrap();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(exported["format"], PORTABLE_FORMAT);
     assert_eq!(exported["version"], PORTABLE_VERSION);
@@ -951,7 +951,7 @@ fn test_create_vault_password() {
         &mut vlt,
         &mut ServerInfo {
             locked: true,
-            keypass: Some(PasswordType::Password("test123456!".to_string())),
+            keypass: Some(PasswordType::Password("test1234567!".to_string())),
         },
         false,
     )
@@ -969,6 +969,39 @@ fn test_create_vault_password() {
         })
     )
 }
+
+#[test]
+fn new_vault_rekey_and_backup_passwords_enforce_the_minimum() {
+    init_test_data_dir();
+    let mut vault = None;
+    let mut server_info = ServerInfo {
+        locked: true,
+        keypass: Some(PasswordType::Password("short".into())),
+    };
+    assert!(create_vault(&mut vault, &mut server_info, false).is_err());
+    assert!(vault.is_none());
+
+    let mut detached = Vault::default();
+    assert!(
+        detached
+            .rekey(
+                &mut ServerInfo::default(),
+                PasswordType::Password("short".into())
+            )
+            .is_err()
+    );
+
+    let output_dir = tempfile::tempdir().unwrap();
+    let path = output_dir.path().join("weak-password.pmbackup");
+    let mut short = PasswordType::Password("short".into());
+    assert!(
+        detached
+            .encrypted_backup(path.display().to_string(), &mut short, false)
+            .is_err()
+    );
+    assert!(!path.exists());
+}
+
 #[test]
 fn test_create_vault_password_lock() {
     init_test_data_dir();
@@ -2015,6 +2048,59 @@ fn import_preview_and_conflict_policies_are_deterministic() {
 }
 
 #[test]
+fn oversized_import_files_are_rejected_before_their_contents_are_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oversized.json");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_IMPORT_BYTES + 1).unwrap();
+
+    let error = Vault::default()
+        .import_with_options(
+            path.display().to_string(),
+            ConflictPolicy::Skip,
+            true,
+            1,
+            &mut ServerInfo::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("128 MiB limit"), "{error}");
+}
+
+#[test]
+fn imports_with_too_many_items_are_rejected_before_vault_changes() {
+    let mut file = NamedTempFile::new().unwrap();
+    {
+        let mut writer = std::io::BufWriter::new(file.as_file_mut());
+        writeln!(writer, "name,username,password,url").unwrap();
+        for index in 0..=MAX_IMPORT_ITEMS {
+            writeln!(writer, "item-{index},user,password,").unwrap();
+        }
+        writer.flush().unwrap();
+    }
+    let mut vault = recovery_test_vault(vec![recovery_test_entry(
+        1,
+        "existing",
+        "alice",
+        "unchanged",
+    )]);
+    let before = vault.clone();
+
+    let error = vault
+        .import_with_options(
+            file.path().display().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            1,
+            &mut ServerInfo::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("100000 item limit"), "{error}");
+    assert_eq!(vault, before);
+}
+
+#[test]
 fn indexed_import_conflicts_track_entries_added_in_the_same_batch() {
     let mut existing = recovery_test_entry(7, "Example", "alice", "old-password");
     existing.url = Some("https://example.com".into());
@@ -2263,11 +2349,13 @@ fn totp_secrets_are_redacted_and_only_in_full_fidelity_json_exports() {
 
     let directory = tempfile::tempdir().unwrap();
     let json_path = directory.path().join("export.json");
-    vault.export(json_path.display().to_string()).unwrap();
+    vault
+        .export(json_path.display().to_string(), false)
+        .unwrap();
     assert!(fs::read_to_string(json_path).unwrap().contains(secret));
 
     let csv_path = directory.path().join("export.csv");
-    vault.export(csv_path.display().to_string()).unwrap();
+    vault.export(csv_path.display().to_string(), false).unwrap();
     assert!(!fs::read_to_string(csv_path).unwrap().contains(secret));
 }
 
@@ -2285,12 +2373,33 @@ fn plaintext_exports_are_created_with_owner_only_permissions() {
     )]);
     for extension in ["json", "csv"] {
         let path = directory.path().join(format!("export.{extension}"));
-        vault.export(path.display().to_string()).unwrap();
+        vault.export(path.display().to_string(), false).unwrap();
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
+}
+
+#[test]
+fn plaintext_exports_do_not_replace_existing_files_without_force() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("export.json");
+    fs::write(&path, "keep this file").unwrap();
+    let vault = recovery_test_vault(vec![recovery_test_entry(
+        1,
+        "service",
+        "alice",
+        "exported-secret",
+    )]);
+
+    let error = vault.export(path.display().to_string(), false).unwrap_err();
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "keep this file");
+
+    vault.export(path.display().to_string(), true).unwrap();
+    let exported = fs::read_to_string(path).unwrap();
+    assert!(exported.contains("exported-secret"));
 }
 
 #[test]
@@ -2523,7 +2632,9 @@ fn audit_reports_weak_reused_and_duplicate_logins_without_passwords() {
         recovery_test_entry(1, "first", "alice", "secret"),
         recovery_test_entry(2, "second", "alice", "secret"),
     ]);
-    let report = vault.audit_report(&AuditOptions::default(), None, None);
+    let report = vault
+        .audit_snapshot(&AuditOptions::default())
+        .report(None, None);
     assert!(report.contains("2 weak entries"));
     assert!(report.contains("1 reused-password groups"));
     assert!(report.contains("1 duplicate-login groups"));
@@ -2545,15 +2656,12 @@ fn audit_reports_stale_missing_totp_and_breached_passwords() {
     });
     let mut breached = HashMap::new();
     breached.insert(password_hash("known-breached-value"), 42);
-    let report = vault.audit_report(
-        &AuditOptions {
-            stale_days: Some(365),
-            check_breaches: true,
-            require_totp: true,
-        },
-        Some(&breached),
-        None,
-    );
+    let options = AuditOptions {
+        stale_days: Some(365),
+        check_breaches: true,
+        require_totp: true,
+    };
+    let report = vault.audit_snapshot(&options).report(Some(&breached), None);
     assert!(report.contains("Stale password: 7. old account"));
     assert!(report.contains("Missing TOTP: 7. old account"));
     assert!(report.contains("Breached password: 7. old account (seen 42 times)"));

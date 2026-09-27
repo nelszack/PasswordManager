@@ -18,11 +18,12 @@
   "content_scripts": [
     {
       "matches": [
-        "<all_urls>"
+        "https://*/*"
       ],
       "js": [
         "form_submission.js",
         "content_fields.js",
+        "content_detection.js",
         "content.js"
       ],
       "run_at": "document_idle",

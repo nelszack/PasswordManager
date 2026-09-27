@@ -1,4 +1,5 @@
 use super::*;
+use crate::file::init_test_data_dir;
 use crate::vault::{Vault, VaultEntry, VaultMetadata};
 
 async fn tcp_pair() -> (TcpStream, TcpStream) {
@@ -7,6 +8,70 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
     let client = TcpStream::connect(address).await.unwrap();
     let (server, _) = listener.accept().await.unwrap();
     (client, server)
+}
+
+#[test]
+fn status_includes_persistent_background_warnings() {
+    assert_eq!(status_message(true, None), "Status: Locked");
+    assert_eq!(
+        status_message(false, Some("Automatic lock failed: disk full")),
+        "Status: Unlocked\nWarning: Automatic lock failed: disk full"
+    );
+}
+
+#[tokio::test]
+async fn auto_lock_completes_while_a_detached_breach_audit_is_slow() {
+    init_test_data_dir();
+    let vault = Vault {
+        entries: vec![VaultEntry {
+            id: 1,
+            name: "slow audit".into(),
+            password: "password".into(),
+            ..VaultEntry::default()
+        }],
+        metadata: VaultMetadata {
+            filename: "auto-lock-during-audit.vault".into(),
+        },
+        ..Vault::default()
+    };
+    let snapshot = vault.audit_snapshot(&AuditOptions {
+        check_breaches: true,
+        ..AuditOptions::default()
+    });
+    let server_info = Arc::new(Mutex::new(ServerInfo {
+        locked: false,
+        keypass: Some(PasswordType::Session {
+            encryption_key: [7; 32],
+            salt: [9; 16],
+            kdf: 1,
+            memory_kib: 19_456,
+            iterations: 2,
+            parallelism: 1,
+        }),
+    }));
+    let vault = Arc::new(Mutex::new(Some(vault)));
+    let generation = Arc::new(AtomicU64::new(1));
+    let background_error = Arc::new(Mutex::new(None));
+
+    let slow_audit = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        drop(snapshot);
+    });
+    schedule_auto_lock(
+        1,
+        1,
+        Arc::clone(&generation),
+        Arc::clone(&server_info),
+        Arc::clone(&vault),
+        Arc::clone(&background_error),
+    );
+
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    assert!(server_info.lock().await.locked);
+    assert!(vault.lock().await.is_none());
+    assert!(background_error.lock().await.is_none());
+    assert!(!slow_audit.is_finished());
+    slow_audit.abort();
 }
 
 #[tokio::test]
@@ -187,6 +252,23 @@ fn session_tokens_are_random_256_bit_hex_values() {
     assert_eq!(first.len(), TOKEN_HEX_LEN);
     assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_ne!(first, second);
+}
+
+#[test]
+fn session_token_rotation_replaces_old_tokens_and_cleanup_is_generation_safe() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(TOKEN_FILE);
+    let mut first = rotate_token_file(&path).unwrap();
+    let mut second = rotate_token_file(&path).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(fs::read_to_string(&path).unwrap(), second);
+
+    remove_token_file_if_current(&path, &first);
+    assert!(path.exists());
+    remove_token_file_if_current(&path, &second);
+    assert!(!path.exists());
+    first.zeroize();
+    second.zeroize();
 }
 
 #[cfg(unix)]

@@ -32,6 +32,12 @@ use tokio::{
 };
 use zeroize::Zeroize;
 
+mod response;
+use response::{flush_buffered_responses, respond_conflict, respond_failure, respond_not_found};
+pub use response::{respond, respond_with_code};
+mod session_token;
+use session_token::*;
+
 #[derive(Debug)]
 pub struct ServerInfo {
     pub locked: bool,
@@ -69,10 +75,16 @@ impl Zeroize for PasswordType {
                 encryption_key,
                 salt,
                 kdf,
+                memory_kib,
+                iterations,
+                parallelism,
             } => {
                 encryption_key.zeroize();
                 salt.zeroize();
                 kdf.zeroize();
+                memory_kib.zeroize();
+                iterations.zeroize();
+                parallelism.zeroize();
                 *self = PasswordType::Password(String::new())
             }
         }
@@ -169,50 +181,21 @@ pub fn is_running(port: u16) -> bool {
     })
 }
 
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill(&mut bytes);
-    hex::encode(bytes)
-}
-
-fn write_token_file(token: &str, path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "session token path has no parent directory".to_string())?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|error| format!("could not create session token: {error}"))?;
-    set_private_perms(temporary.path())
-        .map_err(|error| format!("could not protect session token: {error}"))?;
-    temporary
-        .write_all(token.as_bytes())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| format!("could not write session token: {error}"))?;
-    temporary
-        .persist(path)
-        .map_err(|error| format!("could not replace session token: {}", error.error))?;
-    sync_parent(path)
-        .map_err(|error| format!("could not sync session token directory: {error}"))?;
-    Ok(())
-}
-
-fn load_or_create_token() -> Result<String, String> {
-    let path = data_dir().join(TOKEN_FILE);
-    if let Ok(t) = fs::read_to_string(&path) {
-        let t = t.trim().to_string();
-        if t.len() == TOKEN_HEX_LEN && t.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Ok(t);
-        }
-    }
-    let token = random_token();
-    write_token_file(&token, &path)?;
-    Ok(token)
-}
-
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     a.ct_eq(b).into()
+}
+
+fn status_message(locked: bool, warning: Option<&str>) -> String {
+    format!(
+        "Status: {}{}",
+        if locked { "Locked" } else { "Unlocked" },
+        warning
+            .map(|warning| format!("\nWarning: {warning}"))
+            .unwrap_or_default()
+    )
 }
 
 pub fn start(port: u16) -> Result<String, String> {
@@ -226,9 +209,6 @@ pub fn start(port: u16) -> Result<String, String> {
             server_addr(port)
         ));
     }
-    let token = random_token();
-    let token_path = data_dir().join(TOKEN_FILE);
-    write_token_file(&token, &token_path)?;
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not locate the pm executable: {error}"))?;
     let mut command = Command::new(executable);
@@ -286,6 +266,7 @@ fn schedule_auto_lock(
     lock_generation: Arc<AtomicU64>,
     server_info: Arc<Mutex<ServerInfo>>,
     vlt: Arc<Mutex<Option<Vault>>>,
+    background_error: Arc<Mutex<Option<String>>>,
 ) {
     if time == 0 {
         return;
@@ -300,9 +281,17 @@ fn schedule_auto_lock(
         if lock_generation.load(Ordering::Acquire) == generation
             && !server_info.locked
             && vlt.is_some()
-            && let Err(error) = lock_vlt(&mut vlt, &mut server_info)
         {
-            eprintln!("Automatic lock failed: {error}");
+            let result = lock_vlt(&mut vlt, &mut server_info);
+            let mut last_error = background_error.lock().await;
+            match result {
+                Ok(()) => *last_error = None,
+                Err(error) => {
+                    let message = format!("Automatic lock failed: {error}");
+                    eprintln!("{message}");
+                    *last_error = Some(message);
+                }
+            }
         }
     });
 }
@@ -311,12 +300,13 @@ pub async fn server(
     password_history_limit: usize,
     trash_retention_days: u64,
 ) -> Result<(), String> {
-    let token =
-        load_or_create_token().map_err(|error| format!("could not initialize server: {error}"))?;
     let address = server_addr(port);
     let listener = TcpListener::bind(address)
         .await
         .map_err(|error| format!("could not bind password manager server to {address}: {error}"))?;
+    let token_path = data_dir().join(TOKEN_FILE);
+    let mut token = rotate_token_file(&token_path)
+        .map_err(|error| format!("could not initialize server: {error}"))?;
 
     let server_info = Arc::new(Mutex::new(ServerInfo {
         locked: true,
@@ -325,6 +315,7 @@ pub async fn server(
     let vlt: Arc<Mutex<Option<Vault>>> = Arc::new(Mutex::new(None));
     let lock_generation = Arc::new(AtomicU64::new(0));
     let inactivity_timeout = Arc::new(AtomicU64::new(0));
+    let background_error = Arc::new(Mutex::new(None));
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
 
@@ -346,6 +337,7 @@ pub async fn server(
                     token: token.clone(),
                     lock_generation: Arc::clone(&lock_generation),
                     inactivity_timeout: Arc::clone(&inactivity_timeout),
+                    background_error: Arc::clone(&background_error),
                     password_history_limit,
                     trash_retention_days,
                 };
@@ -360,6 +352,8 @@ pub async fn server(
             }
         }
     }
+    remove_token_file_if_current(&token_path, &token);
+    token.zeroize();
     Ok(())
 }
 
@@ -371,6 +365,7 @@ struct ConnectionState {
     token: String,
     lock_generation: Arc<AtomicU64>,
     inactivity_timeout: Arc<AtomicU64>,
+    background_error: Arc<Mutex<Option<String>>>,
     password_history_limit: usize,
     trash_retention_days: u64,
 }
@@ -395,6 +390,7 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
         token,
         lock_generation,
         inactivity_timeout,
+        background_error,
         password_history_limit,
         trash_retention_days,
     } = state;
@@ -423,6 +419,7 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
             Arc::clone(&lock_generation),
             Arc::clone(&server_info_handle),
             Arc::clone(&vlt_handle),
+            Arc::clone(&background_error),
         );
     }
     match msg {
@@ -449,7 +446,11 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
             lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked && vlt.is_some() {
                 match lock_vlt(&mut vlt, &mut server_info) {
-                    Ok(()) if send => respond("Vault locked.", &mut stream, http).await,
+                    Ok(()) if send => {
+                        *background_error.lock().await = None;
+                        respond("Vault locked.", &mut stream, http).await
+                    }
+                    Ok(()) => *background_error.lock().await = None,
                     Err(error) if send => {
                         respond_failure(&format!("Lock failed: {error}"), &mut stream, http).await
                     }
@@ -490,7 +491,9 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
                             Arc::clone(&lock_generation),
                             server_info_handle,
                             vlt_handle,
+                            Arc::clone(&background_error),
                         );
+                        *background_error.lock().await = None;
                         respond("Vault unlocked.", &mut stream, http).await;
                     }
                     Err(e) => {
@@ -508,15 +511,9 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
             }
         }
         ServerCommand::Status => {
+            let warning = background_error.lock().await.clone();
             respond(
-                &format!(
-                    "Status: {}",
-                    if server_info.locked {
-                        "Locked"
-                    } else {
-                        "Unlocked"
-                    }
-                ),
+                &status_message(server_info.locked, warning.as_deref()),
                 &mut stream,
                 http,
             )
@@ -724,14 +721,15 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
             if server_info.locked {
                 respond_failure("Vault locked.", &mut stream, http).await;
             } else if let Some(vault) = vlt.as_ref() {
-                // Network-backed breach checks must not hold the live vault
-                // mutex. Otherwise status, explicit lock, and auto-lock all
-                // wait behind every remote range request.
-                let mut audit_snapshot = vault.clone();
+                // Build the local findings and one-way password hashes while
+                // the vault is available, then release the live state before
+                // any network-backed breach checks begin.
+                let audit_snapshot = vault.audit_snapshot(&options);
                 drop(vlt);
                 drop(server_info);
-                audit_snapshot.audit(options, &mut stream, http).await;
-                audit_snapshot.zeroize();
+                audit_snapshot
+                    .audit(options.check_breaches, &mut stream, http)
+                    .await;
             }
         }
         ServerCommand::Totp(mut command) => {
@@ -930,7 +928,7 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
                 respond_failure("Vault locked.", &mut stream, http).await;
             }
         }
-        ServerCommand::Export(path) => match vlt.export(path) {
+        ServerCommand::Export { path, force } => match vlt.export(path, force) {
             Ok(()) => {
                 respond(
                     "Export finished. WARNING: the export contains plaintext secrets.",
@@ -1327,78 +1325,6 @@ fn lock_vlt(vlt: &mut Option<Vault>, server_info: &mut ServerInfo) -> Result<(),
     vlt.zeroize();
     server_info.zeroize();
     Ok(())
-}
-
-pub async fn respond(message: &str, stream: &mut TcpStream, http: bool) {
-    respond_with_code(ResponseCode::Success, message, stream, http).await;
-}
-
-async fn respond_failure(message: &str, stream: &mut TcpStream, http: bool) {
-    respond_with_code(ResponseCode::Failure, message, stream, http).await;
-}
-
-async fn respond_not_found(message: &str, stream: &mut TcpStream, http: bool) {
-    respond_with_code(ResponseCode::NotFound, message, stream, http).await;
-}
-
-async fn respond_conflict(message: &str, stream: &mut TcpStream, http: bool) {
-    respond_with_code(ResponseCode::Conflict, message, stream, http).await;
-}
-
-pub async fn respond_with_code(
-    code: ResponseCode,
-    message: &str,
-    stream: &mut TcpStream,
-    http: bool,
-) {
-    if RESPONSE_BUFFER
-        .try_with(|buffer| {
-            buffer.borrow_mut().push(BufferedResponse {
-                code,
-                message: message.to_owned(),
-                http,
-            });
-        })
-        .is_ok()
-    {
-        return;
-    }
-    write_response(code, message, stream, http).await;
-}
-
-async fn flush_buffered_responses(stream: &mut TcpStream) {
-    let responses = RESPONSE_BUFFER.with(|buffer| std::mem::take(&mut *buffer.borrow_mut()));
-    for mut response in responses {
-        write_response(response.code, &response.message, stream, response.http).await;
-        response.message.zeroize();
-    }
-}
-
-async fn write_response(code: ResponseCode, message: &str, stream: &mut TcpStream, http: bool) {
-    if http {
-        let body = json!({
-            "ok": code == ResponseCode::Success,
-            "code": code as u8,
-            "message": message,
-        })
-        .to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len(),
-        );
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
-            stream.write_all(response.as_bytes()),
-        )
-        .await;
-    } else {
-        let frame = encode_response(code, message);
-        let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            stream.write_all(&frame).await
-        })
-        .await;
-    }
-    let _ = stream.flush().await;
 }
 
 #[cfg(test)]

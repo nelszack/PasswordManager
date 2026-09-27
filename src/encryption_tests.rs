@@ -2,6 +2,59 @@ use super::*;
 use proptest::prelude::*;
 use std::fs;
 
+#[test]
+fn new_passwords_require_twelve_characters() {
+    assert!(validate_new_password("").is_err());
+    assert!(validate_new_password("eleven-chrs").is_err());
+    assert!(validate_new_password("twelve-chars!").is_ok());
+    assert!(validate_new_password("🔐🔐🔐🔐🔐🔐🔐🔐🔐🔐🔐🔐").is_ok());
+}
+
+#[test]
+fn session_rewrites_preserve_the_parameters_that_derived_the_key() {
+    let original_parameters = KdfParameters {
+        memory_kib: 8 * 1024,
+        iterations: 1,
+        parallelism: 1,
+    };
+    let newer_parameters = KdfParameters {
+        memory_kib: 16 * 1024,
+        iterations: 2,
+        parallelism: 2,
+    };
+    let password = "parameter-migration-test";
+    let mut session = PasswordType::Password(password.into());
+    let first = with_test_kdf_parameters(original_parameters, || {
+        try_encrypt_file_in_place(&mut session, b"first".to_vec()).unwrap()
+    });
+    assert_eq!(
+        u32::from_be_bytes(first[10..14].try_into().unwrap()),
+        original_parameters.memory_kib
+    );
+
+    let rewritten = with_test_kdf_parameters(newer_parameters, || {
+        try_encrypt_file_in_place(&mut session, b"rewritten".to_vec()).unwrap()
+    });
+    assert_eq!(
+        u32::from_be_bytes(rewritten[10..14].try_into().unwrap()),
+        original_parameters.memory_kib
+    );
+    assert_eq!(
+        u32::from_be_bytes(rewritten[14..18].try_into().unwrap()),
+        original_parameters.iterations
+    );
+    assert_eq!(
+        u32::from_be_bytes(rewritten[18..22].try_into().unwrap()),
+        original_parameters.parallelism
+    );
+
+    let mut fresh_password = PasswordType::Password(password.into());
+    assert_eq!(
+        decrypt_file(&mut fresh_password, &rewritten).as_deref(),
+        Some(b"rewritten".as_slice())
+    );
+}
+
 proptest! {
     #[test]
     fn arbitrary_encrypted_inputs_never_panic(
@@ -11,6 +64,9 @@ proptest! {
             encryption_key: [0; 32],
             salt: [0; 16],
             kdf: KDF_ARGON2ID,
+            memory_kib: FAST_TEST_KDF_PARAMETERS.memory_kib,
+            iterations: FAST_TEST_KDF_PARAMETERS.iterations,
+            parallelism: FAST_TEST_KDF_PARAMETERS.parallelism,
         };
         let _ = decrypt_file(&mut session, &bytes);
     }

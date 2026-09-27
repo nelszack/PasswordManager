@@ -75,21 +75,44 @@ pub(crate) fn with_test_kdf_parameters<T>(
     operation()
 }
 
-pub fn prompt_for_password() -> String {
+pub(crate) fn validate_new_password(password: &str) -> Result<(), &'static str> {
+    if password.chars().count() < 12 {
+        Err("passwords must contain at least 12 characters")
+    } else {
+        Ok(())
+    }
+}
+
+fn prompt_for_confirmed_password(require_minimum: bool) -> String {
     loop {
-        let p1 = rpassword::prompt_password("Enter a password: ").unwrap_or_else(|error| {
+        let mut p1 = rpassword::prompt_password("Enter a password: ").unwrap_or_else(|error| {
             eprintln!("Error: could not read password: {error}");
             std::process::exit(1);
         });
-        let p2 = rpassword::prompt_password("Re-enter the password: ").unwrap_or_else(|error| {
-            eprintln!("Error: could not read password confirmation: {error}");
-            std::process::exit(1);
-        });
-        if p1 == p2 {
+        let mut p2 =
+            rpassword::prompt_password("Re-enter the password: ").unwrap_or_else(|error| {
+                eprintln!("Error: could not read password confirmation: {error}");
+                std::process::exit(1);
+            });
+        if require_minimum && let Err(error) = validate_new_password(&p1) {
+            println!("{error}. Try again.");
+        } else if p1 == p2 {
+            p2.zeroize();
             return p1;
+        } else {
+            println!("Passwords don't match. Try again.")
         }
-        println!("Passwords don't match. Try again.")
+        p1.zeroize();
+        p2.zeroize();
     }
+}
+
+pub fn prompt_for_password() -> String {
+    prompt_for_confirmed_password(false)
+}
+
+pub fn prompt_for_new_master_password() -> String {
+    prompt_for_confirmed_password(true)
 }
 
 fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
@@ -237,25 +260,39 @@ pub fn try_encrypt_file_in_place(
     key_pass: &mut PasswordType,
     mut plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    let parameters = active_kdf_parameters();
     let cached = match key_pass {
         PasswordType::Session {
             encryption_key,
             salt,
             kdf,
-        } => Some((*encryption_key, *salt, *kdf)),
+            memory_kib,
+            iterations,
+            parallelism,
+        } => Some((
+            *encryption_key,
+            *salt,
+            *kdf,
+            KdfParameters {
+                memory_kib: *memory_kib,
+                iterations: *iterations,
+                parallelism: *parallelism,
+            },
+        )),
         _ => None,
     };
-    let salt = cached.map_or_else(<[u8; SALT_LEN]>::generate, |(_, salt, _)| salt);
+    let parameters = cached
+        .map(|(_, _, _, parameters)| parameters)
+        .unwrap_or_else(active_kdf_parameters);
+    let salt = cached.map_or_else(<[u8; SALT_LEN]>::generate, |(_, salt, _, _)| salt);
     let kdf = match cached {
-        Some((_, _, kdf)) => kdf,
+        Some((_, _, kdf, _)) => kdf,
         None => match key_pass {
             PasswordType::Password(_) => KDF_ARGON2ID,
             PasswordType::Key(_) => KDF_KEYFILE,
             PasswordType::Session { .. } => unreachable!(),
         },
     };
-    let mut enc_key = if let Some((key, _, _)) = cached {
+    let mut enc_key = if let Some((key, _, _, _)) = cached {
         key
     } else {
         let mut master_key = encryption_master(key_pass, &salt)?;
@@ -296,6 +333,9 @@ pub fn try_encrypt_file_in_place(
             encryption_key: session_key,
             salt,
             kdf,
+            memory_kib: parameters.memory_kib,
+            iterations: parameters.iterations,
+            parallelism: parameters.parallelism,
         };
     }
     session_key.zeroize();
@@ -351,7 +391,17 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
                 encryption_key,
                 salt: cached_salt,
                 kdf: cached_kdf,
-            } if cached_salt.as_slice() == salt && *cached_kdf == kdf => Some(*encryption_key),
+                memory_kib: cached_memory_kib,
+                iterations: cached_iterations,
+                parallelism: cached_parallelism,
+            } if cached_salt.as_slice() == salt
+                && *cached_kdf == kdf
+                && *cached_memory_kib == memory_kib
+                && *cached_iterations == iterations
+                && *cached_parallelism == parallelism =>
+            {
+                Some(*encryption_key)
+            }
             _ => None,
         };
         let mut enc_key = if let Some(key) = cached_key {
@@ -393,6 +443,9 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
                 encryption_key: session_key,
                 salt: salt.try_into().ok()?,
                 kdf,
+                memory_kib,
+                iterations,
+                parallelism,
             };
         }
         return Some(plaintext);

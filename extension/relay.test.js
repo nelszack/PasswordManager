@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { requestRoute, resultRoute, relayKey, authorizeCredentialRequest } = require("./relay.js");
+const {
+    requestRoute, resultRoute, relayKey, authorizeCredentialRequest, cleanupExpired
+} = require("./relay.js");
 
 const token = "01234567-89ab-4cde-8fab-0123456789ab";
 
@@ -98,4 +100,14 @@ test("expired relay authorizations are rejected and removed", () => {
         tab: { id: 42 }, frameId: 0
     }, pending), null);
     assert.equal(pending.has(key), false);
+});
+
+test("periodic cleanup removes every expired authorization and preserves live entries", () => {
+    const pending = new Map([
+        ["expired", { expiresAt: 99 }],
+        ["missing", null],
+        ["live", { expiresAt: 101 }]
+    ]);
+    assert.equal(cleanupExpired(pending, 100), 2);
+    assert.deepEqual([...pending.keys()], ["live"]);
 });

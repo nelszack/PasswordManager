@@ -366,6 +366,12 @@ fn typed_items_multiple_urls_and_list_options_parse() {
         Cli::try_parse_from(["pm", "import", "--path", "vault.csv", "--key", "key.bin"]).is_err()
     );
 
+    let export = Cli::try_parse_from(["pm", "export", "--path", "vault.json", "--force"]).unwrap();
+    assert!(matches!(
+        export.command,
+        Some(CliCommands::Export { path, force }) if path == "vault.json" && force
+    ));
+
     assert!(
         Cli::try_parse_from([
             "pm",

@@ -9,4 +9,8 @@ test("popup renders disconnected, stopped, locked, and unlocked states", () => {
     assert.deepEqual(presentation({ native: true, running: true, locked: false }), {
         color: "#22c55e", text: "Vault unlocked", canLock: true
     });
+    assert.deepEqual(
+        presentation({ native: true, running: true, locked: false, error: "Automatic lock failed" }),
+        { color: "#f59e0b", text: "Automatic lock failed", canLock: true }
+    );
 });

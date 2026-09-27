@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod clipboard;
 mod config;
+mod docs;
 mod encryption;
 mod file;
 mod native_messaging;
@@ -17,7 +18,7 @@ use crate::{
     },
     client::send_command,
     config::{try_read_config, try_update},
-    encryption::prompt_for_password,
+    encryption::{prompt_for_new_master_password, prompt_for_password},
     file::{config_dir, data_dir, resolve_key_path, resolve_new_key_path},
     password::{
         PasswordOptions, generate_passphrase, generate_password as make_password,
@@ -141,6 +142,11 @@ async fn main() {
         return;
     };
     match (command, server_running) {
+        (CliCommands::GenerateCommandReference { check }, _) => {
+            if let Err(error) = docs::generate_command_reference(check) {
+                client::exit_error(&error, 1);
+            }
+        }
         (
             CliCommands::Genpass {
                 length,
@@ -331,14 +337,14 @@ async fn main() {
             send_command(ServerCommand::New(if let Some(kp) = key_path {
                 resolved_new_key(kp)
             } else {
-                PasswordType::Password(prompt_for_password())
+                PasswordType::Password(prompt_for_new_master_password())
             }));
         }
         (CliCommands::Rekey { key_path }, true) => {
             send_command(ServerCommand::Rekey(if let Some(kp) = key_path {
                 resolved_new_key(kp)
             } else {
-                PasswordType::Password(prompt_for_password())
+                PasswordType::Password(prompt_for_new_master_password())
             }));
         }
         (
@@ -503,7 +509,7 @@ async fn main() {
             } => send_command(ServerCommand::Backup(BackupRequest {
                 path,
                 key_pass: key_path.map_or_else(
-                    || PasswordType::Password(prompt_for_password()),
+                    || PasswordType::Password(prompt_for_new_master_password()),
                     resolved_key,
                 ),
                 force,
@@ -589,8 +595,8 @@ async fn main() {
                 }
             });
         }
-        (CliCommands::Export { path }, true) => {
-            send_command(ServerCommand::Export(path));
+        (CliCommands::Export { path, force }, true) => {
+            send_command(ServerCommand::Export { path, force });
         }
         (
             CliCommands::Import {
@@ -610,7 +616,7 @@ async fn main() {
             } else {
                 Some(match key_path {
                     Some(path) => resolved_new_key(path),
-                    None => PasswordType::Password(prompt_for_password()),
+                    None => PasswordType::Password(prompt_for_new_master_password()),
                 })
             };
             send_command(ServerCommand::Import(ImportRequest {

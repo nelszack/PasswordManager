@@ -11,6 +11,9 @@ pub enum PasswordType {
         encryption_key: [u8; 32],
         salt: [u8; 16],
         kdf: u8,
+        memory_kib: u32,
+        iterations: u32,
+        parallelism: u32,
     },
 }
 
@@ -106,7 +109,10 @@ impl Zeroize for ServerCommand {
             Self::Backup(request) | Self::RestoreBackup(request) => request.zeroize(),
             Self::Update(update) => update.zeroize(),
             Self::UpdateTyped(update) => update.zeroize(),
-            Self::Export(path) => path.zeroize(),
+            Self::Export { path, force } => {
+                path.zeroize();
+                force.zeroize();
+            }
             Self::Import(request) => request.zeroize(),
             Self::New(key) | Self::Rekey(key) => key.zeroize(),
             Self::Search(filter) => {
@@ -157,7 +163,7 @@ pub enum ServerCommand {
     RestoreBackup(BackupRequest),
     Update(EntryUpdate),
     UpdateTyped(TypedUpdate),
-    Export(String),
+    Export { path: String, force: bool },
     Import(ImportRequest),
     New(PasswordType),
     Rekey(PasswordType),

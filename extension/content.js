@@ -54,112 +54,12 @@ function startLayoutObserver() {
     });
 }
 
-// Check whether an element is actually rendered on screen
-// (handles fields that are removed, or hidden via display/visibility/opacity)
-function isElementVisible(el) {
-    if (!el || !el.isConnected) return false;
-    let node = el;
-    while (node && node.nodeType === 1) {
-        const style = getComputedStyle(node);
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-            return false;
-        }
-        node = node.parentElement;
-    }
-    return true;
-}
-
-function isUsableInput(input) {
-    return input instanceof HTMLInputElement
-        && !input.disabled
-        && !input.readOnly
-        && isElementVisible(input);
-}
-
-function scopeInputs(scope) {
-    if (scope instanceof HTMLFormElement) {
-        return Array.from(scope.elements).filter(element => element instanceof HTMLInputElement);
-    }
-    return Array.from(scope.querySelectorAll("input"));
-}
-
-// Prefer the browser's explicit form association (including form="id" fields).
-// For sites built without <form>, use the smallest nearby container that holds
-// a plausible credential pair instead of searching the entire page.
-function credentialScope(input) {
-    if (input.form) return input.form;
-
-    const explicitScope = input.closest("[role='form'], dialog");
-    if (explicitScope) return explicitScope;
-
-    let candidate = input.parentElement;
-    while (candidate && candidate !== document.body) {
-        const fields = Array.from(candidate.querySelectorAll("input")).filter(isUsableInput);
-        const hasPassword = fields.some(field => field.type === "password");
-        const possibleUserFields = fields.filter(field =>
-            USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field)
-        );
-        if (hasPassword && possibleUserFields.length > 0) return candidate;
-        candidate = candidate.parentElement;
-    }
-
-    return input.parentElement || document;
-}
-
-function autocompleteTokens(input) {
-    return (input.autocomplete || "").toLowerCase().split(/\s+/).filter(Boolean);
-}
-
-function isNewPasswordInput(input) {
-    if (autocompleteTokens(input).includes("new-password")) return true;
-    return inputDescriptors(input).some(value => /confirm|repeat|retype|new[-_ ]?pass|create[-_ ]?pass/i.test(value));
-}
-
-function isLoginPasswordInput(input) {
-    return isUsableInput(input) && input.type === "password" && !isNewPasswordInput(input);
-}
-
-function usernameCandidates(fields) {
-    return fields.filter(field =>
-        isUsableInput(field)
-        && USERNAME_INPUT_TYPES.has(field.type)
-        && !hasSearchHint(field)
-    );
-}
-
-function chooseUsernameField(fields, anchor) {
-    const candidates = usernameCandidates(fields);
-    const beforeAnchor = anchor
-        ? candidates.filter(field => fields.indexOf(field) < fields.indexOf(anchor))
-        : candidates;
-    const pool = beforeAnchor.length > 0 ? beforeAnchor : candidates;
-    return pool.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
-        || pool.find(hasUsernameHint)
-        || pool.at(-1)
-        || null;
-}
-
-function choosePasswordField(fields, anchor) {
-    const candidates = fields.filter(isLoginPasswordInput);
-    return candidates.find(field => autocompleteTokens(field).includes("current-password"))
-        || (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
-        || candidates[0]
-        || null;
-}
-
-function credentialFields(input) {
-    const scope = credentialScope(input);
-    const fields = scopeInputs(scope);
-    return {
-        scope,
-        usernameField: USERNAME_INPUT_TYPES.has(input.type)
-            ? input
-            : chooseUsernameField(fields, input),
-        passwordField: isLoginPasswordInput(input)
-            ? input
-            : choosePasswordField(fields, input)
-    };
-}
+const {
+    USERNAME_INPUT_TYPES, autocompleteTokens, credentialFields, credentialScope,
+    hasSearchHint, hasUsernameHint, inputDescriptors, isCredentialInput,
+    isElementVisible, isLoginPasswordInput, isNewPasswordInput, isTotpInput,
+    isUsableInput, scopeInputs, usernameCandidates
+} = PasswordManagerContentDetection;
 
 // Frameworks such as React observe the native value setter and input/change
 // events. Using both keeps their internal form state synchronized with autofill.
@@ -767,76 +667,6 @@ function createGeneratorButton(input) {
     registerPositionedControl(input, button, null, positionButton);
 }
 
-// ===============================
-// Only treat inputs as credential fields when
-// they look like a username or password
-// ===============================
-const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth/i;
-const SEARCH_HINT_RE = /search|query|lookup|find/i;
-const TOTP_HINT_RE = /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
-const USERNAME_INPUT_TYPES = new Set(["text", "email", "tel"]);
-
-function inputDescriptors(input) {
-    return [
-        input.name,
-        input.id,
-        input.className,
-        input.autocomplete,
-        input.getAttribute("type"),
-        input.getAttribute("placeholder"),
-        input.getAttribute("aria-label"),
-        input.getAttribute("role")
-    ].filter(Boolean).map(String);
-}
-
-function hasUsernameHint(input) {
-    return inputDescriptors(input).some(value => USERNAME_HINT_RE.test(value));
-}
-
-function hasSearchHint(input) {
-    return input.type === "search"
-        || input.getAttribute("role") === "searchbox"
-        || inputDescriptors(input).some(value => SEARCH_HINT_RE.test(value));
-}
-
-function isTotpInput(input) {
-    if (!isUsableInput(input)) return false;
-    if (autocompleteTokens(input).includes("one-time-code")) return true;
-    if (!["text", "tel", "number"].includes(input.type)) return false;
-    return inputDescriptors(input).some(value => TOTP_HINT_RE.test(value));
-}
-
-// Some login pages use an unlabelled text box for the username. In that case,
-// only accept the closest eligible field before a password in the same form.
-// This avoids treating unrelated page-level text/search fields as credentials.
-function isUsernameBeforePassword(input) {
-    const form = input.form;
-    if (!form) return false;
-
-    const fields = scopeInputs(form);
-    const passwordIndex = fields.findIndex(isLoginPasswordInput);
-    if (passwordIndex < 0) return false;
-
-    const candidates = fields
-        .slice(0, passwordIndex)
-        .filter(field => isUsableInput(field) && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field));
-    return candidates.at(-1) === input;
-}
-
-function isCredentialInput(input) {
-    if (!isUsableInput(input)) return false;
-    const type = input.type;
-    if (type === "password") return !isNewPasswordInput(input);
-
-    if (!USERNAME_INPUT_TYPES.has(type) || hasSearchHint(input)) {
-        return false;
-    }
-
-    // Explicit hints support multi-step login pages where the password field
-    // is not present yet; the same-form fallback supports minimal login forms.
-    return hasUsernameHint(input) || isUsernameBeforePassword(input);
-}
-
 const CARD_AUTOCOMPLETE_FIELDS = new Set([
     "cc-name", "cc-given-name", "cc-additional-name", "cc-family-name",
     "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "cc-type"
@@ -1099,25 +929,36 @@ function createTypedAutofillButton(input, kind) {
 // Attach to username/password inputs
 // ===============================
 function attachInput(input) {
-        // Ignore extension UI elements
-        if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
-        const typedKind = typedAutofillKind(input);
-        if (typedKind) {
-            createSecureTypedButton(input, typedKind);
-        } else if (isCredentialInput(input)) {
-            createSecureCredentialButton(input);
-        }
-        if (isUsableInput(input) && input.type === "password" && isNewPasswordInput(input)) {
-            createGeneratorButton(input);
-        }
-        if (isTotpInput(input)) {
-            createSecureTotpButton(input);
-        }
+    // Ignore extension UI elements
+    if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
+    const typedKind = typedAutofillKind(input);
+    if (typedKind) {
+        createSecureTypedButton(input, typedKind);
+    } else if (isCredentialInput(input)) {
+        createSecureCredentialButton(input);
+    }
+    if (isUsableInput(input) && input.type === "password" && isNewPasswordInput(input)) {
+        createGeneratorButton(input);
+    }
+    if (isTotpInput(input)) {
+        createSecureTotpButton(input);
+    }
+}
+
+function openRoots(root) {
+    const roots = [root];
+    if (root.shadowRoot) roots.push(...openRoots(root.shadowRoot));
+    for (const candidate of root.querySelectorAll?.("*") || []) {
+        if (candidate.shadowRoot) roots.push(...openRoots(candidate.shadowRoot));
+    }
+    return roots;
 }
 
 function attachToInputs(root = document) {
-    if (root instanceof HTMLInputElement) attachInput(root);
-    root.querySelectorAll?.("input").forEach(attachInput);
+    for (const openRoot of openRoots(root)) {
+        if (openRoot instanceof HTMLInputElement) attachInput(openRoot);
+        openRoot.querySelectorAll?.("input").forEach(attachInput);
+    }
 }
 
 // ===============================
@@ -1125,40 +966,47 @@ function attachToInputs(root = document) {
 // ===============================
 function observeInputs(accounts) {
     const pendingRoots = new Set();
+    const observedRoots = new WeakSet();
     let attachScheduled = false;
-    const scheduleAttach = root => {
-        pendingRoots.add(root);
-        if (attachScheduled) return;
-        attachScheduled = true;
-        requestAnimationFrame(() => {
-            attachScheduled = false;
-            for (const pending of pendingRoots) attachToInputs(pending);
-            pendingRoots.clear();
-        });
-    };
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             if (mutation.type === "attributes" && mutation.target instanceof HTMLInputElement) {
                 scheduleAttach(mutation.target);
             }
             for (const node of mutation.addedNodes) {
-                if (node.nodeType === 1 &&
-                    (node.matches?.("input") || node.querySelector?.("input"))) {
-                    scheduleAttach(node);
-                }
+                if (node.nodeType === 1) scheduleAttach(node);
             }
         }
     });
-
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class", "style", "hidden", "type", "autocomplete", "disabled", "readonly"]
-    });
+    const observeRoot = root => {
+        for (const openRoot of openRoots(root)) {
+            if (observedRoots.has(openRoot)) continue;
+            observedRoots.add(openRoot);
+            observer.observe(openRoot, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ["class", "style", "hidden", "type", "autocomplete", "disabled", "readonly"]
+            });
+        }
+    };
+    const scheduleAttach = root => {
+        pendingRoots.add(root);
+        if (attachScheduled) return;
+        attachScheduled = true;
+        requestAnimationFrame(() => {
+            attachScheduled = false;
+            for (const pending of pendingRoots) {
+                attachToInputs(pending);
+                observeRoot(pending);
+            }
+            pendingRoots.clear();
+        });
+    };
 
     // Initial run
     attachToInputs();
+    observeRoot(document.body);
 }
 // ===============================
 // Get domain from URL

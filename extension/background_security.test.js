@@ -1,6 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const security = require("./background_security.js");
+const manifest = require("./manifest.json");
+
+test("production content scripts are injected only on HTTPS pages", () => {
+    assert.deepEqual(manifest.content_scripts[0].matches, ["https://*/*"]);
+});
 
 test("sender domains come from trusted HTTP(S) sender metadata", () => {
     assert.equal(security.senderDomain({ url: "https://Login.Example.COM./path" }), "login.example.com");

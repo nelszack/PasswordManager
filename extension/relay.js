@@ -70,5 +70,16 @@
         return relay;
     }
 
-    return { requestRoute, resultRoute, relayKey, authorizeCredentialRequest };
+    function cleanupExpired(pendingRelays, now = Date.now()) {
+        let removed = 0;
+        for (const [key, relay] of pendingRelays) {
+            if (!relay || relay.expiresAt <= now) {
+                pendingRelays.delete(key);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    return { requestRoute, resultRoute, relayKey, authorizeCredentialRequest, cleanupExpired };
 });

@@ -32,6 +32,16 @@ function installNativeManifest(testHome, profile, extensionId, hostPath) {
 
 async function launchExtension(options = {}) {
     const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pm-browser-e2e-"));
+    const testExtensionPath = path.join(temporaryRoot, "extension");
+    fs.cpSync(EXTENSION_PATH, testExtensionPath, { recursive: true });
+    const testManifestPath = path.join(testExtensionPath, "manifest.json");
+    const testManifest = JSON.parse(fs.readFileSync(testManifestPath, "utf8"));
+    // Most local fixtures deliberately use HTTP. Tests can opt into the exact
+    // production manifest to verify downgrade protection.
+    if (options.allowHttp !== false) {
+        testManifest.content_scripts[0].matches.push("http://*/*");
+    }
+    fs.writeFileSync(testManifestPath, JSON.stringify(testManifest, null, 2));
     const testHome = path.join(temporaryRoot, "home");
     const profile = path.join(temporaryRoot, "profile");
     const nativeLog = path.join(temporaryRoot, "native-messages.jsonl");
@@ -49,16 +59,18 @@ async function launchExtension(options = {}) {
             ...(options.env || {})
         },
         args: [
-            `--disable-extensions-except=${EXTENSION_PATH}`,
-            `--load-extension=${EXTENSION_PATH}`
+            `--disable-extensions-except=${testExtensionPath}`,
+            `--load-extension=${testExtensionPath}`
         ]
     });
     const coveredPages = new Map();
     async function coverPage(page) {
-        if (!COVERAGE_DIR || coveredPages.has(page)) return;
+        if (!COVERAGE_DIR) return false;
+        if (coveredPages.has(page)) return coveredPages.get(page);
         const started = page.coverage.startJSCoverage({ resetOnNavigation: false })
             .then(() => true, () => false);
         coveredPages.set(page, started);
+        return started;
     }
     context.on("page", page => void coverPage(page));
     await Promise.all(context.pages().map(coverPage));
@@ -71,7 +83,7 @@ async function launchExtension(options = {}) {
         installNativeManifest(testHome, profile, extensionId, hostPath);
     }
     return {
-        context, extensionId, nativeLog, profile, temporaryRoot, testHome,
+        context, extensionId, nativeLog, profile, temporaryRoot, testHome, coverPage,
         async close() {
             if (COVERAGE_DIR) {
                 const coverage = [];

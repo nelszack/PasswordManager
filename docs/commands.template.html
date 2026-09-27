@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Generated command and flag reference for the pm password manager.">
+  <title>PM Command Reference</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f6f7fb; --panel:#fff; --text:#172033; --muted:#58647a; --border:#d8deea; --accent:#3157d5; --code:#111827; --code-text:#e5edff; }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0e1420; --panel:#151d2b; --text:#edf2ff; --muted:#aab5ca; --border:#2d3950; --accent:#8ea8ff; --code:#090d14; } }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,sans-serif; }
+    header { padding:42px max(24px,calc((100vw - 960px)/2)); color:#fff; background:linear-gradient(135deg,#172554,#3157d5); }
+    header h1 { margin:0 0 8px; font-size:clamp(2rem,5vw,3.2rem); }
+    header p { margin:0; max-width:720px; }
+    main { max-width:960px; margin:auto; padding:28px 24px 64px; }
+    .intro,.command { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:22px; margin-bottom:18px; }
+    h2 { margin:0 0 8px; }
+    code,pre { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+    pre { overflow:auto; padding:13px; border-radius:8px; color:var(--code-text); background:var(--code); }
+    h2 code,dt code { color:var(--accent); }
+    .flags { display:grid; grid-template-columns:minmax(190px,auto) 1fr; gap:8px 18px; }
+    dt { font-weight:700; }
+    dd { margin:0; color:var(--muted); }
+    @media (max-width:650px) { .flags { grid-template-columns:1fr; } dd { margin-bottom:8px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PM Command Reference</h1>
+    <p>Generated from the same Clap metadata used by the <code>pm</code> executable. Run <code>cargo run -- generate-command-reference</code> after changing CLI definitions.</p>
+  </header>
+  <main>
+    <section class="intro">
+      <h2>About this reference</h2>
+      <p>Usage, command descriptions, options, and defaults below are generated. Run <code>pm &lt;COMMAND&gt; --help</code> for terminal help.</p>
+    </section>
+{{COMMAND_REFERENCE}}
+  </main>
+</body>
+</html>

@@ -4,6 +4,7 @@ use crate::{
     clipboard::copy_in_background,
     encryption::{
         decrypt_file, try_encrypt_file_in_place, try_gen_master_key, try_gen_master_key_legacy,
+        validate_new_password,
     },
     file::{
         data_dir, file_exists, key_file_path, new_key_file_path, set_private_perms, sync_parent,
@@ -22,13 +23,20 @@ use sha1::{Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, read},
-    io::Write,
+    io::{Read, Write},
     path::Path,
 };
 use tempfile::NamedTempFile;
 use tokio::net::TcpStream;
 use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::{Zeroize, Zeroizing};
+
+mod audit;
+#[cfg(test)]
+use audit::parse_pwned_range;
+use audit::{breached_hashes, password_hash};
+mod import;
+use import::{import_csv, import_json};
 
 #[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct VaultEntry {
@@ -223,6 +231,176 @@ pub struct ImportReport {
     pub preview: bool,
 }
 
+pub(crate) struct AuditSnapshot {
+    entries: Vec<AuditEntrySnapshot>,
+}
+
+struct AuditEntrySnapshot {
+    id: usize,
+    name: String,
+    username: Option<String>,
+    password_hash: String,
+    weak: bool,
+    stale: bool,
+    password_changed: String,
+    missing_totp: bool,
+    identity: (String, String),
+}
+
+impl Drop for AuditSnapshot {
+    fn drop(&mut self) {
+        for entry in &mut self.entries {
+            entry.name.zeroize();
+            entry.username.zeroize();
+            entry.password_hash.zeroize();
+            entry.password_changed.zeroize();
+            entry.identity.0.zeroize();
+            entry.identity.1.zeroize();
+        }
+    }
+}
+
+impl AuditSnapshot {
+    fn report(
+        &self,
+        breached: Option<&HashMap<String, u64>>,
+        breach_error: Option<&str>,
+    ) -> String {
+        let mut weak = Vec::new();
+        let mut stale = Vec::new();
+        let mut missing_totp = Vec::new();
+        let mut breached_entries = Vec::new();
+        let mut passwords: HashMap<&str, Vec<&AuditEntrySnapshot>> = HashMap::new();
+        let mut identities: HashMap<&(String, String), Vec<&AuditEntrySnapshot>> = HashMap::new();
+        let mut unhealthy = HashSet::new();
+
+        for entry in &self.entries {
+            if entry.weak {
+                weak.push(entry);
+                unhealthy.insert(entry.id);
+            }
+            if entry.stale {
+                stale.push(entry);
+                unhealthy.insert(entry.id);
+            }
+            if entry.missing_totp {
+                missing_totp.push(entry);
+                unhealthy.insert(entry.id);
+            }
+            if let Some(count) = breached
+                .and_then(|hashes| hashes.get(&entry.password_hash))
+                .copied()
+            {
+                breached_entries.push((entry, count));
+                unhealthy.insert(entry.id);
+            }
+            passwords
+                .entry(&entry.password_hash)
+                .or_default()
+                .push(entry);
+            identities.entry(&entry.identity).or_default().push(entry);
+        }
+        let reused: Vec<_> = passwords
+            .values()
+            .filter(|entries| entries.len() > 1)
+            .collect();
+        for entries in &reused {
+            unhealthy.extend(entries.iter().map(|entry| entry.id));
+        }
+        let duplicates: Vec<_> = identities
+            .values()
+            .filter(|entries| entries.len() > 1)
+            .collect();
+        for entries in &duplicates {
+            unhealthy.extend(entries.iter().map(|entry| entry.id));
+        }
+        let healthy = self.entries.len().saturating_sub(unhealthy.len());
+        let score = if self.entries.is_empty() {
+            100
+        } else {
+            healthy * 100 / self.entries.len()
+        };
+        let mut report = format!(
+            "Health score: {score}/100 ({healthy}/{} login entries have no detected issues).\nAudit: {} weak entries, {} reused-password groups, {} duplicate-login groups, {} stale entries, {} missing TOTP, {} breached entries.\n",
+            self.entries.len(),
+            weak.len(),
+            reused.len(),
+            duplicates.len(),
+            stale.len(),
+            missing_totp.len(),
+            breached_entries.len(),
+        );
+        for entry in weak {
+            report.push_str(&format!(
+                "Weak: {}. {} {:?}\n",
+                entry.id, entry.name, entry.username
+            ));
+        }
+        for entries in reused {
+            let labels = entries
+                .iter()
+                .map(|entry| format!("{}. {}", entry.id, entry.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            report.push_str(&format!("Reused password: {labels}\n"));
+        }
+        for entries in duplicates {
+            let labels = entries
+                .iter()
+                .map(|entry| format!("{}. {}", entry.id, entry.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            report.push_str(&format!("Duplicate login: {labels}\n"));
+        }
+        for entry in stale {
+            report.push_str(&format!(
+                "Stale password: {}. {} (last changed {})\n",
+                entry.id, entry.name, entry.password_changed
+            ));
+        }
+        for entry in missing_totp {
+            report.push_str(&format!("Missing TOTP: {}. {}\n", entry.id, entry.name));
+        }
+        for (entry, count) in breached_entries {
+            report.push_str(&format!(
+                "Breached password: {}. {} (seen {count} times)\n",
+                entry.id, entry.name
+            ));
+        }
+        if let Some(error) = breach_error {
+            report.push_str(&format!("Breach check unavailable: {error}\n"));
+        }
+        report
+    }
+
+    pub(crate) async fn audit(&self, check_breaches: bool, stream: &mut TcpStream, http: bool) {
+        let breach_result = if check_breaches {
+            Some(
+                breached_hashes(
+                    self.entries
+                        .iter()
+                        .map(|entry| entry.password_hash.as_str()),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let (breached, error) = match breach_result.as_ref() {
+            Some(Ok(matches)) => (Some(matches), None),
+            Some(Err(error)) => (None, Some(error.as_str())),
+            None => (None, None),
+        };
+        let code = if error.is_some() {
+            ResponseCode::Failure
+        } else {
+            ResponseCode::Success
+        };
+        let report = self.report(breached, error);
+        respond_with_code(code, &report, stream, http).await;
+    }
+}
+
 const PORTABLE_FORMAT: &str = "password-manager-portable";
 const PORTABLE_VERSION: u8 = 1;
 
@@ -361,6 +539,8 @@ const BACKUP_MAGIC: &[u8; 8] = b"PMBACKUP";
 const BACKUP_VERSION: u8 = 1;
 const MAX_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_VAULT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_IMPORT_ITEMS: usize = 100_000;
 
 fn run_blocking_io<T>(operation: impl FnOnce() -> T) -> T {
     if tokio::runtime::Handle::try_current()
@@ -474,6 +654,12 @@ pub fn create_vault(
     server_info: &mut ServerInfo,
     lock: bool,
 ) -> Result<(), String> {
+    if let Some(PasswordType::Password(password)) = server_info.keypass.as_ref()
+        && let Err(error) = validate_new_password(password)
+    {
+        server_info.zeroize();
+        return Err(error.to_string());
+    }
     let generated_key_path = match server_info.keypass.as_ref() {
         Some(PasswordType::Key(path)) if !new_key_file_path(path)?.exists() => {
             Some(new_key_file_path(path)?)
@@ -578,7 +764,7 @@ fn persist_private_file(path: &Path, contents: &[u8], force: bool) -> Result<(),
             temporary.persist_noclobber(path).map_err(|error| {
                 if error.error.kind() == std::io::ErrorKind::AlreadyExists {
                     format!(
-                        "backup file {:?} already exists; use --force to replace it",
+                        "destination file {:?} already exists; use --force to replace it",
                         path
                     )
                 } else {
@@ -828,95 +1014,6 @@ fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
     saved == requested
 }
 
-fn password_hash(password: &str) -> String {
-    hex::encode_upper(Sha1::digest(password.as_bytes()))
-}
-
-fn parse_pwned_range(body: &str, prefix: &str) -> HashMap<String, u64> {
-    body.lines()
-        .filter_map(|line| {
-            let (suffix, count) = line.trim().split_once(':')?;
-            let count = count.parse::<u64>().ok()?;
-            (count > 0).then(|| (format!("{prefix}{}", suffix.to_ascii_uppercase()), count))
-        })
-        .collect()
-}
-
-async fn breached_hashes<'a>(
-    passwords: impl Iterator<Item = &'a str>,
-) -> Result<HashMap<String, u64>, String> {
-    let mut prefixes = HashSet::new();
-    for password in passwords {
-        prefixes.insert(password_hash(password)[..5].to_string());
-    }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent("password-manager/0.1 breach-audit")
-        .build()
-        .map_err(|error| format!("could not initialize breach checker: {error}"))?;
-    const MAX_CONCURRENT_REQUESTS: usize = 8;
-    let mut pending = prefixes.into_iter();
-    let mut requests = tokio::task::JoinSet::new();
-    for prefix in pending.by_ref().take(MAX_CONCURRENT_REQUESTS) {
-        requests.spawn(fetch_breached_prefix(client.clone(), prefix));
-    }
-
-    let mut matches = HashMap::new();
-    while let Some(result) = requests.join_next().await {
-        let prefix_matches =
-            result.map_err(|error| format!("breach-check task failed: {error}"))??;
-        matches.extend(prefix_matches);
-        if let Some(prefix) = pending.next() {
-            requests.spawn(fetch_breached_prefix(client.clone(), prefix));
-        }
-    }
-    Ok(matches)
-}
-
-async fn fetch_breached_prefix(
-    client: reqwest::Client,
-    prefix: String,
-) -> Result<HashMap<String, u64>, String> {
-    const MAX_RANGE_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-    let response = client
-        .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
-        .header("Add-Padding", "true")
-        .send()
-        .await
-        .map_err(|error| format!("Pwned Passwords request failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("Pwned Passwords returned an error: {error}"))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RANGE_RESPONSE_BYTES)
-    {
-        return Err("Pwned Passwords returned an oversized response".to_string());
-    }
-    let mut response = response;
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("could not read Pwned Passwords response: {error}"))?
-    {
-        if body.len().saturating_add(chunk.len()) > MAX_RANGE_RESPONSE_BYTES as usize {
-            body.zeroize();
-            return Err("Pwned Passwords returned an oversized response".to_string());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    let text = match std::str::from_utf8(&body) {
-        Ok(text) => text,
-        Err(error) => {
-            body.zeroize();
-            return Err(format!("Pwned Passwords returned invalid UTF-8: {error}"));
-        }
-    };
-    let matches = parse_pwned_range(text, &prefix);
-    body.zeroize();
-    Ok(matches)
-}
-
 fn is_otpauth_uri(value: &str) -> bool {
     value
         .get(.."otpauth://".len())
@@ -1006,166 +1103,6 @@ fn parse_totp_configuration(value: &str) -> Result<Totp, String> {
             .map_err(|error| format!("invalid Base32 TOTP secret: {error}"))?;
         compatible_totp_from_secret(secret)
     }
-}
-
-fn normalized_header(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn csv_field(headers: &[String], record: &csv::StringRecord, aliases: &[&str]) -> Option<String> {
-    headers
-        .iter()
-        .position(|header| aliases.contains(&header.as_str()))
-        .and_then(|index| record.get(index))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn import_csv(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
-    let mut reader = csv::Reader::from_reader(contents.as_bytes());
-    let headers: Vec<String> = reader
-        .headers()
-        .map_err(|e| format!("invalid CSV headers in {path:?}: {e}"))?
-        .iter()
-        .map(normalized_header)
-        .collect();
-    let mut entries = Vec::new();
-    for row in reader.records() {
-        let row = row.map_err(|e| format!("invalid CSV data in {path:?}: {e}"))?;
-        let name = csv_field(&headers, &row, &["name", "title"])
-            .or_else(|| csv_field(&headers, &row, &["url", "website", "loginuri"]))
-            .ok_or_else(|| format!("an imported CSV row in {path:?} has no name or URL"))?;
-        let password = csv_field(&headers, &row, &["password"])
-            .ok_or_else(|| format!("an imported CSV row in {path:?} has no password"))?;
-        let now = chrono::Local::now().to_string();
-        entries.push(ImportedItem::login(VaultEntry {
-            id: 0,
-            name,
-            username: csv_field(&headers, &row, &["username", "loginusername", "login"]),
-            password,
-            url: csv_field(
-                &headers,
-                &row,
-                &["url", "website", "loginuri", "formactionorigin"],
-            ),
-            notes: csv_field(&headers, &row, &["notes", "note", "extra", "comments"]),
-            created: csv_field(&headers, &row, &["created", "timecreated"])
-                .unwrap_or_else(|| now.clone()),
-            modified: csv_field(
-                &headers,
-                &row,
-                &["modified", "timemodified", "timepasswordchanged"],
-            )
-            .unwrap_or(now),
-        }));
-    }
-    Ok(entries)
-}
-
-fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn import_json(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
-    let root: serde_json::Value =
-        serde_json::from_str(contents).map_err(|e| format!("invalid JSON in {path:?}: {e}"))?;
-    if root.get("format").and_then(serde_json::Value::as_str) == Some(PORTABLE_FORMAT) {
-        let portable: PortableExport = serde_json::from_value(root)
-            .map_err(|e| format!("invalid portable JSON in {path:?}: {e}"))?;
-        if portable.version != PORTABLE_VERSION {
-            return Err(format!(
-                "unsupported portable JSON version {} in {path:?}",
-                portable.version
-            ));
-        }
-        return portable
-            .items
-            .into_iter()
-            .map(|mut item| {
-                if item.name.trim().is_empty() {
-                    return Err(format!("a portable JSON item in {path:?} has no name"));
-                }
-                if let Some(configuration) = item.totp.as_deref() {
-                    let (normalized, _) =
-                        normalize_totp_configuration(configuration).map_err(|error| {
-                            format!("invalid TOTP configuration for {:?}: {error}", item.name)
-                        })?;
-                    item.totp = Some(normalized);
-                }
-                Ok(ImportedItem {
-                    portable: true,
-                    entry: VaultEntry {
-                        id: 0,
-                        name: item.name,
-                        username: item.username,
-                        password: item.password,
-                        url: item.url,
-                        notes: item.notes,
-                        created: item.created,
-                        modified: item.modified,
-                    },
-                    kind: item.kind,
-                    additional_urls: item.additional_urls,
-                    custom_fields: item.custom_fields,
-                    password_changed: item.password_changed,
-                    password_history: item.password_history,
-                    totp: item.totp,
-                })
-            })
-            .collect();
-    }
-    let bitwarden = root.get("items").is_some();
-    let values = if let Some(items) = root.get("items").and_then(serde_json::Value::as_array) {
-        items
-    } else {
-        root.as_array().ok_or_else(|| {
-            "JSON import must be an array or a Bitwarden object with items".to_string()
-        })?
-    };
-    let mut entries = Vec::new();
-    for value in values {
-        if bitwarden && value.get("type").and_then(serde_json::Value::as_u64) != Some(1) {
-            continue;
-        }
-        let login = value.get("login").unwrap_or(value);
-        let url = json_text(value, &["url", "website"]).or_else(|| {
-            login
-                .get("uris")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|uris| uris.first())
-                .and_then(|uri| json_text(uri, &["uri"]))
-        });
-        let name = json_text(value, &["name", "title"])
-            .or_else(|| url.clone())
-            .ok_or_else(|| format!("an imported JSON item in {path:?} has no name or URL"))?;
-        let password = json_text(login, &["password"])
-            .or_else(|| json_text(value, &["password"]))
-            .ok_or_else(|| format!("an imported JSON item in {path:?} has no password"))?;
-        let now = chrono::Local::now().to_string();
-        entries.push(ImportedItem::login(VaultEntry {
-            id: 0,
-            name,
-            username: json_text(login, &["username", "login"]),
-            password,
-            url,
-            notes: json_text(value, &["notes", "note"]),
-            created: json_text(value, &["created", "creationDate"]).unwrap_or_else(|| now.clone()),
-            modified: json_text(value, &["modified", "revisionDate"]).unwrap_or(now),
-        }));
-    }
-    if entries.is_empty() {
-        return Err(format!("no supported login entries were found in {path:?}"));
-    }
-    Ok(entries)
 }
 
 impl Vault {
@@ -1457,6 +1394,12 @@ impl Vault {
         server_info: &mut ServerInfo,
         mut new_key: PasswordType,
     ) -> Result<(), String> {
+        if let PasswordType::Password(password) = &new_key
+            && let Err(error) = validate_new_password(password)
+        {
+            new_key.zeroize();
+            return Err(error.to_string());
+        }
         if let PasswordType::Key(path) = &new_key
             && new_key_file_path(path)?.exists()
         {
@@ -2300,18 +2243,7 @@ impl Vault {
         }
     }
 
-    fn audit_report(
-        &self,
-        options: &AuditOptions,
-        breached: Option<&HashMap<String, u64>>,
-        breach_error: Option<&str>,
-    ) -> String {
-        let mut weak = Vec::new();
-        let mut stale = Vec::new();
-        let mut missing_totp = Vec::new();
-        let mut breached_entries = Vec::new();
-        let mut passwords: HashMap<&str, Vec<&VaultEntry>> = HashMap::new();
-        let mut identities: HashMap<(String, String), Vec<&VaultEntry>> = HashMap::new();
+    pub(crate) fn audit_snapshot(&self, options: &AuditOptions) -> AuditSnapshot {
         let metadata_by_id: HashMap<_, _> = self
             .recovery
             .entry_metadata
@@ -2324,7 +2256,7 @@ impl Vault {
             .iter()
             .map(|record| record.entry_id)
             .collect();
-        let logins = self
+        let entries = self
             .entries
             .iter()
             .filter(|entry| {
@@ -2332,150 +2264,28 @@ impl Vault {
                     .get(&entry.id)
                     .is_none_or(|metadata| metadata.kind == ItemKind::Login)
             })
-            .collect::<Vec<_>>();
-        let mut unhealthy = HashSet::new();
-        for &entry in &logins {
-            if zxcvbn::zxcvbn(&entry.password, &[]).score() <= zxcvbn::Score::Two {
-                weak.push(entry);
-                unhealthy.insert(entry.id);
-            }
-            if options
-                .stale_days
-                .is_some_and(|days| self.password_is_stale(entry, days))
-            {
-                stale.push(entry);
-                unhealthy.insert(entry.id);
-            }
-            if options.require_totp && !totp_ids.contains(&entry.id) {
-                missing_totp.push(entry);
-                unhealthy.insert(entry.id);
-            }
-            if let Some(count) = breached
-                .and_then(|hashes| hashes.get(&password_hash(&entry.password)))
-                .copied()
-            {
-                breached_entries.push((entry, count));
-                unhealthy.insert(entry.id);
-            }
-            passwords.entry(&entry.password).or_default().push(entry);
-            let identity = (
-                entry
-                    .url
-                    .as_deref()
-                    .and_then(hostname)
-                    .unwrap_or_else(|| entry.name.to_ascii_lowercase()),
-                entry.username.as_deref().unwrap_or("").to_ascii_lowercase(),
-            );
-            identities.entry(identity).or_default().push(entry);
-        }
-        let reused: Vec<_> = passwords
-            .values()
-            .filter(|entries| entries.len() > 1)
+            .map(|entry| AuditEntrySnapshot {
+                id: entry.id,
+                name: entry.name.clone(),
+                username: entry.username.clone(),
+                password_hash: password_hash(&entry.password),
+                weak: zxcvbn::zxcvbn(&entry.password, &[]).score() <= zxcvbn::Score::Two,
+                stale: options
+                    .stale_days
+                    .is_some_and(|days| self.password_is_stale(entry, days)),
+                password_changed: self.password_changed(entry).to_string(),
+                missing_totp: options.require_totp && !totp_ids.contains(&entry.id),
+                identity: (
+                    entry
+                        .url
+                        .as_deref()
+                        .and_then(hostname)
+                        .unwrap_or_else(|| entry.name.to_ascii_lowercase()),
+                    entry.username.as_deref().unwrap_or("").to_ascii_lowercase(),
+                ),
+            })
             .collect();
-        for entries in &reused {
-            unhealthy.extend(entries.iter().map(|entry| entry.id));
-        }
-        let duplicates: Vec<_> = identities
-            .values()
-            .filter(|entries| entries.len() > 1)
-            .collect();
-        for entries in &duplicates {
-            unhealthy.extend(entries.iter().map(|entry| entry.id));
-        }
-        let healthy = logins.len().saturating_sub(unhealthy.len());
-        let score = if logins.is_empty() {
-            100
-        } else {
-            healthy * 100 / logins.len()
-        };
-        let mut report = format!(
-            "Health score: {score}/100 ({healthy}/{} login entries have no detected issues).\nAudit: {} weak entries, {} reused-password groups, {} duplicate-login groups, {} stale entries, {} missing TOTP, {} breached entries.\n",
-            logins.len(),
-            weak.len(),
-            reused.len(),
-            duplicates.len(),
-            stale.len(),
-            missing_totp.len(),
-            breached_entries.len(),
-        );
-        for entry in weak {
-            report.push_str(&format!(
-                "Weak: {}. {} {:?}\n",
-                entry.id, entry.name, entry.username
-            ));
-        }
-        for entries in reused {
-            let labels = entries
-                .iter()
-                .map(|entry| format!("{}. {}", entry.id, entry.name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            report.push_str(&format!("Reused password: {labels}\n"));
-        }
-        for entries in duplicates {
-            let labels = entries
-                .iter()
-                .map(|entry| format!("{}. {}", entry.id, entry.name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            report.push_str(&format!("Duplicate login: {labels}\n"));
-        }
-        for entry in stale {
-            report.push_str(&format!(
-                "Stale password: {}. {} (last changed {})\n",
-                entry.id,
-                entry.name,
-                self.password_changed(entry)
-            ));
-        }
-        for entry in missing_totp {
-            report.push_str(&format!("Missing TOTP: {}. {}\n", entry.id, entry.name));
-        }
-        for (entry, count) in breached_entries {
-            report.push_str(&format!(
-                "Breached password: {}. {} (seen {count} times)\n",
-                entry.id, entry.name
-            ));
-        }
-        if let Some(error) = breach_error {
-            report.push_str(&format!("Breach check unavailable: {error}\n"));
-        }
-        report
-    }
-
-    pub async fn audit(&self, options: AuditOptions, stream: &mut TcpStream, http: bool) {
-        let breach_result = if options.check_breaches {
-            let non_login_ids: HashSet<_> = self
-                .recovery
-                .entry_metadata
-                .iter()
-                .filter(|record| record.kind != ItemKind::Login)
-                .map(|record| record.entry_id)
-                .collect();
-            Some(
-                breached_hashes(
-                    self.entries
-                        .iter()
-                        .filter(|entry| !non_login_ids.contains(&entry.id))
-                        .map(|entry| entry.password.as_str()),
-                )
-                .await,
-            )
-        } else {
-            None
-        };
-        let (breached, error) = match breach_result.as_ref() {
-            Some(Ok(matches)) => (Some(matches), None),
-            Some(Err(error)) => (None, Some(error.as_str())),
-            None => (None, None),
-        };
-        let code = if error.is_some() {
-            ResponseCode::Failure
-        } else {
-            ResponseCode::Success
-        };
-        let report = run_blocking_io(|| self.audit_report(&options, breached, error));
-        respond_with_code(code, &report, stream, http).await;
+        AuditSnapshot { entries }
     }
 
     fn is_weak(&self, entry: &VaultEntry) -> bool {
@@ -2803,7 +2613,7 @@ impl Vault {
         key_pass.zeroize();
         Ok(())
     }
-    pub fn export(&self, path: String) -> Result<(), String> {
+    pub fn export(&self, path: String, force: bool) -> Result<(), String> {
         if std::path::Path::new(&path)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
@@ -2874,7 +2684,7 @@ impl Vault {
             let encoded = serde_json::to_vec_pretty(&export);
             export.zeroize();
             let mut encoded = encoded.map_err(|e| format!("could not encode JSON export: {e}"))?;
-            let result = persist_private_file(Path::new(&path), &encoded, true)
+            let result = persist_private_file(Path::new(&path), &encoded, force)
                 .map_err(|e| format!("could not create export file {path:?}: {e}"));
             encoded.zeroize();
             return result;
@@ -2887,7 +2697,7 @@ impl Vault {
         let mut encoded = wtr
             .into_inner()
             .map_err(|e| format!("could not finish export file {path:?}: {}", e.error()))?;
-        let result = persist_private_file(Path::new(&path), &encoded, true)
+        let result = persist_private_file(Path::new(&path), &encoded, force)
             .map_err(|e| format!("could not create export file {path:?}: {e}"));
         encoded.zeroize();
         result
@@ -2899,6 +2709,12 @@ impl Vault {
         key_pass: &mut PasswordType,
         force: bool,
     ) -> Result<(), String> {
+        if let PasswordType::Password(password) = &key_pass
+            && let Err(error) = validate_new_password(password)
+        {
+            key_pass.zeroize();
+            return Err(error.to_string());
+        }
         let vault_path = data_dir().join(&self.metadata.filename);
         let backup_path = Path::new(&path);
         if backup_path.exists()
@@ -2999,16 +2815,51 @@ impl Vault {
         password_history_limit: usize,
         key_pass: &mut ServerInfo,
     ) -> Result<ImportReport, String> {
-        let contents = Zeroizing::new(
-            fs::read_to_string(&path)
-                .map_err(|e| format!("could not open import file {path:?}: {e}"))?,
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("could not open import file {path:?}: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!("import path {path:?} is not a regular file"));
+        }
+        if metadata.len() > MAX_IMPORT_BYTES {
+            return Err(format!(
+                "import file {path:?} exceeds the {} MiB limit",
+                MAX_IMPORT_BYTES / (1024 * 1024)
+            ));
+        }
+        let file = fs::File::open(&path)
+            .map_err(|error| format!("could not open import file {path:?}: {error}"))?;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len().min(MAX_IMPORT_BYTES)).unwrap_or_default(),
         );
+        file.take(MAX_IMPORT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("could not read import file {path:?}: {error}"))?;
+        if bytes.len() as u64 > MAX_IMPORT_BYTES {
+            bytes.zeroize();
+            return Err(format!(
+                "import file {path:?} exceeds the {} MiB limit",
+                MAX_IMPORT_BYTES / (1024 * 1024)
+            ));
+        }
+        let contents = match String::from_utf8(bytes) {
+            Ok(contents) => Zeroizing::new(contents),
+            Err(error) => {
+                let mut bytes = error.into_bytes();
+                bytes.zeroize();
+                return Err(format!("import file {path:?} is not valid UTF-8"));
+            }
+        };
         let trimmed = contents.trim_start();
         let imported = if trimmed.starts_with('{') || trimmed.starts_with('[') {
             import_json(&contents, &path)?
         } else {
             import_csv(&contents, &path)?
         };
+        if imported.len() > MAX_IMPORT_ITEMS {
+            return Err(format!(
+                "import contains more than the {MAX_IMPORT_ITEMS} item limit"
+            ));
+        }
         let mut report = ImportReport {
             total: imported.len(),
             preview,
@@ -3230,7 +3081,7 @@ pub trait VaultAccess {
     async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream, http: bool);
     fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), String>;
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), String>;
-    fn export(&self, path: String) -> Result<(), String>;
+    fn export(&self, path: String, force: bool) -> Result<(), String>;
     fn import(&mut self, path: String) -> Result<(), String>;
     fn import_with_options(
         &mut self,
@@ -3350,9 +3201,9 @@ impl VaultAccess for Option<Vault> {
             None => Err("wrong master password, or no vault exists for this key".to_string()),
         }
     }
-    fn export(&self, path: String) -> Result<(), String> {
+    fn export(&self, path: String, force: bool) -> Result<(), String> {
         if let Some(vlt) = self {
-            vlt.export(path)
+            vlt.export(path, force)
         } else {
             Err("vault is locked".to_string())
         }

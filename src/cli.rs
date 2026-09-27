@@ -323,6 +323,9 @@ pub enum CliCommands {
         /// Destination file; `.json` selects portable JSON, otherwise CSV.
         #[arg(long)]
         path: String,
+        /// Atomically replace an existing plaintext export.
+        #[arg(long)]
+        force: bool,
     },
     /// Generate shell completion definitions.
     #[command(
@@ -335,6 +338,13 @@ pub enum CliCommands {
         /// Destination file, or `-` to write to standard output.
         #[arg(long, default_value = "-")]
         output: PathBuf,
+    },
+    /// Regenerate the HTML command reference from Clap metadata.
+    #[command(hide = true)]
+    GenerateCommandReference {
+        /// Fail when the checked-in reference differs instead of rewriting it.
+        #[arg(long)]
+        check: bool,
     },
 }
 

@@ -1,4 +1,11 @@
-importScripts("relay.js", "background_security.js", "background_state.js", "credential_prompt_state.js");
+importScripts(
+    "relay.js",
+    "background_security.js",
+    "background_state.js",
+    "credential_prompt_state.js",
+    "native_protocol.js",
+    "pending_credentials.js"
+);
 
 const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
@@ -31,7 +38,10 @@ function startStatusMonitoring() {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === STATUS_POLL_ALARM) refreshStatus();
+    if (alarm.name === STATUS_POLL_ALARM) {
+        PasswordManagerRelay.cleanupExpired(pendingRelays);
+        refreshStatus();
+    }
 });
 
 function closeNativePort(error) {
@@ -54,7 +64,11 @@ function connectNativeHost() {
         if (!pending) return;
         clearTimeout(pending.timer);
         pendingRequests.delete(response.id);
-        pending.resolve(response);
+        try {
+            pending.resolve(PasswordManagerNativeProtocol.validateResponse(response));
+        } catch (error) {
+            pending.reject(error);
+        }
     });
     port.onDisconnect.addListener(() => {
         const error = chrome.runtime.lastError?.message;
@@ -114,7 +128,7 @@ async function serverStatus() {
         return {
             native: true,
             running: true,
-            locked: /\blocked\b/i.test(String(response.data))
+            ...PasswordManagerBackgroundState.parseServerStatus(response.data)
         };
     } catch (error) {
         return { native: false, running: false, locked: false, error: error.message };
@@ -156,14 +170,7 @@ function setPendingCredentials(request, sender, sendResponse) {
         sendResponse({ success: false, error: "Invalid pending credentials" });
         return;
     }
-    const record = {
-        domain,
-        username: String(pending.username || ""),
-        password: pending.password,
-        accountName: String(pending.accountName || ""),
-        hasAccounts: Boolean(pending.hasAccounts),
-        time: Date.now()
-    };
+    const record = PasswordManagerPendingCredentials.create(pending, domain);
     pendingCredentialMemory.set(key, record);
     setTimeout(() => {
         if (pendingCredentialMemory.get(key) === record) {
@@ -188,7 +195,7 @@ function consumePendingCredentials(sender, sendResponse) {
         const pending = remembered || result?.[key] || null;
         chrome.storage.session.remove(key, () => void chrome.runtime.lastError);
         if (error) sendResponse({ success: false, error });
-        else if (pending?.domain === domain && Date.now() - pending.time < 60_000) {
+        else if (PasswordManagerPendingCredentials.usable(pending, domain)) {
             sendResponse({ success: true, pending });
         } else {
             sendResponse({ success: true, pending: null });
@@ -235,10 +242,7 @@ function sendTotpForPage(request, sender, sendResponse) {
 }
 
 function parseNativeItems(response) {
-    if (!response?.success) throw new Error(response?.error || "Vault items unavailable");
-    const items = JSON.parse(response.data);
-    if (!Array.isArray(items)) throw new Error("Invalid vault item response");
-    return items;
+    return PasswordManagerNativeProtocol.parseItems(response);
 }
 
 function pickerSenderAllowed(sender) {

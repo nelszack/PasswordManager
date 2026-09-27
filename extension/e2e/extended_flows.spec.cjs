@@ -36,6 +36,15 @@ function fixture(pathname, port) {
     if (pathname === "/iframe-cross") return html(
         `<iframe id="loginFrame" src="http://localhost:${port}/iframe-login" width="500" height="200"></iframe>`
     );
+    if (pathname === "/dynamic-shadow") return html(`<div id="mount"></div>`, `
+        setTimeout(() => {
+            const host = document.createElement("section");
+            host.id = "shadowHost";
+            const root = host.attachShadow({ mode: "open" });
+            root.innerHTML = '<form><input id="shadowUser" autocomplete="username"><input id="shadowPassword" type="password" autocomplete="current-password"></form>';
+            mount.appendChild(host);
+        }, 100);
+    `);
     return html(`
         <form id="login"><input id="username" autocomplete="username">
         <input id="password" type="password" autocomplete="current-password">
@@ -190,6 +199,40 @@ test.describe("extended credential flows", () => {
         await expect(crossPicker.locator("#status")).toHaveText("Not found.");
         await crossPicker.locator("#cancel").click();
     });
+
+    test("dynamically inserted open shadow roots receive credential controls", async () => {
+        await page.goto(`${origin}/dynamic-shadow`);
+        await expect(page.locator("#shadowHost")).toBeAttached();
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+    });
+
+    test("popup and picker entry points render without leaking page state", async () => {
+        const popup = await browser.context.newPage();
+        await browser.coverPage(popup);
+        await popup.goto(`chrome-extension://${browser.extensionId}/popup.html`);
+        await expect(popup.locator("#statusText")).not.toBeEmpty();
+
+        const picker = await browser.context.newPage();
+        await browser.coverPage(picker);
+        await picker.goto(`chrome-extension://${browser.extensionId}/picker.html`);
+        await expect(picker.locator("#status")).toHaveText("Missing picker token");
+    });
+});
+
+test("production manifest does not inject credential controls after an HTTP downgrade", async () => {
+    test.skip(process.platform !== "linux");
+    const server = await startServer();
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const browser = await launchExtension({ allowHttp: false });
+    try {
+        const page = browser.context.pages()[0] || await browser.context.newPage();
+        await page.goto(`${origin}/simple`);
+        await expect(page.locator("#username")).toBeVisible();
+        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toHaveCount(0);
+    } finally {
+        await browser.close();
+        await new Promise(resolve => server.close(resolve));
+    }
 });
 
 test.describe("native-host failures", () => {

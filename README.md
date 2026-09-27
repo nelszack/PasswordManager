@@ -44,9 +44,10 @@ The binary will be at `target/release/pm`.
 pm start
 ```
 
-The server creates a private session token automatically. CLI and
+The server creates a new private session token on every start. CLI and
 native-messaging clients read it from the protected application data directory;
-it is not displayed to the user or stored in the extension.
+it is not displayed to the user or stored in the extension. A clean shutdown
+removes the token file.
 
 ### Generate a Password
 
@@ -282,6 +283,8 @@ The timeout is based on inactivity: each authenticated vault operation resets it
 passive status polling does not.
 Durations accept seconds or `s`, `m`, `h`, and `d` suffixes. New configurations
 default to 15 minutes; a value of `0` disables automatic locking.
+If an automatic lock cannot persist the vault, `pm status` reports the failure
+and the extension shows a warning badge until a later lock succeeds.
 
 ### Change the Master Password or Key File
 
@@ -294,6 +297,9 @@ pm rekey
 # Or create and switch to a new external key file
 pm rekey --key /secure/removable-media/replacement.key
 ```
+
+New vault, rekey, import, and backup passwords must contain at least 12
+characters. Existing vaults with shorter legacy passwords remain unlockable.
 
 New key files must be outside the application data directory, so copying the
 encrypted vault does not also copy its key. Relative paths are resolved from
@@ -342,6 +348,9 @@ pm import --path backup.csv --new
 pm export --path backup.csv
 pm import --path bitwarden.json --new
 pm export --path backup.json
+
+# Plaintext exports do not overwrite files unless explicitly requested
+pm export --path backup.json --force
 ```
 
 Preview an import without creating or changing entries, then choose how exact
@@ -357,6 +366,7 @@ pm import --path backup.csv --conflicts keep-both
 Imports into the current vault require it to be unlocked and leave it unlocked.
 Previewing does not prompt for the vault password or change its lock state.
 `--key` is used only with `--new`, where it creates the new vault's external key.
+Import files are limited to 128 MiB and 100,000 items.
 
 `replace` preserves the existing stable ID and records a changed password in
 history. `keep-both` adds a new stable ID and appends an `(imported)` suffix.
@@ -369,7 +379,8 @@ always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
 CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV. Duplicate rows with the same
 name, username, and URL are skipped. Both export formats contain plaintext
 secrets; portable JSON can also contain TOTP secrets and password history, so
-exports should be protected or deleted after use.
+exports should be protected or deleted after use. Export refuses to replace an
+existing file unless `--force` is supplied.
 
 ### Check Password Strength
 
@@ -465,9 +476,8 @@ source ~/.bashrc
 
 ## Browser Extension
 
-Browser credential matching preserves the page scheme. Entries saved with an
-`https://` URL, or without an explicit scheme, are never offered to an HTTP
-page; use an explicit `http://` URL for a site that genuinely requires HTTP.
+The browser extension injects credential-handling code only into HTTPS pages.
+It does not offer autofill or save prompts on plaintext HTTP pages.
 
 1. Build or install `pm` at a stable path, then load the `extension` folder as
    an unpacked extension in Chrome, Chromium, or Helium on Linux, macOS, or
@@ -569,24 +579,28 @@ on-page controls.
 - `src/config.rs` - Configuration management
 - `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - File import/export
-- `docs/commands.html` - Manually maintained browser-friendly CLI reference
+- `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
+- `docs/commands.template.html` - Static layout used by the command-reference generator
 - `extension/` - Browser extension (Chrome/Chromium)
 
 ## Security
 
-- Master passwords derived using Argon2id with a random salt on every vault write
+- Master passwords derived using Argon2id with a random salt when a new
+  password-encryption key is created
 - Vault files use random, password-independent names; older deterministic
   filenames migrate after a successful unlock
 - Vaults encrypted and authenticated with XChaCha20-Poly1305
-- A versioned, authenticated vault header records the format and KDF parameters
+- A versioned, authenticated vault header records the format and exact KDF
+  parameters used to derive its cached session key
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
 - Configurable inactivity-based auto-lock timeout
 - New key files must be stored outside application data, while legacy
   colocated keys remain readable for migration
-- The local server requires a random session token on every TCP and HTTP
-  connection; vault, key, and token files use owner-only `0600` permissions on
-  Linux/macOS and explicit current-user-only ACLs on Windows
+- The local server rotates its random session token on every process start and
+  requires it on every TCP and HTTP connection; vault, key, and token files use
+  owner-only `0600` permissions on Linux/macOS and explicit current-user-only
+  ACLs on Windows
 
 The legacy loopback HTTP protocol is disabled by default. Builds that still
 need compatibility with an older client can opt in with
@@ -608,6 +622,14 @@ npm run test:extension:coverage
 npm run test:e2e:coverage
 # After installing cargo-llvm-cov:
 cargo llvm-cov --all-features --workspace --fail-under-lines 65
+```
+
+After changing CLI commands or flags, regenerate and verify the browser command
+reference with:
+
+```bash
+cargo run -- generate-command-reference
+cargo run -- generate-command-reference --check
 ```
 
 The suite covers authenticated TCP and HTTP framing, native-message validation,

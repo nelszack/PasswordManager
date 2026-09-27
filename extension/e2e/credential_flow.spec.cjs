@@ -96,6 +96,14 @@ test("adds and updates credentials across username, password, and TOTP pages", a
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
     const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pm-browser-e2e-"));
+    const testExtensionPath = path.join(temporaryRoot, "extension");
+    fs.cpSync(EXTENSION_PATH, testExtensionPath, { recursive: true });
+    const testManifestPath = path.join(testExtensionPath, "manifest.json");
+    const testManifest = JSON.parse(fs.readFileSync(testManifestPath, "utf8"));
+    // Production injection is HTTPS-only; this local HTTP fixture exercises
+    // the credential workflow with an isolated test-manifest override.
+    testManifest.content_scripts[0].matches.push("http://*/*");
+    fs.writeFileSync(testManifestPath, JSON.stringify(testManifest, null, 2));
     const testHome = path.join(temporaryRoot, "home");
     const profile = path.join(temporaryRoot, "profile");
     const nativeLog = path.join(temporaryRoot, "native-messages.jsonl");
@@ -112,8 +120,8 @@ test("adds and updates credentials across username, password, and TOTP pages", a
                 PM_E2E_NATIVE_LOG: nativeLog
             },
             args: [
-                `--disable-extensions-except=${EXTENSION_PATH}`,
-                `--load-extension=${EXTENSION_PATH}`
+                `--disable-extensions-except=${testExtensionPath}`,
+                `--load-extension=${testExtensionPath}`
             ]
         });
 

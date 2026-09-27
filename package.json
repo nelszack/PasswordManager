@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test:extension": "node --test extension/*.test.js",
-    "test:extension:coverage": "node --experimental-test-coverage --test --test-coverage-include=extension/*.js --test-coverage-include-all --test-coverage-lines=18 --test-coverage-branches=75 extension/*.test.js",
+    "test:extension:coverage": "node extension/check_unit_coverage.cjs",
     "test:e2e": "playwright test",
     "test:e2e:coverage": "node -e \"require('node:fs').rmSync('test-results/e2e-coverage', { recursive: true, force: true })\" && PM_E2E_COVERAGE_DIR=test-results/e2e-coverage playwright test && node extension/e2e/report_coverage.cjs test-results/e2e-coverage"
   },
