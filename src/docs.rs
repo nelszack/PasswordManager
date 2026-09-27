@@ -6,6 +6,10 @@ const TEMPLATE_PATH: &str = "docs/commands.template.html";
 const OUTPUT_PATH: &str = "docs/commands.html";
 const REFERENCE_MARKER: &str = "{{COMMAND_REFERENCE}}";
 
+fn normalize_newlines(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -139,11 +143,11 @@ fn rendered_reference(template: &str) -> Result<String, String> {
 pub fn generate_command_reference(check: bool) -> Result<(), String> {
     let template = fs::read_to_string(TEMPLATE_PATH)
         .map_err(|error| format!("could not read {TEMPLATE_PATH}: {error}"))?;
-    let rendered = rendered_reference(&template)?;
+    let rendered = rendered_reference(&normalize_newlines(&template))?;
     if check {
         let current = fs::read_to_string(OUTPUT_PATH)
             .map_err(|error| format!("could not read {OUTPUT_PATH}: {error}"))?;
-        if current != rendered {
+        if normalize_newlines(&current) != rendered {
             return Err(format!(
                 "{OUTPUT_PATH} is stale; run `cargo run -- generate-command-reference`"
             ));
@@ -165,5 +169,17 @@ mod tests {
         assert!(rendered.contains("--force"));
         assert!(!rendered.contains("generate-command-reference"));
         assert!(!rendered.contains("pm run"));
+    }
+
+    #[test]
+    fn generated_reference_is_independent_of_platform_line_endings() {
+        let lf = rendered_reference("before\n{{COMMAND_REFERENCE}}\nafter\n").unwrap();
+        let crlf = rendered_reference(&normalize_newlines(
+            "before\r\n{{COMMAND_REFERENCE}}\r\nafter\r\n",
+        ))
+        .unwrap();
+
+        assert_eq!(crlf, lf);
+        assert!(!crlf.contains('\r'));
     }
 }
