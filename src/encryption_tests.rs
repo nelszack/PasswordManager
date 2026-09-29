@@ -3,11 +3,12 @@ use proptest::prelude::*;
 use std::fs;
 
 #[test]
-fn new_passwords_require_twelve_characters() {
+fn new_master_passwords_require_length_and_strength() {
     assert!(validate_new_password("").is_err());
-    assert!(validate_new_password("eleven-chrs").is_err());
-    assert!(validate_new_password("twelve-chars!").is_ok());
-    assert!(validate_new_password("🔐🔐🔐🔐🔐🔐🔐🔐🔐🔐🔐🔐").is_ok());
+    assert!(validate_new_password("thirteen-char").is_err());
+    assert!(validate_new_password("aaaaaaaaaaaaaa").is_err());
+    assert!(validate_new_password("password-password-password").is_err());
+    assert!(validate_new_password("Cedar-Lantern-Quartz-9274!").is_ok());
 }
 
 #[test]
@@ -190,16 +191,9 @@ fn test_encrypted_data_contains_nonce() {
     );
 }
 #[test]
-fn test_legacy_format_still_decrypts() {
-    let plaintext = b"legacy vault data";
+fn unversioned_encryption_format_is_rejected() {
     let mut pass = PasswordType::Password("test123".into());
-    let enc_key = encryption_key_from_master(&master_key_from_password("test123", LEGACY_SALT));
-    let cipher = XChaCha20Poly1305::new((&enc_key).into());
-    let nonce = XNonce::generate();
-    let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).unwrap();
-    let legacy = [nonce.as_slice(), ciphertext.as_slice()].concat();
-    let dec = decrypt_file(&mut pass, &legacy).unwrap();
-    assert_eq!(dec, plaintext);
+    assert!(decrypt_file(&mut pass, &[0; 64]).is_none());
 }
 #[test]
 fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {

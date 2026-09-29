@@ -47,7 +47,9 @@ pm start
 The server creates a new private session token on every start. CLI and
 native-messaging clients read it from the protected application data directory;
 it is not displayed to the user or stored in the extension. A clean shutdown
-removes the token file.
+removes the token file. Before any command is sent, the server proves possession
+of that token with a fresh challenge. Commands and responses are then protected
+with direction-specific XChaCha20-Poly1305 session keys.
 
 ### Generate a Password
 
@@ -298,14 +300,12 @@ pm rekey
 pm rekey --key /secure/removable-media/replacement.key
 ```
 
-New vault, rekey, import, and backup passwords must contain at least 12
-characters. Existing vaults with shorter legacy passwords remain unlockable.
+New vault, rekey, import, and backup passwords must contain at least 14
+characters and pass a predictability check.
 
 New key files must be outside the application data directory, so copying the
 encrypted vault does not also copy its key. Relative paths are resolved from
-the directory where `pm` is run. Bare filenames remain accepted when unlocking
-or migrating legacy colocated keys; use `./name.key` to select a key in the
-current directory explicitly.
+the directory where `pm` is run.
 
 Rekeying persists the replacement vault before removing the old
 vault. An old key file is left in place, but no vault remains encrypted with it.
@@ -587,28 +587,18 @@ on-page controls.
 
 - Master passwords derived using Argon2id with a random salt when a new
   password-encryption key is created
-- Vault files use random, password-independent names; older deterministic
-  filenames migrate after a successful unlock
+- Vault files use random, password-independent names
 - Vaults encrypted and authenticated with XChaCha20-Poly1305
 - A versioned, authenticated vault header records the format and exact KDF
   parameters used to derive its cached session key
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
 - Configurable inactivity-based auto-lock timeout
-- New key files must be stored outside application data, while legacy
-  colocated keys remain readable for migration
+- Key files must be stored outside application data
 - The local server rotates its random session token on every process start and
-  requires it on every TCP and HTTP connection; vault, key, and token files use
+  requires it for every encrypted local connection; vault, key, and token files use
   owner-only `0600` permissions on Linux/macOS and explicit current-user-only
   ACLs on Windows
-
-The legacy loopback HTTP protocol is disabled by default. Builds that still
-need compatibility with an older client can opt in with
-`--features legacy-http`; native messaging and the CLI use the authenticated
-binary protocol.
-
-Existing unversioned vaults remain readable. The next successful vault write
-automatically stores them in the versioned format.
 
 ## Testing
 
@@ -632,7 +622,7 @@ cargo run -- generate-command-reference
 cargo run -- generate-command-reference --check
 ```
 
-The suite covers authenticated TCP and HTTP framing, native-message validation,
+The suite covers authenticated encrypted transport, native-message validation,
 encrypted backup recovery and tamper detection, hostile encryption parameters,
 secret redaction, vault recovery state, TOTP vectors, URL matching, and
 plaintext import/export compatibility. GitHub Actions runs the full test and

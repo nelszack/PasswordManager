@@ -10,7 +10,6 @@ use tempfile::NamedTempFile;
 #[serde(default)]
 pub struct Config {
     pub genpass: GeneratorConfig,
-    #[serde(alias = "clpboard")]
     pub clipboard: ClipboardConfig,
     pub unlock: UnlockConfig,
     pub copy: CopyConfig,
@@ -30,20 +29,17 @@ pub struct GeneratorConfig {
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct CopyConfig {
-    #[serde(alias = "copy_pass")]
     pub passwords: bool,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct ClipboardConfig {
-    #[serde(alias = "clp_timeout")]
     pub timeout: u8,
 }
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct UnlockConfig {
-    #[serde(alias = "unlock_timeout")]
     pub timeout: u64,
 }
 

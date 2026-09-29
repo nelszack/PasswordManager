@@ -1,7 +1,10 @@
 use crate::file::{TOKEN_FILE, data_dir};
 use crate::types::*;
 use crate::{
-    protocol::{ProtocolResponse, ResponseCode, decode_responses},
+    protocol::{
+        ProtocolResponse, ResponseCode, SECURE_HELLO_LEN, SECURE_PREFACE, decode_responses,
+        decrypt_record_stream, encrypt_record, verify_server_hello,
+    },
     server::{DEFAULT_PORT, server_addr},
 };
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -11,7 +14,7 @@ use std::{
     net::TcpStream,
     time::Duration,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
 static QUIET_OUTPUT: AtomicBool = AtomicBool::new(false);
@@ -114,9 +117,10 @@ pub fn request(command: ServerCommand) -> Result<String, String> {
     }
 }
 
-fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, String> {
+fn request_response(command: ServerCommand) -> Result<ProtocolResponse, String> {
+    let command = Zeroizing::new(command);
     let read_timeout = if matches!(
-        &command,
+        &*command,
         ServerCommand::Audit(AuditOptions {
             check_breaches: true,
             ..
@@ -132,18 +136,27 @@ fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, Stri
     connection
         .set_read_timeout(Some(read_timeout))
         .map_err(|e| format!("could not configure server connection: {e}"))?;
-    let mut token = server_token()?;
-    let encoded = rmp_serde::to_vec(&command).map_err(|e| format!("could not encode command: {e}"));
-    command.zeroize();
-    let mut data = encoded?;
-    let send_result = connection
-        .write_all(token.as_bytes())
-        .and_then(|_| connection.write_all(&(data.len() as u32).to_be_bytes()))
-        .and_then(|_| connection.write_all(&data))
+    let token = Zeroizing::new(server_token()?);
+    connection
+        .write_all(SECURE_PREFACE)
         .and_then(|_| connection.flush())
-        .map_err(|e| format!("could not send command: {e}"));
-    token.zeroize();
-    data.zeroize();
+        .map_err(|e| format!("could not start secure server handshake: {e}"))?;
+    let mut hello = [0u8; SECURE_HELLO_LEN];
+    connection
+        .read_exact(&mut hello)
+        .map_err(|e| format!("could not authenticate the password manager server: {e}"))?;
+    let keys = verify_server_hello(&token, &hello)
+        .ok_or_else(|| "password manager server authentication failed".to_string())?;
+    let data = Zeroizing::new(
+        rmp_serde::to_vec(&*command).map_err(|e| format!("could not encode command: {e}"))?,
+    );
+    let mut encrypted_request = encrypt_record(&keys.request, &data)
+        .ok_or_else(|| "could not encrypt command".to_string())?;
+    let send_result = connection
+        .write_all(&encrypted_request)
+        .and_then(|_| connection.flush())
+        .map_err(|e| format!("could not send encrypted command: {e}"));
+    encrypted_request.zeroize();
     send_result?;
 
     let mut buf = vec![0u8; 64 * 1024];
@@ -169,5 +182,9 @@ fn request_response(mut command: ServerCommand) -> Result<ProtocolResponse, Stri
             Err(e) => return Err(format!("could not read server response: {e}")),
         }
     }
-    decode_responses(&total)
+    let mut plaintext = decrypt_record_stream(&keys.response, &total, MAX_SERVER_RESPONSE)?;
+    total.zeroize();
+    let response = decode_responses(&plaintext);
+    plaintext.zeroize();
+    response
 }

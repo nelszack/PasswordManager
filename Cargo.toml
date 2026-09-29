@@ -7,10 +7,6 @@ edition = "2024"
 name = "pm"
 path = "src/main.rs"
 
-[features]
-default = []
-legacy-http = []
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

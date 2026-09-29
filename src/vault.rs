@@ -3,8 +3,7 @@ use crate::encryption::{PRODUCTION_KDF_PARAMETERS, try_encrypt_file, with_test_k
 use crate::{
     clipboard::copy_in_background,
     encryption::{
-        decrypt_file, try_encrypt_file_in_place, try_gen_master_key, try_gen_master_key_legacy,
-        validate_new_password,
+        decrypt_file, try_encrypt_file_in_place, try_gen_master_key, validate_new_password,
     },
     file::{
         data_dir, file_exists, key_file_path, new_key_file_path, set_private_perms, sync_parent,
@@ -111,13 +110,9 @@ pub struct TotpRecord {
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct EntryMetadata {
     pub entry_id: usize,
-    #[serde(default)]
     pub kind: ItemKind,
-    #[serde(default)]
     pub additional_urls: Vec<String>,
-    #[serde(default)]
     pub password_changed: Option<String>,
-    #[serde(default)]
     pub custom_fields: Vec<CustomField>,
 }
 
@@ -147,11 +142,8 @@ impl std::fmt::Debug for TotpRecord {
 pub struct RecoveryData {
     pub password_history: Vec<PasswordRevision>,
     pub trash: Vec<TrashedEntry>,
-    #[serde(default)]
     pub next_entry_id: usize,
-    #[serde(default)]
     pub totp: Vec<TotpRecord>,
-    #[serde(default)]
     pub entry_metadata: Vec<EntryMetadata>,
 }
 
@@ -214,10 +206,8 @@ impl Zeroize for VaultMetadata {
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct Vault {
-    #[serde(alias = "enteries")]
     pub entries: Vec<VaultEntry>,
     pub metadata: VaultMetadata,
-    #[serde(default)]
     pub recovery: RecoveryData,
 }
 
@@ -373,7 +363,7 @@ impl AuditSnapshot {
         report
     }
 
-    pub(crate) async fn audit(&self, check_breaches: bool, stream: &mut TcpStream, http: bool) {
+    pub(crate) async fn audit(&self, check_breaches: bool, stream: &mut TcpStream) {
         let breach_result = if check_breaches {
             Some(
                 breached_hashes(
@@ -397,7 +387,7 @@ impl AuditSnapshot {
             ResponseCode::Success
         };
         let report = self.report(breached, error);
-        respond_with_code(code, &report, stream, http).await;
+        respond_with_code(code, &report, stream).await;
     }
 }
 
@@ -422,17 +412,12 @@ struct PortableItem {
     notes: Option<String>,
     created: String,
     modified: String,
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type")]
     kind: ItemKind,
-    #[serde(default)]
     additional_urls: Vec<String>,
-    #[serde(default)]
     custom_fields: Vec<CustomField>,
-    #[serde(default)]
     password_changed: Option<String>,
-    #[serde(default)]
     password_history: Vec<PortableRevision>,
-    #[serde(default)]
     totp: Option<String>,
 }
 
@@ -566,16 +551,6 @@ struct BackupEnvelope {
     vault: Vault,
 }
 
-fn filename_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
-    blake3::derive_key("vault-filename-v1", master_key)
-}
-
-fn vault_filename_from_key(filename_key: &[u8; 32]) -> String {
-    let hash = blake3::hash(filename_key);
-    let short = &hash.as_bytes()[..16];
-    format!("{}.enc", hex::encode(short))
-}
-
 fn random_vault_filename() -> String {
     loop {
         let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
@@ -585,38 +560,14 @@ fn random_vault_filename() -> String {
     }
 }
 
-fn try_get_deterministic_filename(key_pass: &mut PasswordType) -> Result<String, String> {
-    let mut master_key = try_gen_master_key(key_pass, false)?;
-    let mut filename_key = filename_key_from_master(&master_key);
-    master_key.zeroize();
-    let filename = vault_filename_from_key(&filename_key);
-    filename_key.zeroize();
-    Ok(filename)
-}
-
-fn try_get_legacy_filename(key_pass: &mut PasswordType) -> Result<String, String> {
-    let mut master_key = try_gen_master_key_legacy(key_pass)?;
-    let mut filename_key = filename_key_from_master(&master_key);
-    master_key.zeroize();
-    let filename = vault_filename_from_key(&filename_key);
-    filename_key.zeroize();
-    Ok(filename)
-}
-
-fn find_vault(key_pass: &mut PasswordType) -> Option<(String, Vault, bool)> {
-    let deterministic = try_get_deterministic_filename(key_pass).ok();
-    let legacy = try_get_legacy_filename(key_pass).ok();
-    let mut candidates: Vec<String> = deterministic.iter().chain(legacy.iter()).cloned().collect();
-    if let Ok(entries) = fs::read_dir(data_dir()) {
-        candidates.extend(
-            entries
-                .filter_map(Result::ok)
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter(|name| name.ends_with(".enc")),
-        );
-    }
-    let mut seen = HashSet::new();
-    candidates.retain(|candidate| seen.insert(candidate.clone()));
+fn find_vault(key_pass: &mut PasswordType) -> Option<(String, Vault)> {
+    let candidates = fs::read_dir(data_dir())
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let filename = entry.file_name().into_string().ok()?;
+            filename.ends_with(".enc").then_some(filename)
+        });
 
     for filename in candidates {
         let path = data_dir().join(&filename);
@@ -641,10 +592,8 @@ fn find_vault(key_pass: &mut PasswordType) -> Option<(String, Vault, bool)> {
             vault.zeroize();
             continue;
         }
-        let needs_migration =
-            deterministic.as_ref() == Some(&filename) || legacy.as_ref() == Some(&filename);
         vault.metadata.filename = filename.clone();
-        return Some((filename, vault, needs_migration));
+        return Some((filename, vault));
     }
     None
 }
@@ -669,7 +618,7 @@ pub fn create_vault(
     if matches!(server_info.keypass, Some(PasswordType::Key(_))) {
         let mut key = try_gen_master_key(server_info.keypass.as_mut().unwrap(), true)?;
         key.zeroize();
-    } else if let Some((_, mut existing, _)) = find_vault(server_info.keypass.as_mut().unwrap()) {
+    } else if let Some((_, mut existing)) = find_vault(server_info.keypass.as_mut().unwrap()) {
         existing.zeroize();
         server_info.zeroize();
         return Err("A vault file with this password already exists.".to_string());
@@ -875,7 +824,7 @@ pub fn restore_encrypted_backup(
     }
     let result = (|| {
         validate_backup_vault(&mut backup.vault)?;
-        let existing = find_vault(&mut vault_lookup_key).map(|(filename, mut vault, _)| {
+        let existing = find_vault(&mut vault_lookup_key).map(|(filename, mut vault)| {
             vault.zeroize();
             filename
         });
@@ -902,20 +851,7 @@ fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
     {
         return None;
     }
-    let (filename, mut vault, needs_migration) = find_vault(key_pass.keypass.as_mut().unwrap())?;
-    if needs_migration {
-        let preferred = random_vault_filename();
-        let file_path = data_dir().join(&filename);
-        {
-            let old_metadata_filename = vault.metadata.filename.clone();
-            vault.metadata.filename = preferred.clone();
-            if write_vault_with_key(&vault, key_pass.keypass.as_mut().unwrap()).is_ok() {
-                let _ = fs::remove_file(&file_path);
-            } else {
-                vault.metadata.filename = old_metadata_filename;
-            }
-        }
-    }
+    let (_, vault) = find_vault(key_pass.keypass.as_mut().unwrap())?;
     key_pass.locked = false;
     Some(vault)
 }
@@ -1106,8 +1042,6 @@ fn parse_totp_configuration(value: &str) -> Result<Totp, String> {
 }
 
 impl Vault {
-    const MAX_PASSWORD_HISTORY: usize = 10;
-
     fn ensure_next_entry_id(&mut self) -> Result<(), String> {
         let highest_id = self
             .entries
@@ -1178,11 +1112,6 @@ impl Vault {
             removed.zeroize();
             count -= 1;
         }
-    }
-
-    #[allow(dead_code)]
-    fn push_password_history(&mut self, entry_id: usize, password: String) {
-        self.push_password_history_with_limit(entry_id, password, Self::MAX_PASSWORD_HISTORY);
     }
 
     fn metadata(&self, entry_id: usize) -> Option<&EntryMetadata> {
@@ -1409,7 +1338,7 @@ impl Vault {
         if matches!(&new_key, PasswordType::Key(_)) {
             let mut key = try_gen_master_key(&mut new_key, true)?;
             key.zeroize();
-        } else if let Some((_, mut existing, _)) = find_vault(&mut new_key) {
+        } else if let Some((_, mut existing)) = find_vault(&mut new_key) {
             existing.zeroize();
             new_key.zeroize();
             return Err("a vault already exists for the new password".to_string());
@@ -1453,8 +1382,8 @@ impl Vault {
         Ok(())
     }
 
-    pub async fn get_entry(&self, a: Target, stream: &mut TcpStream, http: bool) {
-        self.get_entry_with_timeout(a, 15, stream, http).await;
+    pub async fn get_entry(&self, a: Target, stream: &mut TcpStream) {
+        self.get_entry_with_timeout(a, 15, stream).await;
     }
 
     pub async fn get_entry_with_timeout(
@@ -1462,27 +1391,26 @@ impl Vault {
         a: Target,
         copy_timeout: u8,
         stream: &mut TcpStream,
-        http: bool,
     ) {
         match a {
             Target::Id(i) => {
                 let Some(entry) = self.entries.iter().find(|entry| entry.id == i) else {
-                    respond_with_code(ResponseCode::NotFound, "Invalid id.", stream, http).await;
+                    respond_with_code(ResponseCode::NotFound, "Invalid id.", stream).await;
                     return;
                 };
-                respond(&self.entry_details(entry), stream, http).await;
+                respond(&self.entry_details(entry), stream).await;
                 if !entry.password.is_empty() {
                     copy_in_background(entry.password.clone(), copy_timeout);
                 }
             }
             Target::Name(name) => {
                 if let Some(entry) = self.entries.iter().find(|entry| entry.name == name) {
-                    respond(&self.entry_details(entry), stream, http).await;
+                    respond(&self.entry_details(entry), stream).await;
                     if !entry.password.is_empty() {
                         copy_in_background(entry.password.clone(), copy_timeout);
                     }
                 } else {
-                    respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
+                    respond_with_code(ResponseCode::NotFound, "Not found.\n", stream).await;
                 }
             }
             Target::Url(u) => {
@@ -1492,9 +1420,9 @@ impl Vault {
                     &self.recovery.entry_metadata,
                     &u,
                 ) {
-                    respond(&json, stream, http).await;
+                    respond(&json, stream).await;
                 } else {
-                    respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
+                    respond_with_code(ResponseCode::NotFound, "Not found.\n", stream).await;
                 }
             }
             Target::Vault { .. } => {
@@ -1502,23 +1430,22 @@ impl Vault {
                     ResponseCode::InvalidInput,
                     "Invalid entry selector.",
                     stream,
-                    http,
                 )
                 .await
             }
         }
     }
 
-    pub async fn get_secret(&self, target: Target, stream: &mut TcpStream, http: bool) {
+    pub async fn get_secret(&self, target: Target, stream: &mut TcpStream) {
         let entry = match target {
             Target::Id(id) => self.entries.iter().find(|entry| entry.id == id),
             Target::Name(name) => self.entries.iter().find(|entry| entry.name == name),
             Target::Url(_) | Target::Vault { .. } => None,
         };
         if let Some(entry) = entry {
-            respond(&entry.password, stream, http).await;
+            respond(&entry.password, stream).await;
         } else {
-            respond_with_code(ResponseCode::NotFound, "Not found.\n", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "Not found.\n", stream).await;
         }
     }
 
@@ -1648,15 +1575,6 @@ impl Vault {
         Ok(true)
     }
 
-    #[allow(dead_code)]
-    pub fn update_entry(
-        &mut self,
-        change: EntryUpdate,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, String> {
-        self.update_entry_with_limit(change, key_pass, Self::MAX_PASSWORD_HISTORY)
-    }
-
     pub fn update_entry_with_limit(
         &mut self,
         change: EntryUpdate,
@@ -1677,15 +1595,6 @@ impl Vault {
             key_pass,
             password_history_limit,
         )
-    }
-
-    #[allow(dead_code)]
-    pub fn update_typed_entry(
-        &mut self,
-        change: TypedUpdate,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, String> {
-        self.update_typed_entry_with_limit(change, key_pass, Self::MAX_PASSWORD_HISTORY)
     }
 
     pub fn update_typed_entry_with_limit(
@@ -1893,9 +1802,9 @@ impl Vault {
         self.totp_at(&target, timestamp)
     }
 
-    pub async fn view_password_history(&self, target: Target, stream: &mut TcpStream, http: bool) {
+    pub async fn view_password_history(&self, target: Target, stream: &mut TcpStream) {
         let Some(index) = self.entry_index(&target) else {
-            respond_with_code(ResponseCode::NotFound, "Entry not found.", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "Entry not found.", stream).await;
             return;
         };
         let entry = &self.entries[index];
@@ -1907,14 +1816,13 @@ impl Vault {
             .rev()
             .collect();
         if revisions.is_empty() {
-            respond("No password history.", stream, http).await;
+            respond("No password history.", stream).await;
             return;
         }
         for (index, revision) in revisions.iter().enumerate() {
             respond(
                 &format!("{}. changed {}\n", index + 1, revision.changed),
                 stream,
-                http,
             )
             .await;
         }
@@ -1984,9 +1892,9 @@ impl Vault {
         Ok(true)
     }
 
-    pub async fn view_trash(&self, stream: &mut TcpStream, http: bool) {
+    pub async fn view_trash(&self, stream: &mut TcpStream) {
         if self.recovery.trash.is_empty() {
-            respond("Trash is empty.", stream, http).await;
+            respond("Trash is empty.", stream).await;
             return;
         }
         for (index, item) in self.recovery.trash.iter().enumerate() {
@@ -2002,7 +1910,6 @@ impl Vault {
                     totp
                 ),
                 stream,
-                http,
             )
             .await;
         }
@@ -2428,14 +2335,14 @@ impl Vault {
         )
     }
 
-    pub async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream, http: bool) {
+    pub async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream) {
         if self.entries.is_empty() {
-            respond("No entries.", stream, http).await;
+            respond("No entries.", stream).await;
             return;
         }
         let entries = self.apply_list_options(self.entries.iter().collect(), &options);
         if entries.is_empty() {
-            respond_with_code(ResponseCode::NotFound, "No matching entries.", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "No matching entries.", stream).await;
             return;
         }
         let metadata_by_id: HashMap<_, _> = self
@@ -2454,7 +2361,6 @@ impl Vault {
             respond(
                 &self.entry_summary_indexed(entry, &metadata_by_id, &totp_ids),
                 stream,
-                http,
             )
             .await;
         }
@@ -2487,8 +2393,8 @@ impl Vault {
         serde_json::to_string(&items).expect("browser autofill items are serializable")
     }
 
-    pub async fn browser_autofill(&self, stream: &mut TcpStream, http: bool) {
-        respond(&self.browser_autofill_json(), stream, http).await;
+    pub async fn browser_autofill(&self, stream: &mut TcpStream) {
+        respond(&self.browser_autofill_json(), stream).await;
     }
 
     fn browser_autofill_item_json(&self, id: usize) -> Option<String> {
@@ -2510,17 +2416,11 @@ impl Vault {
         )
     }
 
-    pub async fn browser_autofill_item(&self, id: usize, stream: &mut TcpStream, http: bool) {
+    pub async fn browser_autofill_item(&self, id: usize, stream: &mut TcpStream) {
         if let Some(item) = self.browser_autofill_item_json(id) {
-            respond(&item, stream, http).await;
+            respond(&item, stream).await;
         } else {
-            respond_with_code(
-                ResponseCode::NotFound,
-                "Autofill item not found.",
-                stream,
-                http,
-            )
-            .await;
+            respond_with_code(ResponseCode::NotFound, "Autofill item not found.", stream).await;
         }
     }
 
@@ -2597,14 +2497,14 @@ impl Vault {
             .collect()
     }
 
-    pub async fn search(&self, filter: SearchFilter, stream: &mut TcpStream, http: bool) {
+    pub async fn search(&self, filter: SearchFilter, stream: &mut TcpStream) {
         let entries = self.apply_list_options(self.search_entries(&filter), &filter.list);
         if entries.is_empty() {
-            respond_with_code(ResponseCode::NotFound, "No matching entries.", stream, http).await;
+            respond_with_code(ResponseCode::NotFound, "No matching entries.", stream).await;
             return;
         }
         for entry in entries {
-            respond(&self.entry_summary(entry), stream, http).await;
+            respond(&self.entry_summary(entry), stream).await;
         }
     }
 
@@ -3003,18 +2903,6 @@ impl Vault {
         recovery_before.zeroize();
         Ok(report)
     }
-
-    #[allow(dead_code)]
-    pub fn import(&mut self, path: String) -> Result<(), String> {
-        self.import_with_options(
-            path,
-            ConflictPolicy::Skip,
-            false,
-            Self::MAX_PASSWORD_HISTORY,
-            &mut ServerInfo::default(),
-        )
-        .map(|_| ())
-    }
 }
 
 fn apply_update(entry: &mut VaultEntry, update: UpdateArgs, password: Option<String>) -> bool {
@@ -3047,10 +2935,9 @@ fn apply_update(entry: &mut VaultEntry, update: UpdateArgs, password: Option<Str
     modified
 }
 
-#[allow(dead_code)]
 pub trait VaultAccess {
-    async fn get_entry(&self, a: Target, stream: &mut TcpStream, http: bool);
-    async fn get_secret(&self, target: Target, stream: &mut TcpStream, http: bool);
+    async fn get_entry(&self, a: Target, stream: &mut TcpStream);
+    async fn get_secret(&self, target: Target, stream: &mut TcpStream);
     fn add_entry(&mut self, info: PasswordEntry, key_pass: &mut ServerInfo)
     -> Result<bool, String>;
     fn add_typed_entry(
@@ -3059,18 +2946,11 @@ pub trait VaultAccess {
         key_pass: &mut ServerInfo,
     ) -> Result<bool, String>;
     fn delete_entry(&mut self, id: Target, key_pass: &mut ServerInfo) -> Result<bool, String>;
-    fn update_entry(&mut self, add: EntryUpdate, key_pass: &mut ServerInfo)
-    -> Result<bool, String>;
     fn update_entry_with_limit(
         &mut self,
         update: EntryUpdate,
         key_pass: &mut ServerInfo,
         password_history_limit: usize,
-    ) -> Result<bool, String>;
-    fn update_typed_entry(
-        &mut self,
-        update: TypedUpdate,
-        key_pass: &mut ServerInfo,
     ) -> Result<bool, String>;
     fn update_typed_entry_with_limit(
         &mut self,
@@ -3078,11 +2958,10 @@ pub trait VaultAccess {
         key_pass: &mut ServerInfo,
         password_history_limit: usize,
     ) -> Result<bool, String>;
-    async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream, http: bool);
+    async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream);
     fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), String>;
     fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), String>;
     fn export(&self, path: String, force: bool) -> Result<(), String>;
-    fn import(&mut self, path: String) -> Result<(), String>;
     fn import_with_options(
         &mut self,
         path: String,
@@ -3094,14 +2973,14 @@ pub trait VaultAccess {
 }
 
 impl VaultAccess for Option<Vault> {
-    async fn get_entry(&self, a: Target, stream: &mut TcpStream, http: bool) {
+    async fn get_entry(&self, a: Target, stream: &mut TcpStream) {
         if let Some(vlt) = self {
-            vlt.get_entry(a, stream, http).await
+            vlt.get_entry(a, stream).await
         }
     }
-    async fn get_secret(&self, target: Target, stream: &mut TcpStream, http: bool) {
+    async fn get_secret(&self, target: Target, stream: &mut TcpStream) {
         if let Some(vault) = self {
-            vault.get_secret(target, stream, http).await;
+            vault.get_secret(target, stream).await;
         }
     }
     fn add_entry(
@@ -3131,16 +3010,6 @@ impl VaultAccess for Option<Vault> {
         }
     }
 
-    fn update_entry(
-        &mut self,
-        add: EntryUpdate,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, String> {
-        match self {
-            Some(vlt) => vlt.update_entry(add, key_pass),
-            None => Err("vault is locked".to_string()),
-        }
-    }
     fn update_entry_with_limit(
         &mut self,
         update: EntryUpdate,
@@ -3149,16 +3018,6 @@ impl VaultAccess for Option<Vault> {
     ) -> Result<bool, String> {
         match self {
             Some(vault) => vault.update_entry_with_limit(update, key_pass, password_history_limit),
-            None => Err("vault is locked".to_string()),
-        }
-    }
-    fn update_typed_entry(
-        &mut self,
-        update: TypedUpdate,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, String> {
-        match self {
-            Some(vlt) => vlt.update_typed_entry(update, key_pass),
             None => Err("vault is locked".to_string()),
         }
     }
@@ -3175,9 +3034,9 @@ impl VaultAccess for Option<Vault> {
             None => Err("vault is locked".to_string()),
         }
     }
-    async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream, http: bool) {
+    async fn view_entries(&self, options: ListOptions, stream: &mut TcpStream) {
         if let Some(vlt) = self {
-            vlt.view_entries(options, stream, http).await;
+            vlt.view_entries(options, stream).await;
         }
     }
     fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), String> {
@@ -3204,13 +3063,6 @@ impl VaultAccess for Option<Vault> {
     fn export(&self, path: String, force: bool) -> Result<(), String> {
         if let Some(vlt) = self {
             vlt.export(path, force)
-        } else {
-            Err("vault is locked".to_string())
-        }
-    }
-    fn import(&mut self, path: String) -> Result<(), String> {
-        if let Some(vlt) = self {
-            vlt.import(path)
         } else {
             Err("vault is locked".to_string())
         }
@@ -3246,7 +3098,7 @@ pub fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), String>
     {
         return Err("key file does not exist or is not a regular file".to_string());
     }
-    let (filename, mut vault, _) = find_vault(&mut key)
+    let (filename, mut vault) = find_vault(&mut key)
         .ok_or_else(|| "could not delete vault (is the key correct?)".to_string())?;
     vault.zeroize();
     fs::remove_file(data.join(filename))

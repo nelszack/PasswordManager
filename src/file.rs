@@ -129,53 +129,12 @@ pub fn file_exists(file_path: impl AsRef<Path>) -> bool {
     file_path.as_ref().exists()
 }
 
-fn legacy_key_file_path(name: &str) -> Result<PathBuf, String> {
-    let path = Path::new(name);
-    let mut components = path.components();
-    let valid = matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none();
-    let invalid_character = name
-        .chars()
-        .any(|character| character.is_control() || r#"<>:"/\|?*"#.contains(character));
-    let basename = name
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    let reserved = matches!(basename.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || basename.strip_prefix("COM").is_some_and(|suffix| {
-            matches!(
-                suffix,
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-        || basename.strip_prefix("LPT").is_some_and(|suffix| {
-            matches!(
-                suffix,
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        });
-    if !valid
-        || invalid_character
-        || name.starts_with(' ')
-        || name.ends_with([' ', '.'])
-        || reserved
-        || name.encode_utf16().count() > 255
-    {
-        return Err("key file must be a single filename in the application data directory".into());
-    }
-    Ok(data_dir().join(path))
-}
-
 pub fn key_file_path(name: &str) -> Result<PathBuf, String> {
     let path = Path::new(name);
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
+    if !path.is_absolute() {
+        return Err("key file path must be absolute".to_string());
     }
-    legacy_key_file_path(name).map_err(|_| {
-        "key file paths must be absolute; bare filenames are accepted only for legacy keys"
-            .to_string()
-    })
+    Ok(path.to_path_buf())
 }
 
 pub fn resolve_new_key_path(name: &str) -> Result<String, String> {
@@ -194,7 +153,7 @@ pub fn resolve_key_path(name: &str) -> Result<String, String> {
         return Err("key file path cannot be empty".to_string());
     }
     let path = Path::new(name);
-    if path.is_absolute() || path.components().count() == 1 {
+    if path.is_absolute() {
         return Ok(name.to_string());
     }
     resolve_new_key_path(name)
@@ -310,27 +269,6 @@ mod test {
     }
 
     #[test]
-    fn legacy_key_files_cannot_escape_the_application_data_directory() {
-        assert!(legacy_key_file_path("vault.key").is_ok());
-        assert!(legacy_key_file_path("../vault.key").is_err());
-        assert!(legacy_key_file_path("nested/vault.key").is_err());
-        assert!(legacy_key_file_path("/tmp/vault.key").is_err());
-        assert!(legacy_key_file_path(r"..\vault.key").is_err());
-        assert!(legacy_key_file_path("vault:key").is_err());
-        assert!(legacy_key_file_path(" vault.key").is_err());
-        assert!(legacy_key_file_path("vault.key.").is_err());
-        assert!(legacy_key_file_path("vault.key ").is_err());
-        assert!(legacy_key_file_path("NUL").is_err());
-        assert!(legacy_key_file_path("con.key").is_err());
-        assert!(legacy_key_file_path("COM1.backup").is_err());
-        assert!(legacy_key_file_path("LPT².key").is_err());
-        assert!(legacy_key_file_path("COM10.key").is_ok());
-        assert!(legacy_key_file_path(&format!("{}.key", "a".repeat(252))).is_err());
-        assert!(legacy_key_file_path(&format!("{}.key", "🔐".repeat(126))).is_err());
-        assert!(legacy_key_file_path("").is_err());
-    }
-
-    #[test]
     fn new_key_files_require_an_external_absolute_path() {
         init_test_data_dir();
         let external = TempDir::new().unwrap();
@@ -348,10 +286,10 @@ mod test {
     }
 
     #[test]
-    fn explicit_relative_existing_keys_resolve_but_legacy_bare_names_do_not() {
+    fn relative_existing_keys_resolve_from_the_client_working_directory() {
         let resolved = resolve_key_path("keys/vault.key").unwrap();
         assert!(Path::new(&resolved).is_absolute());
-        assert_eq!(resolve_key_path("legacy.key").unwrap(), "legacy.key");
+        assert!(Path::new(&resolve_key_path("vault.key").unwrap()).is_absolute());
         assert!(resolve_key_path("").is_err());
     }
 }

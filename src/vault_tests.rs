@@ -6,6 +6,8 @@ use chrono::FixedOffset;
 use proptest::prelude::*;
 use std::{fs, thread};
 
+const HISTORY_LIMIT: usize = 10;
+
 fn time_close(time: String) -> bool {
     let thing =
         chrono::DateTime::<FixedOffset>::parse_from_str(&time, "%Y-%m-%d %H:%M:%S%.f %:z").unwrap();
@@ -29,14 +31,14 @@ proptest! {
 }
 
 #[test]
-fn renamed_entries_field_preserves_compact_vault_format() {
+fn misspelled_entries_field_is_rejected() {
     #[derive(Serialize)]
-    struct LegacyVault {
+    struct InvalidVault {
         enteries: Vec<VaultEntry>,
         metadata: VaultMetadata,
     }
 
-    let legacy = LegacyVault {
+    let invalid = InvalidVault {
         enteries: vec![VaultEntry {
             id: 1,
             name: "example".to_string(),
@@ -44,14 +46,11 @@ fn renamed_entries_field_preserves_compact_vault_format() {
             ..VaultEntry::default()
         }],
         metadata: VaultMetadata {
-            filename: "legacy.enc".to_string(),
+            filename: "invalid.enc".to_string(),
         },
     };
-    let encoded = rmp_serde::to_vec(&legacy).unwrap();
-    let decoded: Vault = rmp_serde::from_slice(&encoded).unwrap();
-
-    assert_eq!(decoded.entries[0].name, "example");
-    assert_eq!(decoded.metadata.filename, "legacy.enc");
+    let encoded = rmp_serde::to_vec(&invalid).unwrap();
+    assert!(rmp_serde::from_slice::<Vault>(&encoded).is_err());
 }
 
 #[test]
@@ -289,7 +288,10 @@ fn test_update_entry_returns_false_when_not_found() {
         },
         password: None,
     };
-    assert!(!vlt.update_entry(upd, &mut si).unwrap());
+    assert!(
+        !vlt.update_entry_with_limit(upd, &mut si, HISTORY_LIMIT)
+            .unwrap()
+    );
 }
 #[test]
 fn test_add_entry() {
@@ -413,7 +415,7 @@ fn test_update_id() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
             update: UpdateArgs {
@@ -430,6 +432,7 @@ fn test_update_id() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     let expected = Vault {
         entries: vec![VaultEntry {
@@ -468,7 +471,7 @@ fn test_update_name() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Name(String::from("test")),
             update: UpdateArgs {
@@ -485,6 +488,7 @@ fn test_update_name() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     let expected = Vault {
         entries: vec![VaultEntry {
@@ -537,7 +541,14 @@ fn test_export_import() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt1.import(path.display().to_string()).unwrap();
+    vlt1.import_with_options(
+        path.display().to_string(),
+        ConflictPolicy::Skip,
+        false,
+        HISTORY_LIMIT,
+        &mut ServerInfo::default(),
+    )
+    .unwrap();
     assert_eq!(vlt, vlt1);
 }
 
@@ -549,7 +560,17 @@ fn test_failed_import_does_not_partially_modify_vault() {
     writeln!(file, "not-an-id,invalid,user,,,,created,modified").unwrap();
 
     let mut vault = Vault::default();
-    assert!(vault.import(file.path().display().to_string()).is_err());
+    assert!(
+        vault
+            .import_with_options(
+                file.path().display().to_string(),
+                ConflictPolicy::Skip,
+                false,
+                HISTORY_LIMIT,
+                &mut ServerInfo::default(),
+            )
+            .is_err()
+    );
     assert!(vault.entries.is_empty());
 }
 
@@ -632,7 +653,15 @@ fn test_json_export_round_trip() {
     assert_eq!(exported["format"], PORTABLE_FORMAT);
     assert_eq!(exported["version"], PORTABLE_VERSION);
     let mut imported = Vault::default();
-    imported.import(path.display().to_string()).unwrap();
+    imported
+        .import_with_options(
+            path.display().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            HISTORY_LIMIT,
+            &mut ServerInfo::default(),
+        )
+        .unwrap();
     assert_eq!(imported.entries, vault.entries);
     assert_eq!(
         imported.recovery.entry_metadata,
@@ -652,7 +681,15 @@ fn test_import_assigns_local_stable_ids() {
     writeln!(file, "99,first,user,password,,,created,modified").unwrap();
 
     let mut vault = Vault::default();
-    vault.import(file.path().display().to_string()).unwrap();
+    vault
+        .import_with_options(
+            file.path().display().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            HISTORY_LIMIT,
+            &mut ServerInfo::default(),
+        )
+        .unwrap();
     assert_eq!(vault.entries[0].id, 1);
 }
 
@@ -688,7 +725,15 @@ fn portable_import_remaps_ids_for_associated_records() {
         "bob",
         "existing-secret",
     )]);
-    vault.import(file.path().display().to_string()).unwrap();
+    vault
+        .import_with_options(
+            file.path().display().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            HISTORY_LIMIT,
+            &mut ServerInfo::default(),
+        )
+        .unwrap();
 
     assert_eq!(vault.entries[1].id, 11);
     assert_eq!(vault.recovery.entry_metadata[0].entry_id, 11);
@@ -722,7 +767,16 @@ fn test_import_new_persists_vault_to_disk() {
         )
         .unwrap();
     }
-    vlt.import(tf.path().to_str().unwrap().to_string()).unwrap();
+    vlt.as_mut()
+        .unwrap()
+        .import_with_options(
+            tf.path().to_str().unwrap().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            HISTORY_LIMIT,
+            &mut server_info,
+        )
+        .unwrap();
 
     vlt.lock_vault(&mut server_info);
 
@@ -821,33 +875,6 @@ fn test_lock_unlock_password() {
 }
 
 #[test]
-fn unlock_migrates_deterministic_password_filename() {
-    init_test_data_dir();
-    let unique = format!("migration-{:016x}", rand::random::<u64>());
-    let mut password = PasswordType::Password(unique.clone());
-    let old_filename = try_get_deterministic_filename(&mut password).unwrap();
-    let vault = Vault {
-        metadata: VaultMetadata {
-            filename: old_filename.clone(),
-        },
-        ..Vault::default()
-    };
-    write_vault_with_key(&vault, &mut password).unwrap();
-    password.zeroize();
-
-    let mut server_info = ServerInfo {
-        locked: true,
-        keypass: Some(PasswordType::Password(unique)),
-    };
-    let migrated = unlock_vault(&mut server_info).unwrap();
-
-    let preferred_filename = migrated.metadata.filename.clone();
-    assert_ne!(old_filename, preferred_filename);
-    assert!(data_dir().join(&preferred_filename).is_file());
-    assert!(!data_dir().join(old_filename).exists());
-    fs::remove_file(data_dir().join(preferred_filename)).unwrap();
-}
-#[test]
 fn test_create_vault_key() {
     init_test_data_dir();
     let key_directory = tempfile::tempdir().unwrap();
@@ -893,7 +920,7 @@ fn test_create_vault_key_lock() {
         true,
     )
     .unwrap();
-    let (filename, mut stored, _) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
+    let (filename, mut stored) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
     stored.zeroize();
     let data_path = data_dir();
     let file_path = data_path.join(&filename);
@@ -914,7 +941,7 @@ fn delete_key_vault_removes_external_key_by_default() {
         keypass: Some(PasswordType::Key(key_path.clone())),
     };
     create_vault(&mut vault, &mut server_info, true).unwrap();
-    let (filename, mut stored, _) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
+    let (filename, mut stored) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
     stored.zeroize();
 
     delete_vault(PasswordType::Key(key_path.clone()), false).unwrap();
@@ -935,7 +962,7 @@ fn delete_key_vault_can_preserve_external_key() {
         keypass: Some(PasswordType::Key(key_path.clone())),
     };
     create_vault(&mut vault, &mut server_info, true).unwrap();
-    let (filename, mut stored, _) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
+    let (filename, mut stored) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
     stored.zeroize();
 
     delete_vault(PasswordType::Key(key_path.clone()), true).unwrap();
@@ -951,7 +978,9 @@ fn test_create_vault_password() {
         &mut vlt,
         &mut ServerInfo {
             locked: true,
-            keypass: Some(PasswordType::Password("test1234567!".to_string())),
+            keypass: Some(PasswordType::Password(
+                "Cedar-Lantern-Quartz-9274!".to_string(),
+            )),
         },
         false,
     )
@@ -1010,13 +1039,17 @@ fn test_create_vault_password_lock() {
         &mut vlt,
         &mut ServerInfo {
             locked: true,
-            keypass: Some(PasswordType::Password("test1234567!".to_string())),
+            keypass: Some(PasswordType::Password(
+                "Cedar-Lantern-Quartz-4821!".to_string(),
+            )),
         },
         true,
     )
     .unwrap();
-    let (filename, mut stored, _) =
-        find_vault(&mut PasswordType::Password("test1234567!".to_string())).unwrap();
+    let (filename, mut stored) = find_vault(&mut PasswordType::Password(
+        "Cedar-Lantern-Quartz-4821!".to_string(),
+    ))
+    .unwrap();
     stored.zeroize();
     let data_path = data_dir();
     let file_path = data_path.join(&filename);
@@ -1194,7 +1227,7 @@ fn test_update_password_changes() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
             update: UpdateArgs {
@@ -1211,6 +1244,7 @@ fn test_update_password_changes() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert_eq!(vlt.entries[0].password, "newpass");
 }
@@ -1232,7 +1266,7 @@ fn test_update_url_changes() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
             update: UpdateArgs {
@@ -1249,6 +1283,7 @@ fn test_update_url_changes() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert_eq!(
         vlt.entries[0].url,
@@ -1273,7 +1308,7 @@ fn test_update_notes_changes() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
             update: UpdateArgs {
@@ -1290,6 +1325,7 @@ fn test_update_notes_changes() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert_eq!(vlt.entries[0].notes, Some(String::from("important notes")));
 }
@@ -1368,7 +1404,7 @@ fn test_update_entry_invalid_id_zero() {
         },
         recovery: RecoveryData::default(),
     };
-    let result = vlt.update_entry(
+    let result = vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(0),
             update: UpdateArgs {
@@ -1385,6 +1421,7 @@ fn test_update_entry_invalid_id_zero() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert!(!result.unwrap());
 }
@@ -1407,7 +1444,7 @@ fn test_update_entry_invalid_id_out_of_bounds() {
         },
         recovery: RecoveryData::default(),
     };
-    let result = vlt.update_entry(
+    let result = vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(100),
             update: UpdateArgs {
@@ -1424,6 +1461,7 @@ fn test_update_entry_invalid_id_out_of_bounds() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert!(!result.unwrap());
 }
@@ -1476,7 +1514,7 @@ fn test_update_entry_by_name_no_match() {
         recovery: RecoveryData::default(),
     };
     let original_modified = vlt.entries[0].modified.clone();
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Name(String::from("nonexistent")),
             update: UpdateArgs {
@@ -1493,6 +1531,7 @@ fn test_update_entry_by_name_no_match() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert_eq!(vlt.entries[0].name, "test");
     assert_eq!(vlt.entries[0].modified, original_modified);
@@ -1626,7 +1665,7 @@ fn test_update_all_fields_at_once() {
         recovery: RecoveryData::default(),
     };
     let original_created = vlt.entries[0].created.clone();
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
             update: UpdateArgs {
@@ -1643,6 +1682,7 @@ fn test_update_all_fields_at_once() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert_eq!(vlt.entries[0].name, "new_name");
     assert_eq!(vlt.entries[0].username, Some(String::from("new_user")));
@@ -1672,7 +1712,7 @@ fn test_update_no_changes() {
     };
     let original_modified = vlt.entries[0].modified.clone();
     thread::sleep(std::time::Duration::from_millis(10));
-    vlt.update_entry(
+    vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
             update: UpdateArgs {
@@ -1689,6 +1729,7 @@ fn test_update_no_changes() {
             locked: true,
             keypass: None,
         },
+        HISTORY_LIMIT,
     );
     assert_eq!(vlt.entries[0].modified, original_modified);
 }
@@ -1721,7 +1762,7 @@ fn password_updates_create_restorable_history() {
     let mut vault = recovery_test_vault(vec![recovery_test_entry(1, "site", "alice", "old")]);
     let mut server_info = ServerInfo::default();
     vault
-        .update_entry(
+        .update_entry_with_limit(
             EntryUpdate {
                 target: Target::Id(1),
                 update: UpdateArgs {
@@ -1735,6 +1776,7 @@ fn password_updates_create_restorable_history() {
                 password: Some("new".into()),
             },
             &mut server_info,
+            HISTORY_LIMIT,
         )
         .unwrap();
     assert_eq!(vault.recovery.password_history[0].password, "old");
@@ -1765,12 +1807,9 @@ fn password_history_is_bounded() {
     let mut vault = recovery_test_vault(vec![recovery_test_entry(1, "site", "alice", "p0")]);
     for index in 1..=15 {
         let old = std::mem::replace(&mut vault.entries[0].password, format!("p{index}"));
-        vault.push_password_history(1, old);
+        vault.push_password_history_with_limit(1, old, HISTORY_LIMIT);
     }
-    assert_eq!(
-        vault.recovery.password_history.len(),
-        Vault::MAX_PASSWORD_HISTORY
-    );
+    assert_eq!(vault.recovery.password_history.len(), HISTORY_LIMIT);
     assert_eq!(vault.recovery.password_history[0].password, "p5");
 }
 
@@ -1955,7 +1994,7 @@ fn typed_add_and_update_persist_item_metadata_by_stable_id() {
 
     assert!(
         vault
-            .update_typed_entry(
+            .update_typed_entry_with_limit(
                 TypedUpdate {
                     entry: EntryUpdate {
                         target: Target::Id(entry_id),
@@ -1982,6 +2021,7 @@ fn typed_add_and_update_persist_item_metadata_by_stable_id() {
                     clear_fields: false,
                 },
                 &mut server_info,
+                HISTORY_LIMIT,
             )
             .unwrap()
     );
@@ -2318,23 +2358,21 @@ fn totp_rejects_invalid_configuration_and_can_be_removed() {
 }
 
 #[test]
-fn old_recovery_data_defaults_to_no_totp_records() {
+fn incomplete_recovery_data_is_rejected() {
     #[derive(Serialize)]
-    struct LegacyRecoveryData {
+    struct IncompleteRecoveryData {
         password_history: Vec<PasswordRevision>,
         trash: Vec<TrashedEntry>,
         next_entry_id: usize,
     }
 
-    let encoded = rmp_serde::to_vec(&LegacyRecoveryData {
+    let encoded = rmp_serde::to_vec(&IncompleteRecoveryData {
         password_history: Vec::new(),
         trash: Vec::new(),
         next_entry_id: 12,
     })
     .unwrap();
-    let decoded: RecoveryData = rmp_serde::from_slice(&encoded).unwrap();
-    assert_eq!(decoded.next_entry_id, 12);
-    assert!(decoded.totp.is_empty());
+    assert!(rmp_serde::from_slice::<RecoveryData>(&encoded).is_err());
 }
 
 #[test]
@@ -2454,7 +2492,7 @@ fn encrypted_backup_round_trip_preserves_complete_vault_state() {
     );
     assert!(
         vault
-            .encrypted_backup(backup_path.display().to_string(), &mut backup_key, false,)
+            .encrypted_backup(backup_path.display().to_string(), &mut backup_key, false)
             .is_err()
     );
     assert_eq!(fs::read(&backup_path).unwrap(), encrypted);

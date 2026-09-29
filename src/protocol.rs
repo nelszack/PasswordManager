@@ -1,5 +1,139 @@
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, Generate, KeyInit},
+};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
+
 const RESPONSE_MAGIC: &[u8; 4] = b"PMR1";
 const RESPONSE_HEADER_LEN: usize = 9;
+
+pub const SECURE_PREFACE: &[u8; 4] = b"PMS2";
+pub const SECURE_HELLO_LEN: usize = 4 + 32 + 32;
+pub const SECURE_RECORD_HEADER_LEN: usize = 24 + 4;
+
+pub struct TransportKeys {
+    pub request: [u8; 32],
+    pub response: [u8; 32],
+}
+
+impl Drop for TransportKeys {
+    fn drop(&mut self) {
+        self.request.zeroize();
+        self.response.zeroize();
+    }
+}
+
+fn token_key(token: &str) -> Option<[u8; 32]> {
+    let mut decoded = hex::decode(token).ok()?;
+    let result = decoded.as_slice().try_into().ok();
+    decoded.zeroize();
+    result
+}
+
+fn keyed_value(key: &[u8; 32], label: &[u8], challenge: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    hasher.update(label);
+    hasher.update(challenge);
+    *hasher.finalize().as_bytes()
+}
+
+fn transport_keys(key: &[u8; 32], challenge: &[u8; 32]) -> TransportKeys {
+    TransportKeys {
+        request: keyed_value(key, b"password-manager-request-v2", challenge),
+        response: keyed_value(key, b"password-manager-response-v2", challenge),
+    }
+}
+
+pub fn server_hello(token: &str) -> Option<([u8; SECURE_HELLO_LEN], TransportKeys)> {
+    let mut key = token_key(token)?;
+    let challenge = rand::random::<[u8; 32]>();
+    let authenticator = keyed_value(&key, b"password-manager-server-v2", &challenge);
+    let keys = transport_keys(&key, &challenge);
+    key.zeroize();
+
+    let mut hello = [0u8; SECURE_HELLO_LEN];
+    hello[..4].copy_from_slice(SECURE_PREFACE);
+    hello[4..36].copy_from_slice(&challenge);
+    hello[36..].copy_from_slice(&authenticator);
+    Some((hello, keys))
+}
+
+pub fn verify_server_hello(token: &str, hello: &[u8]) -> Option<TransportKeys> {
+    if hello.len() != SECURE_HELLO_LEN || &hello[..4] != SECURE_PREFACE {
+        return None;
+    }
+    let challenge: [u8; 32] = hello[4..36].try_into().ok()?;
+    let mut key = token_key(token)?;
+    let mut expected = keyed_value(&key, b"password-manager-server-v2", &challenge);
+    let authenticated: bool = expected.ct_eq(&hello[36..]).into();
+    expected.zeroize();
+    if !authenticated {
+        key.zeroize();
+        return None;
+    }
+    let keys = transport_keys(&key, &challenge);
+    key.zeroize();
+    Some(keys)
+}
+
+pub fn encrypt_record(key: &[u8; 32], plaintext: &[u8]) -> Option<Vec<u8>> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let nonce = XNonce::generate();
+    let ciphertext = cipher.encrypt(&nonce, plaintext).ok()?;
+    let length = u32::try_from(ciphertext.len()).ok()?;
+    let mut record = Vec::with_capacity(SECURE_RECORD_HEADER_LEN + ciphertext.len());
+    record.extend_from_slice(&nonce);
+    record.extend_from_slice(&length.to_be_bytes());
+    record.extend_from_slice(&ciphertext);
+    Some(record)
+}
+
+pub fn decrypt_record(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let nonce = XNonce::try_from(nonce).ok()?;
+    cipher.decrypt(&nonce, ciphertext).ok()
+}
+
+pub fn decrypt_record_stream(
+    key: &[u8; 32],
+    mut records: &[u8],
+    maximum_plaintext: usize,
+) -> Result<Vec<u8>, String> {
+    let mut plaintext = Vec::new();
+    while !records.is_empty() {
+        if records.len() < SECURE_RECORD_HEADER_LEN {
+            plaintext.zeroize();
+            return Err("server returned a truncated encrypted response".to_string());
+        }
+        let length = u32::from_be_bytes(
+            records[24..28]
+                .try_into()
+                .map_err(|_| "server returned an invalid encrypted response length")?,
+        ) as usize;
+        let nonce: [u8; 24] = records[..24]
+            .try_into()
+            .map_err(|_| "server returned an invalid encrypted response nonce")?;
+        records = &records[SECURE_RECORD_HEADER_LEN..];
+        if length < 16 || length > maximum_plaintext.saturating_add(16) || records.len() < length {
+            plaintext.zeroize();
+            return Err("server returned an invalid encrypted response length".to_string());
+        }
+        let Some(mut part) = decrypt_record(key, &nonce, &records[..length]) else {
+            plaintext.zeroize();
+            return Err("server returned an unauthenticated encrypted response".to_string());
+        };
+        if plaintext.len().saturating_add(part.len()) > maximum_plaintext {
+            part.zeroize();
+            plaintext.zeroize();
+            return Err("server response exceeds the configured limit".to_string());
+        }
+        plaintext.extend_from_slice(&part);
+        part.zeroize();
+        records = &records[length..];
+    }
+    Ok(plaintext)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -124,5 +258,47 @@ mod tests {
         let mut frame = encode_response(ResponseCode::Success, "x");
         *frame.last_mut().unwrap() = 0xff;
         assert!(decode_responses(&frame).is_err());
+    }
+
+    #[test]
+    fn secure_transport_authenticates_the_server_and_encrypts_both_directions() {
+        let token = "ab".repeat(32);
+        let (hello, server_keys) = server_hello(&token).unwrap();
+        let client_keys = verify_server_hello(&token, &hello).unwrap();
+        assert_eq!(client_keys.request, server_keys.request);
+        assert_eq!(client_keys.response, server_keys.response);
+
+        let secret = b"master-password-must-not-appear-on-the-wire";
+        let mut request = encrypt_record(&client_keys.request, secret).unwrap();
+        assert!(!request.windows(secret.len()).any(|window| window == secret));
+        let decrypted = decrypt_record(
+            &server_keys.request,
+            &request[..24],
+            &request[SECURE_RECORD_HEADER_LEN..],
+        )
+        .unwrap();
+        assert_eq!(decrypted, secret);
+
+        *request.last_mut().unwrap() ^= 1;
+        assert!(
+            decrypt_record(
+                &server_keys.request,
+                &request[..24],
+                &request[SECURE_RECORD_HEADER_LEN..],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn impostor_server_cannot_authenticate_before_receiving_a_command() {
+        let real_token = "ab".repeat(32);
+        let attacker_token = "cd".repeat(32);
+        let (impostor_hello, _) = server_hello(&attacker_token).unwrap();
+        assert!(verify_server_hello(&real_token, &impostor_hello).is_none());
+
+        let mut tampered = server_hello(&real_token).unwrap().0;
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(verify_server_hello(&real_token, &tampered).is_none());
     }
 }

@@ -126,8 +126,7 @@ pub enum CliCommands {
     Unlock {
         /// Read the vault key from this file instead of prompting for a password.
         ///
-        /// Explicit relative paths resolve from the current directory. A bare
-        /// filename is retained for compatibility with legacy app-data keys.
+        /// Relative paths resolve from the current directory.
         #[arg(long)]
         key: Option<String>,
 

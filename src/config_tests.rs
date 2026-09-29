@@ -166,14 +166,14 @@ length = 20
 stats = true
 copy = false
 
-[clpboard]
-clp_timeout = 30
+[clipboard]
+timeout = 30
 
 [unlock]
-unlock_timeout = 5
+timeout = 5
 
 [copy]
-copy_pass = false
+passwords = false
 "#;
     fs::write(&config_path, content).unwrap();
     let conf = read_config(&config_path);
