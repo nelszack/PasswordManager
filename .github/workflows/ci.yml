@@ -88,7 +88,7 @@ jobs:
         run: xvfb-run --auto-servernum npm run test:e2e:coverage
       - name: Upload browser coverage
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: browser-coverage
           path: test-results/e2e-coverage/
@@ -113,7 +113,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           # --test-coverage-include-all requires Node 26.7 or newer.
           node-version: 26
@@ -123,7 +123,7 @@ jobs:
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path rust-lcov.info --fail-under-lines 65
       - name: Measure extension unit coverage
         run: npm run test:extension:coverage
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-reports
           path: rust-lcov.info
