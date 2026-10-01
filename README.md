@@ -563,6 +563,9 @@ for example `*.example.com`. Wildcards rooted at public suffixes such as
 
 The badge and any open popup track native-host, server, and vault lock state
 continuously, including changes made through the CLI and automatic locking.
+They also show a warning when the extension release, installed native host,
+and running password-manager server are not the same version. Restart the
+server and reinstall/reload the extension after an upgrade to clear it.
 The popup can lock the vault; entry management happens through the CLI and
 on-page controls.
 
@@ -643,9 +646,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The CLI/package version in `Cargo.toml` is the release version. The browser
-manifest has an independent extension-package version because browser stores
-require monotonically increasing extension revisions.
+The CLI/package version in `Cargo.toml` is the release version and must match
+the browser manifest's `version_name`, which is used for runtime compatibility
+checks. The manifest's numeric `version` remains an independent extension-package
+revision because browser stores require monotonically increasing revisions.
 
 Then open the **Release** workflow in GitHub Actions, choose **Run workflow**,
 and enter that existing tag. The pipeline reruns tests and strict linting, then

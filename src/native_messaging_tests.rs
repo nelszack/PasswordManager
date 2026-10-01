@@ -126,6 +126,7 @@ fn native_message_round_trip_uses_native_endian_framing() {
     assert_eq!(length, encoded.len() - 4);
     let decoded: Value = serde_json::from_slice(&encoded[4..]).unwrap();
     assert_eq!(decoded["id"], 7);
+    assert_eq!(decoded["nativeVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(decoded["data"]["ok"], true);
 
     let mut input = Cursor::new(encoded[4..].to_vec());

@@ -3,11 +3,34 @@ const assert = require("node:assert/strict");
 const state = require("./background_state.js");
 
 test("server warnings remain attached to otherwise healthy status", () => {
-    assert.deepEqual(state.parseServerStatus("Status: Locked"), { locked: true });
     assert.deepEqual(
-        state.parseServerStatus("Status: Unlocked\nWarning: Automatic lock failed: disk full"),
-        { locked: false, error: "Automatic lock failed: disk full" }
+        state.parseServerStatus("Status: Locked\nVersion: 0.1.0"),
+        { locked: true, serverVersion: "0.1.0" }
     );
+    assert.deepEqual(
+        state.parseServerStatus("Status: Unlocked\nVersion: 0.1.0\nWarning: Automatic lock failed: disk full"),
+        { locked: false, serverVersion: "0.1.0", error: "Automatic lock failed: disk full" }
+    );
+});
+
+test("component version mismatches identify every installed version", () => {
+    assert.equal(state.versionError({
+        running: true,
+        extensionVersion: "0.1.0",
+        nativeVersion: "0.1.0",
+        serverVersion: "0.1.0"
+    }), null);
+    assert.equal(state.versionError({
+        running: true,
+        extensionVersion: "0.2.0",
+        nativeVersion: "0.1.0",
+        serverVersion: "0.1.0"
+    }), "Version mismatch: extension 0.2.0, native host 0.1.0, password manager 0.1.0. Update all Password Manager components together.");
+    assert.match(state.versionError({
+        running: true,
+        extensionVersion: "0.1.0",
+        nativeVersion: "0.1.0"
+    }), /password manager version unavailable/);
 });
 
 test("every server state has stable badge semantics", () => {
@@ -21,11 +44,13 @@ test("every server state has stable badge semantics", () => {
         state.badge({ native: true, running: true, locked: false, error: "Automatic lock failed" }),
         { text: "!", color: "#f59e0b", title: "Password Manager: Automatic lock failed" }
     );
+    assert.equal(state.badge({ native: true, versionError: "Versions differ" }).text, "!");
 });
 
 test("status equality includes user-visible errors", () => {
     const status = { native: true, running: false, locked: false, error: "offline" };
     assert.equal(state.equal(status, { ...status }), true);
     assert.equal(state.equal(status, { ...status, error: "missing host" }), false);
+    assert.equal(state.equal(status, { ...status, versionError: "Versions differ" }), false);
     assert.equal(state.equal(null, null), true);
 });

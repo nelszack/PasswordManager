@@ -58,6 +58,8 @@ impl Zeroize for NativeRequest {
 struct NativeResponse {
     id: u64,
     success: bool,
+    #[serde(rename = "nativeVersion")]
+    native_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +69,7 @@ struct NativeResponse {
 impl Zeroize for NativeResponse {
     fn zeroize(&mut self) {
         self.id.zeroize();
+        self.native_version.zeroize();
         if let Some(data) = self.data.as_mut() {
             zeroize_json(data);
         }
@@ -91,6 +94,7 @@ impl NativeResponse {
         Self {
             id,
             success: true,
+            native_version: env!("CARGO_PKG_VERSION").to_string(),
             data: Some(data),
             error: None,
         }
@@ -100,6 +104,7 @@ impl NativeResponse {
         Self {
             id,
             success: false,
+            native_version: env!("CARGO_PKG_VERSION").to_string(),
             data: None,
             error: Some(error.into()),
         }

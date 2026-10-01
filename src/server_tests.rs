@@ -12,10 +12,16 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
 
 #[test]
 fn status_includes_persistent_background_warnings() {
-    assert_eq!(status_message(true, None), "Status: Locked");
+    assert_eq!(
+        status_message(true, None),
+        format!("Status: Locked\nVersion: {}", env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(
         status_message(false, Some("Automatic lock failed: disk full")),
-        "Status: Unlocked\nWarning: Automatic lock failed: disk full"
+        format!(
+            "Status: Unlocked\nVersion: {}\nWarning: Automatic lock failed: disk full",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 }
 

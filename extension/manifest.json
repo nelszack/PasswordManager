@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Password Manager",
   "version": "1.6",
+  "version_name": "0.1.0",
   "description": "Securely connects websites to the local password manager",
   "permissions": [
     "activeTab",

@@ -12,6 +12,14 @@ function registerPositionedControl(input, button, menu, position, outsideClick =
     dropdownRegistry.add(record);
     startLayoutObserver();
     controlResizeObserver?.observe(input);
+    return () => {
+        dropdownRegistry.delete(record);
+        button.remove();
+        menu?.remove();
+        if (![...dropdownRegistry].some(control => control.input === input)) {
+            controlResizeObserver?.unobserve(input);
+        }
+    };
 }
 
 function startLayoutObserver() {
@@ -207,10 +215,17 @@ chrome.runtime.onMessage.addListener(message => {
     }
 });
 
+const securePickerControls = new WeakMap();
+
+function removeSecurePickerButton(input) {
+    securePickerControls.get(input)?.remove();
+}
+
 function createSecurePickerButton(input, kind, icon, title, onSelection) {
-    const marker = `hasSecurePicker${kind.replace(/[^a-z]/g, "")}`;
-    if (input.dataset[marker]) return;
-    input.dataset[marker] = "true";
+    const existing = securePickerControls.get(input);
+    if (existing?.kind === kind) return;
+    existing?.remove();
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = "my-extension-ui";
@@ -233,7 +248,17 @@ function createSecurePickerButton(input, kind, icon, title, onSelection) {
         button.style.top = rect.top + rect.height / 2 - 14 + "px";
     };
     positionButton();
-    registerPositionedControl(input, button, null, positionButton, () => {});
+    const unregister = registerPositionedControl(input, button, null, positionButton, () => {});
+    const control = {
+        kind,
+        remove() {
+            unregister();
+            if (securePickerControls.get(input) === control) {
+                securePickerControls.delete(input);
+            }
+        }
+    };
+    securePickerControls.set(input, control);
     button.addEventListener("click", async event => {
         if (!event.isTrusted) return;
         event.preventDefault();
@@ -932,16 +957,17 @@ function attachInput(input) {
     // Ignore extension UI elements
     if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
     const typedKind = typedAutofillKind(input);
-    if (typedKind) {
+    if (isTotpInput(input)) {
+        createSecureTotpButton(input);
+    } else if (typedKind) {
         createSecureTypedButton(input, typedKind);
     } else if (isCredentialInput(input)) {
         createSecureCredentialButton(input);
+    } else {
+        removeSecurePickerButton(input);
     }
     if (isUsableInput(input) && input.type === "password" && isNewPasswordInput(input)) {
         createGeneratorButton(input);
-    }
-    if (isTotpInput(input)) {
-        createSecureTotpButton(input);
     }
 }
 

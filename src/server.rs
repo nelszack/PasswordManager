@@ -200,8 +200,9 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn status_message(locked: bool, warning: Option<&str>) -> String {
     format!(
-        "Status: {}{}",
+        "Status: {}\nVersion: {}{}",
         if locked { "Locked" } else { "Unlocked" },
+        env!("CARGO_PKG_VERSION"),
         warning
             .map(|warning| format!("\nWarning: {warning}"))
             .unwrap_or_default()

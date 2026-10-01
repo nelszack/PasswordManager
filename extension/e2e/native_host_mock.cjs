@@ -19,7 +19,12 @@ function handle(request) {
         fs.appendFileSync(logPath, `${JSON.stringify(request)}\n`);
     }
     if (request.action === "status") {
-        write({ id: request.id, success: true, data: "Status: unlocked" });
+        write({
+            id: request.id,
+            success: true,
+            nativeVersion: "0.1.0",
+            data: "Status: unlocked\nVersion: 0.1.0"
+        });
     } else if (request.action === "getCredentials") {
         if (mode === "timeout") return;
         if (mode === "locked") {

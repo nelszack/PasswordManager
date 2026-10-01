@@ -27,6 +27,15 @@ function fixture(pathname, port) {
         login.addEventListener("submit", event => { event.preventDefault();
             login.dispatchEvent(new Event("duplicate-attempt")); });`);
     if (pathname === "/totp") return html(`<input id="totp" autocomplete="one-time-code">`);
+    if (pathname === "/changing-role") return html(`
+        <form><label>Address <input id="changing" autocomplete="street-address"></label></form>`, `
+        window.changeToLogin = () => {
+            changing.autocomplete = "username";
+            changing.setAttribute("aria-label", "Username");
+            document.querySelector("form").insertAdjacentHTML(
+                "beforeend", '<input type="password" autocomplete="current-password">'
+            );
+        };`);
     if (pathname === "/iframe-login") return html(`
         <form><input id="username" autocomplete="username">
         <input id="password" type="password" autocomplete="current-password"></form>`);
@@ -103,6 +112,14 @@ test.describe("extended credential flows", () => {
         await picker.getByRole("button", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
+    });
+
+    test("a changing input role replaces its picker instead of stacking controls", async () => {
+        await page.goto(`${origin}/changing-role`);
+        await expect(page.getByRole("button", { name: "Choose identity" })).toHaveCount(1);
+        await page.evaluate(() => window.changeToLogin());
+        await expect(page.getByRole("button", { name: "Choose identity" })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toHaveCount(2);
     });
 
     test("an exact match resumes without a save prompt", async () => {

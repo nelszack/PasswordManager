@@ -19,6 +19,7 @@ test("background worker starts, publishes status, and rejects untrusted credenti
         runtime: {
             id: "abcdefghijklmnopabcdefghijklmnop",
             lastError: null,
+            getManifest: () => ({ version: "1.6", version_name: "0.1.0" }),
             getURL: value => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${value}`,
             onInstalled: event(),
             onStartup: event(),
@@ -30,7 +31,8 @@ test("background worker starts, publishes status, and rejects untrusted credenti
                     onDisconnect: event(),
                     postMessage(request) {
                         queueMicrotask(() => nativeMessageListener({
-                            id: request.id, success: true, data: "Vault is unlocked"
+                            id: request.id, success: true, nativeVersion: "0.1.0",
+                            data: "Status: unlocked\nVersion: 0.1.0"
                         }));
                     }
                 };

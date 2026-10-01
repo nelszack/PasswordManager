@@ -11,6 +11,8 @@ const NATIVE_HOST = "com.myproject.password_manager";
 const REQUEST_TIMEOUT_MS = 7000;
 const STATUS_POLL_ALARM = "status-poll";
 const LIVE_STATUS_POLL_MS = 2000;
+const manifest = chrome.runtime.getManifest();
+const EXTENSION_VERSION = manifest.version_name || manifest.version;
 
 let nativePort = null;
 let nextRequestId = 1;
@@ -123,15 +125,26 @@ async function serverStatus() {
     try {
         const response = await nativeRequest("status");
         if (!response.success) {
-            return { native: true, running: false, locked: false, error: response.error };
+            const status = {
+                native: true, running: false, locked: false, error: response.error,
+                extensionVersion: EXTENSION_VERSION,
+                nativeVersion: response.nativeVersion
+            };
+            return { ...status, versionError: PasswordManagerBackgroundState.versionError(status) };
         }
-        return {
+        const status = {
             native: true,
             running: true,
+            extensionVersion: EXTENSION_VERSION,
+            nativeVersion: response.nativeVersion,
             ...PasswordManagerBackgroundState.parseServerStatus(response.data)
         };
+        return { ...status, versionError: PasswordManagerBackgroundState.versionError(status) };
     } catch (error) {
-        return { native: false, running: false, locked: false, error: error.message };
+        return {
+            native: false, running: false, locked: false, error: error.message,
+            extensionVersion: EXTENSION_VERSION
+        };
     }
 }
 
