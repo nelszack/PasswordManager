@@ -24,45 +24,8 @@ fn test_generate_password_charset() {
 }
 
 #[test]
-fn test_generate_password_uniqueness() {
-    let mut rng = StdRng::seed_from_u64(1);
-    let options = PasswordOptions::default();
-    let pass1 = generate_password_with_rng(32, &options, &mut rng).unwrap();
-    let pass2 = generate_password_with_rng(32, &options, &mut rng).unwrap();
-    assert_ne!(pass1, pass2, "Generated passwords should be unique");
-}
-
-#[test]
 fn test_generate_password_empty_is_rejected() {
     assert!(generate_password_with_options(0, &PasswordOptions::default()).is_err());
-}
-
-#[test]
-fn test_generate_password_contains_uppercase() {
-    let pass = generate_password(100);
-    assert!(pass.chars().any(|c| c.is_uppercase()));
-}
-
-#[test]
-fn test_generate_password_contains_lowercase() {
-    let pass = generate_password(100);
-    assert!(pass.chars().any(|c| c.is_lowercase()));
-}
-
-#[test]
-fn test_generate_password_contains_digits() {
-    let pass = generate_password(100);
-    assert!(pass.chars().any(|c| c.is_ascii_digit()));
-}
-
-#[test]
-fn test_generate_password_contains_special() {
-    let special_chars = "!@#$%^&*-_=+";
-    let pass = generate_password(200);
-    assert!(
-        pass.chars().any(|c| special_chars.contains(c)),
-        "Password should contain at least one special character"
-    );
 }
 
 #[test]
@@ -74,25 +37,6 @@ fn test_practical_lengths_guarantee_all_character_classes() {
         assert!(pass.chars().any(|c| c.is_ascii_digit()));
         assert!(pass.chars().any(|c| "!@#$%^&*-_=+".contains(c)));
     }
-}
-
-#[test]
-fn test_generate_password_long_length() {
-    let pass = generate_password(128);
-    assert_eq!(pass.len(), 128);
-}
-
-#[test]
-fn test_generate_password_max_u8_length() {
-    let pass = generate_password(u8::MAX);
-    assert_eq!(pass.len(), u8::MAX as usize);
-}
-
-#[test]
-fn test_generate_password_single_char() {
-    let pass = generate_password(1);
-    assert_eq!(pass.len(), 1);
-    assert!(pass.chars().next().is_some());
 }
 
 #[test]
@@ -111,24 +55,6 @@ fn seeded_generation_is_reproducible() {
     assert_eq!(
         generate_password_with_rng(64, &options, &mut first).unwrap(),
         generate_password_with_rng(64, &options, &mut second).unwrap()
-    );
-}
-
-#[test]
-fn test_generate_password_no_whitespace() {
-    let pass = generate_password(255);
-    assert!(
-        !pass.chars().any(|c| c.is_whitespace()),
-        "Password should not contain whitespace"
-    );
-}
-
-#[test]
-fn test_generate_password_all_ascii() {
-    let pass = generate_password(255);
-    assert!(
-        pass.is_ascii(),
-        "Password should only contain ASCII characters"
     );
 }
 

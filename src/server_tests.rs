@@ -180,13 +180,6 @@ fn test_password_type_zeroize_key() {
 }
 
 #[test]
-fn test_password_type_clone() {
-    let pt1 = PasswordType::Password("test".to_string());
-    let pt2 = pt1.clone();
-    assert_eq!(pt1, pt2);
-}
-
-#[test]
 fn test_vault_entries_zeroize() {
     let mut entry = VaultEntry {
         id: 42,

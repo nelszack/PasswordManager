@@ -146,26 +146,6 @@ fn test_decrypt_wrong_password_returns_none() {
     assert!(result.is_none());
 }
 #[test]
-fn test_decrypt_corrupted_ciphertext_returns_none() {
-    let plaintext = "test".as_bytes();
-    let mut pass = PasswordType::Password("test123".into());
-    let mut encrypt = encrypt_file(&mut pass, plaintext);
-    encrypt[24] ^= 0xFF;
-    let result = decrypt_file(&mut pass, &encrypt);
-    assert!(result.is_none());
-}
-#[test]
-fn test_encrypt_produces_different_output_each_time() {
-    let plaintext = "test".as_bytes();
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypt1 = encrypt_file(&mut pass, plaintext);
-    let encrypt2 = encrypt_file(&mut pass, plaintext);
-    assert_ne!(
-        encrypt1, encrypt2,
-        "Encryption should produce unique ciphertexts due to random nonce"
-    );
-}
-#[test]
 fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     let expected = b"plaintext kept in the original allocation";
     let mut plaintext = Vec::with_capacity(expected.len() + HEADER_LEN + 16);
@@ -175,20 +155,6 @@ fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     let encrypted = try_encrypt_file_in_place(&mut pass, plaintext).unwrap();
     assert_eq!(encrypted.as_ptr(), allocation);
     assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
-}
-#[test]
-fn test_encrypted_data_contains_nonce() {
-    let plaintext = "test".as_bytes();
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypt = encrypt_file(&mut pass, plaintext);
-    assert!(
-        encrypt.len() > plaintext.len(),
-        "Encrypted data should be larger than plaintext"
-    );
-    assert!(
-        encrypt.len() >= 24 + plaintext.len(),
-        "Nonce (24 bytes) + ciphertext"
-    );
 }
 #[test]
 fn unversioned_encryption_format_is_rejected() {

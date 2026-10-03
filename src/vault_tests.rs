@@ -200,30 +200,6 @@ fn test_url_match_json_partial_match() {
     assert_eq!(parsed[0]["has_totp"], false);
 }
 #[test]
-fn test_add_entry_returns_false_for_duplicate() {
-    let mut vlt = Vault {
-        entries: vec![],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    let entry = PasswordEntry {
-        name: String::from("test"),
-        username: Some(String::from("user1")),
-        password: String::from("pass1"),
-        url: None,
-        notes: None,
-        copy: false,
-    };
-    let mut si = ServerInfo {
-        locked: true,
-        keypass: None,
-    };
-    assert!(vlt.add_entry(entry.clone(), &mut si).unwrap());
-    assert!(!vlt.add_entry(entry, &mut si).unwrap());
-}
-#[test]
 fn test_delete_entry_returns_false_when_not_found() {
     let mut vlt = Vault {
         entries: vec![VaultEntry {
@@ -245,10 +221,12 @@ fn test_delete_entry_returns_false_when_not_found() {
         locked: true,
         keypass: None,
     };
+    let original = vlt.entries.clone();
     assert!(
         !vlt.delete_entry(Target::Name("nope".into()), &mut si)
             .unwrap()
     );
+    assert_eq!(vlt.entries, original);
     assert!(
         vlt.delete_entry(Target::Name("test".into()), &mut si)
             .unwrap()
@@ -276,6 +254,7 @@ fn test_update_entry_returns_false_when_not_found() {
         locked: true,
         keypass: None,
     };
+    let original = vlt.entries[0].clone();
     let upd = EntryUpdate {
         target: Target::Name("nope".into()),
         update: UpdateArgs {
@@ -292,6 +271,7 @@ fn test_update_entry_returns_false_when_not_found() {
         !vlt.update_entry_with_limit(upd, &mut si, HISTORY_LIMIT)
             .unwrap()
     );
+    assert_eq!(vlt.entries[0], original);
 }
 #[test]
 fn test_add_entry() {
@@ -1093,53 +1073,57 @@ fn test_add_duplicate_entry_name() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.add_entry(
-        PasswordEntry {
-            name: String::from("test"),
-            username: Some(String::from("user1")),
-            password: String::from("pass1"),
-            url: None,
-            notes: None,
-            copy: false,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
+    let mut server_info = ServerInfo {
+        locked: true,
+        keypass: None,
+    };
+    assert!(
+        vlt.add_entry(
+            PasswordEntry {
+                name: String::from("test"),
+                username: Some(String::from("user1")),
+                password: String::from("pass1"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut server_info,
+        )
+        .unwrap()
     );
     let initial_len = vlt.entries.len();
 
     // Same name, different username -> allowed (multiple accounts per site)
-    vlt.add_entry(
-        PasswordEntry {
-            name: String::from("test"),
-            username: Some(String::from("user2")),
-            password: String::from("pass2"),
-            url: None,
-            notes: None,
-            copy: false,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
+    assert!(
+        vlt.add_entry(
+            PasswordEntry {
+                name: String::from("test"),
+                username: Some(String::from("user2")),
+                password: String::from("pass2"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut server_info,
+        )
+        .unwrap()
     );
     assert_eq!(vlt.entries.len(), initial_len + 1);
 
     // Same name AND same username -> still blocked
-    vlt.add_entry(
-        PasswordEntry {
-            name: String::from("test"),
-            username: Some(String::from("user1")),
-            password: String::from("pass3"),
-            url: None,
-            notes: None,
-            copy: false,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
+    assert!(
+        !vlt.add_entry(
+            PasswordEntry {
+                name: String::from("test"),
+                username: Some(String::from("user1")),
+                password: String::from("pass3"),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut server_info,
+        )
+        .unwrap()
     );
     assert_eq!(vlt.entries.len(), initial_len + 1);
 }
@@ -1464,77 +1448,6 @@ fn test_update_entry_invalid_id_out_of_bounds() {
         HISTORY_LIMIT,
     );
     assert!(!result.unwrap());
-}
-
-#[test]
-fn test_delete_entry_by_name_no_match() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    let initial_len = vlt.entries.len();
-    vlt.delete_entry(
-        Target::Name("nonexistent".into()),
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-    );
-    assert_eq!(vlt.entries.len(), initial_len);
-}
-
-#[test]
-fn test_update_entry_by_name_no_match() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    let original_modified = vlt.entries[0].modified.clone();
-    vlt.update_entry_with_limit(
-        EntryUpdate {
-            target: Target::Name(String::from("nonexistent")),
-            update: UpdateArgs {
-                name: Some(String::from("new")),
-                username: None,
-                password: false,
-                generate_password: false,
-                url: None,
-                notes: None,
-            },
-            password: None,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-        HISTORY_LIMIT,
-    );
-    assert_eq!(vlt.entries[0].name, "test");
-    assert_eq!(vlt.entries[0].modified, original_modified);
 }
 
 #[test]
