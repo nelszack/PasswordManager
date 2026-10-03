@@ -17,9 +17,15 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     [System.Security.AccessControl.AccessControlType]::Allow
 )
 $acl.SetAccessRule($rule)
-Set-Acl -LiteralPath $privatePath -AclObject $acl
-
-$actual = Get-Acl -LiteralPath $privatePath
+# Use the Windows PowerShell .NET Framework APIs directly. A parent pwsh
+# process can supply a PSModulePath whose modules cannot load in powershell.exe.
+if ($env:PM_PRIVATE_ACL_DIRECTORY -eq '1') {
+    [System.IO.Directory]::SetAccessControl($privatePath, $acl)
+    $actual = [System.IO.Directory]::GetAccessControl($privatePath)
+} else {
+    [System.IO.File]::SetAccessControl($privatePath, $acl)
+    $actual = [System.IO.File]::GetAccessControl($privatePath)
+}
 $rules = @($actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
 if (-not $actual.AreAccessRulesProtected -or $rules.Count -ne 1) {
     throw 'Private ACL verification failed: unexpected access rules'

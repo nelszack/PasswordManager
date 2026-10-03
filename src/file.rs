@@ -243,12 +243,17 @@ mod test {
                 .args(["-NoProfile", "-NonInteractive", "-Command", r#"
                     $ErrorActionPreference = 'Stop'
                     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-                    $acl = Get-Acl -LiteralPath $env:PM_TEST_ACL_PATH
+                    if ($env:PM_TEST_ACL_DIRECTORY -eq '1') {
+                        $acl = [System.IO.Directory]::GetAccessControl($env:PM_TEST_ACL_PATH)
+                    } else {
+                        $acl = [System.IO.File]::GetAccessControl($env:PM_TEST_ACL_PATH)
+                    }
                     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
                     if (-not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
                         $rules[0].IdentityReference.Value -ne $sid) { exit 1 }
                 "#])
                 .env("PM_TEST_ACL_PATH", path)
+                .env("PM_TEST_ACL_DIRECTORY", if is_directory { "1" } else { "0" })
                 .output()
                 .unwrap();
             assert!(
