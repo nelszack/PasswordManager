@@ -360,6 +360,18 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             2048,
         )?))),
         "getAutofillItems" => Ok(ServerCommand::BrowserAutofill),
+        "getLoginItems" => Ok(ServerCommand::BrowserLogins(required(
+            request.domain.take(),
+            "domain",
+            2048,
+        )?)),
+        "getLoginItem" => Ok(ServerCommand::BrowserLogin {
+            domain: required(request.domain.take(), "domain", 2048)?,
+            id: request
+                .entry_id
+                .filter(|id| *id > 0)
+                .ok_or_else(|| "invalid entry ID".to_string())?,
+        }),
         "getAutofillItem" => Ok(ServerCommand::BrowserAutofillItem(
             request
                 .entry_id

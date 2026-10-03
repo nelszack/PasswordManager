@@ -8,6 +8,63 @@ use std::{fs, thread};
 
 const HISTORY_LIMIT: usize = 10;
 
+#[test]
+fn browser_login_summaries_are_secret_free_and_selection_is_site_scoped() {
+    let mut vault = Vault {
+        entries: vec![
+            VaultEntry {
+                id: 1,
+                name: "Personal".into(),
+                password: "first-secret".into(),
+                url: Some("https://example.com".into()),
+                ..VaultEntry::default()
+            },
+            VaultEntry {
+                id: 2,
+                name: "Other site".into(),
+                password: "other-secret".into(),
+                url: Some("https://other.example".into()),
+                ..VaultEntry::default()
+            },
+            VaultEntry {
+                id: 3,
+                name: "Card".into(),
+                password: "card-secret".into(),
+                url: Some("https://example.com".into()),
+                ..VaultEntry::default()
+            },
+        ],
+        ..Vault::default()
+    };
+    vault.recovery.entry_metadata.push(EntryMetadata {
+        entry_id: 3,
+        kind: ItemKind::PaymentCard,
+        ..EntryMetadata::default()
+    });
+    vault.recovery.totp.push(TotpRecord {
+        entry_id: 1,
+        configuration: "totp-secret".into(),
+    });
+    let summaries = vault.browser_logins_json("https://example.com");
+    assert!(!summaries.contains("secret"));
+    assert!(!summaries.contains("password"));
+    let summaries: serde_json::Value = serde_json::from_str(&summaries).unwrap();
+    assert_eq!(summaries.as_array().unwrap().len(), 1);
+    assert_eq!(summaries[0]["has_totp"], true);
+    let selected = vault.browser_login_json("https://example.com", 1).unwrap();
+    assert!(selected.contains("first-secret"));
+    assert!(!selected.contains("other-secret"));
+    assert!(!selected.contains("totp-secret"));
+    assert!(vault.browser_login_json("https://example.com", 2).is_none());
+    assert!(vault.browser_login_json("https://example.com", 3).is_none());
+    assert!(
+        vault
+            .browser_login_json("https://example.com", 99)
+            .is_none()
+    );
+    assert_eq!(vault.browser_logins_json("https://unrelated.example"), "[]");
+}
+
 fn time_close(time: String) -> bool {
     let thing =
         chrono::DateTime::<FixedOffset>::parse_from_str(&time, "%Y-%m-%d %H:%M:%S%.f %:z").unwrap();
@@ -798,10 +855,12 @@ fn test_lock_unlock_key() {
     };
     let pass = PasswordType::Key(key_path.clone());
     let pass1 = PasswordType::Key(key_path);
-    vlt.lock_vault(&mut ServerInfo {
+    let mut info = ServerInfo {
         locked: false,
         keypass: Some(pass),
-    });
+    };
+    write_vault(&vlt, &mut info).unwrap();
+    vlt.lock_vault(&mut info).unwrap();
     let vlt1 = unlock_vault(&mut ServerInfo {
         locked: true,
         keypass: Some(pass1),
@@ -837,10 +896,12 @@ fn test_lock_unlock_password() {
     };
     let pass = PasswordType::Password("test_password1234!".to_string());
     let pass1 = PasswordType::Password("test_password1234!".to_string());
-    vlt.lock_vault(&mut ServerInfo {
+    let mut info = ServerInfo {
         locked: false,
         keypass: Some(pass),
-    });
+    };
+    write_vault(&vlt, &mut info).unwrap();
+    vlt.lock_vault(&mut info).unwrap();
     let vlt1 = unlock_vault(&mut ServerInfo {
         locked: true,
         keypass: Some(pass1),

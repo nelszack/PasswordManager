@@ -3,6 +3,8 @@ body { margin: 0; background: Canvas; color: CanvasText; }
 main { padding: 18px; }
 h1 { font-size: 18px; margin: 0 0 8px; }
 #status { color: GrayText; margin: 0 0 14px; }
+#destination, #crossOriginWarning { overflow-wrap: anywhere; }
+#crossOriginWarning { margin-bottom: 14px; }
 #items { display: grid; gap: 8px; }
 #items button, #cancel {
   width: 100%; padding: 10px 12px; border: 1px solid GrayText;

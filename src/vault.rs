@@ -873,16 +873,7 @@ fn url_match_json(
         if item_metadata.is_some_and(|record| record.kind != ItemKind::Login) {
             continue;
         }
-        let matches = e
-            .url
-            .as_deref()
-            .is_some_and(|saved| hosts_match(saved, url))
-            || item_metadata.is_some_and(|record| {
-                record
-                    .additional_urls
-                    .iter()
-                    .any(|saved| hosts_match(saved, url))
-            });
+        let matches = login_matches_site(e, item_metadata, url);
         if matches {
             results.push(json!({
                 "id": e.id,
@@ -898,6 +889,20 @@ fn url_match_json(
     } else {
         Some(serde_json::to_string(&results).unwrap())
     }
+}
+
+fn login_matches_site(entry: &VaultEntry, metadata: Option<&EntryMetadata>, domain: &str) -> bool {
+    metadata.is_none_or(|record| record.kind == ItemKind::Login)
+        && (entry
+            .url
+            .as_deref()
+            .is_some_and(|saved| hosts_match(saved, domain))
+            || metadata.is_some_and(|record| {
+                record
+                    .additional_urls
+                    .iter()
+                    .any(|saved| hosts_match(saved, domain))
+            }))
 }
 
 fn hostname(value: &str) -> Option<String> {
@@ -2366,6 +2371,59 @@ impl Vault {
         }
     }
 
+    pub(crate) fn browser_logins_json(&self, domain: &str) -> String {
+        let metadata_by_id: HashMap<_, _> = self
+            .recovery
+            .entry_metadata
+            .iter()
+            .map(|record| (record.entry_id, record))
+            .collect();
+        let totp_ids: HashSet<_> = self
+            .recovery
+            .totp
+            .iter()
+            .map(|record| record.entry_id)
+            .collect();
+        let items = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                login_matches_site(entry, metadata_by_id.get(&entry.id).copied(), domain)
+            })
+            .map(|entry| {
+                json!({
+                    "id": entry.id,
+                    "name": entry.name,
+                    "username": entry.username,
+                    "has_totp": totp_ids.contains(&entry.id),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&items).expect("login summaries are serializable")
+    }
+
+    pub(crate) fn browser_login_json(&self, domain: &str, id: usize) -> Option<String> {
+        let entry = self.entries.iter().find(|entry| entry.id == id)?;
+        let metadata = self
+            .recovery
+            .entry_metadata
+            .iter()
+            .find(|record| record.entry_id == id);
+        if !login_matches_site(entry, metadata, domain) {
+            return None;
+        }
+        Some(
+            json!({
+                "id": entry.id,
+                "name": entry.name,
+                "username": entry.username,
+                "password": entry.password,
+                "has_totp": self.recovery.totp.iter().any(|record| record.entry_id == id),
+            })
+            .to_string(),
+        )
+    }
+
     fn browser_autofill_json(&self) -> String {
         let metadata_by_id: HashMap<_, _> = self
             .recovery
@@ -2509,7 +2567,8 @@ impl Vault {
     }
 
     pub fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), String> {
-        write_vault(self, key_pass)?;
+        // Every mutation is persisted before it succeeds. Locking must not
+        // depend on storage availability or leave keys resident after an I/O error.
         key_pass.zeroize();
         Ok(())
     }

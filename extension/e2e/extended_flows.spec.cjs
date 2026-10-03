@@ -7,6 +7,10 @@ function html(body, script = "") {
 }
 
 function fixture(pathname, port) {
+    if (pathname === "/iframe-card") return html(`<form><input id="card" autocomplete="cc-number"></form>`);
+    if (pathname === "/iframe-card-cross") return html(
+        `<iframe id="cardFrame" src="http://localhost:${port}/iframe-card" width="500" height="200"></iframe>`
+    );
     if (pathname === "/spa") return html(`
         <main><label>Username <input id="username" autocomplete="username"></label>
         <button id="next" type="button">Next</button></main>`, `
@@ -93,7 +97,11 @@ test.describe("extended credential flows", () => {
         test.skip(process.platform !== "linux");
         server = await startServer();
         origin = `http://127.0.0.1:${server.address().port}`;
-        browser = await launchExtension({ accounts: [
+        browser = await launchExtension({ env: {
+            PM_E2E_NATIVE_AUTOFILL_ITEMS: JSON.stringify([
+                { id: 9, name: "Test Visa", kind: "payment-card", primary_secret: "4111111111111111", custom_fields: [] }
+            ])
+        }, accounts: [
             { id: 7, name: "Alice", username: "alice@example.com", password: "saved-password", has_totp: true, domain: origin },
             { id: 8, name: "Bob", username: "bob@example.com", password: "bob-password", has_totp: false, domain: origin }
         ] });
@@ -221,6 +229,22 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/dynamic-shadow`);
         await expect(page.locator("#shadowHost")).toBeAttached();
         await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+    });
+
+    test("cross-origin card autofill displays both sites and requires confirmation", async () => {
+        await page.goto(`${origin}/iframe-card-cross`);
+        const frame = page.frameLocator("#cardFrame");
+        const picker = await openPicker(browser.context,
+            frame.getByRole("button", { name: "Choose payment card" }));
+        const embeddedOrigin = `http://localhost:${server.address().port}`;
+        await expect(picker.locator("#destination")).toHaveText(`Fill on: ${embeddedOrigin}`);
+        await expect(picker.locator("#crossOriginText")).toContainText(origin);
+        await picker.getByRole("button", { name: "Test Visa" }).click();
+        await expect(picker.locator("#status")).toContainText("Confirm");
+        await expect(frame.locator("#card")).toHaveValue("");
+        await picker.locator("#confirmCrossOrigin").check();
+        await picker.getByRole("button", { name: "Test Visa" }).click();
+        await expect(frame.locator("#card")).toHaveValue("4111111111111111");
     });
 
     test("popup and picker entry points render without leaking page state", async () => {

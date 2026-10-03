@@ -821,6 +821,24 @@ async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionSt
                 respond_failure("Vault locked.", &mut stream).await;
             }
         }
+        ServerCommand::BrowserLogins(domain) => {
+            if let Some(vault) = vlt.as_ref().filter(|_| !server_info.locked) {
+                respond(&vault.browser_logins_json(&domain), &mut stream).await;
+            } else {
+                respond_failure("Vault locked.", &mut stream).await;
+            }
+        }
+        ServerCommand::BrowserLogin { domain, id } => {
+            if let Some(vault) = vlt.as_ref().filter(|_| !server_info.locked) {
+                if let Some(item) = vault.browser_login_json(&domain, id) {
+                    respond(&item, &mut stream).await;
+                } else {
+                    respond_not_found("Login item not found for this site.", &mut stream).await;
+                }
+            } else {
+                respond_failure("Vault locked.", &mut stream).await;
+            }
+        }
         ServerCommand::BrowserAutofillItem(id) => {
             if !server_info.locked {
                 if let Some(vault) = vlt.as_ref() {

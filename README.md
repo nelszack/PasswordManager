@@ -534,8 +534,13 @@ extension; the encrypted TOTP secret never leaves the vault server.
 Payment-card and identity fields also receive contextual picker buttons. The
 actual selection happens in a separate extension-owned window that the webpage
 cannot inspect or restyle. Only secret-free labels enter that window; after the
-user selects one, the extension retrieves that single item and fills controls
-in the same form. Cardholder/email fall back to the item's `--username`, and the card
+user selects one, the extension retrieves that single item from the unlocked
+vault and fills controls in the same form. Locking or losing the native-host
+connection invalidates open pickers. The picker displays the receiving site;
+for an embedded frame from a different origin, it also displays the main page
+and requires explicit confirmation before filling. The extension uses the
+browser's `tabs` permission to read the main page's URL for this destination
+check. Cardholder/email fall back to the item's `--username`, and the card
 number comes from the card item's primary secret. Other values are read from
 custom fields using common names, for example:
 
@@ -596,7 +601,8 @@ on-page controls.
   parameters used to derive its cached session key
 - Keys derived with BLAKE3
 - Zeroize for secure memory cleanup
-- Configurable inactivity-based auto-lock timeout
+- Configurable inactivity-based auto-lock timeout; locking clears in-memory
+  secrets without depending on disk writes
 - Key files must be stored outside application data
 - The local server rotates its random session token on every process start and
   requires it for every encrypted local connection; vault, key, and token files use

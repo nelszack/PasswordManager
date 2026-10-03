@@ -47,6 +47,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 function closeNativePort(error) {
+    invalidateSecurePickers();
     const message = error || "Native messaging host disconnected";
     for (const pending of pendingRequests.values()) {
         clearTimeout(pending.timer);
@@ -110,6 +111,7 @@ function sameStatus(left, right) {
 }
 
 function publishStatus(status) {
+    if (!status.native || !status.running || status.locked) invalidateSecurePickers();
     setBadge(status);
     if (sameStatus(cachedStatus, status)) return;
 
@@ -269,7 +271,7 @@ function pickerSenderAllowed(sender) {
 async function loadSecurePickerItems(kind, domain) {
     let items;
     if (kind === "login" || kind === "totp") {
-        items = parseNativeItems(await nativeRequest("getCredentials", { domain }));
+        items = parseNativeItems(await nativeRequest("getLoginItems", { domain }));
         if (kind === "totp") items = items.filter(item => item?.has_totp === true);
     } else {
         items = parseNativeItems(await nativeRequest("getAutofillItems"));
@@ -281,7 +283,15 @@ async function loadSecurePickerItems(kind, domain) {
         username: String(item.username || ""),
         kind
     })).filter(item => Number.isSafeInteger(item.id) && item.id > 0);
-    return { items, summaries };
+    return { items: summaries, summaries };
+}
+
+function invalidateSecurePickers() {
+    pendingPickers.clear();
+    for (const windowId of pickerWindows.keys()) {
+        chrome.windows.remove(windowId, () => void chrome.runtime.lastError);
+    }
+    pickerWindows.clear();
 }
 
 async function openSecurePicker(request, sender) {
@@ -289,14 +299,20 @@ async function openSecurePicker(request, sender) {
     const tabId = sender?.tab?.id;
     const frameId = sender?.frameId;
     const kind = request?.kind;
+    const documentId = sender?.documentId;
     if (!domain || !Number.isInteger(tabId) || !Number.isInteger(frameId)
+        || typeof documentId !== "string" || !documentId
         || !["login", "totp", "payment-card", "identity"].includes(kind)) {
         throw new Error("Invalid secure picker request");
     }
+    const tab = await chrome.tabs.get(tabId);
+    const topOrigin = PasswordManagerSecurity.senderOrigin({ url: tab.url });
+    if (!topOrigin) throw new Error("Invalid top-level page origin");
 
     const token = crypto.randomUUID();
     pendingPickers.set(token, {
-        tabId, frameId, kind,
+        tabId, frameId, documentId, kind, domain, topOrigin,
+        crossOrigin: domain !== topOrigin,
         items: [],
         summaries: [],
         loading: true,
@@ -503,31 +519,48 @@ async function completeSecurePicker(request, sender) {
     }
     if (pending.loading) throw new Error("Secure picker is still loading");
     if (pending.error) throw new Error(pending.error);
+    if (pending.completing) throw new Error("Selection is already in progress");
+    if (pending.crossOrigin && request.confirmCrossOrigin !== true) {
+        throw new Error("Confirm filling the embedded site's origin");
+    }
     if (!Number.isSafeInteger(request.id) || request.id <= 0) {
         throw new Error("Invalid picker selection");
     }
     const selected = pending.items.find(item => item?.id === request.id);
     if (!selected) throw new Error("Picker selection is unavailable");
 
+    pending.completing = true;
+    // Lock/disconnect invalidation also cancels selections awaiting native I/O.
     let payload;
-    if (pending.kind === "login") {
-        payload = selected;
-    } else if (pending.kind === "totp") {
-        const response = await nativeRequest("getTotp", { entryId: selected.id });
-        if (!response.success) throw new Error(response.error || "TOTP unavailable");
-        payload = response.data;
-    } else {
-        const response = await nativeRequest("getAutofillItem", { entryId: selected.id });
-        if (!response.success) throw new Error(response.error || "Autofill item unavailable");
-        payload = JSON.parse(response.data);
+    try {
+        if (pending.kind === "login") {
+            const response = await nativeRequest("getLoginItem", {
+                domain: pending.domain, entryId: selected.id
+            });
+            if (!response.success) throw new Error(response.error || "Login unavailable");
+            payload = JSON.parse(response.data);
+        } else if (pending.kind === "totp") {
+            const response = await nativeRequest("getTotp", { entryId: selected.id });
+            if (!response.success) throw new Error(response.error || "TOTP unavailable");
+            payload = response.data;
+        } else {
+            const response = await nativeRequest("getAutofillItem", { entryId: selected.id });
+            if (!response.success) throw new Error(response.error || "Autofill item unavailable");
+            payload = JSON.parse(response.data);
+        }
+        if (pendingPickers.get(request.token) !== pending || pending.expiresAt <= Date.now()) {
+            throw new Error("Secure picker expired");
+        }
+        pendingPickers.delete(request.token);
+        await chrome.tabs.sendMessage(
+            pending.tabId,
+            { action: "securePickerResult", token: request.token, payload },
+            { documentId: pending.documentId }
+        );
+        return { success: true };
+    } finally {
+        pending.completing = false;
     }
-    pendingPickers.delete(request.token);
-    await chrome.tabs.sendMessage(
-        pending.tabId,
-        { action: "securePickerResult", token: request.token, payload },
-        { frameId: pending.frameId }
-    );
-    return { success: true };
 }
 
 chrome.windows.onRemoved.addListener(windowId => {
@@ -592,6 +625,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 ? {
                     success: true,
                     kind: pending.kind,
+                    origin: pending.domain,
+                    topOrigin: pending.topOrigin,
+                    crossOrigin: pending.crossOrigin,
                     items: pending.summaries,
                     loading: pending.loading,
                     error: pending.error
@@ -686,6 +722,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === "lockVault") {
+        invalidateSecurePickers();
         sendAction("lock", {}, sendResponse, true);
         return true;
     }

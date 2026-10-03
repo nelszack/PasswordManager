@@ -6,6 +6,7 @@ const logPath = process.env.PM_E2E_NATIVE_LOG;
 const mode = process.env.PM_E2E_NATIVE_MODE || "normal";
 let buffered = Buffer.alloc(0);
 let accounts = JSON.parse(process.env.PM_E2E_NATIVE_ACCOUNTS || "[]");
+const autofillItems = JSON.parse(process.env.PM_E2E_NATIVE_AUTOFILL_ITEMS || "[]");
 
 function write(response) {
     const payload = Buffer.from(JSON.stringify(response));
@@ -25,7 +26,7 @@ function handle(request) {
             nativeVersion: "0.1.0",
             data: "Status: unlocked\nVersion: 0.1.0"
         });
-    } else if (request.action === "getCredentials") {
+    } else if (["getCredentials", "getLoginItems", "getLoginItem"].includes(request.action)) {
         if (mode === "timeout") return;
         if (mode === "locked") {
             write({ id: request.id, success: false, error: "Vault is locked" });
@@ -39,12 +40,22 @@ function handle(request) {
             write({ id: request.id, success: true, data: "not-json" });
             return;
         }
-        const matches = accounts.filter(account => !account.domain || account.domain === request.domain);
+        let matches = accounts.filter(account => !account.domain || account.domain === request.domain);
+        if (request.action === "getLoginItems") matches = matches.map(({ password, ...summary }) => summary);
+        if (request.action === "getLoginItem") matches = matches.filter(account => account.id === request.entryId);
         if (matches.length === 0) {
             write({ id: request.id, success: false, error: "Not found." });
         } else {
-            write({ id: request.id, success: true, data: JSON.stringify(matches) });
+            write({ id: request.id, success: true, data: JSON.stringify(request.action === "getLoginItem" ? matches[0] : matches) });
         }
+    } else if (request.action === "getAutofillItems") {
+        write({ id: request.id, success: true, data: JSON.stringify(
+            autofillItems.map(({ id, name, kind, username }) => ({ id, name, kind, username }))
+        ) });
+    } else if (request.action === "getAutofillItem") {
+        const item = autofillItems.find(item => item.id === request.entryId);
+        write(item ? { id: request.id, success: true, data: JSON.stringify(item) }
+            : { id: request.id, success: false, error: "Not found." });
     } else if (request.action === "saveCredentials") {
         accounts.push({
             id: 7 + accounts.length,

@@ -10,6 +10,70 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
+#[tokio::test]
+async fn auto_lock_clears_secrets_even_when_the_vault_cannot_be_written() {
+    init_test_data_dir();
+    let directory = tempfile::tempdir_in(data_dir()).unwrap();
+    let filename = directory
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // The destination is a directory, so the old save-before-lock path would fail.
+    let vault = Arc::new(Mutex::new(Some(Vault {
+        entries: vec![VaultEntry {
+            id: 1,
+            password: "synthetic-secret".into(),
+            ..VaultEntry::default()
+        }],
+        metadata: VaultMetadata { filename },
+        ..Vault::default()
+    })));
+    let info = Arc::new(Mutex::new(ServerInfo {
+        locked: false,
+        keypass: Some(PasswordType::Password("synthetic-master-password".into())),
+    }));
+    let error = Arc::new(Mutex::new(None));
+    schedule_auto_lock(
+        1,
+        1,
+        Arc::new(AtomicU64::new(1)),
+        Arc::clone(&info),
+        Arc::clone(&vault),
+        Arc::clone(&error),
+    );
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(info.lock().await.locked);
+    assert!(info.lock().await.keypass.is_none());
+    assert!(vault.lock().await.is_none());
+    assert!(error.lock().await.is_none());
+    assert!(directory.path().is_dir());
+}
+
+#[test]
+fn manual_lock_does_not_depend_on_a_writable_vault_destination() {
+    let mut vault = Some(Vault {
+        entries: vec![VaultEntry {
+            password: "synthetic-secret".into(),
+            ..VaultEntry::default()
+        }],
+        metadata: VaultMetadata {
+            filename: "missing-directory/vault.enc".into(),
+        },
+        ..Vault::default()
+    });
+    let mut info = ServerInfo {
+        locked: false,
+        keypass: Some(PasswordType::Password("synthetic-master-password".into())),
+    };
+    lock_vlt(&mut vault, &mut info).unwrap();
+    assert!(vault.is_none());
+    assert!(info.locked);
+    assert!(info.keypass.is_none());
+}
+
 #[test]
 fn status_includes_persistent_background_warnings() {
     assert_eq!(
@@ -344,4 +408,95 @@ async fn tcp_protocol_authenticates_before_commands_and_rejects_invalid_messages
     let request = encrypt_record(&keys.request, &command).unwrap();
     client.write_all(&request).await.unwrap();
     assert!(task.await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn browser_login_commands_check_lock_state_and_site_at_selection() {
+    for (command, locked, expected_code, expected_secret) in [
+        (
+            ServerCommand::BrowserLogins("https://example.com".into()),
+            false,
+            ResponseCode::Success,
+            false,
+        ),
+        (
+            ServerCommand::BrowserLogin {
+                domain: "https://example.com".into(),
+                id: 1,
+            },
+            false,
+            ResponseCode::Success,
+            true,
+        ),
+        (
+            ServerCommand::BrowserLogin {
+                domain: "https://attacker.example".into(),
+                id: 1,
+            },
+            false,
+            ResponseCode::NotFound,
+            false,
+        ),
+        (
+            ServerCommand::BrowserLogins("https://example.com".into()),
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+        (
+            ServerCommand::BrowserLogin {
+                domain: "https://example.com".into(),
+                id: 1,
+            },
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+    ] {
+        let token = "ab".repeat(32);
+        let (mut client, server) = tcp_pair().await;
+        let (kill_tx, _kill_rx) = mpsc::channel(1);
+        let state = ConnectionState {
+            server_info: Arc::new(Mutex::new(ServerInfo {
+                locked,
+                keypass: None,
+            })),
+            vlt: Arc::new(Mutex::new(Some(Vault {
+                entries: vec![VaultEntry {
+                    id: 1,
+                    password: "synthetic-secret".into(),
+                    url: Some("https://example.com".into()),
+                    ..VaultEntry::default()
+                }],
+                ..Vault::default()
+            }))),
+            kill_tx,
+            token: token.clone(),
+            lock_generation: Arc::new(AtomicU64::new(0)),
+            inactivity_timeout: Arc::new(AtomicU64::new(0)),
+            background_error: Arc::new(Mutex::new(None)),
+            password_history_limit: 10,
+            trash_retention_days: 0,
+        };
+        let task = tokio::spawn(handle_connection(server, state));
+        client.write_all(SECURE_PREFACE).await.unwrap();
+        let mut hello = [0; SECURE_HELLO_LEN];
+        client.read_exact(&mut hello).await.unwrap();
+        let keys = verify_server_hello(&token, &hello).unwrap();
+        let encoded = rmp_serde::to_vec(&command).unwrap();
+        client
+            .write_all(&encrypt_record(&keys.request, &encoded).unwrap())
+            .await
+            .unwrap();
+        let mut ciphertext = Vec::new();
+        client.read_to_end(&mut ciphertext).await.unwrap();
+        let plaintext = decrypt_record_stream(&keys.response, &ciphertext, 1024 * 1024).unwrap();
+        let response = decode_responses(&plaintext).unwrap();
+        assert_eq!(response.code, expected_code as i32);
+        assert_eq!(
+            response.message.contains("synthetic-secret"),
+            expected_secret
+        );
+        task.await.unwrap();
+    }
 }

@@ -122,6 +122,7 @@ impl Zeroize for ServerCommand {
                 filter.url.zeroize();
                 filter.notes.zeroize();
             }
+            Self::BrowserLogins(domain) | Self::BrowserLogin { domain, .. } => domain.zeroize(),
             Self::Kill
             | Self::Lock(_)
             | Self::Status
@@ -167,6 +168,8 @@ pub enum ServerCommand {
     Import(ImportRequest),
     New(PasswordType),
     Rekey(PasswordType),
+    BrowserLogins(String),
+    BrowserLogin { domain: String, id: usize },
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]

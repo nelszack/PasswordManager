@@ -150,6 +150,32 @@ fn parses_totp_server_response() {
 
 #[test]
 fn native_requests_are_whitelisted_and_use_stable_ids() {
+    let mut logins = NativeRequest {
+        action: "getLoginItems".into(),
+        domain: Some("https://example.com".into()),
+        ..NativeRequest::default()
+    };
+    assert!(
+        matches!(command_for_request(&mut logins).unwrap(), ServerCommand::BrowserLogins(domain) if domain == "https://example.com")
+    );
+    let mut login = NativeRequest {
+        action: "getLoginItem".into(),
+        domain: Some("https://example.com".into()),
+        entry_id: Some(7),
+        ..NativeRequest::default()
+    };
+    assert!(
+        matches!(command_for_request(&mut login).unwrap(), ServerCommand::BrowserLogin { domain, id: 7 } if domain == "https://example.com")
+    );
+    for id in [None, Some(0)] {
+        let mut invalid = NativeRequest {
+            action: "getLoginItem".into(),
+            domain: Some("https://example.com".into()),
+            entry_id: id,
+            ..NativeRequest::default()
+        };
+        assert!(command_for_request(&mut invalid).is_err());
+    }
     let mut autofill = NativeRequest {
         action: "getAutofillItems".into(),
         ..NativeRequest::default()

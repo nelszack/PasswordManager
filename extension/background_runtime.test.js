@@ -82,3 +82,157 @@ test("background worker starts, publishes status, and rejects untrusted credenti
     assert.equal(response.success, false);
     assert.equal(response.error, "Invalid page origin");
 });
+
+function securityEnvironment() {
+    let listener, nativeListener, disconnect;
+    let locked = false;
+    let holdLogin = false, heldLoginResponse;
+    const requests = [], deliveries = [], removed = [];
+    const event = capture => ({ addListener(fn) { capture?.(fn); } });
+    const origin = "https://shop.example";
+    const chrome = {
+        action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setTitle() {} },
+        alarms: { create() {}, onAlarm: event() },
+        runtime: {
+            id: "abcdefghijklmnopabcdefghijklmnop", lastError: null,
+            getManifest: () => ({ version: "1.6", version_name: "0.1.0" }),
+            getURL: value => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${value}`,
+            onInstalled: event(), onStartup: event(), onMessage: event(fn => listener = fn),
+            sendMessage(_message, callback) { callback?.(); },
+            connectNative() {
+                return {
+                    onMessage: event(fn => nativeListener = fn),
+                    onDisconnect: event(fn => disconnect = fn),
+                    postMessage(request) {
+                        requests.push(request);
+                        const response = { id: request.id, success: true, nativeVersion: "0.1.0" };
+                        if (request.action === "status") response.data = `Status: ${locked ? "Locked" : "Unlocked"}\nVersion: 0.1.0`;
+                        else if (locked) Object.assign(response, { success: false, error: "Vault locked." });
+                        else if (request.action === "getLoginItems") response.data = JSON.stringify([
+                            { id: 1, name: "Personal", username: "alice", has_totp: true }
+                        ]);
+                        else if (request.action === "getAutofillItems") response.data = JSON.stringify([
+                            { id: 2, name: "Visa", kind: "payment-card" }
+                        ]);
+                        else if (request.action === "getAutofillItem") response.data = JSON.stringify({ id: 2, primary_secret: "synthetic-card" });
+                        else response.data = JSON.stringify({ id: 1, password: "synthetic-secret" });
+                        if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
+                        else queueMicrotask(() => nativeListener(response));
+                    }
+                };
+            }
+        },
+        storage: { local: { set() {} } },
+        tabs: {
+            get: async () => ({ url: origin }),
+            sendMessage: async (tab, message, options) => { deliveries.push({ tab, message, options }); }
+        },
+        windows: {
+            create(_options, callback) { callback({ id: 42 }); },
+            remove(id, callback) { removed.push(id); callback?.(); },
+            onRemoved: event()
+        }
+    };
+    const context = vm.createContext({
+        chrome, importScripts() {}, URL, crypto: require("node:crypto").webcrypto,
+        setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, queueMicrotask,
+        PasswordManagerRelay: require("./relay.js"),
+        PasswordManagerSecurity: require("./background_security.js"),
+        PasswordManagerCredentialPrompt: require("./credential_prompt_state.js"),
+        PasswordManagerBackgroundState: require("./background_state.js"),
+        PasswordManagerNativeProtocol: require("./native_protocol.js"),
+        PasswordManagerPendingCredentials: require("./pending_credentials.js")
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "background.js"), "utf8"), context);
+    const sender = { url: origin, tab: { id: 7, url: origin }, frameId: 0, documentId: "original-document" };
+    const pickerSender = { id: chrome.runtime.id, url: chrome.runtime.getURL("picker.html") };
+    const message = (request, source = sender) => new Promise(resolve => listener(request, source, resolve));
+    return {
+        context, requests, deliveries, removed, sender, pickerSender, message,
+        setLocked() { locked = true; },
+        holdLogin() { holdLogin = true; },
+        releaseLogin() { nativeListener(heldLoginResponse); },
+        disconnect() { disconnect(); },
+        async open(source = sender, kind = "login") {
+            await new Promise(resolve => setImmediate(resolve));
+            const response = await message({ action: "openSecurePicker", kind }, source);
+            assert.equal(response.success, true, response.error);
+            await new Promise(resolve => setImmediate(resolve));
+            return response.token;
+        }
+    };
+}
+
+test("picker fetches only the selected login and targets the originating document", async () => {
+    const env = securityEnvironment();
+    const token = await env.open();
+    const data = await env.message({ action: "getSecurePickerData", token }, env.pickerSender);
+    assert.equal(data.origin, "https://shop.example");
+    assert.equal(data.crossOrigin, false);
+    assert.equal(JSON.stringify(data).includes("password"), false);
+    assert.equal(env.requests.some(request => request.action === "getLoginItem"), false);
+    const result = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+    assert.equal(result.success, true, result.error);
+    assert.equal(env.deliveries[0].message.payload.password, "synthetic-secret");
+    assert.equal(env.deliveries[0].options.documentId, "original-document");
+    assert.equal(env.requests.find(request => request.action === "getLoginItem").domain, env.sender.url);
+});
+
+test("a server lock before the next status poll prevents login delivery", async () => {
+    const env = securityEnvironment();
+    const token = await env.open();
+    env.setLocked();
+    const result = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+    assert.equal(result.success, false);
+    assert.equal(result.error, "Vault locked.");
+    assert.equal(env.deliveries.length, 0);
+});
+
+test("locked status and native disconnect invalidate already open pickers", async () => {
+    for (const operation of ["lock", "disconnect"]) {
+        const env = securityEnvironment();
+        const token = await env.open();
+        if (operation === "lock") {
+            env.setLocked();
+            await env.message({ action: "getStatus" });
+        } else env.disconnect();
+        const result = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+        assert.equal(result.success, false);
+        assert.match(result.error, /expired/);
+        assert.equal(env.deliveries.length, 0);
+        assert.ok(env.removed.includes(42));
+    }
+});
+
+test("embedded card autofill requires confirmation of the browser-derived origins", async () => {
+    const env = securityEnvironment();
+    const sender = { ...env.sender, url: "https://embedded.example/form", frameId: 3 };
+    const token = await env.open(sender, "payment-card");
+    const data = await env.message({ action: "getSecurePickerData", token }, env.pickerSender);
+    assert.equal(data.origin, "https://embedded.example");
+    assert.equal(data.topOrigin, "https://shop.example");
+    assert.equal(data.crossOrigin, true);
+    const rejected = await env.message({ action: "completeSecurePicker", token, id: 2 }, env.pickerSender);
+    assert.equal(rejected.success, false);
+    assert.equal(env.requests.some(request => request.action === "getAutofillItem"), false);
+    const accepted = await env.message({ action: "completeSecurePicker", token, id: 2, confirmCrossOrigin: true }, env.pickerSender);
+    assert.equal(accepted.success, true, accepted.error);
+    assert.equal(env.deliveries[0].message.payload.primary_secret, "synthetic-card");
+});
+
+test("locking cancels an in-flight selection and duplicate clicks cannot deliver twice", async () => {
+    const env = securityEnvironment();
+    const token = await env.open();
+    env.holdLogin();
+    const selection = env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+    const duplicate = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+    assert.equal(duplicate.success, false);
+    assert.match(duplicate.error, /already in progress/);
+    env.setLocked();
+    await env.message({ action: "getStatus" });
+    env.releaseLogin();
+    const result = await selection;
+    assert.equal(result.success, false);
+    assert.match(result.error, /expired/);
+    assert.equal(env.deliveries.length, 0);
+});

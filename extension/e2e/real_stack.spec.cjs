@@ -99,6 +99,27 @@ test("the extension saves through the real native host into a temporary vault", 
             "--password-only"
         ));
         expect(secret).toMatchObject({ ok: true, output: "real-native-password" });
+
+        await page.locator("#username").fill("");
+        await page.locator("#password").fill("");
+        const pickerOpened = browser.context.waitForEvent(
+            "page", popup => popup.url().includes("picker.html")
+        );
+        await page.getByRole("button", { name: "Choose saved credentials" }).first().click();
+        const picker = await pickerOpened;
+        await expect(picker.locator("#destination")).toHaveText(`Fill on: ${origin}`);
+        await picker.getByRole("button", { name: /Real Native Entry/ }).click();
+        await expect(page.locator("#username")).toHaveValue("real@example.com");
+        await expect(page.locator("#password")).toHaveValue("real-native-password");
+
+        const secondPickerOpened = browser.context.waitForEvent(
+            "page", popup => popup.url().includes("picker.html")
+        );
+        await page.getByRole("button", { name: "Choose saved credentials" }).first().click();
+        const secondPicker = await secondPickerOpened;
+        await expect(secondPicker.getByRole("button", { name: /Real Native Entry/ })).toBeVisible();
+        runPm(environment, "lock");
+        await expect.poll(() => secondPicker.isClosed()).toBe(true);
     } finally {
         if (serverStarted) {
             try {

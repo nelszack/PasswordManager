@@ -2,13 +2,22 @@ const token = new URLSearchParams(location.search).get("token");
 const items = document.getElementById("items");
 const status = document.getElementById("status");
 const title = document.getElementById("title");
+const confirmation = document.getElementById("confirmCrossOrigin");
+let crossOrigin = false;
 
 function send(message) {
     return new Promise(resolve => chrome.runtime.sendMessage(message, resolve));
 }
 
 async function complete(id) {
-    const response = await send({ action: "completeSecurePicker", token, id });
+    if (crossOrigin && !confirmation.checked) {
+        status.textContent = "Confirm the embedded site's origin before filling";
+        return;
+    }
+    const response = await send({
+        action: "completeSecurePicker", token, id,
+        confirmCrossOrigin: crossOrigin && confirmation.checked
+    });
     if (response?.success) window.close();
     else status.textContent = response?.error || "Selection failed";
 }
@@ -24,6 +33,11 @@ async function load() {
     }
     if (response.error) throw new Error(response.error);
     title.textContent = PasswordManagerPickerState.title(response.kind);
+    document.getElementById("destination").textContent = `Fill on: ${response.origin}`;
+    crossOrigin = response.crossOrigin === true;
+    document.getElementById("crossOriginWarning").hidden = !crossOrigin;
+    document.getElementById("crossOriginText").textContent =
+        `Allow filling ${response.origin}, embedded in ${response.topOrigin}`;
     status.textContent = PasswordManagerPickerState.status(response.items);
     items.replaceChildren();
     for (const item of response.items) {

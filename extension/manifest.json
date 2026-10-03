@@ -6,6 +6,7 @@
   "description": "Securely connects websites to the local password manager",
   "permissions": [
     "activeTab",
+    "tabs",
     "storage",
     "alarms",
     "nativeMessaging"

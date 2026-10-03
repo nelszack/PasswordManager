@@ -48,48 +48,33 @@ pub fn set_private_dir_perms(_path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn current_user_sid() -> std::io::Result<String> {
-    use std::io;
-    let output = hidden_windows_command("whoami.exe")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            "whoami.exe could not determine the user SID",
-        ));
-    }
-    let output = String::from_utf8_lossy(&output.stdout);
-    output
-        .split([',', '"', '\r', '\n'])
-        .map(str::trim)
-        .find(|field| field.starts_with("S-1-"))
-        .map(str::to_owned)
-        .ok_or_else(|| io::Error::other("whoami.exe returned no user SID"))
-}
-
-#[cfg(target_os = "windows")]
 fn set_windows_acl(path: &Path, directory: bool) -> std::io::Result<()> {
-    use std::io;
-    let sid = current_user_sid()?;
-    let grant = if directory {
-        format!("*{sid}:(OI)(CI)(F)")
-    } else {
-        format!("*{sid}:(F)")
-    };
-    // Native-messaging stdout is a binary protocol channel. Capture icacls'
-    // normal "processed files" summary so it can never corrupt that channel.
-    let output = hidden_windows_command("icacls.exe")
-        .arg(path)
-        .args(["/inheritance:r", "/grant:r", &grant])
+    // Pass paths as environment data rather than interpolating PowerShell code.
+    // Build a fresh protected DACL so explicit grants to other principals are
+    // removed as well as inherited grants, then read back and verify it.
+    let output = hidden_windows_command("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            include_str!("windows_private_acl.ps1"),
+        ])
+        .env("PM_PRIVATE_ACL_PATH", std::path::absolute(path)?)
+        .env(
+            "PM_PRIVATE_ACL_DIRECTORY",
+            if directory { "1" } else { "0" },
+        )
         .output()?;
-    output.status.success().then_some(()).ok_or_else(|| {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        io::Error::other(format!(
-            "icacls.exe failed for {}: {}",
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "could not protect ACL for {}: {}",
             path.display(),
-            detail.trim()
-        ))
-    })
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -236,6 +221,43 @@ mod test {
     use super::*;
     use std::fs::File;
     use tempfile::TempDir;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn private_windows_acls_remove_explicit_grants_to_other_principals() {
+        let root = TempDir::new().unwrap();
+        let directory = root.path().join("private directory");
+        fs::create_dir(&directory).unwrap();
+        let file = directory.join("private file.txt");
+        fs::write(&file, b"synthetic-secret").unwrap();
+        for (path, is_directory) in [(&directory, true), (&file, false)] {
+            let output = hidden_windows_command("icacls.exe")
+                .arg(path)
+                .args(["/grant", "*S-1-1-0:(F)"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            // This includes read-back verification that only our SID remains.
+            set_windows_acl(path, is_directory).unwrap();
+            let output = hidden_windows_command("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+                    $ErrorActionPreference = 'Stop'
+                    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                    $acl = Get-Acl -LiteralPath $env:PM_TEST_ACL_PATH
+                    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+                    if (-not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+                        $rules[0].IdentityReference.Value -ne $sid) { exit 1 }
+                "#])
+                .env("PM_TEST_ACL_PATH", path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn file_exists_recognizes_files_directories_and_missing_paths() {
