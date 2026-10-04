@@ -36,6 +36,27 @@ cargo build --release
 
 The binary will be at `target/release/pm`.
 
+`cargo build` (including `--release`) automatically refreshes completions for
+`$SHELL` (PowerShell on Windows) and updates an already registered native host.
+Register the host once with `pm native-host install`; builds preserve browser
+manifests and extension IDs. Unix hosts link to the current build profile's `pm`.
+Windows hosts use a small launcher that forwards to that profile's `pm.exe`, so
+future builds do not need to copy the executable into the host. If replacement
+is blocked, Cargo prints a warning; fully close the browser, including background
+processes, and rerun `cargo build`. Restart the server and reload the extension
+after upgrading to use the newly built code.
+
+Bash completions go to `~/.local/share/bash-completion/completions/pm`, Zsh to
+`~/.zfunc/_pm`, and Fish to `~/.config/fish/completions/pm.fish` (respecting XDG
+paths). Add `~/.zfunc` to Zsh's `fpath` before `compinit`. PowerShell completions
+are written to `target/debug/completions/pm.ps1` (or `target/release/completions/pm.ps1`);
+dot-source that file from `$PROFILE` once. Existing shells may need to reload
+completions. Set `PM_COMPLETION_SHELL` to select a shell or
+`PM_COMPLETION_OUTPUT` to update a specific completion file you already source.
+`PM_DATA_DIR` and Cargo's target directory are respected. Set
+`PM_SKIP_BUILD_UPDATES=1` to disable installation side effects; CI and cross
+compilation skip them automatically. No Python or separate build command is needed.
+
 ## Usage
 
 ### Start the Server
