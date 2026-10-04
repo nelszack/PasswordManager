@@ -2,7 +2,7 @@
 use crate::file::hidden_windows_command;
 use crate::{
     cli::NativeBrowser,
-    client,
+    client::AuthenticatedClient,
     file::data_dir,
     types::{EntryUpdate, PasswordEntry, ServerCommand, Target, TotpCommand},
 };
@@ -16,7 +16,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-use crate::types::UpdateArgs;
+use crate::types::EntryChanges;
 
 const HOST_NAME: &str = "com.myproject.password_manager";
 #[cfg(not(target_os = "windows"))]
@@ -284,13 +284,17 @@ fn validate_extension_id(extension_id: &str) -> Result<(), String> {
     }
 }
 
-pub fn run() -> Result<(), String> {
+pub fn run(client: &AuthenticatedClient) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    run_with_io(&mut stdin.lock(), &mut stdout.lock())
+    run_with_io(client, &mut stdin.lock(), &mut stdout.lock())
 }
 
-fn run_with_io(reader: &mut impl Read, writer: &mut impl Write) -> Result<(), String> {
+fn run_with_io(
+    client: &AuthenticatedClient,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> Result<(), String> {
     loop {
         let Some(mut payload) = read_message(reader)? else {
             return Ok(());
@@ -298,7 +302,7 @@ fn run_with_io(reader: &mut impl Read, writer: &mut impl Write) -> Result<(), St
         let request = serde_json::from_slice::<NativeRequest>(&payload);
         payload.zeroize();
         let mut response = match request {
-            Ok(request) => handle_request(request),
+            Ok(request) => handle_request(client, request),
             Err(error) => NativeResponse::error(0, format!("invalid request: {error}")),
         };
         let write_result = write_message(writer, &response);
@@ -356,10 +360,10 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
     Ok(value)
 }
 
-fn handle_request(mut request: NativeRequest) -> NativeResponse {
+fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> NativeResponse {
     let id = request.id;
     let result = command_for_request(&mut request)
-        .and_then(client::request)
+        .and_then(|command| client.request(command))
         .and_then(|output| response_data(&request.action, output));
     request.zeroize();
     match result {
@@ -416,11 +420,9 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 .ok_or_else(|| "missing entry ID".to_string())?;
             Ok(ServerCommand::Update(EntryUpdate {
                 target: Target::Id(entry_id),
-                update: UpdateArgs {
+                update: EntryChanges {
                     name: None,
                     username: Some(optional_text(request.username.take(), "username", 4096)?),
-                    password: true,
-                    generate_password: false,
                     url: Some(required(request.domain.take(), "domain", 2048)?),
                     notes: None,
                 },

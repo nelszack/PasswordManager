@@ -3,7 +3,7 @@ use super::*;
 impl Vault {
     pub fn rekey(
         &mut self,
-        server_info: &mut ServerInfo,
+        server_info: &mut VaultCredentials,
         mut new_key: PasswordType,
     ) -> Result<(), VaultError> {
         if let PasswordType::Password(password) = &new_key
@@ -34,7 +34,7 @@ impl Vault {
         }
         // Keep the same random filename. One atomic replacement is the commit
         // point: recovery sees either the old ciphertext or the new ciphertext.
-        let mut replacement = ServerInfo {
+        let mut replacement = VaultCredentials {
             locked: false,
             keypass: Some(new_key),
         };
@@ -55,7 +55,7 @@ impl Vault {
         Ok(())
     }
 
-    pub fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), VaultError> {
+    pub fn lock_vault(&self, key_pass: &mut VaultCredentials) -> Result<(), VaultError> {
         // Every mutation is persisted before it succeeds. Locking must not
         // depend on storage availability or leave keys resident after an I/O error.
         key_pass.zeroize();
@@ -266,7 +266,7 @@ fn with_write_fault<T>(fault: u8, operation: impl FnOnce() -> T) -> T {
 
 pub(crate) fn create_vault(
     vlt: &mut Option<Vault>,
-    server_info: &mut ServerInfo,
+    server_info: &mut VaultCredentials,
     lock: bool,
 ) -> Result<(), VaultError> {
     if let Some(PasswordType::Password(password)) = server_info.keypass.as_ref()
@@ -329,7 +329,7 @@ pub(crate) fn create_vault(
     }
     Ok(())
 }
-pub(super) fn write_vault(vlt: &Vault, key_pass: &mut ServerInfo) -> Result<(), VaultError> {
+pub(super) fn write_vault(vlt: &Vault, key_pass: &mut VaultCredentials) -> Result<(), VaultError> {
     if key_pass.keypass.is_none() {
         // This permits detached in-memory vault values used by callers and tests;
         // the running server never mutates a vault without an active key.
@@ -465,8 +465,8 @@ pub(super) fn persist_private_file(
     })
 }
 
-pub(super) fn unlock_selected_vault(
-    key_pass: &mut ServerInfo,
+pub(crate) fn unlock_selected_vault(
+    key_pass: &mut VaultCredentials,
     selected: Option<&str>,
 ) -> Result<Vault, VaultError> {
     let kp = key_pass.keypass.as_mut().ok_or(VaultError::Locked)?;
@@ -478,7 +478,7 @@ pub(super) fn unlock_selected_vault(
 }
 
 #[cfg(test)]
-pub(super) fn unlock_vault(key_pass: &mut ServerInfo) -> Option<Vault> {
+pub(super) fn unlock_vault(key_pass: &mut VaultCredentials) -> Option<Vault> {
     unlock_selected_vault(key_pass, None).ok()
 }
 
@@ -576,7 +576,7 @@ mod tests {
         }
     }
 
-    fn stored_vault() -> (Vault, ServerInfo) {
+    fn stored_vault() -> (Vault, VaultCredentials) {
         crate::file::init_test_data_dir();
         let vault = Vault {
             entries: vec![VaultEntry {
@@ -589,7 +589,7 @@ mod tests {
             },
             recovery: RecoveryData::default(),
         };
-        let mut info = ServerInfo {
+        let mut info = VaultCredentials {
             locked: false,
             keypass: Some(session(42)),
         };
@@ -667,7 +667,7 @@ mod tests {
         crate::file::init_test_data_dir();
         let directory = tempfile::tempdir().unwrap();
         let key_path = directory.path().join("creation.key");
-        let mut info = ServerInfo {
+        let mut info = VaultCredentials {
             locked: false,
             keypass: Some(PasswordType::Key(key_path.display().to_string())),
         };
@@ -796,7 +796,7 @@ mod tests {
             let (_, vault) = lookup_vault(&mut key, Some("crash.enc")).unwrap().unwrap();
             (
                 vault,
-                ServerInfo {
+                VaultCredentials {
                     locked: false,
                     keypass: Some(key),
                 },

@@ -115,21 +115,23 @@
             && inputDescriptors(input).some(value => TOTP_HINT_RE.test(value));
     }
 
-    function isUsernameBeforePassword(input) {
+    function isUsernameBeforePassword(input, formUsernames) {
         if (!input.form) return false;
+        if (formUsernames?.has(input.form)) return formUsernames.get(input.form) === input;
         const fields = scopeInputs(input.form);
         const passwordIndex = fields.findIndex(isLoginPasswordInput);
-        if (passwordIndex < 0) return false;
-        return fields.slice(0, passwordIndex)
+        const username = passwordIndex < 0 ? null : fields.slice(0, passwordIndex)
             .filter(field => isUsableInput(field) && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))
-            .at(-1) === input;
+            .at(-1);
+        formUsernames?.set(input.form, username);
+        return username === input;
     }
 
-    function isCredentialInput(input) {
+    function isCredentialInput(input, formUsernames) {
         if (!isUsableInput(input)) return false;
         if (input.type === "password") return !isNewPasswordInput(input);
         if (!USERNAME_INPUT_TYPES.has(input.type) || hasSearchHint(input)) return false;
-        return hasUsernameHint(input) || isUsernameBeforePassword(input);
+        return hasUsernameHint(input) || isUsernameBeforePassword(input, formUsernames);
     }
 
     return {

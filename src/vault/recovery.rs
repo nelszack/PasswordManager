@@ -55,7 +55,7 @@ impl Vault {
         &mut self,
         target: Target,
         revision: usize,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let Some(entry_index) = self.entry_index(&target) else {
             return Ok(false);
@@ -120,7 +120,7 @@ impl Vault {
     pub fn restore_trashed(
         &mut self,
         trash_id: usize,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let Some(index) = trash_id
             .checked_sub(1)
@@ -158,7 +158,7 @@ impl Vault {
     pub fn purge_trash(
         &mut self,
         trash_id: Option<usize>,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let indexes = if let Some(id) = trash_id {
             let Some(index) = id
@@ -184,7 +184,7 @@ impl Vault {
     pub fn purge_expired_trash(
         &mut self,
         retention_days: u64,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<usize, VaultError> {
         if retention_days == 0 || self.recovery.trash.is_empty() {
             return Ok(0);

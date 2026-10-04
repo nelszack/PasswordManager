@@ -10,6 +10,7 @@ fn kind(view: &EntryView<'_>) -> ItemKind {
         .map_or(ItemKind::Login, |metadata| metadata.kind)
 }
 
+#[cfg(test)]
 pub(super) fn entry_details(view: &EntryView<'_>) -> Zeroizing<String> {
     entry_details_with_secrets(view, false)
 }
@@ -116,6 +117,92 @@ pub(super) fn trash(items: &[TrashView<'_>]) -> String {
             )
         })
         .collect()
+}
+
+pub(crate) fn audit(findings: &crate::vault::AuditReport) -> String {
+    let score = findings.score;
+    let healthy = findings.healthy;
+    let weak = &findings.weak;
+    let reused = &findings.reused;
+    let duplicates = &findings.duplicates;
+    let stale = &findings.stale;
+    let missing_totp = &findings.missing_totp;
+    let breached_entries = &findings.breached;
+    let breach_error = findings.breach_error.as_deref();
+    let mut report = format!(
+        "Health score: {score}/100 ({healthy}/{} login entries have no detected issues).\nAudit: {} weak entries, {} reused-password groups, {} duplicate-login groups, {} stale entries, {} missing TOTP, {} breached entries.\n",
+        findings.total,
+        weak.len(),
+        reused.len(),
+        duplicates.len(),
+        stale.len(),
+        missing_totp.len(),
+        breached_entries.len(),
+    );
+    for entry in weak {
+        report.push_str(&format!(
+            "Weak: {}. {} {:?}\n",
+            entry.id,
+            metadata(&entry.name).as_str(),
+            entry.username
+        ));
+    }
+    for entries in reused {
+        let labels = entries
+            .iter()
+            .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        report.push_str(&format!("Reused password: {labels}\n"));
+    }
+    for entries in duplicates {
+        let labels = entries
+            .iter()
+            .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        report.push_str(&format!("Duplicate login: {labels}\n"));
+    }
+    for entry in stale {
+        report.push_str(&format!(
+            "Stale password: {}. {} (last changed {})\n",
+            entry.id,
+            metadata(&entry.name).as_str(),
+            metadata(&entry.password_changed).as_str()
+        ));
+    }
+    for entry in missing_totp {
+        report.push_str(&format!(
+            "Missing TOTP: {}. {}\n",
+            entry.id,
+            metadata(&entry.name).as_str()
+        ));
+    }
+    for (entry, count) in breached_entries {
+        report.push_str(&format!(
+            "Breached password: {}. {} (seen {count} times)\n",
+            entry.id,
+            metadata(&entry.name).as_str()
+        ));
+    }
+    if let Some(error) = breach_error {
+        report.push_str(&format!("Breach check unavailable: {error}\n"));
+    }
+    if !findings.unchecked.is_empty() {
+        report.push_str(&format!(
+            "Breach checks incomplete: {} of {} login entries checked successfully.\n",
+            findings.total - findings.unchecked.len(),
+            findings.total
+        ));
+        for entry in &findings.unchecked {
+            report.push_str(&format!(
+                "Unchecked breach status: {}. {}\n",
+                entry.id,
+                metadata(&entry.name).as_str()
+            ));
+        }
+    }
+    report
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::types::{ItemKind, ListOptions, SortField, UpdateArgs};
+use crate::types::{ItemKind, ListOptions, SortField};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
@@ -723,6 +723,43 @@ pub struct EntryArgs {
     /// Select an entry by exact name.
     #[arg(long)]
     pub entry_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Replace the item's display name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Replace the username or secondary identifier; an empty value clears it.
+    #[arg(long)]
+    pub username: Option<String>,
+    /// Prompt for and replace the primary secret.
+    #[arg(long, default_value_t = false)]
+    pub password: bool,
+    /// Generate the replacement secret instead of prompting for it.
+    #[arg(
+        long = "generate-password",
+        default_value_t = false,
+        requires = "password"
+    )]
+    pub generate_password: bool,
+    /// Replace the primary URL.
+    #[arg(long)]
+    pub url: Option<String>,
+    /// Replace the notes text; an empty value clears it.
+    #[arg(long)]
+    pub notes: Option<String>,
+}
+
+impl From<UpdateArgs> for crate::types::EntryChanges {
+    fn from(args: UpdateArgs) -> Self {
+        Self {
+            name: args.name,
+            username: args.username,
+            url: args.url,
+            notes: args.notes,
+        }
+    }
 }
 
 #[cfg(test)]

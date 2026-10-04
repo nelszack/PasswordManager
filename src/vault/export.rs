@@ -1,5 +1,39 @@
 use super::*;
 
+// Export the portable schema without duplicating vault-owned plaintext.
+#[derive(Serialize)]
+struct PortableExportRef<'a> {
+    format: &'static str,
+    version: u8,
+    exported_at: String,
+    items: Vec<PortableItemRef<'a>>,
+}
+
+#[derive(Serialize)]
+struct PortableItemRef<'a> {
+    id: usize,
+    name: &'a str,
+    username: Option<&'a str>,
+    password: &'a str,
+    url: Option<&'a str>,
+    notes: Option<&'a str>,
+    created: &'a str,
+    modified: &'a str,
+    #[serde(rename = "type")]
+    kind: ItemKind,
+    additional_urls: &'a [String],
+    custom_fields: &'a [CustomField],
+    password_changed: Option<&'a str>,
+    password_history: Vec<PortableRevisionRef<'a>>,
+    totp: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct PortableRevisionRef<'a> {
+    password: &'a str,
+    changed: &'a str,
+}
+
 impl Vault {
     pub fn export(&self, path: String, force: bool) -> Result<(), VaultError> {
         if std::path::Path::new(&path)
@@ -30,51 +64,48 @@ impl Vault {
                 .iter()
                 .map(|entry| {
                     let metadata = metadata_by_id.get(&entry.id).copied();
-                    PortableItem {
+                    PortableItemRef {
                         id: entry.id,
-                        name: entry.name.clone(),
-                        username: entry.username.clone(),
-                        password: entry.password.clone(),
-                        url: entry.url.clone(),
-                        notes: entry.notes.clone(),
-                        created: entry.created.clone(),
-                        modified: entry.modified.clone(),
-                        kind: self.item_kind(entry.id),
+                        name: &entry.name,
+                        username: entry.username.as_deref(),
+                        password: &entry.password,
+                        url: entry.url.as_deref(),
+                        notes: entry.notes.as_deref(),
+                        created: &entry.created,
+                        modified: &entry.modified,
+                        kind: metadata.map_or(ItemKind::Login, |record| record.kind),
                         additional_urls: metadata
-                            .map(|record| record.additional_urls.clone())
-                            .unwrap_or_default(),
+                            .map_or(&[][..], |record| record.additional_urls.as_slice()),
                         custom_fields: metadata
-                            .map(|record| record.custom_fields.clone())
-                            .unwrap_or_default(),
+                            .map_or(&[][..], |record| record.custom_fields.as_slice()),
                         password_changed: metadata
-                            .and_then(|record| record.password_changed.clone()),
+                            .and_then(|record| record.password_changed.as_deref()),
                         password_history: history_by_id
                             .get(&entry.id)
                             .into_iter()
                             .flatten()
-                            .map(|revision| PortableRevision {
-                                password: revision.password.clone(),
-                                changed: revision.changed.clone(),
+                            .map(|revision| PortableRevisionRef {
+                                password: &revision.password,
+                                changed: &revision.changed,
                             })
                             .collect(),
                         totp: totp_by_id
                             .get(&entry.id)
-                            .map(|record| record.configuration.clone()),
+                            .map(|record| record.configuration.as_str()),
                     }
                 })
                 .collect();
-            let mut export = PortableExport {
-                format: PORTABLE_FORMAT.to_string(),
+            let export = PortableExportRef {
+                format: PORTABLE_FORMAT,
                 version: PORTABLE_VERSION,
                 exported_at: chrono::Utc::now().to_rfc3339(),
                 items,
             };
-            let encoded = serde_json::to_vec_pretty(&export);
-            export.zeroize();
-            let mut encoded = encoded.map_err(|e| format!("could not encode JSON export: {e}"))?;
+            let mut encoded = Zeroizing::new(Vec::new());
+            serde_json::to_writer_pretty(&mut *encoded, &export)
+                .map_err(|e| format!("could not encode JSON export: {e}"))?;
             let result = persist_private_file(Path::new(&path), &encoded, force)
                 .map_err(|e| e.context(format!("could not create export file {path:?}")));
-            encoded.zeroize();
             return result;
         }
         let mut wtr = csv::Writer::from_writer(Vec::new());

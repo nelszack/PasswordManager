@@ -2,6 +2,9 @@ use super::*;
 
 impl Vault {
     pub(crate) fn browser_logins_json(&self, domain: &str) -> String {
+        let Some(requested) = parse_site(domain, false) else {
+            return "[]".into();
+        };
         let metadata_by_id: HashMap<_, _> = self
             .recovery
             .entry_metadata
@@ -18,7 +21,7 @@ impl Vault {
             .entries
             .iter()
             .filter(|entry| {
-                login_matches_site(entry, metadata_by_id.get(&entry.id).copied(), domain)
+                login_matches_site(entry, metadata_by_id.get(&entry.id).copied(), &requested)
             })
             .map(|entry| {
                 json!({
@@ -33,13 +36,14 @@ impl Vault {
     }
 
     pub(crate) fn browser_login_json(&self, domain: &str, id: usize) -> Option<String> {
+        let requested = parse_site(domain, false)?;
         let entry = self.entries.iter().find(|entry| entry.id == id)?;
         let metadata = self
             .recovery
             .entry_metadata
             .iter()
             .find(|record| record.entry_id == id);
-        if !login_matches_site(entry, metadata, domain) {
+        if !login_matches_site(entry, metadata, &requested) {
             return None;
         }
         Some(
@@ -111,6 +115,7 @@ pub(super) fn url_match_json(
     metadata: &[EntryMetadata],
     url: &str,
 ) -> Option<String> {
+    let requested = parse_site(url, false)?;
     let metadata_by_id: HashMap<_, _> = metadata
         .iter()
         .map(|record| (record.entry_id, record))
@@ -122,7 +127,7 @@ pub(super) fn url_match_json(
         if item_metadata.is_some_and(|record| record.kind != ItemKind::Login) {
             continue;
         }
-        let matches = login_matches_site(e, item_metadata, url);
+        let matches = login_matches_site(e, item_metadata, &requested);
         if matches {
             results.push(BrowserLogin {
                 id: e.id,
@@ -140,21 +145,21 @@ pub(super) fn url_match_json(
     }
 }
 
-pub(super) fn login_matches_site(
+fn login_matches_site(
     entry: &VaultEntry,
     metadata: Option<&EntryMetadata>,
-    domain: &str,
+    requested: &Site,
 ) -> bool {
     metadata.is_none_or(|record| record.kind == ItemKind::Login)
         && (entry
             .url
             .as_deref()
-            .is_some_and(|saved| hosts_match(saved, domain))
+            .is_some_and(|saved| saved_matches_site(saved, requested))
             || metadata.is_some_and(|record| {
                 record
                     .additional_urls
                     .iter()
-                    .any(|saved| hosts_match(saved, domain))
+                    .any(|saved| saved_matches_site(saved, requested))
             }))
 }
 
@@ -215,11 +220,14 @@ pub(super) fn hostname(value: &str) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 pub(super) fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
-    let (Some(saved), Some(requested)) = (
-        parse_site(saved_url, true),
-        parse_site(requested_url, false),
-    ) else {
+    parse_site(requested_url, false)
+        .is_some_and(|requested| saved_matches_site(saved_url, &requested))
+}
+
+fn saved_matches_site(saved_url: &str, requested: &Site) -> bool {
+    let Some(saved) = parse_site(saved_url, true) else {
         return false;
     };
     if saved.scheme != requested.scheme || saved.port != requested.port {

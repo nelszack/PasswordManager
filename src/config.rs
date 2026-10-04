@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
 pub struct Config {
     pub genpass: GeneratorConfig,
@@ -19,37 +19,37 @@ pub struct Config {
     pub server: ServerConfig,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct GeneratorConfig {
     pub length: u8,
     pub stats: bool,
     pub copy: bool,
 }
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct CopyConfig {
     pub passwords: bool,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct ClipboardConfig {
     pub timeout: u8,
 }
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct UnlockConfig {
     pub timeout: u64,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct ServerConfig {
     pub port: u16,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct RecoveryConfig {
     pub password_history_limit: usize,

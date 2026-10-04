@@ -191,7 +191,7 @@ test.describe("extended credential flows", () => {
                 returnByValue: true
             });
             expect(submitted.result.value).toEqual({ active: false, submitted: "yes" });
-            await browser.context.serviceWorkers()[0].evaluate(() => refreshStatus());
+            await browser.context.serviceWorkers()[0].evaluate(() => status.refresh());
             expect(readLookups()).toHaveLength(before);
             expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
         }

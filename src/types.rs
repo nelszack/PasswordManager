@@ -1,4 +1,4 @@
-use clap::{Args, ValueEnum};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -386,30 +386,30 @@ pub struct PasswordEntry {
     pub copy: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Args)]
-pub struct UpdateArgs {
-    /// Replace the item's display name.
-    #[arg(long)]
+/// Metadata changes supplied by any client. Secret replacement lives in EntryUpdate.
+#[derive(Debug, Default)]
+pub struct EntryChanges {
     pub name: Option<String>,
-    /// Replace the username or secondary identifier; an empty value clears it.
-    #[arg(long)]
     pub username: Option<String>,
-    /// Prompt for and replace the primary secret.
-    #[arg(long, default_value_t = false)]
-    pub password: bool,
-    /// Generate the replacement secret instead of prompting for it.
-    #[arg(
-        long = "generate-password",
-        default_value_t = false,
-        requires = "password"
-    )]
-    pub generate_password: bool,
-    /// Replace the primary URL.
-    #[arg(long)]
     pub url: Option<String>,
-    /// Replace the notes text; an empty value clears it.
-    #[arg(long)]
     pub notes: Option<String>,
+}
+
+// Keep the original MessagePack field order for installed native hosts and servers.
+#[derive(Serialize, Deserialize)]
+struct UpdateWireArgs {
+    name: Option<String>,
+    username: Option<String>,
+    password: bool,
+    generate_password: bool,
+    url: Option<String>,
+    notes: Option<String>,
+}
+#[derive(Serialize, Deserialize)]
+struct EntryUpdateWire {
+    target: Target,
+    update: UpdateWireArgs,
+    password: Option<String>,
 }
 
 impl std::fmt::Debug for PasswordEntry {
@@ -512,11 +512,61 @@ pub enum Target {
     Vault { key: PasswordType, keep_key: bool },
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct EntryUpdate {
     pub target: Target,
-    pub update: UpdateArgs,
+    pub update: EntryChanges,
     pub password: Option<String>,
+}
+
+impl Serialize for EntryUpdate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            target: &'a Target,
+            update: WireChanges<'a>,
+            password: &'a Option<String>,
+        }
+        #[derive(Serialize)]
+        struct WireChanges<'a> {
+            name: &'a Option<String>,
+            username: &'a Option<String>,
+            password: bool,
+            generate_password: bool,
+            url: &'a Option<String>,
+            notes: &'a Option<String>,
+        }
+        Wire {
+            target: &self.target,
+            update: WireChanges {
+                name: &self.update.name,
+                username: &self.update.username,
+                password: self.password.is_some(),
+                generate_password: false,
+                url: &self.update.url,
+                notes: &self.update.notes,
+            },
+            password: &self.password,
+        }
+        .serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for EntryUpdate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut wire = EntryUpdateWire::deserialize(deserializer)?;
+        if !wire.update.password {
+            wire.password.zeroize();
+        }
+        Ok(Self {
+            target: wire.target,
+            update: EntryChanges {
+                name: wire.update.name,
+                username: wire.update.username,
+                url: wire.update.url,
+                notes: wire.update.notes,
+            },
+            password: wire.password,
+        })
+    }
 }
 
 impl std::fmt::Debug for EntryUpdate {
@@ -526,7 +576,7 @@ impl std::fmt::Debug for EntryUpdate {
             .field("target", &self.target)
             .field("changes_name", &self.update.name.is_some())
             .field("changes_username", &self.update.username.is_some())
-            .field("changes_password", &self.update.password)
+            .field("changes_password", &self.password.is_some())
             .field("changes_url", &self.update.url.is_some())
             .field("changes_notes", &self.update.notes.is_some())
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -691,11 +741,9 @@ mod test {
         let update_secret = "updated-password-that-must-not-leak";
         let update = ServerCommand::Update(EntryUpdate {
             target: Target::Id(1),
-            update: UpdateArgs {
+            update: EntryChanges {
                 name: None,
                 username: None,
-                password: true,
-                generate_password: false,
                 url: None,
                 notes: None,
             },
@@ -755,6 +803,46 @@ mod test {
 #[cfg(test)]
 mod unlock_compatibility_tests {
     use super::*;
+
+    #[test]
+    fn update_messages_preserve_legacy_field_order_and_secret_intent() {
+        for replace in [false, true] {
+            let wire = EntryUpdateWire {
+                target: Target::Id(17),
+                update: UpdateWireArgs {
+                    name: Some("Renamed".into()),
+                    username: None,
+                    password: replace,
+                    generate_password: true,
+                    url: Some("https://example.com".into()),
+                    notes: None,
+                },
+                password: Some("synthetic-secret".into()),
+            };
+            for bytes in [
+                rmp_serde::to_vec(&wire).unwrap(),
+                rmp_serde::to_vec_named(&wire).unwrap(),
+            ] {
+                let decoded: EntryUpdate = rmp_serde::from_slice(&bytes).unwrap();
+                assert_eq!(decoded.update.name.as_deref(), Some("Renamed"));
+                assert_eq!(
+                    decoded.password.as_deref(),
+                    replace.then_some("synthetic-secret")
+                );
+                let encoded = rmp_serde::to_vec(&decoded).unwrap();
+                let legacy: EntryUpdateWire = rmp_serde::from_slice(&encoded).unwrap();
+                assert_eq!(legacy.update.password, replace);
+                assert!(!legacy.update.generate_password);
+                assert_eq!(legacy.password, decoded.password);
+                let expected = EntryUpdateWire {
+                    target: legacy.target,
+                    update: legacy.update,
+                    password: legacy.password,
+                };
+                assert_eq!(encoded, rmp_serde::to_vec(&expected).unwrap());
+            }
+        }
+    }
 
     #[test]
     fn old_unlock_messages_default_to_automatic_discovery() {

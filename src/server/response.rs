@@ -4,38 +4,13 @@ pub async fn respond(message: &str, stream: &mut TcpStream) {
     respond_with_code(ResponseCode::Success, message, stream).await;
 }
 
-pub(super) async fn respond_failure(message: &str, stream: &mut TcpStream) {
-    respond_with_code(ResponseCode::Failure, message, stream).await;
-}
-
-pub(super) async fn respond_not_found(message: &str, stream: &mut TcpStream) {
-    respond_with_code(ResponseCode::NotFound, message, stream).await;
-}
-
-pub(super) async fn respond_conflict(message: &str, stream: &mut TcpStream) {
-    respond_with_code(ResponseCode::Conflict, message, stream).await;
-}
-
 pub async fn respond_with_code(code: ResponseCode, message: &str, stream: &mut TcpStream) {
-    if RESPONSE_BUFFER
-        .try_with(|buffer| {
-            buffer.borrow_mut().push(BufferedResponse {
-                code,
-                message: message.to_owned(),
-            });
-        })
-        .is_ok()
-    {
-        return;
-    }
     write_response(code, message, stream).await;
 }
 
-pub(super) async fn flush_buffered_responses(stream: &mut TcpStream) {
-    let responses = RESPONSE_BUFFER.with(|buffer| std::mem::take(&mut *buffer.borrow_mut()));
-    for mut response in responses {
+pub(super) async fn deliver_responses(responses: Vec<BufferedResponse>, stream: &mut TcpStream) {
+    for response in responses {
         write_response(response.code, &response.message, stream).await;
-        response.message.zeroize();
     }
 }
 
@@ -62,58 +37,4 @@ async fn write_response(code: ResponseCode, message: &str, stream: &mut TcpStrea
         record.zeroize();
     }
     let _ = stream.flush().await;
-}
-
-fn domain_code(error: &crate::vault::VaultError) -> ResponseCode {
-    use crate::vault::VaultError;
-    match error {
-        VaultError::NotFound(_) => ResponseCode::NotFound,
-        VaultError::InvalidInput(_) | VaultError::Validation(_) => ResponseCode::InvalidInput,
-        VaultError::Conflict(_) => ResponseCode::Conflict,
-        VaultError::Locked | VaultError::Persistence(_) | VaultError::Durability(_) => {
-            ResponseCode::Failure
-        }
-    }
-}
-
-pub(super) async fn respond_domain_error(error: &crate::vault::VaultError, stream: &mut TcpStream) {
-    respond_domain_error_with_context(error, &error.to_string(), stream).await;
-}
-
-pub(super) async fn respond_domain_error_with_context(
-    error: &crate::vault::VaultError,
-    message: &str,
-    stream: &mut TcpStream,
-) {
-    respond_with_code(domain_code(error), message, stream).await;
-}
-
-pub(super) async fn respond_domain_result(
-    result: Result<String, crate::vault::VaultError>,
-    stream: &mut TcpStream,
-) {
-    match result {
-        Ok(output) => {
-            let output = zeroize::Zeroizing::new(output);
-            respond(&output, stream).await;
-        }
-        Err(error) => respond_domain_error(&error, stream).await,
-    }
-}
-
-pub(super) async fn deliver_entry(
-    result: Result<crate::vault::EntryOutput<'_>, crate::vault::VaultError>,
-    timeout: u8,
-    stream: &mut TcpStream,
-) {
-    match result {
-        Ok(crate::vault::EntryOutput::Details(view)) => {
-            respond(&presentation::entry_details(&view), stream).await;
-            if !view.entry.password.is_empty() {
-                copy_in_background(view.entry.password.clone(), timeout);
-            }
-        }
-        Ok(crate::vault::EntryOutput::SiteLogins(output)) => respond(&output, stream).await,
-        Err(error) => respond_domain_error(&error, stream).await,
-    }
 }

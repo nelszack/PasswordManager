@@ -4,7 +4,7 @@ impl Vault {
     pub fn add_entry(
         &mut self,
         info: PasswordEntry,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         self.add_typed_entry(
             TypedEntry {
@@ -20,7 +20,7 @@ impl Vault {
     pub fn add_typed_entry(
         &mut self,
         request: TypedEntry,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let TypedEntry {
             entry: info,
@@ -86,7 +86,7 @@ impl Vault {
     pub fn delete_entry(
         &mut self,
         target: Target,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let Some(index) = self.entry_index(&target) else {
             return Ok(false);
@@ -107,7 +107,7 @@ impl Vault {
     pub fn update_entry_with_limit(
         &mut self,
         change: EntryUpdate,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
         password_history_limit: usize,
     ) -> Result<bool, VaultError> {
         self.update_typed_entry_with_limit(
@@ -129,7 +129,7 @@ impl Vault {
     pub fn update_typed_entry_with_limit(
         &mut self,
         change: TypedUpdate,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
         password_history_limit: usize,
     ) -> Result<bool, VaultError> {
         let TypedUpdate {
@@ -157,10 +157,9 @@ impl Vault {
         let id = self.entries[index].id;
         self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
             let original = Zeroizing::new(vault.entries[index].clone());
-            let password_changed = update.password
-                && password
-                    .as_ref()
-                    .is_some_and(|new_password| *new_password != original.password);
+            let password_changed = password
+                .as_ref()
+                .is_some_and(|new_password| *new_password != original.password);
             let old_password = password_changed.then(|| original.password.clone());
             let metadata_modified = vault.apply_metadata_update(
                 original.id,
@@ -288,7 +287,7 @@ impl Vault {
 
 pub(super) fn apply_update(
     entry: &mut VaultEntry,
-    update: UpdateArgs,
+    update: EntryChanges,
     password: Option<String>,
 ) -> bool {
     let mut modified = false;
@@ -301,9 +300,7 @@ pub(super) fn apply_update(
         entry.notes = (!notes.is_empty()).then_some(notes);
         modified = true;
     }
-    if update.password
-        && let Some(password) = password
-    {
+    if let Some(password) = password {
         entry.password.zeroize();
         entry.password = password;
         modified = true;

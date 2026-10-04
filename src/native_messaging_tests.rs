@@ -260,7 +260,12 @@ fn native_bridge_does_not_echo_rejected_credentials() {
     framed.extend_from_slice(&payload);
     let mut output = Vec::new();
 
-    run_with_io(&mut Cursor::new(framed), &mut output).unwrap();
+    run_with_io(
+        &AuthenticatedClient::new(crate::server::DEFAULT_PORT),
+        &mut Cursor::new(framed),
+        &mut output,
+    )
+    .unwrap();
 
     let length = u32::from_ne_bytes(output[..4].try_into().unwrap()) as usize;
     let response: Value = serde_json::from_slice(&output[4..4 + length]).unwrap();

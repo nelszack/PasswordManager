@@ -759,9 +759,9 @@ on-page controls.
 
 ## Architecture
 
-- `src/main.rs` - CLI entry point and command routing
+- `src/main.rs` and `src/app/` - CLI initialization, local commands, and conversion to server requests
 - `src/server.rs` and `src/server/` - Authenticated local server, command handling, and output rendering
-- `src/client.rs` - Client for server communication
+- `src/client.rs` and `src/client/transport.rs` - CLI output and shared authenticated client with explicit connection settings
 - `src/native_messaging.rs` - Chrome native host protocol and registration
 - `src/vault.rs` and `src/vault/` - Vault records, mutations, recovery, import/export, and persistence
 - `src/encryption.rs` - Encryption/decryption utilities
@@ -915,8 +915,17 @@ publish them.
 Vault logic lives in `src/vault/`, grouped by entries, queries, recovery, TOTP,
 imports, exports, backups, and persistence. Read operations return domain records;
 `src/server/presentation.rs` renders CLI output, and `src/server/response.rs`
-handles protocol delivery and maps domain errors to response codes. Native clients
+handles encrypted protocol delivery. Commands execute synchronously on a blocking
+worker and return explicit responses and effects through `src/server/outcome.rs`,
+which maps domain errors to response codes. Audit calculations return secret-free
+structured findings; presentation renders their CLI output. Native clients
 use structured server status; the CLI retains its human-readable status output.
+
+The server owns one `VaultSession` containing the live vault and credentials,
+protected by one mutex. Vault persistence uses domain-owned credentials and does
+not depend on server state. CLI-only update flags are converted into domain
+changes before transport; a compatibility adapter preserves the existing
+MessagePack update representation.
 
 Vault mutations share `src/vault/transaction.rs`. Individual edits snapshot only
 the affected entry and recovery records; imports snapshot the full state. A
@@ -924,6 +933,12 @@ failure before atomic replacement restores the snapshot; a directory-sync failur
 after replacement keeps committed memory and keys and reports uncertain durability.
 Temporary secrets are wiped on drop. Import previews and execution share a plan
 based on non-secret fields.
+
+The extension's `background.js` wires separate services for native requests,
+status monitoring, pending credential storage, pickers, save prompts, and message
+routing. Each service owns its lifecycle state and receives explicit dependencies.
+Picker cancellation on locking/disconnect remains distinct from save operations
+that are already completing.
 
 The extension's `content.js` initializes the page integration. The manifest loads
 separate scripts for messaging, controls, password generation, typed autofill,

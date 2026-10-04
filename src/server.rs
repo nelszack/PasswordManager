@@ -2,19 +2,18 @@ use crate::{
     clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, set_private_perms, sync_parent},
     protocol::{
-        ResponseCode, SECURE_HELLO_LEN, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decode_responses,
-        decrypt_record, decrypt_record_stream, encode_response, encrypt_record, server_hello,
-        verify_server_hello,
+        ResponseCode, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record, encode_response,
+        encrypt_record, server_hello,
     },
     types::*,
-    vault::{Vault, VaultAccess, create_vault, delete_vault, restore_encrypted_backup},
+    vault::{Vault, VaultSession, create_vault, delete_vault, restore_encrypted_backup},
 };
 use rand::RngExt;
 use serde::Deserialize;
 use std::{
     cell::RefCell,
     fs,
-    io::{Cursor, Read, Write},
+    io::{Cursor, Write},
     path::Path,
     process::{Command, Stdio},
     sync::{
@@ -32,47 +31,25 @@ use tokio::{
 use zeroize::{Zeroize, Zeroizing};
 
 mod commands;
-mod presentation;
-use commands::handle_command;
+pub(crate) mod presentation;
+use commands::execute_command;
+mod outcome;
 mod response;
-use response::{
-    deliver_entry, respond_domain_error, respond_domain_error_with_context, respond_domain_result,
-};
-use response::{flush_buffered_responses, respond_conflict, respond_failure, respond_not_found};
+use response::deliver_responses;
 pub use response::{respond, respond_with_code};
 mod session_token;
 use session_token::*;
 
-#[derive(Debug)]
-pub struct ServerInfo {
-    pub locked: bool,
-    pub keypass: Option<PasswordType>,
-}
-
-impl Default for ServerInfo {
-    fn default() -> Self {
-        Self {
-            locked: true,
-            keypass: None,
-        }
-    }
-}
-
-impl Zeroize for ServerInfo {
-    fn zeroize(&mut self) {
-        self.locked.zeroize();
-        self.keypass.zeroize();
-        *self = Self::default()
-    }
-}
+pub use crate::vault::VaultCredentials as ServerInfo;
 pub const DEFAULT_PORT: u16 = 7878;
 
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()
 }
 
-const MAX_TCP_MSG: usize = 16 * 1024 * 1024;
+#[cfg(test)]
 const TOKEN_HEX_LEN: usize = 64;
+const MAX_TCP_MSG: usize = 16 * 1024 * 1024;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CLIENT_CONNECTIONS: usize = 128;
 // Reserve space for both ciphertext and decrypted payload before allocating.
@@ -108,62 +85,15 @@ impl Drop for BufferedResponse {
 }
 
 tokio::task_local! {
-    static RESPONSE_BUFFER: RefCell<Vec<BufferedResponse>>;
     static TRANSPORT_RESPONSE_KEY: RefCell<Option<Zeroizing<[u8; 32]>>>;
 }
 pub fn is_running(port: u16) -> bool {
-    let path = data_dir().join(TOKEN_FILE);
-    let Ok(mut token) = fs::read_to_string(path) else {
-        return false;
-    };
-    token.truncate(token.trim_end().len());
-    if token.len() != TOKEN_HEX_LEN || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        token.zeroize();
-        return false;
-    }
-    let Ok(mut stream) =
-        std::net::TcpStream::connect_timeout(&server_addr(port), Duration::from_millis(500))
-    else {
-        token.zeroize();
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let Ok(mut command) = rmp_serde::to_vec(&ServerCommand::StatusData) else {
-        token.zeroize();
-        return false;
-    };
-    let result = (|| {
-        stream.write_all(SECURE_PREFACE)?;
-        stream.flush()?;
-        let mut hello = [0u8; SECURE_HELLO_LEN];
-        stream.read_exact(&mut hello)?;
-        let keys = verify_server_hello(&token, &hello)
-            .ok_or_else(|| std::io::Error::other("server authentication failed"))?;
-        let mut request = encrypt_record(&keys.request, &command)
-            .ok_or_else(|| std::io::Error::other("request encryption failed"))?;
-        let sent = stream.write_all(&request).and_then(|_| stream.flush());
-        request.zeroize();
-        sent?;
-
-        let mut encrypted = Vec::new();
-        stream.read_to_end(&mut encrypted)?;
-        let decrypted = decrypt_record_stream(&keys.response, &encrypted, 1024 * 1024)
-            .map_err(std::io::Error::other)?;
-        encrypted.zeroize();
-        Ok::<Vec<u8>, std::io::Error>(decrypted)
-    })();
-    token.zeroize();
-    command.zeroize();
-    let Ok(mut response) = result else {
-        return false;
-    };
-    let valid = decode_responses(&response).is_ok_and(|response| {
-        response.code == ResponseCode::Success as i32
-            && serde_json::from_str::<crate::protocol::ServerStatus>(&response.message).is_ok()
-    });
-    response.zeroize();
-    valid
+    crate::client::AuthenticatedClient::probe(port)
+        .request_response(ServerCommand::StatusData)
+        .is_ok_and(|response| {
+            response.code == ResponseCode::Success as i32
+                && serde_json::from_str::<crate::protocol::ServerStatus>(&response.message).is_ok()
+        })
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -250,8 +180,7 @@ fn schedule_auto_lock(
     time: u64,
     generation: u64,
     lock_generation: Arc<AtomicU64>,
-    server_info: Arc<Mutex<ServerInfo>>,
-    vlt: Arc<Mutex<Option<Vault>>>,
+    session: Arc<Mutex<VaultSession>>,
     background_error: Arc<Mutex<Option<String>>>,
 ) {
     if time == 0 {
@@ -262,14 +191,10 @@ fn schedule_auto_lock(
         if lock_generation.load(Ordering::Acquire) != generation {
             return;
         }
-        let mut server_info = server_info.lock_owned().await;
-        let mut vlt = vlt.lock_owned().await;
+        let mut session = session.lock_owned().await;
         let result = tokio::task::spawn_blocking(move || {
-            if lock_generation.load(Ordering::Acquire) == generation
-                && !server_info.locked
-                && vlt.is_some()
-            {
-                Some(lock_vlt(&mut vlt, &mut server_info))
+            if lock_generation.load(Ordering::Acquire) == generation && !session.is_locked() {
+                Some(lock_session(&mut session))
             } else {
                 None
             }
@@ -300,11 +225,7 @@ pub async fn server(
     let mut token = rotate_token_file(&token_path)
         .map_err(|error| format!("could not initialize server: {error}"))?;
 
-    let server_info = Arc::new(Mutex::new(ServerInfo {
-        locked: true,
-        keypass: None,
-    }));
-    let vlt: Arc<Mutex<Option<Vault>>> = Arc::new(Mutex::new(None));
+    let session = Arc::new(Mutex::new(VaultSession::default()));
     let lock_generation = Arc::new(AtomicU64::new(0));
     let inactivity_timeout = Arc::new(AtomicU64::new(0));
     let background_error = Arc::new(Mutex::new(None));
@@ -323,8 +244,7 @@ pub async fn server(
                     }
                 };
                 let state = ConnectionState {
-                    server_info: Arc::clone(&server_info),
-                    vlt: Arc::clone(&vlt),
+                    session: Arc::clone(&session),
                     kill_tx: kill_tx.clone(),
                     token: token.clone(),
                     lock_generation: Arc::clone(&lock_generation),
@@ -352,8 +272,7 @@ pub async fn server(
 
 #[derive(Clone)]
 struct ConnectionState {
-    server_info: Arc<Mutex<ServerInfo>>,
-    vlt: Arc<Mutex<Option<Vault>>>,
+    session: Arc<Mutex<VaultSession>>,
     kill_tx: mpsc::Sender<()>,
     token: String,
     lock_generation: Arc<AtomicU64>,
@@ -374,45 +293,33 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
             let kill_tx = state.kill_tx.clone();
             // Wait for vault ownership asynchronously. Only its current owner
             // occupies a blocking worker; the connection limit bounds the queue.
-            let server_info = Arc::clone(&state.server_info).lock_owned().await;
-            let vlt = Arc::clone(&state.vlt).lock_owned().await;
-            let runtime = tokio::runtime::Handle::current();
-            let result = tokio::task::spawn_blocking(move || {
-                // Reuse the command helpers' async bookkeeping, but buffer
-                // every response here; socket writes stay on the Tokio runtime.
-                runtime.block_on(RESPONSE_BUFFER.scope(RefCell::new(Vec::new()), async move {
-                    let mut effect = CommandEffect::None;
-                    handle_command(&mut stream, state, command, server_info, vlt, &mut effect)
-                        .await;
-                    let responses =
-                        RESPONSE_BUFFER.with(|buffer| std::mem::take(&mut *buffer.borrow_mut()));
-                    (stream, responses, effect)
-                }))
-            })
-            .await;
-            let (mut stream, responses, effect) = match result {
-                Ok(result) => result,
+            let mut session = Arc::clone(&state.session).lock_owned().await;
+            let result =
+                tokio::task::spawn_blocking(move || execute_command(state, command, &mut session))
+                    .await;
+            let mut outcome = match result {
+                Ok(outcome) => outcome,
                 Err(error) => {
                     eprintln!("Vault command worker failed: {error}");
                     return;
                 }
             };
-            let stop_server = matches!(&effect, CommandEffect::StopServer);
-            RESPONSE_BUFFER
-                .scope(RefCell::new(responses), async {
-                    if let CommandEffect::Audit(snapshot, check_breaches) = effect {
-                        // Network calls never hold vault ownership or a blocking worker.
-                        let outcome = snapshot.audit(check_breaches).await;
-                        let code = if outcome.incomplete {
-                            ResponseCode::Failure
-                        } else {
-                            ResponseCode::Success
-                        };
-                        respond_with_code(code, &outcome.report, &mut stream).await;
-                    }
-                    flush_buffered_responses(&mut stream).await;
-                })
-                .await;
+            let stop_server = matches!(&outcome.effect, CommandEffect::StopServer);
+            if let CommandEffect::Audit(snapshot, check_breaches) = outcome.effect {
+                // Network calls run after releasing the vault session.
+                let audit = snapshot.audit(check_breaches).await;
+                let code = if audit.incomplete {
+                    ResponseCode::Failure
+                } else {
+                    ResponseCode::Success
+                };
+                outcome::respond_with_code(
+                    code,
+                    &presentation::audit(&audit.report),
+                    &mut outcome.responses,
+                );
+            }
+            deliver_responses(outcome.responses, &mut stream).await;
             let _ = stream.flush().await;
             let _ = stream.shutdown().await;
             if stop_server {
@@ -478,7 +385,6 @@ fn lock_vlt(
     vlt: &mut Option<Vault>,
     server_info: &mut ServerInfo,
 ) -> Result<(), crate::vault::VaultError> {
-    vlt.lock_vault(server_info)?;
     vlt.zeroize();
     server_info.zeroize();
     crate::clipboard::clear_owned().map_err(|error| {
@@ -487,6 +393,11 @@ fn lock_vlt(
         ))
     })?;
     Ok(())
+}
+
+fn lock_session(session: &mut VaultSession) -> Result<(), crate::vault::VaultError> {
+    let (credentials, vault) = session.parts_mut();
+    lock_vlt(vault, credentials)
 }
 
 #[cfg(test)]

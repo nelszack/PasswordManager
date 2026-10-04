@@ -1,18 +1,40 @@
 use super::*;
-use crate::terminal::metadata;
 
 pub(super) fn password_hash(password: &str) -> String {
     hex::encode_upper(Sha1::digest(password.as_bytes()))
 }
 
+#[cfg(test)]
 pub(super) fn parse_pwned_range(body: &str, prefix: &str) -> HashMap<String, u64> {
+    parse_pwned_range_matching(body, prefix, |_| true)
+}
+
+fn parse_pwned_range_matching(
+    body: &str,
+    prefix: &str,
+    wanted: impl Fn(&str) -> bool,
+) -> HashMap<String, u64> {
     body.lines()
         .filter_map(|line| {
             let (suffix, count) = line.trim().split_once(':')?;
             let count = count.parse::<u64>().ok()?;
-            (count > 0).then(|| (format!("{prefix}{}", suffix.to_ascii_uppercase()), count))
+            if count == 0 {
+                return None;
+            }
+            let mut hash = Zeroizing::new(format!("{prefix}{}", suffix.to_ascii_uppercase()));
+            wanted(&hash).then(|| (std::mem::take(&mut *hash), count))
         })
         .collect()
+}
+
+// These hashes are password verifiers; clear additional audit-owned copies.
+struct BreachTargets(HashSet<String>);
+impl Drop for BreachTargets {
+    fn drop(&mut self) {
+        for mut hash in self.0.drain() {
+            hash.zeroize();
+        }
+    }
 }
 
 struct BreachCheck {
@@ -22,7 +44,16 @@ struct BreachCheck {
 }
 
 async fn breached_hashes<'a>(password_hashes: impl Iterator<Item = &'a str>) -> BreachCheck {
-    let prefixes = password_hashes
+    let mut targets = BreachTargets(HashSet::new());
+    for hash in password_hashes {
+        if !targets.0.contains(hash) {
+            targets.0.insert(hash.to_owned());
+        }
+    }
+    let targets = std::sync::Arc::new(targets);
+    let prefixes = targets
+        .0
+        .iter()
         .map(|hash| hash[..5].to_string())
         .collect::<HashSet<_>>();
     let client = match reqwest::Client::builder()
@@ -41,7 +72,7 @@ async fn breached_hashes<'a>(password_hashes: impl Iterator<Item = &'a str>) -> 
     };
     // Finish before the CLI's five-minute response timeout, retaining partial results.
     check_breached_prefixes(prefixes, std::time::Duration::from_secs(240), |prefix| {
-        fetch_breached_prefix(client.clone(), prefix)
+        fetch_breached_prefix(client.clone(), prefix, std::sync::Arc::clone(&targets))
     })
     .await
 }
@@ -110,6 +141,7 @@ where
 async fn fetch_breached_prefix(
     client: reqwest::Client,
     prefix: String,
+    targets: std::sync::Arc<BreachTargets>,
 ) -> Result<HashMap<String, u64>, String> {
     const MAX_RANGE_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
     let response = client
@@ -146,7 +178,7 @@ async fn fetch_breached_prefix(
             return Err(format!("Pwned Passwords returned invalid UTF-8: {error}"));
         }
     };
-    let matches = parse_pwned_range(text, &prefix);
+    let matches = parse_pwned_range_matching(text, &prefix, |hash| targets.0.contains(hash));
     body.zeroize();
     Ok(matches)
 }
@@ -165,6 +197,7 @@ impl Vault {
             .iter()
             .map(|record| record.entry_id)
             .collect();
+        let now = chrono::Utc::now();
         let entries = self
             .entries
             .iter()
@@ -173,25 +206,29 @@ impl Vault {
                     .get(&entry.id)
                     .is_none_or(|metadata| metadata.kind == ItemKind::Login)
             })
-            .map(|entry| AuditEntrySnapshot {
-                id: entry.id,
-                name: entry.name.clone(),
-                username: entry.username.clone(),
-                password_hash: password_hash(&entry.password),
-                weak: zxcvbn::zxcvbn(&entry.password, &[]).score() <= zxcvbn::Score::Two,
-                stale: options
-                    .stale_days
-                    .is_some_and(|days| self.password_is_stale(entry, days)),
-                password_changed: self.password_changed(entry).to_string(),
-                missing_totp: options.require_totp && !totp_ids.contains(&entry.id),
-                identity: (
-                    entry
-                        .url
-                        .as_deref()
-                        .and_then(hostname)
-                        .unwrap_or_else(|| entry.name.to_ascii_lowercase()),
-                    entry.username.as_deref().unwrap_or("").to_ascii_lowercase(),
-                ),
+            .map(|entry| {
+                let changed = self
+                    .password_changed_with_metadata(entry, metadata_by_id.get(&entry.id).copied());
+                AuditEntrySnapshot {
+                    id: entry.id,
+                    name: entry.name.clone(),
+                    username: entry.username.clone(),
+                    password_hash: password_hash(&entry.password),
+                    weak: zxcvbn::zxcvbn(&entry.password, &[]).score() <= zxcvbn::Score::Two,
+                    stale: options
+                        .stale_days
+                        .is_some_and(|days| password_is_stale_at(changed, days, now)),
+                    password_changed: changed.to_string(),
+                    missing_totp: options.require_totp && !totp_ids.contains(&entry.id),
+                    identity: (
+                        entry
+                            .url
+                            .as_deref()
+                            .and_then(hostname)
+                            .unwrap_or_else(|| entry.name.to_ascii_lowercase()),
+                        entry.username.as_deref().unwrap_or("").to_ascii_lowercase(),
+                    ),
+                }
             })
             .collect();
         AuditSnapshot { entries }
@@ -199,11 +236,11 @@ impl Vault {
 }
 
 impl AuditSnapshot {
-    pub(super) fn report(
+    pub(super) fn findings(
         &self,
         breached: Option<&HashMap<String, u64>>,
         breach_error: Option<&str>,
-    ) -> String {
+    ) -> AuditReport {
         let mut weak = Vec::new();
         let mut stale = Vec::new();
         let mut missing_totp = Vec::new();
@@ -258,66 +295,31 @@ impl AuditSnapshot {
         } else {
             healthy * 100 / self.entries.len()
         };
-        let mut report = format!(
-            "Health score: {score}/100 ({healthy}/{} login entries have no detected issues).\nAudit: {} weak entries, {} reused-password groups, {} duplicate-login groups, {} stale entries, {} missing TOTP, {} breached entries.\n",
-            self.entries.len(),
-            weak.len(),
-            reused.len(),
-            duplicates.len(),
-            stale.len(),
-            missing_totp.len(),
-            breached_entries.len(),
-        );
-        for entry in weak {
-            report.push_str(&format!(
-                "Weak: {}. {} {:?}\n",
-                entry.id,
-                metadata(&entry.name).as_str(),
-                entry.username
-            ));
+        AuditReport {
+            total: self.entries.len(),
+            healthy,
+            score,
+            weak: weak.into_iter().map(AuditEntrySnapshot::label).collect(),
+            reused: reused
+                .into_iter()
+                .map(|group| group.iter().map(|entry| entry.label()).collect())
+                .collect(),
+            duplicates: duplicates
+                .into_iter()
+                .map(|group| group.iter().map(|entry| entry.label()).collect())
+                .collect(),
+            stale: stale.into_iter().map(AuditEntrySnapshot::label).collect(),
+            missing_totp: missing_totp
+                .into_iter()
+                .map(AuditEntrySnapshot::label)
+                .collect(),
+            breached: breached_entries
+                .into_iter()
+                .map(|(entry, count)| (entry.label(), count))
+                .collect(),
+            breach_error: breach_error.map(str::to_owned),
+            unchecked: vec![],
         }
-        for entries in reused {
-            let labels = entries
-                .iter()
-                .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            report.push_str(&format!("Reused password: {labels}\n"));
-        }
-        for entries in duplicates {
-            let labels = entries
-                .iter()
-                .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            report.push_str(&format!("Duplicate login: {labels}\n"));
-        }
-        for entry in stale {
-            report.push_str(&format!(
-                "Stale password: {}. {} (last changed {})\n",
-                entry.id,
-                metadata(&entry.name).as_str(),
-                metadata(&entry.password_changed).as_str()
-            ));
-        }
-        for entry in missing_totp {
-            report.push_str(&format!(
-                "Missing TOTP: {}. {}\n",
-                entry.id,
-                metadata(&entry.name).as_str()
-            ));
-        }
-        for (entry, count) in breached_entries {
-            report.push_str(&format!(
-                "Breached password: {}. {} (seen {count} times)\n",
-                entry.id,
-                metadata(&entry.name).as_str()
-            ));
-        }
-        if let Some(error) = breach_error {
-            report.push_str(&format!("Breach check unavailable: {error}\n"));
-        }
-        report
     }
 
     pub(crate) async fn audit(&self, check_breaches: bool) -> AuditOutcome {
@@ -337,7 +339,7 @@ impl AuditSnapshot {
     }
 
     fn audit_outcome(&self, check: Option<&BreachCheck>) -> AuditOutcome {
-        let mut report = self.report(
+        let mut report = self.findings(
             check.map(|check| &check.matches),
             check.and_then(|check| check.error.as_deref()),
         );
@@ -347,21 +349,12 @@ impl AuditSnapshot {
                 .iter()
                 .filter(|entry| check.unchecked_prefixes.contains(&entry.password_hash[..5]))
                 .collect();
-            if !unchecked.is_empty() {
-                report.push_str(&format!(
-                    "Breach checks incomplete: {} of {} login entries checked successfully.\n",
-                    self.entries.len() - unchecked.len(),
-                    self.entries.len(),
-                ));
-                for entry in unchecked {
-                    report.push_str(&format!(
-                        "Unchecked breach status: {}. {}\n",
-                        entry.id,
-                        metadata(&entry.name).as_str()
-                    ));
-                }
-            }
+            report.unchecked = unchecked
+                .into_iter()
+                .map(AuditEntrySnapshot::label)
+                .collect();
         }
+
         AuditOutcome {
             report,
             incomplete: check
@@ -378,6 +371,21 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
+
+    #[test]
+    fn range_parser_retains_only_target_hashes_and_ignores_padding() {
+        let targets = HashSet::from(["FFFFFABCDE".to_string(), "FFFFF12345".to_string()]);
+        let parsed = parse_pwned_range_matching(
+            "abcde:12\r\n12345:0\r\n99999:42\r\nbroken\r\nABCDE:invalid\r\n",
+            "FFFFF",
+            |hash| targets.contains(hash),
+        );
+        assert_eq!(parsed, HashMap::from([("FFFFFABCDE".into(), 12)]));
+        assert!(
+            parse_pwned_range_matching("99999:42", "FFFFF", |hash| targets.contains(hash))
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn range_checks_bound_concurrency_and_preserve_complete_or_partial_results() {
@@ -487,23 +495,14 @@ mod tests {
         };
         let outcome = snapshot.audit_outcome(Some(&check));
         assert!(outcome.incomplete);
-        assert!(
-            outcome
-                .report
-                .contains("Breached password: 1. Account 1 (seen 42 times)")
-        );
-        assert!(
-            outcome
-                .report
-                .contains("Unchecked breach status: 2. Account 2")
-        );
-        assert!(
-            outcome
-                .report
-                .contains("1 of 2 login entries checked successfully")
-        );
+        assert_eq!(outcome.report.breached[0].0.id, 1);
+        assert_eq!(outcome.report.unchecked[0].id, 2);
+        let rendered = crate::server::presentation::audit(&outcome.report);
+        assert!(rendered.contains("Breached password: 1. Account 1 (seen 42 times)"));
+        assert!(rendered.contains("Unchecked breach status: 2. Account 2"));
+        assert!(rendered.contains("1 of 2 login entries checked successfully"));
         for password in passwords {
-            assert!(!outcome.report.contains(password));
+            assert!(!rendered.contains(password));
         }
         assert!(!snapshot.audit(false).await.incomplete);
     }

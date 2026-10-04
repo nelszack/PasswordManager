@@ -8,38 +8,10 @@ fn isolated_config() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn test_config() {
+fn test_update_all_config_fields() {
     let (_directory, config_path) = isolated_config();
-    test_read_write(&config_path);
-    test_update(&config_path);
-}
-fn test_read_write(config_path: &Path) {
-    let conf1 = read_config(config_path);
-    default_test_config(true, config_path);
-    let conf2 = read_config(config_path);
-    assert_eq!(
-        conf2,
-        Config {
-            genpass: GeneratorConfig {
-                length: 12,
-                stats: false,
-                copy: true
-            },
-            clipboard: ClipboardConfig { timeout: 15 },
-            unlock: UnlockConfig { timeout: 15 * 60 },
-            copy: CopyConfig { passwords: true },
-            recovery: RecoveryConfig::default(),
-            server: ServerConfig::default(),
-        }
-    );
-    write_file(&conf1, config_path).unwrap();
-    assert_eq!(read_config(config_path), conf1)
-}
-
-fn test_update(config_path: &Path) {
-    let conf1 = read_config(config_path);
     update(
-        default_test_config(true, config_path),
+        default_test_config(true, &config_path),
         ConfigArgs {
             reset: false,
             genpass_length: Some(100),
@@ -52,10 +24,10 @@ fn test_update(config_path: &Path) {
             trash_retention_days: Some(30),
             server_port: Some(8787),
         },
-        config_path,
+        &config_path,
     );
     assert_eq!(
-        read_config(config_path),
+        read_config(&config_path),
         Config {
             genpass: GeneratorConfig {
                 length: 100,
@@ -72,7 +44,6 @@ fn test_update(config_path: &Path) {
             server: ServerConfig { port: 8787 },
         }
     );
-    write_file(&conf1, config_path).unwrap();
 }
 #[test]
 fn test_is_config_exists() {
@@ -105,7 +76,8 @@ fn test_update_single_field_preserves_unmodified_fields() {
 }
 #[test]
 fn test_default_config_values() {
-    let config = default_test_config(false, Path::new("dummy.toml"));
+    let (_directory, config_path) = isolated_config();
+    let config = default_test_config(false, &config_path);
     assert_eq!(config.genpass.length, 12);
     assert!(!config.genpass.stats);
     assert!(config.genpass.copy);
@@ -115,6 +87,9 @@ fn test_default_config_values() {
     assert_eq!(config.recovery.password_history_limit, 10);
     assert_eq!(config.recovery.trash_retention_days, 0);
     assert_eq!(config.server.port, crate::server::DEFAULT_PORT);
+    assert_eq!(read_config(&config_path), config);
+    assert_eq!(default_test_config(true, &config_path), config);
+    assert_eq!(read_config(&config_path), config);
 }
 #[test]
 fn test_reset_to_default() {
@@ -227,9 +202,7 @@ fn test_multiple_updates() {
 
 #[test]
 fn test_config_round_trip() {
-    let (_directory, config_path) = isolated_config();
-
-    let original = Config {
+    let custom = Config {
         genpass: GeneratorConfig {
             length: 32,
             stats: true,
@@ -242,10 +215,11 @@ fn test_config_round_trip() {
         server: ServerConfig { port: 9876 },
     };
 
-    write_file(&original, &config_path).unwrap();
-    let loaded = read_config(&config_path);
-
-    assert_eq!(original, loaded);
+    for (label, original) in [("defaults", Config::default()), ("custom", custom)] {
+        let (_directory, config_path) = isolated_config();
+        write_file(&original, &config_path).unwrap();
+        assert_eq!(read_config(&config_path), original, "{label}");
+    }
 }
 
 #[test]

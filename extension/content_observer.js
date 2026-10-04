@@ -1,4 +1,4 @@
-function attachInput(input) {
+function attachInput(input, formUsernames) {
     // Ignore extension UI elements
     if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
     const typedKind = typedAutofillKind(input);
@@ -6,7 +6,7 @@ function attachInput(input) {
         createSecureTotpButton(input);
     } else if (typedKind) {
         createSecureTypedButton(input, typedKind);
-    } else if (isCredentialInput(input)) {
+    } else if (isCredentialInput(input, formUsernames)) {
         createSecureCredentialButton(input);
     } else {
         removeSecurePickerButton(input);
@@ -16,25 +16,33 @@ function attachInput(input) {
     }
 }
 
-function openRoots(root) {
+// Visit each light DOM / open shadow DOM subtree once for both discovery and
+// observation. No credentials are fetched during this scan.
+function attachToInputs(root = document, observeRoot = () => {}) {
     const roots = [root];
-    if (root.shadowRoot) roots.push(...openRoots(root.shadowRoot));
-    for (const candidate of root.querySelectorAll?.("*") || []) {
-        if (candidate.shadowRoot) roots.push(...openRoots(candidate.shadowRoot));
+    // Form classification is shared within this scan, then discarded so later
+    // DOM changes and user interactions always inspect the current fields.
+    const formUsernames = new WeakMap();
+    for (let index = 0; index < roots.length; index++) {
+        const openRoot = roots[index];
+        observeRoot(openRoot);
+        if (openRoot instanceof HTMLInputElement) attachInput(openRoot, formUsernames);
+        if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
+        for (const candidate of openRoot.querySelectorAll?.("*") || []) {
+            if (candidate instanceof HTMLInputElement) attachInput(candidate, formUsernames);
+            if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+        }
     }
-    return roots;
 }
 
-function attachToInputs(root = document) {
-    for (const openRoot of openRoots(root)) {
-        if (openRoot instanceof HTMLInputElement) attachInput(openRoot);
-        openRoot.querySelectorAll?.("input").forEach(attachInput);
+// Follow shadow hosts too: Node.contains does not cross shadow boundaries.
+function coveredByPendingRoot(root, pendingRoots) {
+    for (let parent = root.parentNode || root.host; parent; parent = parent.parentNode || parent.host) {
+        if (pendingRoots.has(parent)) return true;
     }
+    return false;
 }
 
-// ===============================
-// Observe DOM safely (no loop)
-// ===============================
 function observeInputs() {
     const pendingRoots = new Set();
     const observedRoots = new WeakSet();
@@ -50,16 +58,14 @@ function observeInputs() {
         }
     });
     const observeRoot = root => {
-        for (const openRoot of openRoots(root)) {
-            if (observedRoots.has(openRoot)) continue;
-            observedRoots.add(openRoot);
-            observer.observe(openRoot, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ["class", "style", "hidden", "type", "autocomplete", "disabled", "readonly"]
-            });
-        }
+        if (observedRoots.has(root)) return;
+        observedRoots.add(root);
+        observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["class", "style", "hidden", "type", "autocomplete", "disabled", "readonly"]
+        });
     };
     const scheduleAttach = root => {
         pendingRoots.add(root);
@@ -68,17 +74,12 @@ function observeInputs() {
         requestAnimationFrame(() => {
             attachScheduled = false;
             for (const pending of pendingRoots) {
-                attachToInputs(pending);
-                observeRoot(pending);
+                if (!pending.isConnected || coveredByPendingRoot(pending, pendingRoots)) continue;
+                attachToInputs(pending, observeRoot);
             }
             pendingRoots.clear();
         });
     };
 
-    // Initial run
-    attachToInputs();
-    observeRoot(document.body);
+    attachToInputs(document, observeRoot);
 }
-// ===============================
-// Get domain from URL
-// ===============================

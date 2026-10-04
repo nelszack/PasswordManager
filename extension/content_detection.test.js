@@ -85,3 +85,26 @@ test("hidden, disconnected, disabled, and readonly fields fail closed", () => {
     input.isConnected = false;
     assert.equal(detection.isElementVisible(input), false);
 });
+
+test("scan-local form classification refreshes after fields change", () => {
+    const unrelated = new FakeInput("text");
+    const username = new FakeInput("text");
+    const password = new FakeInput("password");
+    const form = new FakeForm([unrelated, username, password]);
+    let scans = 0;
+    const elements = form.elements;
+    Object.defineProperty(form, "elements", { get() { scans++; return elements; } });
+    const cache = new WeakMap();
+    assert.equal(detection.isCredentialInput(unrelated, cache), false);
+    assert.equal(detection.isCredentialInput(username, cache), true);
+    assert.equal(scans, 1);
+
+    username.disabled = true;
+    const nextScan = new WeakMap();
+    assert.equal(detection.isCredentialInput(unrelated, nextScan), true);
+    assert.equal(detection.isCredentialInput(username, nextScan), false);
+    assert.equal(scans, 2);
+    password.autocomplete = "new-password";
+    assert.equal(detection.isCredentialInput(unrelated, new WeakMap()), false);
+    assert.equal(detection.isCredentialInput(unrelated), false);
+});

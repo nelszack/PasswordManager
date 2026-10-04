@@ -244,7 +244,7 @@ impl Vault {
         conflicts: ConflictPolicy,
         preview: bool,
         password_history_limit: usize,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<ImportReport, VaultError> {
         let metadata = fs::metadata(&path).map_err(|error| {
             VaultError::Persistence(format!("could not open import file {path:?}: {error}"))
@@ -303,6 +303,9 @@ impl Vault {
         }
         self.transaction(TransactionScope::All, key_pass, |vault| {
             let changed = !plan.operations.is_empty();
+            if plan.operations.iter().any(|(index, _)| index.is_none()) {
+                vault.ensure_next_entry_id()?;
+            }
             for (index, mut imported) in plan.operations {
                 if let Some(index) = index {
                     let id = vault.entries[index].id;
@@ -346,7 +349,7 @@ impl Vault {
                         );
                     }
                 } else {
-                    let id = vault.allocate_entry_id()?;
+                    let id = vault.allocate_validated_entry_id()?;
                     imported.entry.id = id;
                     vault.entries.push(std::mem::take(&mut imported.entry));
                     if imported.portable {
@@ -449,4 +452,90 @@ impl Vault {
 struct ImportPlan {
     operations: Vec<(Option<usize>, ImportedItem)>,
     report: ImportReport,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn batch() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "name,password\nfirst,synthetic-one\nsecond,synthetic-two"
+        )
+        .unwrap();
+        file
+    }
+
+    #[test]
+    fn batch_ids_respect_active_trash_and_reserved_counters() {
+        let file = batch();
+        for (counter, expected) in [(0, 91), (5, 91), (200, 200)] {
+            let mut vault = Vault::default();
+            vault.entries.push(VaultEntry {
+                id: 42,
+                ..Default::default()
+            });
+            vault.recovery.trash.push(TrashedEntry {
+                entry: VaultEntry {
+                    id: 90,
+                    ..Default::default()
+                },
+                history: Vec::new(),
+                deleted: "synthetic".into(),
+            });
+            vault.recovery.next_entry_id = counter;
+            let before = vault.clone();
+            let preview = vault
+                .import_with_options(
+                    file.path().display().to_string(),
+                    ConflictPolicy::Skip,
+                    true,
+                    1,
+                    &mut VaultCredentials::default(),
+                )
+                .unwrap();
+            assert_eq!(preview.added, 2);
+            assert_eq!(vault, before);
+            vault
+                .import_with_options(
+                    file.path().display().to_string(),
+                    ConflictPolicy::Skip,
+                    false,
+                    1,
+                    &mut VaultCredentials::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                vault
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>(),
+                vec![42, expected, expected + 1]
+            );
+            assert_eq!(vault.recovery.next_entry_id, expected + 2);
+            assert_eq!(vault.recovery.trash, before.recovery.trash);
+        }
+    }
+
+    #[test]
+    fn counter_overflow_rolls_back_the_entire_batch() {
+        let file = batch();
+        let mut vault = Vault::default();
+        vault.recovery.next_entry_id = usize::MAX - 1;
+        let before = vault.clone();
+        let error = vault
+            .import_with_options(
+                file.path().display().to_string(),
+                ConflictPolicy::Skip,
+                false,
+                1,
+                &mut VaultCredentials::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("ID space is exhausted"));
+        assert_eq!(vault, before);
+    }
 }

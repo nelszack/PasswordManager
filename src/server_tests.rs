@@ -1,5 +1,8 @@
 use super::*;
 use crate::file::init_test_data_dir;
+use crate::protocol::{
+    SECURE_HELLO_LEN, decode_responses, decrypt_record_stream, verify_server_hello,
+};
 use crate::vault::RecoveryData;
 use crate::vault::{Vault, VaultEntry, VaultMetadata};
 
@@ -11,6 +14,20 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
+fn test_connection_state(session: VaultSession) -> ConnectionState {
+    let (kill_tx, _) = mpsc::channel(1);
+    ConnectionState {
+        session: Arc::new(Mutex::new(session)),
+        kill_tx,
+        token: "ab".repeat(32),
+        lock_generation: Arc::new(AtomicU64::new(0)),
+        inactivity_timeout: Arc::new(AtomicU64::new(0)),
+        background_error: Arc::new(Mutex::new(None)),
+        password_history_limit: 10,
+        trash_retention_days: 0,
+    }
+}
+
 async fn dispatch_test_command(
     vault: Vault,
     command: ServerCommand,
@@ -18,21 +35,13 @@ async fn dispatch_test_command(
 ) -> crate::protocol::ProtocolResponse {
     let token = "ab".repeat(32);
     let (mut client, server) = tcp_pair().await;
-    let (kill_tx, _kill_rx) = mpsc::channel(1);
-    let state = ConnectionState {
-        server_info: Arc::new(Mutex::new(ServerInfo {
+    let state = test_connection_state(VaultSession {
+        credentials: ServerInfo {
             locked,
             keypass: None,
-        })),
-        vlt: Arc::new(Mutex::new(Some(vault))),
-        kill_tx,
-        token: token.clone(),
-        lock_generation: Arc::new(AtomicU64::new(0)),
-        inactivity_timeout: Arc::new(AtomicU64::new(0)),
-        background_error: Arc::new(Mutex::new(None)),
-        password_history_limit: 10,
-        trash_retention_days: 0,
-    };
+        },
+        vault: Some(vault),
+    });
     let task = tokio::spawn(handle_connection(server, state));
     client.write_all(SECURE_PREFACE).await.unwrap();
     let mut hello = [0; SECURE_HELLO_LEN];
@@ -54,10 +63,7 @@ async fn dispatch_test_command(
 #[tokio::test]
 async fn vault_commands_leave_the_single_thread_runtime_responsive() {
     let token = "ab".repeat(32);
-    let info = Arc::new(Mutex::new(ServerInfo {
-        locked: false,
-        keypass: None,
-    }));
+
     let vault = Vault {
         entries: (1..=256)
             .map(|id| VaultEntry {
@@ -70,18 +76,14 @@ async fn vault_commands_leave_the_single_thread_runtime_responsive() {
         metadata: VaultMetadata::default(),
         recovery: RecoveryData::default(),
     };
-    let (kill_tx, _kill_rx) = mpsc::channel(1);
-    let state = ConnectionState {
-        server_info: Arc::clone(&info),
-        vlt: Arc::new(Mutex::new(Some(vault))),
-        kill_tx,
-        token: token.clone(),
-        lock_generation: Arc::new(AtomicU64::new(0)),
-        inactivity_timeout: Arc::new(AtomicU64::new(0)),
-        background_error: Arc::new(Mutex::new(None)),
-        password_history_limit: 10,
-        trash_retention_days: 0,
-    };
+    let state = test_connection_state(VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: None,
+        },
+        vault: Some(vault),
+    });
+    let info = Arc::clone(&state.session);
     let (mut client, server) = tcp_pair().await;
     let task = tokio::spawn(handle_connection(server, state));
     client.write_all(SECURE_PREFACE).await.unwrap();
@@ -133,32 +135,33 @@ async fn auto_lock_clears_secrets_even_when_the_vault_cannot_be_written() {
         .unwrap()
         .to_string();
     // The destination is a directory, so the old save-before-lock path would fail.
-    let vault = Arc::new(Mutex::new(Some(Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            password: "synthetic-secret".into(),
-            ..VaultEntry::default()
-        }],
-        metadata: VaultMetadata { filename },
-        recovery: RecoveryData::default(),
-    })));
-    let info = Arc::new(Mutex::new(ServerInfo {
-        locked: false,
-        keypass: Some(PasswordType::Password("synthetic-master-password".into())),
+    let session = Arc::new(Mutex::new(VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Password("synthetic-master-password".into())),
+        },
+        vault: Some(Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                password: "synthetic-secret".into(),
+                ..VaultEntry::default()
+            }],
+            metadata: VaultMetadata { filename },
+            recovery: RecoveryData::default(),
+        }),
     }));
     let error = Arc::new(Mutex::new(None));
     schedule_auto_lock(
         1,
         1,
         Arc::new(AtomicU64::new(1)),
-        Arc::clone(&info),
-        Arc::clone(&vault),
+        Arc::clone(&session),
         Arc::clone(&error),
     );
     tokio::time::sleep(Duration::from_millis(1300)).await;
-    assert!(info.lock().await.locked);
-    assert!(info.lock().await.keypass.is_none());
-    assert!(vault.lock().await.is_none());
+    assert!(session.lock().await.is_locked());
+    assert!(session.lock().await.credentials.keypass.is_none());
+    assert!(session.lock().await.vault.is_none());
     assert!(error.lock().await.is_none());
     assert!(directory.path().is_dir());
 }
@@ -231,6 +234,10 @@ async fn auto_lock_completes_while_a_detached_breach_audit_is_slow() {
         }),
     }));
     let vault = Arc::new(Mutex::new(Some(vault)));
+    let session = Arc::new(Mutex::new(VaultSession {
+        credentials: std::mem::take(&mut *server_info.lock().await),
+        vault: vault.lock().await.take(),
+    }));
     let generation = Arc::new(AtomicU64::new(1));
     let background_error = Arc::new(Mutex::new(None));
 
@@ -242,14 +249,13 @@ async fn auto_lock_completes_while_a_detached_breach_audit_is_slow() {
         1,
         1,
         Arc::clone(&generation),
-        Arc::clone(&server_info),
-        Arc::clone(&vault),
+        Arc::clone(&session),
         Arc::clone(&background_error),
     );
 
     tokio::time::sleep(Duration::from_millis(1_300)).await;
-    assert!(server_info.lock().await.locked);
-    assert!(vault.lock().await.is_none());
+    assert!(session.lock().await.is_locked());
+    assert!(session.lock().await.vault.is_none());
     assert!(background_error.lock().await.is_none());
     assert!(!slow_audit.is_finished());
     slow_audit.abort();
@@ -284,21 +290,17 @@ async fn response_codes_are_explicit_and_independent_of_message_wording() {
 }
 
 #[tokio::test]
-async fn scoped_responses_are_buffered_until_state_work_finishes() {
+async fn explicit_outcomes_are_delivered_after_state_work_finishes() {
     let (mut client, mut server) = tcp_pair().await;
-    RESPONSE_BUFFER
-        .scope(RefCell::new(Vec::new()), async {
-            respond("buffered", &mut server).await;
-            let mut byte = [0u8; 1];
-            assert!(
-                tokio::time::timeout(Duration::from_millis(20), client.read_exact(&mut byte))
-                    .await
-                    .is_err(),
-                "a response was written before the critical section completed"
-            );
-            flush_buffered_responses(&mut server).await;
-        })
-        .await;
+    let mut outcome = outcome::CommandOutcome::default();
+    outcome::respond("buffered", &mut outcome.responses);
+    let mut byte = [0u8; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), client.read_exact(&mut byte))
+            .await
+            .is_err()
+    );
+    deliver_responses(outcome.responses, &mut server).await;
     server.shutdown().await.unwrap();
     let mut bytes = Vec::new();
     client.read_to_end(&mut bytes).await.unwrap();
@@ -341,7 +343,7 @@ fn test_password_type_zeroize_password_and_key() {
 }
 
 #[test]
-fn test_vault_entries_zeroize() {
+fn zeroization_clears_entry_fields_and_vault_contents() {
     let mut entry = VaultEntry {
         id: 42,
         name: "test".to_string(),
@@ -352,6 +354,13 @@ fn test_vault_entries_zeroize() {
         created: "2024-01-01".to_string(),
         modified: "2024-01-01".to_string(),
     };
+    let mut vault = Vault {
+        entries: vec![entry.clone()],
+        metadata: VaultMetadata {
+            filename: "test.enc".to_string(),
+        },
+        recovery: RecoveryData::default(),
+    };
     entry.zeroize();
     assert_eq!(entry.id, 0);
     assert_eq!(entry.name, "");
@@ -359,26 +368,8 @@ fn test_vault_entries_zeroize() {
     assert_eq!(entry.password, "");
     assert_eq!(entry.url, None);
     assert_eq!(entry.notes, None);
-}
-
-#[test]
-fn test_vault_zeroize() {
-    let mut vault = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: "test".to_string(),
-            username: Some("user".to_string()),
-            password: "secret".to_string(),
-            url: None,
-            notes: None,
-            created: "2024-01-01".to_string(),
-            modified: "2024-01-01".to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".to_string(),
-        },
-        recovery: crate::vault::RecoveryData::default(),
-    };
+    assert_eq!(entry.created, "");
+    assert_eq!(entry.modified, "");
     vault.zeroize();
     assert!(vault.entries.is_empty());
     assert_eq!(vault.metadata.filename, "");
@@ -766,4 +757,128 @@ async fn custom_field_commands_redact_reveal_select_and_enforce_lock_state() {
         assert_eq!(response.code, expected_code as i32);
         assert_eq!(response.message.contains("synthetic-field-secret"), visible);
     }
+}
+
+#[test]
+fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
+    let mut session = VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: None,
+        },
+        vault: Some(Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                name: "Account".into(),
+                ..Default::default()
+            }],
+            recovery: RecoveryData {
+                entry_metadata: vec![crate::vault::EntryMetadata {
+                    entry_id: 1,
+                    custom_fields: vec![CustomField {
+                        name: "private".into(),
+                        value: "hidden-secret".into(),
+                        secret: true,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            metadata: VaultMetadata::default(),
+        }),
+    };
+    let mut outputs = vec![];
+    for command in [
+        ServerCommand::Get(Target::Id(1)),
+        ServerCommand::GetWithOptions {
+            target: Target::Id(1),
+            copy_timeout: 0,
+        },
+        ServerCommand::GetDetails {
+            target: Target::Id(1),
+            copy_timeout: 0,
+            reveal_secrets: false,
+        },
+    ] {
+        let outcome = execute_command(
+            test_connection_state(VaultSession::default()),
+            command,
+            &mut session,
+        );
+        assert_eq!(outcome.responses.len(), 1);
+        assert_eq!(outcome.responses[0].code, ResponseCode::Success);
+        assert!(!outcome.responses[0].message.contains("hidden-secret"));
+        outputs.push(outcome.responses[0].message.clone());
+    }
+    assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
+    // A retained vault cannot override the locked flag.
+    session.credentials.locked = true;
+    let denied = execute_command(
+        test_connection_state(VaultSession::default()),
+        ServerCommand::BrowserLogin {
+            domain: "https://example.com".into(),
+            id: 1,
+        },
+        &mut session,
+    );
+    assert_eq!(denied.responses[0].code, ResponseCode::Failure);
+    assert_eq!(denied.responses[0].message, "Vault locked.");
+    session.lock();
+    assert!(session.is_locked());
+    assert!(session.vault.is_none());
+    assert!(session.credentials.keypass.is_none());
+    // A missing vault must fail closed even if credentials say unlocked.
+    for locked in [true, false] {
+        session.credentials.locked = locked;
+        for command in [
+            ServerCommand::Get(Target::Id(1)),
+            ServerCommand::GetSecret(Target::Id(1)),
+            ServerCommand::View(ListOptions::default()),
+            ServerCommand::BrowserLogins("https://example.com".into()),
+            ServerCommand::BrowserLogin {
+                domain: "https://example.com".into(),
+                id: 1,
+            },
+            ServerCommand::BrowserAutofill,
+            ServerCommand::BrowserAutofillItem(1),
+            ServerCommand::GetField {
+                target: Target::Id(1),
+                name: "private".into(),
+                copy_timeout: None,
+            },
+            ServerCommand::History(Target::Id(1)),
+            ServerCommand::Trash,
+            ServerCommand::Audit(AuditOptions::default()),
+            ServerCommand::Totp(TotpCommand::Show {
+                target: Target::Id(1),
+                copy_timeout: None,
+            }),
+            ServerCommand::Export {
+                path: "must-not-be-created.json".into(),
+                force: false,
+            },
+            ServerCommand::Update(EntryUpdate {
+                target: Target::Id(1),
+                update: EntryChanges::default(),
+                password: Some("synthetic-secret".into()),
+            }),
+        ] {
+            let outcome = execute_command(
+                test_connection_state(VaultSession::default()),
+                command,
+                &mut session,
+            );
+            assert_eq!(outcome.responses.len(), 1);
+            assert_eq!(outcome.responses[0].code, ResponseCode::Failure);
+            assert_eq!(outcome.responses[0].message, "Vault locked.");
+            assert!(matches!(outcome.effect, CommandEffect::None));
+        }
+    }
+    session.credentials.locked = true;
+    let stopped = execute_command(
+        test_connection_state(VaultSession::default()),
+        ServerCommand::Kill,
+        &mut session,
+    );
+    assert!(matches!(stopped.effect, CommandEffect::StopServer));
 }

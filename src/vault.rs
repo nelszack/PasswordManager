@@ -7,11 +7,10 @@ use crate::{
     file::{
         data_dir, file_exists, key_file_path, new_key_file_path, set_private_perms, sync_parent,
     },
-    server::ServerInfo,
     types::{
-        AuditOptions, ConflictPolicy, CustomField, EntryUpdate, ItemKind, ListOptions,
-        PasswordEntry, PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
-        UpdateArgs,
+        AuditOptions, ConflictPolicy, CustomField, EntryChanges, EntryUpdate, ItemKind,
+        ListOptions, PasswordEntry, PasswordType, SearchFilter, SortField, Target, TypedEntry,
+        TypedUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +26,11 @@ use tempfile::NamedTempFile;
 use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::{Zeroize, Zeroizing};
 
+mod session;
+#[cfg(test)]
+use VaultCredentials as ServerInfo;
+pub(crate) use session::available;
+pub use session::{VaultCredentials, VaultSession};
 mod error;
 pub use error::VaultError;
 mod recovery;
@@ -44,7 +48,7 @@ mod entries;
 mod export;
 
 mod persistence;
-use persistence::unlock_selected_vault;
+pub(crate) use persistence::unlock_selected_vault;
 pub(crate) use persistence::{create_vault, delete_vault};
 #[cfg(test)]
 use persistence::{find_vault, unlock_vault};
@@ -74,8 +78,41 @@ pub struct TrashView<'a> {
 }
 
 pub(crate) struct AuditOutcome {
-    pub report: String,
+    pub report: AuditReport,
     pub incomplete: bool,
+}
+
+/// Public audit findings contain labels and counts, never password hashes or secrets.
+#[derive(Debug, Serialize)]
+pub struct AuditLabel {
+    pub id: usize,
+    pub name: String,
+    pub username: Option<String>,
+    pub password_changed: String,
+}
+#[derive(Debug, Serialize)]
+pub struct AuditReport {
+    pub total: usize,
+    pub healthy: usize,
+    pub score: usize,
+    pub weak: Vec<AuditLabel>,
+    pub reused: Vec<Vec<AuditLabel>>,
+    pub duplicates: Vec<Vec<AuditLabel>>,
+    pub stale: Vec<AuditLabel>,
+    pub missing_totp: Vec<AuditLabel>,
+    pub breached: Vec<(AuditLabel, u64)>,
+    pub breach_error: Option<String>,
+    pub unchecked: Vec<AuditLabel>,
+}
+impl AuditEntrySnapshot {
+    fn label(&self) -> AuditLabel {
+        AuditLabel {
+            id: self.id,
+            name: self.name.clone(),
+            username: self.username.clone(),
+            password_changed: self.password_changed.clone(),
+        }
+    }
 }
 
 mod audit;
@@ -450,6 +487,14 @@ fn parse_entry_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
 }
 
+fn password_is_stale_at(changed: &str, days: u64, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(changed) = parse_entry_timestamp(changed) else {
+        return false;
+    };
+    now.signed_duration_since(changed)
+        >= chrono::Duration::days(i64::try_from(days).unwrap_or(i64::MAX))
+}
+
 #[derive(Serialize)]
 struct BackupEnvelopeRef<'a> {
     version: u8,
@@ -486,6 +531,11 @@ impl Vault {
 
     fn allocate_entry_id(&mut self) -> Result<usize, VaultError> {
         self.ensure_next_entry_id()?;
+        self.allocate_validated_entry_id()
+    }
+
+    // Bulk imports validate the counter once inside the rollback transaction.
+    fn allocate_validated_entry_id(&mut self) -> Result<usize, VaultError> {
         let id = self.recovery.next_entry_id;
         self.recovery.next_entry_id = id
             .checked_add(1)
@@ -521,19 +571,17 @@ impl Vault {
         )
     }
 
+    #[cfg(test)]
     fn password_changed<'a>(&'a self, entry: &'a VaultEntry) -> &'a str {
         self.metadata(entry.id)
             .and_then(|record| record.password_changed.as_deref())
             .unwrap_or(&entry.created)
     }
 
+    #[cfg(test)]
     fn password_is_stale(&self, entry: &VaultEntry, days: u64) -> bool {
         let changed = self.password_changed(entry);
-        let Some(changed) = parse_entry_timestamp(changed) else {
-            return false;
-        };
-        chrono::Utc::now().signed_duration_since(changed.with_timezone(&chrono::Utc))
-            >= chrono::Duration::days(i64::try_from(days).unwrap_or(i64::MAX))
+        password_is_stale_at(changed, days, chrono::Utc::now())
     }
 
     fn custom_fields(&self, entry_id: usize) -> &[CustomField] {
@@ -554,152 +602,6 @@ impl Vault {
     }
 }
 
-pub trait VaultAccess {
-    fn add_entry(
-        &mut self,
-        info: PasswordEntry,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, VaultError>;
-    fn add_typed_entry(
-        &mut self,
-        info: TypedEntry,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, VaultError>;
-    fn delete_entry(&mut self, id: Target, key_pass: &mut ServerInfo) -> Result<bool, VaultError>;
-    fn update_entry_with_limit(
-        &mut self,
-        update: EntryUpdate,
-        key_pass: &mut ServerInfo,
-        password_history_limit: usize,
-    ) -> Result<bool, VaultError>;
-    fn update_typed_entry_with_limit(
-        &mut self,
-        update: TypedUpdate,
-        key_pass: &mut ServerInfo,
-        password_history_limit: usize,
-    ) -> Result<bool, VaultError>;
-    fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), VaultError>;
-    fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), VaultError> {
-        self.unlock_vault_selected(key_pass, None)
-    }
-    fn unlock_vault_selected(
-        &mut self,
-        key_pass: &mut ServerInfo,
-        selected: Option<&str>,
-    ) -> Result<(), VaultError>;
-    fn export(&self, path: String, force: bool) -> Result<(), VaultError>;
-    fn import_with_options(
-        &mut self,
-        path: String,
-        conflicts: ConflictPolicy,
-        preview: bool,
-        password_history_limit: usize,
-        key_pass: &mut ServerInfo,
-    ) -> Result<ImportReport, VaultError>;
-}
-
-impl VaultAccess for Option<Vault> {
-    fn add_entry(
-        &mut self,
-        info: PasswordEntry,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, VaultError> {
-        match self {
-            Some(vlt) => vlt.add_entry(info, key_pass),
-            None => Err(VaultError::Locked),
-        }
-    }
-    fn add_typed_entry(
-        &mut self,
-        info: TypedEntry,
-        key_pass: &mut ServerInfo,
-    ) -> Result<bool, VaultError> {
-        match self {
-            Some(vlt) => vlt.add_typed_entry(info, key_pass),
-            None => Err(VaultError::Locked),
-        }
-    }
-    fn delete_entry(&mut self, id: Target, key_pass: &mut ServerInfo) -> Result<bool, VaultError> {
-        match self {
-            Some(vlt) => vlt.delete_entry(id, key_pass),
-            None => Err(VaultError::Locked),
-        }
-    }
-
-    fn update_entry_with_limit(
-        &mut self,
-        update: EntryUpdate,
-        key_pass: &mut ServerInfo,
-        password_history_limit: usize,
-    ) -> Result<bool, VaultError> {
-        match self {
-            Some(vault) => vault.update_entry_with_limit(update, key_pass, password_history_limit),
-            None => Err(VaultError::Locked),
-        }
-    }
-    fn update_typed_entry_with_limit(
-        &mut self,
-        update: TypedUpdate,
-        key_pass: &mut ServerInfo,
-        password_history_limit: usize,
-    ) -> Result<bool, VaultError> {
-        match self {
-            Some(vault) => {
-                vault.update_typed_entry_with_limit(update, key_pass, password_history_limit)
-            }
-            None => Err(VaultError::Locked),
-        }
-    }
-
-    fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), VaultError> {
-        if let Some(vlt) = self {
-            vlt.lock_vault(key_pass)?;
-        }
-        key_pass.zeroize();
-        Ok(())
-    }
-    fn unlock_vault_selected(
-        &mut self,
-        key_pass: &mut ServerInfo,
-        selected: Option<&str>,
-    ) -> Result<(), VaultError> {
-        if self.is_some() {
-            return Err(
-                ("a vault is already unlocked; lock it before unlocking another one".to_string())
-                    .into(),
-            );
-        }
-        *self = Some(unlock_selected_vault(key_pass, selected)?);
-        Ok(())
-    }
-
-    fn export(&self, path: String, force: bool) -> Result<(), VaultError> {
-        if let Some(vlt) = self {
-            vlt.export(path, force)
-        } else {
-            Err(VaultError::Locked)
-        }
-    }
-    fn import_with_options(
-        &mut self,
-        path: String,
-        conflicts: ConflictPolicy,
-        preview: bool,
-        password_history_limit: usize,
-        key_pass: &mut ServerInfo,
-    ) -> Result<ImportReport, VaultError> {
-        match self {
-            Some(vault) => vault.import_with_options(
-                path,
-                conflicts,
-                preview,
-                password_history_limit,
-                key_pass,
-            ),
-            None => Err(VaultError::Locked),
-        }
-    }
-}
 impl Zeroize for Vault {
     fn zeroize(&mut self) {
         self.entries.zeroize();

@@ -131,7 +131,7 @@ impl Vault {
     pub(super) fn transaction<T>(
         &mut self,
         scope: TransactionScope,
-        key: &mut ServerInfo,
+        key: &mut VaultCredentials,
         mutate: impl FnOnce(&mut Vault) -> Result<(bool, T), VaultError>,
     ) -> Result<T, VaultError> {
         let snapshot = Snapshot::capture(self, scope);
@@ -186,7 +186,7 @@ impl Vault {
     pub(super) fn purge_ids(
         &mut self,
         ids: HashSet<usize>,
-        key: &mut ServerInfo,
+        key: &mut VaultCredentials,
     ) -> Result<usize, VaultError> {
         self.transaction(TransactionScope::Recovery, key, |vault| {
             vault.recovery.trash.retain_mut(|r| {
@@ -250,7 +250,7 @@ mod tests {
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _: Result<(), VaultError> = vault.transaction(
                 TransactionScope::Entry(1),
-                &mut ServerInfo::default(),
+                &mut VaultCredentials::default(),
                 |vault| {
                     vault.entries.remove(0).zeroize();
                     vault.recovery.password_history.clear();
@@ -276,7 +276,7 @@ mod tests {
         });
         let before = vault.clone();
         // A cached key keeps this test independent of password derivation cost.
-        let mut key = ServerInfo {
+        let mut key = VaultCredentials {
             locked: false,
             keypass: Some(PasswordType::Session {
                 encryption_key: [42; 32],

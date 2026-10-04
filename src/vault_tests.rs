@@ -410,11 +410,9 @@ fn test_update_entry_returns_false_when_not_found() {
     for target in [Target::Name("nope".into()), Target::Id(0), Target::Id(100)] {
         let upd = EntryUpdate {
             target: target.clone(),
-            update: UpdateArgs {
+            update: EntryChanges {
                 name: Some("x".into()),
                 username: None,
-                password: false,
-                generate_password: false,
                 url: None,
                 notes: None,
             },
@@ -487,175 +485,102 @@ fn test_add_entry() {
     }
 }
 #[test]
-fn test_delete_id() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    vlt.delete_entry(
-        Target::Id(1),
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-    );
-    assert!(vlt.entries.is_empty());
-    assert_eq!(vlt.recovery.trash.len(), 1);
-    assert_eq!(vlt.recovery.trash[0].entry.name, "test");
-}
-#[test]
-fn test_delete_name() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    vlt.delete_entry(
-        Target::Name("test".into()),
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-    );
-    assert!(vlt.entries.is_empty());
-    assert_eq!(vlt.recovery.trash.len(), 1);
-    assert_eq!(vlt.recovery.trash[0].entry.name, "test");
-}
-#[test]
-fn test_update_id() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    vlt.update_entry_with_limit(
-        EntryUpdate {
-            target: Target::Id(1),
-            update: UpdateArgs {
-                name: Some(String::from("test2")),
-                username: Some(String::from("test2")),
-                password: false,
-                generate_password: false,
+fn test_delete_entry_by_id_or_name() {
+    for target in [Target::Id(1), Target::Name("test".into())] {
+        let mut vlt = Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
                 url: None,
                 notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
             },
-            password: None,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-        HISTORY_LIMIT,
-    );
-    let expected = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test2"),
-            username: Some(String::from("test2")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: vlt.entries[0].created.clone(),
-            modified: vlt.entries[0].modified.clone(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    assert_eq!(vlt, expected);
-    assert!(time_close(vlt.entries[0].modified.clone()))
+            recovery: RecoveryData::default(),
+        };
+        assert!(
+            vlt.delete_entry(
+                target.clone(),
+                &mut ServerInfo {
+                    locked: true,
+                    keypass: None,
+                },
+            )
+            .unwrap(),
+            "{target:?}"
+        );
+        assert!(vlt.entries.is_empty(), "{target:?}");
+        assert_eq!(vlt.recovery.trash.len(), 1, "{target:?}");
+        assert_eq!(vlt.recovery.trash[0].entry.name, "test", "{target:?}");
+    }
 }
+
 #[test]
-fn test_update_name() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    vlt.update_entry_with_limit(
-        EntryUpdate {
-            target: Target::Name(String::from("test")),
-            update: UpdateArgs {
-                name: Some(String::from("test2")),
-                username: Some(String::from("test2")),
-                password: false,
-                generate_password: false,
+fn test_update_entry_by_id_or_name() {
+    for target in [Target::Id(1), Target::Name("test".into())] {
+        let mut vlt = Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
                 url: None,
                 notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
             },
-            password: None,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-        HISTORY_LIMIT,
-    );
-    let expected = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test2"),
-            username: Some(String::from("test2")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: vlt.entries[0].created.clone(),
-            modified: vlt.entries[0].modified.clone(),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    assert_eq!(vlt, expected);
-    assert!(time_close(vlt.entries[0].modified.clone()))
+            recovery: RecoveryData::default(),
+        };
+        assert!(
+            vlt.update_entry_with_limit(
+                EntryUpdate {
+                    target: target.clone(),
+                    update: EntryChanges {
+                        name: Some(String::from("test2")),
+                        username: Some(String::from("test2")),
+                        url: None,
+                        notes: None,
+                    },
+                    password: None,
+                },
+                &mut ServerInfo {
+                    locked: true,
+                    keypass: None,
+                },
+                HISTORY_LIMIT,
+            )
+            .unwrap(),
+            "{target:?}"
+        );
+        let expected = Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                name: String::from("test2"),
+                username: Some(String::from("test2")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: vlt.entries[0].created.clone(),
+                modified: vlt.entries[0].modified.clone(),
+            }],
+            metadata: VaultMetadata {
+                filename: "test.enc".into(),
+            },
+            recovery: RecoveryData::default(),
+        };
+        assert_eq!(vlt, expected, "{target:?}");
+        assert!(time_close(vlt.entries[0].modified.clone()), "{target:?}");
+    }
 }
+
 #[test]
 fn test_export_import() {
     let mut vault = recovery_test_vault(vec![
@@ -959,7 +884,7 @@ fn test_import_new_persists_vault_to_disk() {
         )
         .unwrap();
 
-    vlt.lock_vault(&mut server_info);
+    vlt.as_ref().unwrap().lock_vault(&mut server_info);
 
     let vlt1 = unlock_vault(&mut ServerInfo {
         locked: true,
@@ -974,122 +899,99 @@ fn test_import_new_persists_vault_to_disk() {
     let _ = fs::remove_file(data_dir().join(fname));
 }
 #[test]
-fn test_lock_unlock_key() {
+fn test_lock_unlock_with_key_or_password() {
     init_test_data_dir();
     let key_directory = tempfile::tempdir().unwrap();
-    let temp = key_directory.path().join("test_lock_unlock_key.pem");
-    let key_path = temp.to_string_lossy().into_owned();
-    gen_master_key(&mut PasswordType::Key(key_path.clone()), true);
-    let filename = random_vault_filename();
-    let vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: filename.clone(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    let pass = PasswordType::Key(key_path.clone());
-    let pass1 = PasswordType::Key(key_path);
-    let mut info = ServerInfo {
-        locked: false,
-        keypass: Some(pass),
-    };
-    write_vault(&vlt, &mut info).unwrap();
-    vlt.lock_vault(&mut info).unwrap();
-    let vlt1 = unlock_vault(&mut ServerInfo {
-        locked: true,
-        keypass: Some(pass1),
-    })
-    .unwrap();
-    let data_path = data_dir();
-    let file_path = data_path.join(&filename);
-    fs::remove_file(temp).unwrap();
-    fs::remove_file(file_path).unwrap();
-    assert_eq!(vlt.entries, vlt1.entries);
-    assert_eq!(vlt.metadata, vlt1.metadata);
-    assert_eq!(vlt1.recovery.next_entry_id, 2);
-}
-#[test]
-fn test_lock_unlock_password() {
-    init_test_data_dir();
-    let filename = random_vault_filename();
-    let vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: Some(String::from("test")),
-            password: String::from("test123"),
-            url: None,
-            notes: None,
-            created: chrono::Local::now().to_string(),
-            modified: chrono::Local::now().to_string(),
-        }],
-        metadata: VaultMetadata {
-            filename: filename.clone(),
-        },
-        recovery: RecoveryData::default(),
-    };
-    let pass = PasswordType::Password("test_password1234!".to_string());
-    let pass1 = PasswordType::Password("test_password1234!".to_string());
-    let mut info = ServerInfo {
-        locked: false,
-        keypass: Some(pass),
-    };
-    write_vault(&vlt, &mut info).unwrap();
-    vlt.lock_vault(&mut info).unwrap();
-    let vlt1 = unlock_vault(&mut ServerInfo {
-        locked: true,
-        keypass: Some(pass1),
-    })
-    .unwrap();
-    let data_path = data_dir();
-    let file_path = data_path.join(&filename);
-    fs::remove_file(file_path).unwrap();
-    assert_eq!(vlt.entries, vlt1.entries);
-    assert_eq!(vlt.metadata, vlt1.metadata);
-    assert_eq!(vlt1.recovery.next_entry_id, 2);
+    let key_path = key_directory.path().join("lock-unlock.key");
+    let key = PasswordType::Key(key_path.to_string_lossy().into_owned());
+    gen_master_key(&mut key.clone(), true);
+    for (label, credential) in [
+        ("key", key),
+        (
+            "password",
+            PasswordType::Password("test_password1234!".into()),
+        ),
+    ] {
+        let filename = random_vault_filename();
+        let vlt = Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                name: String::from("test"),
+                username: Some(String::from("test")),
+                password: String::from("test123"),
+                url: None,
+                notes: None,
+                created: chrono::Local::now().to_string(),
+                modified: chrono::Local::now().to_string(),
+            }],
+            metadata: VaultMetadata {
+                filename: filename.clone(),
+            },
+            recovery: RecoveryData::default(),
+        };
+        let mut info = ServerInfo {
+            locked: false,
+            keypass: Some(credential.clone()),
+        };
+        write_vault(&vlt, &mut info).unwrap();
+        vlt.lock_vault(&mut info).unwrap();
+        let vlt1 = unlock_vault(&mut ServerInfo {
+            locked: true,
+            keypass: Some(credential),
+        })
+        .unwrap();
+        let data_path = data_dir();
+        let file_path = data_path.join(&filename);
+        fs::remove_file(file_path).unwrap();
+        assert_eq!(vlt.entries, vlt1.entries, "{label}");
+        assert_eq!(vlt.metadata, vlt1.metadata, "{label}");
+        assert_eq!(vlt1.recovery.next_entry_id, 2, "{label}");
+    }
 }
 
 #[test]
-fn test_create_vault_key() {
+fn test_create_vault_with_key_or_password() {
     init_test_data_dir();
     for locked in [false, true] {
         let key_directory = tempfile::tempdir().unwrap();
         let key_path = key_directory.path().join("create-vault.key");
-        let credential = PasswordType::Key(key_path.to_string_lossy().into_owned());
-        let mut vault = None;
-        let mut server_info = ServerInfo {
-            locked: true,
-            keypass: Some(credential.clone()),
-        };
-        create_vault(&mut vault, &mut server_info, locked).unwrap();
-        let (filename, mut stored) = find_vault(&mut credential.clone()).unwrap();
-        stored.zeroize();
-        if locked {
-            assert!(vault.is_none());
+        let password = if locked {
+            "Cedar-Lantern-Quartz-4821!"
         } else {
-            assert_eq!(
-                vault,
-                Some(Vault {
-                    entries: Vec::new(),
-                    metadata: VaultMetadata {
-                        filename: filename.clone()
-                    },
-                    recovery: RecoveryData::default(),
-                })
-            );
+            "Cedar-Lantern-Quartz-9274!"
+        };
+        for (label, credential) in [
+            (
+                "key",
+                PasswordType::Key(key_path.to_string_lossy().into_owned()),
+            ),
+            ("password", PasswordType::Password(password.into())),
+        ] {
+            let mut vault = None;
+            let mut server_info = ServerInfo {
+                locked: true,
+                keypass: Some(credential.clone()),
+            };
+            create_vault(&mut vault, &mut server_info, locked).unwrap();
+            let (filename, mut stored) = find_vault(&mut credential.clone()).unwrap();
+            stored.zeroize();
+            if locked {
+                assert!(vault.is_none(), "{label}, locked={locked}");
+            } else {
+                assert_eq!(
+                    vault,
+                    Some(Vault {
+                        entries: Vec::new(),
+                        metadata: VaultMetadata {
+                            filename: filename.clone()
+                        },
+                        recovery: RecoveryData::default(),
+                    }),
+                    "{label}, locked={locked}"
+                );
+            }
+            fs::remove_file(data_dir().join(filename)).unwrap();
         }
-        fs::remove_file(data_dir().join(filename)).unwrap();
-        fs::remove_file(key_path).unwrap();
     }
 }
 
@@ -1118,44 +1020,6 @@ fn delete_key_vault_applies_the_requested_key_retention_policy() {
             keep_key,
             "keep_key={keep_key}"
         );
-    }
-}
-
-#[test]
-fn test_create_vault_password() {
-    init_test_data_dir();
-    for locked in [false, true] {
-        let credential = PasswordType::Password(
-            if locked {
-                "Cedar-Lantern-Quartz-4821!"
-            } else {
-                "Cedar-Lantern-Quartz-9274!"
-            }
-            .into(),
-        );
-        let mut vault = None;
-        let mut server_info = ServerInfo {
-            locked: true,
-            keypass: Some(credential.clone()),
-        };
-        create_vault(&mut vault, &mut server_info, locked).unwrap();
-        let (filename, mut stored) = find_vault(&mut credential.clone()).unwrap();
-        stored.zeroize();
-        if locked {
-            assert!(vault.is_none());
-        } else {
-            assert_eq!(
-                vault,
-                Some(Vault {
-                    entries: Vec::new(),
-                    metadata: VaultMetadata {
-                        filename: filename.clone()
-                    },
-                    recovery: RecoveryData::default(),
-                })
-            );
-        }
-        fs::remove_file(data_dir().join(filename)).unwrap();
     }
 }
 
@@ -1411,11 +1275,9 @@ fn test_update_individual_and_all_fields() {
         initial.created = chrono::Local::now().to_string();
         initial.modified = initial.created.clone();
         let mut vault = recovery_test_vault(vec![initial.clone()]);
-        let update = UpdateArgs {
+        let update = EntryChanges {
             name: all.then(|| "new_name".into()),
             username: all.then(|| "new_user".into()),
-            password: all || field == "password",
-            generate_password: false,
             url: (all || field == "url").then(|| {
                 if all {
                     "https://new.com"
@@ -1427,9 +1289,8 @@ fn test_update_individual_and_all_fields() {
             notes: (all || field == "notes")
                 .then(|| if all { "new notes" } else { "important notes" }.into()),
         };
-        let password = update
-            .password
-            .then(|| if all { "new_pass" } else { "newpass" }.into());
+        let password =
+            (all || field == "password").then(|| if all { "new_pass" } else { "newpass" }.into());
         assert!(
             vault
                 .update_entry_with_limit(
@@ -1511,11 +1372,9 @@ fn test_update_no_changes() {
     vlt.update_entry_with_limit(
         EntryUpdate {
             target: Target::Id(1),
-            update: UpdateArgs {
+            update: EntryChanges {
                 name: None,
                 username: None,
-                password: false,
-                generate_password: false,
                 url: None,
                 notes: None,
             },
@@ -1561,11 +1420,9 @@ fn password_updates_create_restorable_history() {
         .update_entry_with_limit(
             EntryUpdate {
                 target: Target::Id(1),
-                update: UpdateArgs {
+                update: EntryChanges {
                     name: None,
                     username: None,
-                    password: true,
-                    generate_password: false,
                     url: None,
                     notes: None,
                 },
@@ -1794,11 +1651,9 @@ fn typed_add_and_update_persist_item_metadata_by_stable_id() {
                 TypedUpdate {
                     entry: EntryUpdate {
                         target: Target::Id(entry_id),
-                        update: UpdateArgs {
+                        update: EntryChanges {
                             name: None,
                             username: None,
-                            password: false,
-                            generate_password: false,
                             url: None,
                             notes: None,
                         },
@@ -2638,9 +2493,13 @@ fn audit_reports_weak_reused_and_duplicate_logins_without_passwords() {
         recovery_test_entry(1, "first", "alice", "secret"),
         recovery_test_entry(2, "second", "alice", "secret"),
     ]);
-    let report = vault
+    let findings = vault
         .audit_snapshot(&AuditOptions::default())
-        .report(None, None);
+        .findings(None, None);
+    assert_eq!(findings.weak.len(), 2);
+    assert_eq!(findings.reused.len(), 1);
+    assert_eq!(findings.duplicates.len(), 1);
+    let report = crate::server::presentation::audit(&findings);
     assert!(report.contains("2 weak entries"));
     assert!(report.contains("1 reused-password groups"));
     assert!(report.contains("1 duplicate-login groups"));
@@ -2667,7 +2526,19 @@ fn audit_reports_stale_missing_totp_and_breached_passwords() {
         check_breaches: true,
         require_totp: true,
     };
-    let report = vault.audit_snapshot(&options).report(Some(&breached), None);
+    let findings = vault
+        .audit_snapshot(&options)
+        .findings(Some(&breached), None);
+    assert_eq!(findings.score, 0);
+    assert_eq!(findings.stale[0].id, 7);
+    assert_eq!(findings.missing_totp[0].id, 7);
+    assert_eq!(findings.breached[0].1, 42);
+    assert!(
+        !serde_json::to_string(&findings)
+            .unwrap()
+            .contains("known-breached-value")
+    );
+    let report = crate::server::presentation::audit(&findings);
     assert!(report.contains("Stale password: 7. old account"));
     assert!(report.contains("Missing TOTP: 7. old account"));
     assert!(report.contains("Breached password: 7. old account (seen 42 times)"));

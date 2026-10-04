@@ -1,6 +1,24 @@
 use super::browser::url_match_json;
 use super::*;
 
+struct EntryIndexes<'a> {
+    metadata: HashMap<usize, &'a EntryMetadata>,
+    totp: HashSet<usize>,
+}
+
+impl<'a> EntryIndexes<'a> {
+    fn new(recovery: &'a RecoveryData) -> Self {
+        Self {
+            metadata: recovery
+                .entry_metadata
+                .iter()
+                .map(|r| (r.entry_id, r))
+                .collect(),
+            totp: recovery.totp.iter().map(|r| r.entry_id).collect(),
+        }
+    }
+}
+
 impl Vault {
     pub(super) fn is_weak(&self, entry: &VaultEntry) -> bool {
         !entry.password.is_empty()
@@ -8,23 +26,24 @@ impl Vault {
                 <= zxcvbn::Score::Two
     }
 
+    #[cfg(test)]
     pub(super) fn apply_list_options<'a>(
+        &'a self,
+        entries: Vec<&'a VaultEntry>,
+        options: &ListOptions,
+    ) -> Vec<&'a VaultEntry> {
+        self.apply_list_options_indexed(entries, options, &EntryIndexes::new(&self.recovery))
+    }
+
+    fn apply_list_options_indexed<'a>(
         &'a self,
         mut entries: Vec<&'a VaultEntry>,
         options: &ListOptions,
+        indexes: &EntryIndexes<'a>,
     ) -> Vec<&'a VaultEntry> {
-        let metadata_by_id: HashMap<_, _> = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .map(|record| (record.entry_id, record))
-            .collect();
-        let totp_ids: HashSet<_> = self
-            .recovery
-            .totp
-            .iter()
-            .map(|record| record.entry_id)
-            .collect();
+        let metadata_by_id = &indexes.metadata;
+        let totp_ids = &indexes.totp;
+        let now = chrono::Utc::now();
         entries.retain(|entry| {
             options.kind.is_none_or(|kind| {
                 metadata_by_id
@@ -35,9 +54,16 @@ impl Vault {
                 .has_totp
                 .is_none_or(|expected| totp_ids.contains(&entry.id) == expected)
                 && (!options.weak || self.is_weak(entry))
-                && options
-                    .stale_days
-                    .is_none_or(|days| self.password_is_stale(entry, days))
+                && options.stale_days.is_none_or(|days| {
+                    password_is_stale_at(
+                        self.password_changed_with_metadata(
+                            entry,
+                            metadata_by_id.get(&entry.id).copied(),
+                        ),
+                        days,
+                        now,
+                    )
+                })
         });
         if options.sort == SortField::Name {
             if options.descending {
@@ -83,14 +109,13 @@ impl Vault {
             .unwrap_or(&entry.created)
     }
 
-    fn entry_views<'a>(&'a self, entries: Vec<&'a VaultEntry>) -> Vec<EntryView<'a>> {
-        let metadata: HashMap<_, _> = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .map(|r| (r.entry_id, r))
-            .collect();
-        let totp: HashSet<_> = self.recovery.totp.iter().map(|r| r.entry_id).collect();
+    fn entry_views<'a>(
+        &'a self,
+        entries: Vec<&'a VaultEntry>,
+        indexes: &EntryIndexes<'a>,
+    ) -> Vec<EntryView<'a>> {
+        let metadata = &indexes.metadata;
+        let totp = &indexes.totp;
         entries
             .into_iter()
             .map(|entry| EntryView {
@@ -116,14 +141,25 @@ impl Vault {
         if self.entries.is_empty() {
             return Ok(Vec::new());
         }
-        let entries = self.apply_list_options(self.entries.iter().collect(), &options);
+        let indexes = EntryIndexes::new(&self.recovery);
+        let entries =
+            self.apply_list_options_indexed(self.entries.iter().collect(), &options, &indexes);
         if entries.is_empty() {
             return Err(VaultError::NotFound("No matching entries.".into()));
         }
-        Ok(self.entry_views(entries))
+        Ok(self.entry_views(entries, &indexes))
     }
 
+    #[cfg(test)]
     pub(super) fn search_entries(&self, filter: &SearchFilter) -> Vec<&VaultEntry> {
+        self.search_entries_indexed(filter, &EntryIndexes::new(&self.recovery))
+    }
+
+    fn search_entries_indexed<'a>(
+        &'a self,
+        filter: &SearchFilter,
+        indexes: &EntryIndexes<'a>,
+    ) -> Vec<&'a VaultEntry> {
         fn field_matches(value: Option<&str>, needle: Option<&String>) -> bool {
             needle.is_none_or(|needle| {
                 value.is_some_and(|value| value.to_lowercase().contains(needle))
@@ -135,12 +171,7 @@ impl Vault {
         let username = filter.username.as_ref().map(|value| value.to_lowercase());
         let url = filter.url.as_ref().map(|value| value.to_lowercase());
         let notes = filter.notes.as_ref().map(|value| value.to_lowercase());
-        let metadata_by_id: HashMap<_, _> = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .map(|record| (record.entry_id, record))
-            .collect();
+        let metadata_by_id = &indexes.metadata;
         self.entries
             .iter()
             .filter(|entry| {
@@ -197,11 +228,16 @@ impl Vault {
     }
 
     pub fn search(&self, filter: SearchFilter) -> Result<Vec<EntryView<'_>>, VaultError> {
-        let entries = self.apply_list_options(self.search_entries(&filter), &filter.list);
+        let indexes = EntryIndexes::new(&self.recovery);
+        let entries = self.apply_list_options_indexed(
+            self.search_entries_indexed(&filter, &indexes),
+            &filter.list,
+            &indexes,
+        );
         if entries.is_empty() {
             return Err(VaultError::NotFound("No matching entries.".into()));
         }
-        Ok(self.entry_views(entries))
+        Ok(self.entry_views(entries, &indexes))
     }
 
     pub fn get_entry(&self, target: &Target) -> Result<EntryOutput<'_>, VaultError> {
@@ -259,5 +295,82 @@ impl Vault {
             .find(|field| field.name.eq_ignore_ascii_case(name))
             .map(|field| Zeroizing::new(field.value.clone()))
             .ok_or_else(|| VaultError::NotFound("Custom field not found.".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_search_and_views_preserve_metadata_filters_and_secret_redaction() {
+        let mut vault = Vault::default();
+        vault.entries = (1..=3)
+            .map(|id| VaultEntry {
+                id,
+                name: format!("Login {id}"),
+                created: "2020-01-01T00:00:00Z".into(),
+                ..Default::default()
+            })
+            .collect();
+        vault.recovery.entry_metadata = vec![
+            EntryMetadata {
+                entry_id: 1,
+                password_changed: Some("2999-01-01T00:00:00Z".into()),
+                ..Default::default()
+            },
+            EntryMetadata {
+                entry_id: 2,
+                additional_urls: vec!["https://indexed.example".into()],
+                custom_fields: vec![CustomField {
+                    name: "recovery".into(),
+                    value: "secret-value".into(),
+                    secret: true,
+                }],
+                ..Default::default()
+            },
+        ];
+        vault.recovery.totp.push(TotpRecord {
+            entry_id: 2,
+            configuration: "synthetic".into(),
+        });
+        let options = ListOptions {
+            stale_days: Some(365),
+            has_totp: Some(true),
+            ..Default::default()
+        };
+        let views = vault.view_entries(options.clone()).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].entry.id, 2);
+        assert!(views[0].has_totp);
+        assert_eq!(views[0].urls, vec!["https://indexed.example"]);
+        let results = vault
+            .search(SearchFilter {
+                query: Some("indexed.example".into()),
+                list: options,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.id, 2);
+        assert!(
+            vault
+                .search(SearchFilter {
+                    query: Some("secret-value".into()),
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert_eq!(
+            vault
+                .search(SearchFilter {
+                    query: Some("recovery".into()),
+                    ..Default::default()
+                })
+                .unwrap()[0]
+                .entry
+                .id,
+            2
+        );
     }
 }

@@ -5,7 +5,7 @@ impl Vault {
         &mut self,
         target: Target,
         configuration: &str,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<Option<usize>, VaultError> {
         let Some(index) = self.entry_index(&target) else {
             return Ok(None);
@@ -30,7 +30,7 @@ impl Vault {
     pub fn remove_totp(
         &mut self,
         target: Target,
-        key_pass: &mut ServerInfo,
+        key_pass: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let Some(index) = self.entry_index(&target) else {
             return Ok(false);
