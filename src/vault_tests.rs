@@ -1121,7 +1121,7 @@ fn test_rekey_replaces_vault_and_new_password_unlocks() {
         .rekey(&mut server_info, new_password.clone())
         .unwrap();
     let new_path = data_dir().join(&vault.as_ref().unwrap().metadata.filename);
-    assert!(!old_path.exists());
+    assert_eq!(old_path, new_path);
     assert!(new_path.exists());
     let mut unlock_info = ServerInfo {
         locked: true,
@@ -2607,7 +2607,7 @@ fn production_kdf_covers_vault_unlock_rekey_backup_restore_and_tamper_workflows(
             .rekey(&mut old_unlock, PasswordType::Password(new_password))
             .unwrap();
         let rekeyed_filename = unlocked.metadata.filename.clone();
-        assert!(!data_dir().join(original_filename).exists());
+        assert_eq!(original_filename, rekeyed_filename);
 
         let backup_path = directory.path().join("production.pmbackup");
         let tampered_path = directory.path().join("production-tampered.pmbackup");

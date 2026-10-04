@@ -8,6 +8,8 @@ pub enum VaultError {
     InvalidInput(String),
     Conflict(String),
     Persistence(String),
+    /// The replacement is visible, but directory sync failed. Do not roll back.
+    Durability(String),
     Validation(String),
 }
 
@@ -19,6 +21,7 @@ impl fmt::Display for VaultError {
             | Self::InvalidInput(message)
             | Self::Conflict(message)
             | Self::Persistence(message)
+            | Self::Durability(message)
             | Self::Validation(message) => f.write_str(message),
         }
     }
@@ -36,6 +39,10 @@ impl From<&str> for VaultError {
 }
 
 impl VaultError {
+    pub fn committed(&self) -> bool {
+        matches!(self, Self::Durability(_))
+    }
+
     pub(super) fn context(self, context: impl fmt::Display) -> Self {
         let message = format!("{context}: {self}");
         match self {
@@ -44,6 +51,7 @@ impl VaultError {
             Self::InvalidInput(_) => Self::InvalidInput(message),
             Self::Conflict(_) => Self::Conflict(message),
             Self::Persistence(_) => Self::Persistence(message),
+            Self::Durability(_) => Self::Durability(message),
             Self::Validation(_) => Self::Validation(message),
         }
     }

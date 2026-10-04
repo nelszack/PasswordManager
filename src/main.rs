@@ -1,16 +1,3 @@
-mod cli;
-mod client;
-mod clipboard;
-mod config;
-mod docs;
-mod encryption;
-mod file;
-mod native_messaging;
-mod password;
-mod protocol;
-mod server;
-mod types;
-mod vault;
 use crate::{
     cli::{
         BackupCommands, Cli, CliCommands, DeleteArgs, EntryArgs, NativeHostCommands, TotpCommands,
@@ -32,6 +19,10 @@ use crate::{
 };
 use clap::CommandFactory;
 use clap_complete::generate;
+use password_manager::{
+    cli, client, clipboard, config, docs, encryption, file, native_messaging, password, server,
+    types, vault,
+};
 use std::fs;
 
 fn target_type(target: EntryArgs) -> Target {
@@ -98,6 +89,16 @@ fn resolved_key(path: String) -> PasswordType {
 #[tokio::main]
 async fn main() {
     let invoked_as_native_host = native_messaging::invoked_directly();
+    let cli = (!invoked_as_native_host).then(cli_parse);
+    if let Some(CliCommands::ClipboardHelper { timeout }) =
+        cli.as_ref().and_then(|cli| cli.command.as_ref())
+    {
+        if let Err(error) = clipboard::run_helper(*timeout) {
+            eprintln!("Clipboard helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let config_path = config_dir();
     let data_path = data_dir();
     if let Err(error) =
@@ -122,7 +123,7 @@ async fn main() {
         }
         return;
     }
-    let cli = cli_parse();
+    let cli = cli.expect("native host returned before CLI dispatch");
     client::configure_output(cli.json, cli.quiet);
     let conf = match try_read_config(&config_file) {
         Ok(config) => config,
@@ -142,6 +143,15 @@ async fn main() {
         return;
     };
     match (command, server_running) {
+        (CliCommands::Vaults, _) => match vault::list_vaults() {
+            Ok(names) => client::print_success(&names.join("\n")),
+            Err(error) => client::exit_error(&error.to_string(), 1),
+        },
+        (CliCommands::ClipboardHelper { timeout }, _) => {
+            if let Err(error) = clipboard::run_helper(timeout) {
+                client::exit_error(&error, 1);
+            }
+        }
         (CliCommands::GenerateCommandReference { check }, _) => {
             if let Err(error) = docs::generate_command_reference(check) {
                 client::exit_error(&error, 1);
@@ -295,8 +305,21 @@ async fn main() {
         (CliCommands::Lock, true) => {
             send_command(ServerCommand::Lock(true));
         }
-        (CliCommands::Unlock { key, timeout }, true) => {
+        (
+            CliCommands::Unlock {
+                key,
+                timeout,
+                vault_file,
+            },
+            true,
+        ) => {
+            if let Some(name) = &vault_file
+                && let Err(error) = vault::validate_vault_filename(name)
+            {
+                client::exit_error(&error.to_string(), 2);
+            }
             send_command(ServerCommand::Unlock(UnlockInfo {
+                vault_file,
                 key: if let Some(k) = key {
                     resolved_key(k)
                 } else {

@@ -346,3 +346,142 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert!(run(root.path(), port, &["kill"]).status.success());
     server.active = false;
 }
+
+#[test]
+fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    let first_key = root.path().join("first.key").display().to_string();
+    let second_key = root.path().join("second.key").display().to_string();
+    let replacement_key = root.path().join("replacement.key").display().to_string();
+    let initial = isolated_pm(root.path())
+        .args(["--json", "vaults"])
+        .output()
+        .unwrap();
+    assert!(initial.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&initial.stdout).unwrap()["output"],
+        ""
+    );
+
+    assert!(run(root.path(), port, &["start"]).status.success());
+    let _guard = ServerGuard {
+        root: root.path().into(),
+        port,
+        active: true,
+    };
+    assert!(
+        run(root.path(), port, &["new", "--key", &first_key])
+            .status
+            .success()
+    );
+    let listed = run(root.path(), port, &["--json", "vaults"]);
+    let first_id = serde_json::from_slice::<serde_json::Value>(&listed.stdout).unwrap()["output"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(first_id.ends_with(".enc"));
+    assert!(
+        run(root.path(), port, &["new", "--key", &second_key])
+            .status
+            .success()
+    );
+
+    let missing = run(
+        root.path(),
+        port,
+        &["unlock", "--vault-file", "missing.enc", "--key", &first_key],
+    );
+    assert_eq!(missing.status.code(), Some(3));
+    let traversal = run(
+        root.path(),
+        port,
+        &[
+            "unlock",
+            "--vault-file",
+            "../other.enc",
+            "--key",
+            &first_key,
+        ],
+    );
+    assert_eq!(traversal.status.code(), Some(2));
+    let missing_key = root.path().join("absent.key").display().to_string();
+    let unreadable = run(
+        root.path(),
+        port,
+        &["unlock", "--vault-file", &first_id, "--key", &missing_key],
+    );
+    assert_eq!(unreadable.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("could not read key file"));
+    let wrong_key = run(
+        root.path(),
+        port,
+        &["unlock", "--vault-file", &first_id, "--key", &second_key],
+    );
+    assert_eq!(wrong_key.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&wrong_key.stderr).contains("incorrect password/key or modified")
+    );
+
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["unlock", "--vault-file", &first_id, "--key", &first_key]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(root.path(), port, &["rekey", "--key", &replacement_key])
+            .status
+            .success()
+    );
+    assert!(run(root.path(), port, &["lock"]).status.success());
+    assert_eq!(
+        run(
+            root.path(),
+            port,
+            &["unlock", "--vault-file", &first_id, "--key", &first_key]
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+    assert!(
+        run(
+            root.path(),
+            port,
+            &[
+                "unlock",
+                "--vault-file",
+                &first_id,
+                "--key",
+                &replacement_key
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(run(root.path(), port, &["lock"]).status.success());
+    // Corrupting one vault does not block selecting an unrelated healthy vault.
+    std::fs::write(root.path().join("data").join(&first_id), b"invalid header").unwrap();
+    let damaged = run(
+        root.path(),
+        port,
+        &[
+            "unlock",
+            "--vault-file",
+            &first_id,
+            "--key",
+            &replacement_key,
+        ],
+    );
+    assert_eq!(damaged.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("truncated encrypted vault header"));
+    assert!(
+        run(root.path(), port, &["unlock", "--key", &second_key])
+            .status
+            .success()
+    );
+}

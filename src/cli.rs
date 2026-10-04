@@ -124,6 +124,9 @@ pub enum CliCommands {
         after_help = "Examples:\n  pm unlock\n  pm unlock --timeout 30m\n  pm unlock --key ./keys/vault.key"
     )]
     Unlock {
+        /// Open only this .enc filename from `pm vaults`, avoiding a full scan.
+        #[arg(long)]
+        vault_file: Option<String>,
         /// Read the vault key from this file instead of prompting for a password.
         ///
         /// Relative paths resolve from the current directory.
@@ -133,7 +136,15 @@ pub enum CliCommands {
         #[command(flatten)]
         timeout: Timeout,
     },
-    /// Encrypt the in-memory vault and remove its key material from the server.
+    /// List opaque vault filenames without decrypting them or requiring a server.
+    Vaults,
+    /// Internal detached clipboard owner. Secrets arrive only over stdin.
+    #[command(hide = true)]
+    ClipboardHelper {
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
+        timeout: u8,
+    },
+    /// Remove decrypted vault/key material and clear the server-owned clipboard copy.
     Lock,
     /// Report whether the running server's vault is locked or unlocked.
     Status,
@@ -146,7 +157,7 @@ pub enum CliCommands {
         #[command(subcommand)]
         command: NativeHostCommands,
     },
-    /// Persist and lock the vault, then stop the background server.
+    /// Lock the vault, clear its clipboard copy, and stop the background server.
     Kill,
     /// Move an entry to encrypted trash, or permanently delete an entire vault.
     #[command(

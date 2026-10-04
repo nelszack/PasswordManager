@@ -91,6 +91,7 @@ Supplying no options displays the effective configuration. Boolean settings acce
       <p>Unlock a vault using a prompted master password or an existing key file</p>
       <pre><code>Usage: pm unlock [OPTIONS]</code></pre>
       <dl class="flags">
+        <dt><code>--vault-file &lt;VAULT_FILE&gt;</code></dt><dd>Open only this .enc filename from `pm vaults`, avoiding a full scan</dd>
         <dt><code>--key &lt;KEY&gt;</code></dt><dd>Read the vault key from this file instead of prompting for a password.
 
 Relative paths resolve from the current directory.</dd>
@@ -99,9 +100,14 @@ Relative paths resolve from the current directory.</dd>
 Zero disables automatic locking for this unlock session. If omitted, uses the configured unlock timeout.</dd>
       </dl>
     </section>
+    <section class="command" id="pm-vaults">
+      <h2><code>pm vaults</code></h2>
+      <p>List opaque vault filenames without decrypting them or requiring a server</p>
+      <pre><code>Usage: pm vaults</code></pre>
+    </section>
     <section class="command" id="pm-lock">
       <h2><code>pm lock</code></h2>
-      <p>Encrypt the in-memory vault and remove its key material from the server</p>
+      <p>Remove decrypted vault/key material and clear the server-owned clipboard copy</p>
       <pre><code>Usage: pm lock</code></pre>
     </section>
     <section class="command" id="pm-status">
@@ -130,7 +136,7 @@ Zero disables automatic locking for this unlock session. If omitted, uses the co
     </section>
     <section class="command" id="pm-kill">
       <h2><code>pm kill</code></h2>
-      <p>Persist and lock the vault, then stop the background server</p>
+      <p>Lock the vault, clear its clipboard copy, and stop the background server</p>
       <pre><code>Usage: pm kill</code></pre>
     </section>
     <section class="command" id="pm-delete">

@@ -70,7 +70,9 @@ fn domain_code(error: &crate::vault::VaultError) -> ResponseCode {
         VaultError::NotFound(_) => ResponseCode::NotFound,
         VaultError::InvalidInput(_) | VaultError::Validation(_) => ResponseCode::InvalidInput,
         VaultError::Conflict(_) => ResponseCode::Conflict,
-        VaultError::Locked | VaultError::Persistence(_) => ResponseCode::Failure,
+        VaultError::Locked | VaultError::Persistence(_) | VaultError::Durability(_) => {
+            ResponseCode::Failure
+        }
     }
 }
 

@@ -2,3 +2,7 @@
 /node_modules
 /playwright-report
 /test-results
+
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts

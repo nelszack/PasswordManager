@@ -112,7 +112,10 @@ jobs:
           package="pm-${RELEASE_TAG}-${{ matrix.target }}"
           mkdir -p "dist/$package/completions"
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/$package/"
-          cp README.md "dist/$package/"
+          cp README.md SECURITY.md "dist/$package/"
+          cp -R docs "dist/$package/"
+          mkdir -p "dist/$package/fuzz"
+          cp fuzz/README.md "dist/$package/fuzz/"
           cp -R extension "dist/$package/"
           cp release-completions/* "dist/$package/completions/"
           tar -czf "dist/$package.tar.gz" -C dist "$package"
@@ -125,7 +128,10 @@ jobs:
           $Package = "pm-$env:RELEASE_TAG-${{ matrix.target }}"
           New-Item -ItemType Directory -Force "dist/$Package/completions" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/$Package/"
-          Copy-Item README.md "dist/$Package/"
+          Copy-Item README.md, SECURITY.md "dist/$Package/"
+          Copy-Item -Recurse docs "dist/$Package/"
+          New-Item -ItemType Directory -Force "dist/$Package/fuzz" | Out-Null
+          Copy-Item fuzz/README.md "dist/$Package/fuzz/"
           Copy-Item -Recurse extension "dist/$Package/"
           Copy-Item "release-completions/*" "dist/$Package/completions/"
           Compress-Archive -Path "dist/$Package" -DestinationPath "dist/$Package.zip"

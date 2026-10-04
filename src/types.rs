@@ -50,6 +50,7 @@ impl Zeroize for UnlockInfo {
     fn zeroize(&mut self) {
         self.key.zeroize();
         self.timeout.zeroize();
+        self.vault_file.zeroize();
     }
 }
 
@@ -317,12 +318,15 @@ impl Zeroize for BackupRequest {
 pub struct UnlockInfo {
     pub key: PasswordType,
     pub timeout: u64,
+    #[serde(default)]
+    pub vault_file: Option<String>,
 }
 
 impl std::fmt::Debug for UnlockInfo {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("UnlockInfo")
+            .field("vault_file", &self.vault_file)
             .field("key", &"<redacted>")
             .field("timeout", &self.timeout)
             .finish()
@@ -635,6 +639,7 @@ mod test {
 
         let master_secret = "master-password-that-must-not-leak";
         let unlock = ServerCommand::Unlock(UnlockInfo {
+            vault_file: None,
             key: PasswordType::Password(master_secret.into()),
             timeout: 60,
         });
@@ -670,6 +675,7 @@ mod test {
     #[test]
     fn sensitive_commands_are_zeroized_after_transport_encoding() {
         let mut command = ServerCommand::Unlock(UnlockInfo {
+            vault_file: None,
             key: PasswordType::Password("master-secret".into()),
             timeout: 60,
         });
@@ -679,6 +685,7 @@ mod test {
             ServerCommand::Unlock(UnlockInfo {
                 key: PasswordType::Password(ref password),
                 timeout: 0,
+                vault_file: None,
             }) if password.is_empty()
         ));
 
@@ -699,5 +706,27 @@ mod test {
                 ..
             }) if password.is_empty() && notes.as_deref().is_none_or(str::is_empty)
         ));
+    }
+}
+
+#[cfg(test)]
+mod unlock_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn old_unlock_messages_default_to_automatic_discovery() {
+        #[derive(Serialize)]
+        struct OldUnlockInfo {
+            key: PasswordType,
+            timeout: u64,
+        }
+        let bytes = rmp_serde::to_vec(&OldUnlockInfo {
+            key: PasswordType::Password("synthetic".into()),
+            timeout: 30,
+        })
+        .unwrap();
+        let decoded: UnlockInfo = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(decoded.vault_file.is_none());
+        assert_eq!(decoded.timeout, 30);
     }
 }

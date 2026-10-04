@@ -22,7 +22,7 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **TOTP Authenticator**: Encrypted per-entry authenticator secrets with current-code generation
 - **Browser Extension**: Login, payment-card, identity, and TOTP autofill with save/update prompts
 - **In-page Password Generation**: Fill new-password and confirmation fields securely
-- **Clipboard Integration**: Secure clipboard with auto-clear timeout
+- **Clipboard Integration**: Prompt copy completion, coordinated auto-clear, and lock cleanup
 - **Import/Export**: Interoperable CSV plus versioned, full-fidelity portable JSON
 - **Import Planning**: Non-mutating previews with skip, replace, and keep-both policies
 - **Encrypted Backups**: Versioned, authenticated full-vault backup and disaster recovery
@@ -281,12 +281,28 @@ pm lock
 pm unlock --timeout 15m
 ```
 
+To avoid trying every vault's password KDF, list the opaque vault IDs and select
+one explicitly. Listing works without a running server and does not decrypt files:
+
+```bash
+pm vaults
+pm unlock --vault-file 0123456789abcdef0123456789abcdef.enc
+pm unlock --vault-file 0123456789abcdef0123456789abcdef.enc --key ./keys/vault.key
+```
+
+The selector accepts one `.enc` filename from the application data directory.
+Missing files, unreadable keys, invalid headers, unsupported versions, and invalid
+authenticated records produce specific errors. A wrong password and modified
+ciphertext cannot be distinguished by authentication alone. Omitting the selector
+retains automatic vault discovery.
+
 The timeout is based on inactivity: each authenticated vault operation resets it;
 passive status polling does not.
 Durations accept seconds or `s`, `m`, `h`, and `d` suffixes. New configurations
 default to 15 minutes; a value of `0` disables automatic locking.
-If an automatic lock cannot persist the vault, `pm status` reports the failure
-and the extension shows a warning badge until a later lock succeeds.
+Locking clears vault memory without depending on storage writes. If automatic
+clipboard cleanup fails, `pm status` reports a warning and the extension shows a
+warning badge; the vault itself is already locked.
 
 ### Change the Master Password or Key File
 
@@ -307,8 +323,13 @@ New key files must be outside the application data directory, so copying the
 encrypted vault does not also copy its key. Relative paths are resolved from
 the directory where `pm` is run.
 
-Rekeying persists the replacement vault before removing the old
-vault. An old key file is left in place, but no vault remains encrypted with it.
+Rekeying atomically replaces the ciphertext at the same random vault filename.
+There is one vault file throughout the operation. An old key file is left in place,
+but the successfully rekeyed vault no longer uses it. If replacement completes but
+directory synchronization fails, the new key remains active and the command
+reports that durability is uncertain. Keep both credentials until the operation
+succeeds durably; after an interruption, verify which credential opens the vault.
+Historical backups and filesystem snapshots still use their original credentials.
 
 ### Import/Export
 
@@ -591,7 +612,22 @@ on-page controls.
 - `docs/commands.template.html` - Static layout used by the command-reference generator
 - `extension/` - Browser extension (Chrome/Chromium)
 
+### Clipboard behavior
+
+CLI copies return after the clipboard is set, without waiting through the timeout.
+A detached helper holds the clipboard until cleanup; secrets travel over stdin,
+never command-line arguments. Server copies share one worker, and copying again
+replaces its owned value and resets its deadline. Explicit and inactivity locking
+clear the latest server-owned copy immediately. Cleanup preserves text copied by
+another application. A timeout of `0` disables copying, as before.
+
+Clipboard history managers may retain copies. CLI-generated copies have independent
+timeouts and are not canceled by server locking. See the threat model for limits.
+
 ## Security
+
+See [SECURITY.md](SECURITY.md) for the threat model, security limits, and private
+vulnerability-reporting process.
 
 - Master passwords derived using Argon2id with a random salt when a new
   password-encryption key is created
@@ -639,8 +675,18 @@ strict-lint suite on Linux, macOS, and Windows for every push and pull request.
 
 Dependency changes are scanned against the RustSec advisory database and
 reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
-weekly. GitHub's secret scanning and push protection remain enabled for the
-repository.
+weekly, including npm browser-test dependencies and the fuzz harness. Scheduled
+security checks audit the Rust and npm lockfiles. GitHub's secret scanning and
+push protection remain enabled for the repository.
+
+Coverage-guided fuzz targets and scheduled CI sessions exercise encrypted headers,
+native messages, and import parsers. See [fuzz/README.md](fuzz/README.md) for local
+setup, synthetic seeds, and reproducing findings. The CLI and fuzzers share the
+production implementation through `src/lib.rs`.
+
+Vault persistence tests distinguish failures before atomic replacement from
+failures afterward. The latter retain committed memory and keys and report
+uncertain durability, so callers should inspect state before retrying a mutation.
 
 ## Releases
 
@@ -663,8 +709,8 @@ creates a **draft** release with archives for Linux x86-64, Windows x86-64,
 macOS Apple Silicon, and macOS Intel. Review the draft and publish it manually
 from GitHub's Releases page.
 
-Each archive contains `pm`, the browser extension, README, and shell
-completions. Draft releases include generated notes, SHA-256 checksums, and
+Each archive contains `pm`, the browser extension, README, security policy, command
+reference, fuzzing guide, and shell completions. Draft releases include generated notes, SHA-256 checksums, and
 GitHub build-provenance attestations. Prerelease tags such as
 `v0.2.0-beta.1` are marked as prereleases, but still remain drafts until you
 publish them.

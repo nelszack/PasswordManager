@@ -1,0 +1,37 @@
+[package]
+name = "password-manager-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+password_manager = { path = "..", features = ["fuzzing"] }
+zeroize = "1"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "encrypted_headers"
+path = "fuzz_targets/encrypted_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_messages"
+path = "fuzz_targets/native_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "imports"
+path = "fuzz_targets/imports.rs"
+test = false
+doc = false
+bench = false

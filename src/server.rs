@@ -318,6 +318,7 @@ pub async fn server(
             }
         }
     }
+    let _ = crate::clipboard::clear_owned();
     remove_token_file_if_current(&token_path, &token);
     token.zeroize();
     Ok(())
@@ -407,6 +408,11 @@ fn lock_vlt(
     vlt.lock_vault(server_info)?;
     vlt.zeroize();
     server_info.zeroize();
+    crate::clipboard::clear_owned().map_err(|error| {
+        crate::vault::VaultError::Persistence(format!(
+            "vault locked, but clipboard cleanup failed: {error}"
+        ))
+    })?;
     Ok(())
 }
 

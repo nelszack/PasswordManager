@@ -63,25 +63,30 @@ pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: C
         }
         ServerCommand::Lock(send) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
-            if !server_info.locked && vlt.is_some() {
-                match lock_vlt(&mut vlt, &mut server_info) {
-                    Ok(()) if send => {
-                        *background_error.lock().await = None;
-                        respond("Vault locked.", &mut stream).await
-                    }
-                    Ok(()) => *background_error.lock().await = None,
-                    Err(error) if send => {
-                        respond_domain_error_with_context(
-                            &error,
-                            &format!("Lock failed: {error}"),
+            let was_locked = server_info.locked;
+            // Retry clipboard cleanup even when the vault was already locked.
+            match lock_vlt(&mut vlt, &mut server_info) {
+                Ok(()) => {
+                    *background_error.lock().await = None;
+                    if send {
+                        respond(
+                            if was_locked {
+                                "Vault is already locked."
+                            } else {
+                                "Vault locked."
+                            },
                             &mut stream,
                         )
-                        .await
+                        .await;
                     }
-                    _ => {}
                 }
-            } else if send {
-                respond("Vault is already locked.", &mut stream).await;
+                Err(error) => {
+                    let message = format!("Vault locked with a cleanup warning: {error}");
+                    *background_error.lock().await = Some(message.clone());
+                    if send {
+                        respond_domain_error_with_context(&error, &message, &mut stream).await;
+                    }
+                }
             }
         }
         ServerCommand::Unlock(info) => {
@@ -90,7 +95,7 @@ pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: C
                     old.zeroize();
                 }
                 server_info.keypass = Some(info.key);
-                match vlt.unlock_vault(&mut server_info) {
+                match vlt.unlock_vault_selected(&mut server_info, info.vault_file.as_deref()) {
                     Ok(()) => {
                         let expired = if let Some(vault) = vlt.as_mut() {
                             vault.purge_expired_trash(trash_retention_days, &mut server_info)
@@ -186,7 +191,14 @@ pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: C
                     Err(error) => {
                         respond_domain_error_with_context(
                             &error,
-                            &format!("Rekey failed: {error}"),
+                            &format!(
+                                "{}: {error}",
+                                if error.committed() {
+                                    "Rekey committed with uncertain durability"
+                                } else {
+                                    "Rekey failed before replacement"
+                                }
+                            ),
                             &mut stream,
                         )
                         .await

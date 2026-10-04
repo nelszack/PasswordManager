@@ -446,3 +446,16 @@ fn response_data(action: &str, mut output: String) -> Result<Value, String> {
 #[cfg(test)]
 #[path = "native_messaging_tests.rs"]
 mod tests;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_message(data: &[u8]) {
+    if let Ok(Some(mut payload)) = read_message(&mut std::io::Cursor::new(data)) {
+        if let Ok(mut request) = serde_json::from_slice::<NativeRequest>(&payload) {
+            if let Ok(mut command) = command_for_request(&mut request) {
+                command.zeroize();
+            }
+            request.zeroize();
+        }
+        payload.zeroize();
+    }
+}

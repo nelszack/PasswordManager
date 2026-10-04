@@ -138,7 +138,7 @@ pub(crate) fn restore_encrypted_backup(
     }
     let result = (|| {
         validate_backup_vault(&mut backup.vault)?;
-        let existing = find_vault(&mut vault_lookup_key).map(|(filename, mut vault)| {
+        let existing = lookup_vault(&mut vault_lookup_key, None)?.map(|(filename, mut vault)| {
             vault.zeroize();
             filename
         });

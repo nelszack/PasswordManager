@@ -140,8 +140,11 @@ impl Vault {
             snapshot: Some(snapshot),
         };
         let (changed, result) = mutate(transaction.vault)?;
-        if changed {
-            write_vault(transaction.vault, key)?;
+        if changed && let Err(error) = write_vault(transaction.vault, key) {
+            if error.committed() {
+                transaction.snapshot.take();
+            }
+            return Err(error);
         }
         transaction.snapshot.take();
         Ok(result)

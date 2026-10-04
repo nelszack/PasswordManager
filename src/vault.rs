@@ -19,7 +19,7 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, read},
+    fs,
     io::{Read, Write},
     path::Path,
 };
@@ -34,6 +34,7 @@ mod totp;
 
 mod browser;
 mod query;
+use backup::validate_backup_vault;
 use browser::hostname;
 #[cfg(test)]
 use browser::hosts_match;
@@ -43,10 +44,13 @@ mod entries;
 mod export;
 
 mod persistence;
-use persistence::unlock_vault;
+use persistence::unlock_selected_vault;
 pub(crate) use persistence::{create_vault, delete_vault};
+#[cfg(test)]
+use persistence::{find_vault, unlock_vault};
+pub use persistence::{list_vaults, validate_vault_filename};
 use persistence::{
-    find_vault, persist_private_file, random_vault_filename, write_vault, write_vault_with_key,
+    lookup_vault, persist_private_file, random_vault_filename, write_vault, write_vault_with_key,
 };
 mod transaction;
 use transaction::TransactionScope;
@@ -570,7 +574,14 @@ pub trait VaultAccess {
         password_history_limit: usize,
     ) -> Result<bool, VaultError>;
     fn lock_vault(&self, key_pass: &mut ServerInfo) -> Result<(), VaultError>;
-    fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), VaultError>;
+    fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), VaultError> {
+        self.unlock_vault_selected(key_pass, None)
+    }
+    fn unlock_vault_selected(
+        &mut self,
+        key_pass: &mut ServerInfo,
+        selected: Option<&str>,
+    ) -> Result<(), VaultError>;
     fn export(&self, path: String, force: bool) -> Result<(), VaultError>;
     fn import_with_options(
         &mut self,
@@ -642,23 +653,21 @@ impl VaultAccess for Option<Vault> {
         key_pass.zeroize();
         Ok(())
     }
-    fn unlock_vault(&mut self, key_pass: &mut ServerInfo) -> Result<(), VaultError> {
+    fn unlock_vault_selected(
+        &mut self,
+        key_pass: &mut ServerInfo,
+        selected: Option<&str>,
+    ) -> Result<(), VaultError> {
         if self.is_some() {
             return Err(
                 ("a vault is already unlocked; lock it before unlocking another one".to_string())
                     .into(),
             );
         }
-        match crate::vault::unlock_vault(key_pass) {
-            Some(vault) => {
-                *self = Some(vault);
-                Ok(())
-            }
-            None => {
-                Err(("wrong master password, or no vault exists for this key".to_string()).into())
-            }
-        }
+        *self = Some(unlock_selected_vault(key_pass, selected)?);
+        Ok(())
     }
+
     fn export(&self, path: String, force: bool) -> Result<(), VaultError> {
         if let Some(vlt) = self {
             vlt.export(path, force)
@@ -716,5 +725,18 @@ impl Drop for Vault {
         self.entries.zeroize();
         self.metadata.zeroize();
         self.recovery.zeroize();
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_imports(text: &str) {
+    for mut items in [
+        import::import_csv(text, "synthetic.csv"),
+        import::import_json(text, "synthetic.json"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        items.zeroize();
     }
 }

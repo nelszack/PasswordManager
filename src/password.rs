@@ -130,7 +130,8 @@ pub fn generated_password_output(
     copy: bool,
     copy_time: u8,
 ) -> (String, Option<String>) {
-    let mut output = format!("Password: {pass}\n");
+    let pass = zeroize::Zeroizing::new(pass);
+    let mut output = format!("Password: {}\n", pass.as_str());
     if stats {
         output.push_str(&password_strength_output(&pass));
     }

@@ -338,11 +338,29 @@ pub fn encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8> {
     try_encrypt_file(key_pass, plaintext).expect("could not encrypt vault")
 }
 
-pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
-    if !encrypted.starts_with(VAULT_MAGIC)
-        || encrypted.len() < HEADER_LEN + 16
-        || encrypted[8] != VAULT_VERSION
+/// Inspect untrusted format metadata without running the password KDF.
+pub fn validate_vault_header(encrypted: &[u8]) -> Result<(), &'static str> {
+    if encrypted.len() < HEADER_LEN + 16 || !encrypted.starts_with(VAULT_MAGIC) {
+        return Err("invalid or truncated encrypted vault header");
+    }
+    if encrypted[8] != VAULT_VERSION {
+        return Err("unsupported encrypted vault version");
+    }
+    let memory = u32::from_be_bytes(encrypted[10..14].try_into().unwrap());
+    let iterations = u32::from_be_bytes(encrypted[14..18].try_into().unwrap());
+    let parallelism = u32::from_be_bytes(encrypted[18..22].try_into().unwrap());
+    if !matches!(encrypted[9], KDF_KEYFILE | KDF_ARGON2ID)
+        || !(8 * 1024..=1024 * 1024).contains(&memory)
+        || !(1..=10).contains(&iterations)
+        || !(1..=16).contains(&parallelism)
     {
+        return Err("unsupported or unsafe vault KDF parameters");
+    }
+    Ok(())
+}
+
+pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
+    if validate_vault_header(encrypted).is_err() {
         return None;
     }
 
