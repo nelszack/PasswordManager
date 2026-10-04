@@ -674,9 +674,9 @@ native-messaging API. The browser launches the registered native-host executable
 which forwards a small, validated command set to the authenticated local
 server. The extension no longer requests localhost access or stores the server
 session token. Page origins are derived from trusted browser sender metadata;
-content scripts cannot select a different vault hostname or request a TOTP code
+content scripts cannot select a different vault origin or request a TOTP code
 for an unrelated entry. Pending save prompts are held briefly in service-worker
-session storage and are isolated by tab and hostname. On Linux and macOS the
+session storage and are isolated by tab and origin. On Linux and macOS the
 installer creates a host link and writes
 the browser manifest in the browser's per-user application-support directory.
 On Windows it installs `pm-native-host.exe` and registers the manifest under
@@ -731,11 +731,23 @@ street-address lines, city, state/region, country, and postal code. Select boxes
 are matched using either their option value or visible label. Payment and
 identity secrets are never requested merely because a page loaded.
 
-Credentials are matched to the exact saved hostname by default and are only
-retrieved when the picker is opened or a user-initiated login must be checked.
-To deliberately share an entry with subdomains, store its URL as a wildcard,
-for example `*.example.com`. Wildcards rooted at public suffixes such as
-`*.github.io` are rejected for matching.
+Credentials match the normalized saved origin: scheme, hostname, and port.
+Bare domains mean HTTPS on port 443. Different ports and HTTP/HTTPS origins
+require separate saved URLs. To deliberately share an entry with subdomains,
+store its URL as a wildcard, such as `https://*.example.com:8443`; the scheme
+and port must still match. Public-suffix wildcards such as `*.com`, `*.co.uk`,
+and `*.github.io`, URLs with credentials, backslashes, and control characters
+are rejected for matching. Existing ambiguous URLs remain stored but must be
+corrected before browser filling can use them.
+
+Save/update prompts use account summaries and never compare stored passwords
+in a content script. They run after user interaction without delaying or
+replaying the site's submission. A prompt may also appear for an already saved
+account; cancel it when no update is needed. Script-driven submissions without
+user activation do not request account information.
+
+Terminal displays escape control characters in entry metadata. Explicit raw
+secret output to a pipe and plaintext exports preserve the stored values.
 
 The badge and any open popup track native-host, server, and vault lock state
 continuously, including changes made through the CLI and automatic locking.

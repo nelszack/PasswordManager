@@ -158,54 +158,78 @@ pub(super) fn login_matches_site(
             }))
 }
 
-pub(super) fn hostname(value: &str) -> Option<String> {
+struct Site {
+    scheme: String,
+    host: String,
+    port: u16,
+    wildcard: bool,
+}
+
+fn parse_site(value: &str, allow_wildcard: bool) -> Option<Site> {
+    // URL parsers normalize backslashes and strip some controls. Reject them
+    // rather than silently changing the meaning of a saved site identity.
+    if value.chars().any(|c| c.is_control() || c == '\\') {
+        return None;
+    }
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
-    let authority = value
-        .split_once("://")
-        .map_or(value, |(_, remainder)| remainder)
-        .split(['/', '?', '#'])
-        .next()?;
-    let host_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let host = if host_port.starts_with('[') {
-        host_port
-            .split_once(']')
-            .map_or(host_port, |(host, _)| host)
-    } else {
-        host_port
-            .split_once(':')
-            .map_or(host_port, |(host, _)| host)
-    };
-    let host = host.trim_matches(['[', ']']).trim_end_matches('.');
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+    let (scheme, remainder) = value.split_once("://").unwrap_or(("https", value));
+    let wildcard = remainder.starts_with("*.");
+    if wildcard && !allow_wildcard {
+        return None;
+    }
+    let remainder = if wildcard { &remainder[2..] } else { remainder };
+    let parsed = url::Url::parse(&format!("{scheme}://{remainder}")).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    let host = parsed.host_str()?.trim_end_matches('.').to_string();
+    if host.is_empty() || host.contains('*') {
+        return None;
+    }
+    if wildcard
+        && (!matches!(parsed.host(), Some(url::Host::Domain(_)))
+            || psl::domain_str(&host) != Some(host.as_str()))
+    {
+        return None;
+    }
+    Some(Site {
+        scheme: parsed.scheme().to_string(),
+        host,
+        port: parsed.port_or_known_default()?,
+        wildcard,
+    })
 }
 
-pub(super) fn url_scheme(value: &str) -> Option<&str> {
-    let (scheme, _) = value.trim().split_once("://")?;
-    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")).then_some(scheme)
+pub(super) fn hostname(value: &str) -> Option<String> {
+    let site = parse_site(value, true)?;
+    Some(if site.wildcard {
+        format!("*.{}", site.host)
+    } else {
+        site.host
+    })
 }
 
 pub(super) fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
-    let (Some(saved), Some(requested)) = (hostname(saved_url), hostname(requested_url)) else {
+    let (Some(saved), Some(requested)) = (
+        parse_site(saved_url, true),
+        parse_site(requested_url, false),
+    ) else {
         return false;
     };
-    if url_scheme(requested_url).is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
-        && !url_scheme(saved_url).is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
-    {
+    if saved.scheme != requested.scheme || saved.port != requested.port {
         return false;
     }
-    if let Some(base) = saved.strip_prefix("*.") {
-        // Wildcards must be rooted at a registrable domain, never a public
-        // suffix such as "com", "co.uk", or "github.io".
-        return psl::domain_str(base) == Some(base)
-            && requested != base
-            && requested.ends_with(&format!(".{base}"));
+    if saved.wildcard {
+        return requested.host != saved.host
+            && requested.host.ends_with(&format!(".{}", saved.host));
     }
-    saved == requested
+    saved.host == requested.host
 }
 
 // Borrow secrets during serialization instead of creating plaintext copies in JSON values.

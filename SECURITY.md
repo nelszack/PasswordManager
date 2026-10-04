@@ -44,6 +44,12 @@ A shared 64 MiB budget bounds ciphertext and plaintext request buffers before
 authentication; requests exceeding the available budget are rejected.
 The extension derives site identity from browser sender metadata and requires
 site-scoped selection rather than trusting a domain supplied by page scripts.
+Site matching parses HTTP(S) URLs and compares scheme, normalized hostname,
+and effective port; bare domains default to HTTPS. Ambiguous URLs fail closed.
+Save prompts request summaries and never delay or replay form submissions based
+on a password match. New Unix key files are private at creation; Windows key
+writers deny shared data access until the private ACL is installed and the
+writer closes. Terminal presentation escapes controls in imported metadata.
 
 ### What these controls protect
 

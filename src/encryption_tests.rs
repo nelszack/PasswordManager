@@ -2,6 +2,59 @@ use super::*;
 use proptest::prelude::*;
 use std::fs;
 
+#[cfg(unix)]
+#[test]
+fn key_creation_permissions_subprocess_helper() {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(path) = std::env::var("PM_TEST_NEW_KEY_PATH") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    let file = create_key_file(path).unwrap();
+    // Inspect before protect_key_file or the first secret byte is written.
+    assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    protect_key_file(&file, path).unwrap();
+    assert!(
+        create_key_file(path).is_err(),
+        "must never replace an existing key"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn keys_are_private_at_creation_even_with_a_permissive_umask() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", "umask 000; exec \"$@\"", "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "encryption::test::key_creation_permissions_subprocess_helper",
+        ])
+        .env("PM_TEST_NEW_KEY_PATH", directory.path().join("new.key"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_key_writer_prevents_readers_until_the_private_acl_is_installed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("new.key");
+    let mut file = create_key_file(&path).unwrap();
+    assert!(fs::File::open(&path).is_err());
+    protect_key_file(&file, &path).unwrap();
+    file.write_all(b"synthetic-key").unwrap();
+    assert!(fs::File::open(&path).is_err());
+    drop(file);
+    assert_eq!(fs::read(&path).unwrap(), b"synthetic-key");
+}
+
 #[test]
 fn new_master_passwords_require_length_and_strength() {
     assert!(validate_new_password("").is_err());

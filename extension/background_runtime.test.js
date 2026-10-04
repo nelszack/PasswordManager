@@ -88,7 +88,9 @@ function securityEnvironment() {
     let locked = false;
     let holdLogin = false, heldLoginResponse;
     let holdCredentials = false, heldCredentialResponse;
-    let credentialResponse = { success: true, data: "[]" };
+    let credentialResponse = { success: true, data: JSON.stringify([
+        { id: 1, name: "Personal", username: "alice", has_totp: true }
+    ]) };
     const requests = [], deliveries = [], removed = [], created = [];
     const event = capture => ({ addListener(fn) { capture?.(fn); } });
     const origin = "https://shop.example";
@@ -110,17 +112,14 @@ function securityEnvironment() {
                         const response = { id: request.id, success: true, nativeVersion: "0.1.0" };
                         if (request.action === "status") response.data = `Status: ${locked ? "Locked" : "Unlocked"}\nVersion: 0.1.0`;
                         else if (locked) Object.assign(response, { success: false, error: "Vault locked." });
-                        else if (request.action === "getCredentials") Object.assign(response, credentialResponse);
-                        else if (request.action === "getLoginItems") response.data = JSON.stringify([
-                            { id: 1, name: "Personal", username: "alice", has_totp: true }
-                        ]);
+                        else if (request.action === "getLoginItems") Object.assign(response, credentialResponse);
                         else if (request.action === "getAutofillItems") response.data = JSON.stringify([
                             { id: 2, name: "Visa", kind: "payment-card" }
                         ]);
                         else if (request.action === "getAutofillItem") response.data = JSON.stringify({ id: 2, primary_secret: "synthetic-card" });
                         else response.data = JSON.stringify({ id: 1, password: "synthetic-secret" });
                         if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
-                        else if (holdCredentials && request.action === "getCredentials") heldCredentialResponse = response;
+                        else if (holdCredentials && request.action === "getLoginItems") heldCredentialResponse = response;
                         else queueMicrotask(() => nativeListener(response));
                     }
                 };
@@ -274,23 +273,35 @@ test("stopped, locked, disconnected, and malformed backends never open automatic
     assert.equal(env.created.length, 0);
 });
 
-test("new sites still prompt while exact matches do not flash a popup", async () => {
-    for (const response of [
-        { success: false, error: "Not found." },
-        { success: true, data: "[]" },
-        { success: true, data: JSON.stringify([{ id: 1, username: "alice", password: "existing-secret" }]) }
-    ]) {
+test("automatic prompts use summaries and behave identically for every entered password", async () => {
+    for (const password of ["existing-secret", "different-secret"]) {
         const env = securityEnvironment();
-        env.setCredentialResponse(response);
-        const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "existing-secret" });
-        if (response.data?.includes("existing-secret")) {
-            assert.equal(result.matched, true);
-            assert.equal(env.created.length, 0);
-        } else {
-            assert.ok(result.token);
-            assert.equal(env.created.length, 1);
-        }
+        const result = await env.message({ action: "openCredentialPrompt", username: "alice", password });
+        assert.equal(result.success, true);
+        assert.ok(result.token);
+        assert.equal(result.matched, undefined);
+        assert.equal(env.created.length, 1);
+        assert.equal(env.requests.filter(r => r.action !== "status").every(r => r.action === "getLoginItems"), true);
+        const sender = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "credential_prompt.html") };
+        const data = await env.message({ action: "getCredentialPromptData", token: result.token }, sender);
+        assert.equal(JSON.stringify(data).includes(password), false);
+        assert.deepEqual(JSON.parse(JSON.stringify(data.data.updateTarget)), { id: 1, name: "Personal" });
     }
+    for (const response of [{ success: false, error: "Not found." }, { success: true, data: "[]" }]) {
+        const env = securityEnvironment(); env.setCredentialResponse(response);
+        const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
+        assert.ok(result.token); assert.equal(env.created.length, 1);
+    }
+});
+
+test("legacy page lookups deliver only summaries, never unselected passwords", async () => {
+    const env = securityEnvironment();
+    const result = await env.message({ action: "getCredentials", domain: "https://attacker.example" });
+    assert.equal(result.success, true);
+    assert.equal(JSON.stringify(result).includes("password"), false);
+    const lookup = env.requests.find(r => r.action === "getLoginItems");
+    assert.equal(lookup.domain, env.sender.url);
+    assert.equal(env.requests.some(r => r.action === "getCredentials" || r.action === "getLoginItem"), false);
 });
 
 test("disconnecting or locking closes an existing automatic save prompt", async () => {

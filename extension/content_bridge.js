@@ -8,27 +8,6 @@ function fillInput(input, value) {
     input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-// Fetch the current saved accounts for a domain from the background
-function fetchAccounts(domain) {
-    return new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-            { action: "getCredentials", domain: domain },
-            (response) => {
-                let accounts = [];
-                if (response && response.success) {
-                    try {
-                        accounts = JSON.parse(response.data);
-                        if (!Array.isArray(accounts)) accounts = [];
-                    } catch (e) {
-                        accounts = [];
-                    }
-                }
-                resolve(accounts);
-            }
-        );
-    });
-}
-
 const securePickerResolvers = new Map();
 const credentialPromptResolvers = new Map();
 
@@ -60,10 +39,6 @@ function openCredentialPrompt(username, password) {
         chrome.runtime.sendMessage({ action: "openCredentialPrompt", username, password }, response => {
             if (chrome.runtime.lastError) {
                 reject(new Error(chrome.runtime.lastError.message));
-                return;
-            }
-            if (response?.matched) {
-                resolve({ action: "matched" });
                 return;
             }
             if (response?.skipped) {

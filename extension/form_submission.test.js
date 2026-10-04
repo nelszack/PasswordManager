@@ -1,54 +1,38 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const {
-    createSubmissionCoordinator,
-    scheduleCredentialAdvance
-} = require("./form_submission.js");
+const { createSubmissionCoordinator, scheduleCredentialAdvance } = require("./form_submission.js");
 
-function setup({ password = "secret", handle = async () => {}, shouldIgnore = () => false } = {}) {
+function setup({ password = "secret", handle = async () => {}, shouldIgnore = () => false,
+    userActivated = () => true } = {}) {
     const form = {};
     const calls = [];
     const coordinator = createSubmissionCoordinator({
         isForm: value => value === form,
         credentialsFor: () => ({ username: "alice", password }),
-        shouldIgnore,
-        handle,
-        resume: () => calls.push("resume")
+        shouldIgnore, userActivated, handle
     });
-    const event = {
-        target: form,
-        submitter: {},
-        isTrusted: true,
-        preventDefault: () => calls.push("prevent")
-    };
+    const event = { target: form, submitter: {}, isTrusted: true,
+        preventDefault: () => calls.push("prevent") };
     return { coordinator, event, calls };
 }
 
-test("submission is cancelled synchronously and concurrent attempts cannot duplicate prompts", async () => {
+test("pending prompts never prevent submission and duplicate attempts pass through", async () => {
     let release;
     const pending = new Promise(resolve => { release = resolve; });
-    const context = setup({
-        handle: async () => {
-            context.calls.push("handle");
-            await pending;
-        }
-    });
+    const context = setup({ handle: async () => { context.calls.push("handle"); await pending; } });
     const first = context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, ["prevent", "handle"], "cancels before awaiting");
+    assert.deepEqual(context.calls, ["handle"], "sends before navigation without preventing submission");
     await context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, ["prevent", "handle", "prevent"], "blocks concurrent submit");
-    release();
-    await first;
-    assert.deepEqual(context.calls, ["prevent", "handle", "prevent", "resume"]);
+    assert.deepEqual(context.calls, ["handle"]);
+    release(); await first;
+    assert.deepEqual(context.calls, ["handle"]);
 });
 
-test("synthetic, passwordless, ignored, and non-form submissions pass through", async () => {
-    for (const scenario of ["synthetic", "passwordless", "ignored", "non-form"]) {
-        const context = setup({
-            password: scenario === "passwordless" ? "" : "secret",
-            shouldIgnore: () => scenario === "ignored",
-            handle: async () => context.calls.push("handle")
-        });
+test("trusted script-driven submits without user activation do not request vault data", async () => {
+    for (const scenario of ["synthetic", "no-activation", "passwordless", "ignored", "non-form"]) {
+        const context = setup({ password: scenario === "passwordless" ? "" : "secret",
+            userActivated: () => scenario !== "no-activation", shouldIgnore: () => scenario === "ignored",
+            handle: async () => context.calls.push("handle") });
         if (scenario === "synthetic") context.event.isTrusted = false;
         if (scenario === "non-form") context.event.target = {};
         await context.coordinator.onSubmit(context.event);
@@ -56,34 +40,27 @@ test("synthetic, passwordless, ignored, and non-form submissions pass through", 
     }
 });
 
-
-test("errors still resume the user's submission", async () => {
-    const context = setup({ handle: async () => { throw new Error("bridge failed"); } });
-    await assert.rejects(context.coordinator.onSubmit(context.event), /bridge failed/);
-    assert.deepEqual(context.calls, ["prevent", "resume"]);
+test("matched, unmatched, and failed lookups never affect the site's submit event", async () => {
+    for (const outcome of ["matched", "unmatched", "error"]) {
+        const context = setup({ handle: async () => {
+            if (outcome === "error") throw new Error("bridge failed");
+            return { action: outcome };
+        } });
+        if (outcome === "error") await assert.rejects(context.coordinator.onSubmit(context.event), /bridge failed/);
+        else await context.coordinator.onSubmit(context.event);
+        assert.deepEqual(context.calls, [], outcome);
+    }
 });
 
-
-
-
-test("a later user submission is handled after the resumed event", async () => {
-    const context = setup({
-        handle: async ({ submitter, credentials }) => {
-            assert.equal(submitter, context.event.submitter);
-            assert.deepEqual(credentials, { username: "alice", password: "secret" });
-            context.calls.push("handle");
-        }
-    });
-
+test("later user attempts are handled without replaying a submission", async () => {
+    const context = setup({ handle: async ({ submitter, credentials }) => {
+        assert.equal(submitter, context.event.submitter);
+        assert.deepEqual(credentials, { username: "alice", password: "secret" });
+        context.calls.push("handle");
+    } });
     await context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, ["prevent", "handle", "resume"]);
-    await context.coordinator.onSubmit(context.event); // requestSubmit replay
-    assert.deepEqual(context.calls, ["prevent", "handle", "resume"], "replay passes through once");
-    await context.coordinator.onSubmit(context.event); // a new user attempt
-    assert.deepEqual(context.calls, [
-        "prevent", "handle", "resume",
-        "prevent", "handle", "resume"
-    ]);
+    await context.coordinator.onSubmit(context.event);
+    assert.deepEqual(context.calls, ["handle", "handle"]);
 });
 
 test("multi-step advances remember usernames and prompt only from a captured password", () => {

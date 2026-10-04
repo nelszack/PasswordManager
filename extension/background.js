@@ -240,7 +240,7 @@ function sendTotpForPage(request, sender, sendResponse) {
         sendResponse({ success: false, error: "Invalid TOTP request" });
         return;
     }
-    nativeRequest("getCredentials", { domain })
+    nativeRequest("getLoginItems", { domain })
         .then(response => {
             if (!response.success) throw new Error(response.error || "Credentials unavailable");
             let accounts;
@@ -423,15 +423,13 @@ async function openCredentialPrompt(request, sender) {
     let accounts;
     try {
         accounts = PasswordManagerCredentialPrompt.accountsFromLookup(
-            await nativeRequest("getCredentials", { domain })
+            await nativeRequest("getLoginItems", { domain })
         );
     } catch (_) {
         return { success: true, skipped: true };
     }
-    if (PasswordManagerCredentialPrompt.hasExactMatch(accounts, username, password)) {
-        return { success: true, matched: true };
-    }
-
+    // Account summaries contain no stored passwords. Opening and completing
+    // this prompt never disclose whether the submitted password was a match.
     const token = crypto.randomUUID();
     const pending = {
         tabId,
@@ -653,7 +651,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getCredentials") {
         const domain = PasswordManagerSecurity.senderOrigin(sender);
         if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
-        else sendAction("getCredentials", { domain }, sendResponse);
+        else sendAction("getLoginItems", { domain }, sendResponse);
         return true;
     }
     if (request.action === "saveCredentials") {
@@ -684,7 +682,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             request, sender, pendingRelays
         );
         if (!relay) sendResponse({ success: false, error: "Invalid credential relay" });
-        else sendAction("getCredentials", { domain: relay.domain }, sendResponse);
+        else sendAction("getLoginItems", { domain: relay.domain }, sendResponse);
         return true;
     }
     if (request.action === "saveRelayedCredentials"

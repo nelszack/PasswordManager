@@ -220,6 +220,86 @@ struct ServerGuard {
     active: bool,
 }
 
+#[test]
+fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    assert!(run(root.path(), port, &["start"]).status.success());
+    let _server = ServerGuard {
+        root: root.path().to_path_buf(),
+        port,
+        active: true,
+    };
+    let key = root.path().join("vault.key");
+    for args in [
+        vec!["new", "--key", key.to_str().unwrap()],
+        vec!["unlock", "--key", key.to_str().unwrap(), "--timeout", "0"],
+    ] {
+        let result = run(root.path(), port, &args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let name = "Synthetic\x1b]52;c;c3ludGhldGlj\x07\nForged row";
+    let secret = "raw\x1b[2Jsecret";
+    let path = root.path().join("import.csv");
+    let mut writer = csv::Writer::from_path(&path).unwrap();
+    writer
+        .write_record(["name", "username", "password", "url"])
+        .unwrap();
+    writer
+        .write_record([name, "alice", secret, "https://example.com"])
+        .unwrap();
+    writer.flush().unwrap();
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["import", "--path", path.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    for args in [
+        vec!["view"],
+        vec!["search", "--name", "Synthetic"],
+        vec!["audit", "--require-totp"],
+    ] {
+        let result = run(root.path(), port, &args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = String::from_utf8(result.stdout).unwrap();
+        assert!(!text.contains(['\x1b', '\x07', '\u{009b}']));
+        assert!(text.contains("\\u{1b}]52;"));
+        assert!(text.contains("\\nForged row"));
+    }
+    let result = run(root.path(), port, &["get", "--id", "1", "--password-only"]);
+    assert!(result.status.success());
+    assert_eq!(result.stdout, format!("{secret}\n").as_bytes());
+    let export = root.path().join("export.csv");
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["export", "--path", export.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    let records = csv::Reader::from_path(export)
+        .unwrap()
+        .records()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(&records[0][1], name);
+    assert_eq!(&records[0][3], secret);
+}
+
 impl Drop for ServerGuard {
     fn drop(&mut self) {
         if self.active {

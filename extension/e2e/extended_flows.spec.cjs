@@ -1,4 +1,5 @@
 const { test, expect } = require("@playwright/test");
+const fs = require("node:fs");
 const http = require("node:http");
 const { launchExtension, waitForNativeRequest } = require("./harness.cjs");
 
@@ -136,22 +137,65 @@ test.describe("extended credential flows", () => {
         await expect(page.getByRole("button", { name: "Choose saved credentials" })).toHaveCount(2);
     });
 
-    test("saved credentials fill the form and exact matches resume without a save prompt", async () => {
-        await page.goto(`${origin}/simple`);
-        const picker = await openPicker(browser.context,
+    test("saved credentials fill the form and submission proceeds while a summary-only prompt is open", async () => {
+        await page.goto(`${origin}/login`);
+        const loginPicker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await loginPicker.getByRole("button", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
-        const promptsBefore = browser.context.pages().filter(candidate =>
-            candidate.url().includes("credential_prompt.html") && !candidate.isClosed()
-        ).length;
-        await page.locator("#submit").click();
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
         await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes");
-        await page.waitForTimeout(300);
-        expect(browser.context.pages().filter(candidate =>
-            candidate.url().includes("credential_prompt.html") && !candidate.isClosed()
-        )).toHaveLength(promptsBefore);
+        await expect(prompt.locator("#status")).toContainText("already exists");
+        await prompt.locator("#cancel").click();
+    });
+
+    test("script-driven submits cannot trigger vault lookups or block the page", async () => {
+        const previousPage = page;
+        page = await browser.context.newPage();
+        await previousPage.close();
+        const session = await browser.context.newCDPSession(page);
+        for (const password of ["saved-password", "wrong-password"]) {
+            await page.goto(`${origin}/login`);
+            await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+            await session.send("Runtime.evaluate", {
+                expression: `new Promise(resolve => {
+                    const timer = setInterval(() => {
+                        if (!navigator.userActivation.isActive) {
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 50);
+                })`,
+                userGesture: false,
+                awaitPromise: true,
+                timeout: 10_000
+            });
+            const readLookups = () => fs.readFileSync(browser.nativeLog, "utf8").trim().split("\n")
+                .filter(Boolean).map(line => JSON.parse(line))
+                .filter(request => request.action !== "status");
+            const before = readLookups().length;
+            const submitGuess = guess => {
+                const active = navigator.userActivation.isActive;
+                document.querySelector("#username").value = "alice@example.com";
+                document.querySelector("#password").value = guess;
+                document.querySelector("form").requestSubmit();
+                window.dispatchEvent(new PageTransitionEvent("pagehide"));
+                return { active, submitted: document.body.dataset.submitted };
+            };
+            // Playwright's page.evaluate grants a user gesture. Execute with
+            // that flag disabled to reproduce an ordinary page script.
+            const submitted = await session.send("Runtime.evaluate", {
+                expression: `(${submitGuess.toString()})(${JSON.stringify(password)})`,
+                userGesture: false,
+                returnByValue: true
+            });
+            expect(submitted.result.value).toEqual({ active: false, submitted: "yes" });
+            await browser.context.serviceWorkers()[0].evaluate(() => refreshStatus());
+            expect(readLookups()).toHaveLength(before);
+            expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
+        }
+        await session.detach();
     });
 
     test("a submitted username selects the matching update target", async () => {

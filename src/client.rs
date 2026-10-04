@@ -10,7 +10,7 @@ use crate::{
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     net::TcpStream,
     time::Duration,
 };
@@ -34,7 +34,7 @@ pub fn print_error(error: &str) {
     if JSON_OUTPUT.load(Ordering::Relaxed) {
         println!("{}", serde_json::json!({ "ok": false, "error": error }));
     } else {
-        eprintln!("Error: {error}");
+        eprintln!("Error: {}", crate::terminal::output(error).as_str());
     }
 }
 
@@ -47,16 +47,16 @@ pub fn print_success(output: &str) {
     } else if QUIET_OUTPUT.load(Ordering::Relaxed) {
         return;
     } else if output.ends_with('\n') {
-        output.to_string()
+        crate::terminal::output(output).to_string()
     } else {
-        format!("{output}\n")
+        format!("{}\n", crate::terminal::output(output).as_str())
     };
     let _ = io::stdout().write_all(rendered.as_bytes());
 }
 
 pub fn print_warning(warning: &str) {
     if !QUIET_OUTPUT.load(Ordering::Relaxed) {
-        eprintln!("Warning: {warning}");
+        eprintln!("Warning: {}", crate::terminal::output(warning).as_str());
     }
 }
 
@@ -66,6 +66,14 @@ pub fn exit_error(error: &str, code: i32) -> ! {
 }
 
 pub fn send_command(command: ServerCommand) {
+    let raw_secret = matches!(
+        &command,
+        ServerCommand::GetSecret(_)
+            | ServerCommand::GetField {
+                copy_timeout: None,
+                ..
+            }
+    );
     match request_response(command) {
         Ok(response) => {
             let exit_code = response.code;
@@ -83,9 +91,13 @@ pub fn send_command(command: ServerCommand) {
                 }
             } else if !QUIET_OUTPUT.load(Ordering::Relaxed) || exit_code != 0 {
                 if exit_code == 0 {
-                    print!("{}", response.message);
+                    if raw_secret && !io::stdout().is_terminal() {
+                        print!("{}", response.message);
+                    } else {
+                        print!("{}", crate::terminal::output(&response.message).as_str());
+                    }
                 } else {
-                    eprint!("{}", response.message);
+                    eprint!("{}", crate::terminal::output(&response.message).as_str());
                 }
             }
             if exit_code != 0 {

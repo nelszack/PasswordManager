@@ -17,7 +17,7 @@ function getDomainFromUrl(url) {
 let modalOpen = false;
 let popupResolved = false;
 let credentialAttemptPending = false;
-let currentDomain = window.location.origin.toLowerCase();
+let credentialUserIntent = false;
 
 // ===============================
 // Request credentials from background
@@ -26,14 +26,15 @@ async function initExtension() {
     await restoreUsernameFromPreviousStep();
 
     // Do not place plaintext vault credentials in every matching page at load.
-    // The picker fetches on click, and save/update checks fetch on submission.
+    // Only the secure picker delivers a selected vault secret.
     observeInputs();
 
     // Remember the last username typed on this domain so password-only
     // login steps (and the save prompt) know which account is logging in.
     document.addEventListener("input", (e) => {
         const t = e.target;
-        if (!(t instanceof HTMLInputElement) || !isCredentialInput(t)) return;
+        if (!e.isTrusted || !(t instanceof HTMLInputElement) || !isCredentialInput(t)) return;
+        credentialUserIntent = true;
         lastCredentialInput = t;
         if (USERNAME_INPUT_TYPES.has(t.type) && t.value.trim()) {
             storeUsernameForLater(t.value.trim());
@@ -46,37 +47,17 @@ async function initExtension() {
         }
     }, true);
 
-    const resumeFormSubmission = (form, submitter, resumedForms) => {
-        try {
-            if (submitter instanceof HTMLElement && submitter.isConnected && submitter.form === form) {
-                HTMLFormElement.prototype.requestSubmit.call(form, submitter);
-            } else {
-                HTMLFormElement.prototype.requestSubmit.call(form);
-            }
-        } catch (_) {
-            // requestSubmit can fail if a framework removed the submitter or
-            // form while the prompt was open. Native submit is the last-resort
-            // fallback so the password manager never traps the user on-page.
-            resumedForms.delete(form);
-            HTMLFormElement.prototype.submit.call(form);
-        }
-    };
-
     const submissionCoordinator = PasswordManagerFormSubmission.createSubmissionCoordinator({
         isForm: form => form instanceof HTMLFormElement,
         credentialsFor: form => findLoginCredentials(form),
         shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
-        resume: resumeFormSubmission,
+        userActivated: () => navigator.userActivation?.isActive === true,
         handle: async ({ credentials }) => {
             credentialAttemptPending = true;
             const { username: rawUsername, password } = credentials;
             try {
-                const accounts = await fetchAccounts(currentDomain);
-                const username = resolveUsername(rawUsername, accounts);
+                const username = resolveUsername(rawUsername);
                 if (rawUsername) rememberUsernameAcrossNavigation(rawUsername);
-
-                const match = findMatchingAccount(username, password, accounts);
-                if (match) return;
 
                 modalOpen = true;
                 try {
@@ -91,7 +72,8 @@ async function initExtension() {
         }
     });
     document.addEventListener("submit", event => {
-        if (event.target instanceof HTMLFormElement) {
+        if (event.isTrusted && navigator.userActivation?.isActive === true
+            && event.target instanceof HTMLFormElement) {
             const username = usernameFromScope(event.target);
             if (username) rememberUsernameAcrossNavigation(username);
         }
@@ -113,6 +95,7 @@ async function initExtension() {
             || source?.closest?.("form, [role='form'], dialog")
             || (input ? credentialScope(input) : null);
         if (!scope) return;
+        credentialUserIntent = true;
         const username = usernameFromScope(scope);
         const credentials = credentialsFromScope(scope);
         PasswordManagerFormSubmission.scheduleCredentialAdvance({
@@ -123,7 +106,7 @@ async function initExtension() {
             shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
             prompt: captured => {
                 credentialAttemptPending = true;
-                const resolvedUsername = resolveUsername(captured.username, []);
+                const resolvedUsername = resolveUsername(captured.username);
                 openCredentialPrompt(resolvedUsername, captured.password)
                     .then(result => { if (result.action !== "skipped") popupResolved = true; })
                     .catch(error => console.log("Password Manager credential prompt error:", error))
@@ -150,7 +133,8 @@ async function initExtension() {
     // Catch logins that navigate/redirect without a form submit event
     // (e.g. fetch + window.location, or form.submit() in JS). The extension
     // window and background-owned operation survive the page being destroyed.
-    window.addEventListener("pagehide", () => {
+    window.addEventListener("pagehide", event => {
+        if (!event.isTrusted || !credentialUserIntent) return;
         if (modalOpen || popupResolved || credentialAttemptPending) return;
 
         const { username: rawUsername, password } = findLoginCredentials();
@@ -161,7 +145,7 @@ async function initExtension() {
             if (username) rememberUsernameAcrossNavigation(username);
             return;
         }
-        const username = resolveUsername(rawUsername, []);
+        const username = resolveUsername(rawUsername);
         if (rawUsername) storeUsernameForLater(rawUsername);
 
         chrome.runtime.sendMessage(

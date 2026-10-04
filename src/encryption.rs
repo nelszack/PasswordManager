@@ -1,6 +1,4 @@
-use crate::file::{
-    key_file_path, new_key_file_path, read_bounded_file, set_private_perms, sync_parent,
-};
+use crate::file::{key_file_path, new_key_file_path, read_bounded_file, sync_parent};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -124,12 +122,9 @@ pub fn prompt_for_new_master_password() -> String {
 
 fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
     let key = Zeroizing::new(<[u8; 32]>::generate());
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+    let mut file = create_key_file(path)
         .map_err(|e| format!("could not create key file {}: {e}", path.display()))?;
-    let result = set_private_perms(path)
+    let result = protect_key_file(&file, path)
         .map_err(|e| format!("could not protect key file {}: {e}", path.display()))
         .and_then(|_| {
             file.write_all(&*key)
@@ -144,11 +139,45 @@ fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
                     })
                 })
         });
+    // Windows writers deny delete sharing as well as read/write sharing.
+    // Close before cleaning up an unsuccessful creation.
+    drop(file);
     if let Err(error) = result {
         let _ = fs::remove_file(path);
         return Err(error);
     }
     Ok(*key)
+}
+
+fn create_key_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Deny data access until the private ACL is installed and the writer
+        // closes. Changing ACLs needs WRITE_DAC, not shared data access.
+        options.share_mode(0);
+    }
+    options.open(path)
+}
+
+fn protect_key_file(file: &std::fs::File, _path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        crate::file::set_private_perms(_path)
+    }
 }
 
 fn master_key_from_password_with_params(

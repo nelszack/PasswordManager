@@ -1,3 +1,4 @@
+use crate::terminal::metadata;
 use crate::{
     types::ItemKind,
     vault::{EntryView, TrashView},
@@ -23,9 +24,13 @@ pub(super) fn entry_details_with_secrets(
             .iter()
             .map(|field| {
                 if field.secret && !reveal_secrets {
-                    format!("{}=<redacted>", field.name)
+                    format!("{}=<redacted>", metadata(&field.name).as_str())
                 } else {
-                    format!("{}={}", field.name, field.value)
+                    format!(
+                        "{}={}",
+                        metadata(&field.name).as_str(),
+                        metadata(&field.value).as_str()
+                    )
                 }
             })
             .collect::<Vec<_>>(),
@@ -69,7 +74,7 @@ pub(super) fn entries(views: &[EntryView<'_>]) -> String {
             format!(
                 "{}. {} [{}] {:?} {:?} {:?} {:?}{}\n",
                 entry.id,
-                entry.name,
+                metadata(&entry.name).as_str(),
                 kind(view),
                 entry.username,
                 (!urls.is_empty()).then_some(urls),
@@ -88,7 +93,7 @@ pub(super) fn history(changed: &[&str]) -> String {
     changed
         .iter()
         .enumerate()
-        .map(|(index, changed)| format!("{}. changed {}\n", index + 1, changed))
+        .map(|(index, changed)| format!("{}. changed {}\n", index + 1, metadata(changed).as_str()))
         .collect()
 }
 
@@ -103,12 +108,65 @@ pub(super) fn trash(items: &[TrashView<'_>]) -> String {
             format!(
                 "{}. {} [{}] {:?} deleted {}{}\n",
                 index + 1,
-                item.entry.entry.name,
+                metadata(&item.entry.entry.name).as_str(),
                 kind(&item.entry),
                 item.entry.entry.username,
-                item.deleted,
+                metadata(item.deleted).as_str(),
                 if item.entry.has_totp { " [TOTP]" } else { "" }
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        types::CustomField,
+        vault::{EntryMetadata, VaultEntry},
+    };
+
+    #[test]
+    fn every_metadata_view_escapes_controls_and_keeps_secret_fields_redacted() {
+        let attack = "Metadata\x1b]52;c;c2VjcmV0\x07\nFake row";
+        let entry = VaultEntry {
+            name: attack.into(),
+            ..Default::default()
+        };
+        let record = EntryMetadata {
+            custom_fields: vec![
+                CustomField {
+                    name: attack.into(),
+                    value: attack.into(),
+                    secret: false,
+                },
+                CustomField {
+                    name: "secret".into(),
+                    value: "must-stay-redacted".into(),
+                    secret: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let view = || EntryView {
+            entry: &entry,
+            metadata: Some(&record),
+            has_totp: false,
+            urls: vec![],
+        };
+        let outputs = [
+            entry_details(&view()).to_string(),
+            entries(&[view()]),
+            history(&[attack]),
+            trash(&[TrashView {
+                entry: view(),
+                deleted: attack,
+            }]),
+        ];
+        for text in outputs {
+            assert!(!text.contains(['\x1b', '\x07']));
+            assert!(text.contains("\\nFake row"));
+            assert!(!text.contains("must-stay-redacted"));
+        }
+    }
 }

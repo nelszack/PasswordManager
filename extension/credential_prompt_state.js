@@ -9,13 +9,6 @@
         return account?.username && account.username !== "None" ? String(account.username) : "";
     }
 
-    function hasExactMatch(accounts, username, password) {
-        return Array.isArray(accounts) && accounts.some(account =>
-            account?.password === password
-            && (!username || accountUsername(account) === username)
-        );
-    }
-
     function accountsFromLookup(response) {
         if (!response?.success) {
             const error = String(response?.error || "Credentials unavailable").trim();
@@ -55,9 +48,9 @@
             }
         }
         const message = existing
-            ? "An account with this username already exists, but the password is different."
+            ? "An account with this username already exists. Update it or save a new account."
             : validAccounts.length
-                ? "These credentials don't match any saved account."
+                ? "No saved account has this username. Update an existing account or save a new one."
                 : "Would you like to save these credentials?";
         return {
             message,
@@ -99,5 +92,5 @@
         return { action, fields };
     }
 
-    return { accountUsername, accountsFromLookup, hasExactMatch, describe, operation };
+    return { accountUsername, accountsFromLookup, describe, operation };
 });

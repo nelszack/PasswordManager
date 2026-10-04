@@ -1,4 +1,5 @@
 use super::*;
+use crate::terminal::metadata;
 
 pub(super) fn password_hash(password: &str) -> String {
     hex::encode_upper(Sha1::digest(password.as_bytes()))
@@ -270,13 +271,15 @@ impl AuditSnapshot {
         for entry in weak {
             report.push_str(&format!(
                 "Weak: {}. {} {:?}\n",
-                entry.id, entry.name, entry.username
+                entry.id,
+                metadata(&entry.name).as_str(),
+                entry.username
             ));
         }
         for entries in reused {
             let labels = entries
                 .iter()
-                .map(|entry| format!("{}. {}", entry.id, entry.name))
+                .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
                 .collect::<Vec<_>>()
                 .join(", ");
             report.push_str(&format!("Reused password: {labels}\n"));
@@ -284,7 +287,7 @@ impl AuditSnapshot {
         for entries in duplicates {
             let labels = entries
                 .iter()
-                .map(|entry| format!("{}. {}", entry.id, entry.name))
+                .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
                 .collect::<Vec<_>>()
                 .join(", ");
             report.push_str(&format!("Duplicate login: {labels}\n"));
@@ -292,16 +295,23 @@ impl AuditSnapshot {
         for entry in stale {
             report.push_str(&format!(
                 "Stale password: {}. {} (last changed {})\n",
-                entry.id, entry.name, entry.password_changed
+                entry.id,
+                metadata(&entry.name).as_str(),
+                metadata(&entry.password_changed).as_str()
             ));
         }
         for entry in missing_totp {
-            report.push_str(&format!("Missing TOTP: {}. {}\n", entry.id, entry.name));
+            report.push_str(&format!(
+                "Missing TOTP: {}. {}\n",
+                entry.id,
+                metadata(&entry.name).as_str()
+            ));
         }
         for (entry, count) in breached_entries {
             report.push_str(&format!(
                 "Breached password: {}. {} (seen {count} times)\n",
-                entry.id, entry.name
+                entry.id,
+                metadata(&entry.name).as_str()
             ));
         }
         if let Some(error) = breach_error {
@@ -346,7 +356,8 @@ impl AuditSnapshot {
                 for entry in unchecked {
                     report.push_str(&format!(
                         "Unchecked breach status: {}. {}\n",
-                        entry.id, entry.name
+                        entry.id,
+                        metadata(&entry.name).as_str()
                     ));
                 }
             }

@@ -53,12 +53,13 @@ test("new-site metadata suggests the captured hostname and requests a username",
     assert.equal(data.updateTarget, null);
 });
 
-test("exact matches suppress prompts, including password-only login steps", () => {
-    const accounts = [{ username: "alice", password: "secret" }];
-    assert.equal(prompt.hasExactMatch(accounts, "alice", "secret"), true);
-    assert.equal(prompt.hasExactMatch(accounts, "bob", "secret"), false);
-    assert.equal(prompt.hasExactMatch(accounts, "", "secret"), true);
-    assert.equal(prompt.hasExactMatch(accounts, "alice", "different"), false);
+test("prompt descriptions use usernames and never make password comparisons", () => {
+    const accounts = [{ id: 1, name: "Personal", username: "alice" }];
+    const data = prompt.describe(accounts, "alice", "https://example.com");
+    assert.equal(data.hasAccounts, true);
+    assert.match(data.message, /already exists/);
+    assert.equal(data.message.includes("different"), false);
+    assert.equal(JSON.stringify(data).includes("password"), false);
 });
 
 test("completion builds only authorized add and update operations", () => {

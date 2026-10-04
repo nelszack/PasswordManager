@@ -10,6 +10,7 @@ pub mod native_messaging;
 pub mod password;
 pub mod protocol;
 pub mod server;
+mod terminal;
 pub mod types;
 pub mod vault;
 

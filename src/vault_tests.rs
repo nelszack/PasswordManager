@@ -1,6 +1,6 @@
 #![allow(unused_must_use)]
 use super::audit::password_hash;
-use super::browser::{url_match_json, url_scheme};
+use super::browser::url_match_json;
 use super::import::{import_csv, import_json};
 use super::totp::{normalize_totp_configuration, parse_totp_configuration};
 use super::*;
@@ -87,7 +87,7 @@ proptest! {
     #[test]
     fn arbitrary_url_inputs_never_panic(value in ".{0,2048}") {
         let _ = hostname(&value);
-        let _ = url_scheme(&value);
+        let _ = hosts_match(&value, &value);
         let _ = url_match_json(&[], &[], &[], &value);
     }
 }
@@ -217,7 +217,7 @@ fn test_url_match_json_rejects_substring_lookalike() {
 }
 
 #[test]
-fn test_hostname_ignores_scheme_path_port_and_case() {
+fn site_matching_normalizes_case_path_and_default_ports() {
     assert!(hosts_match("HTTPS://Example.COM:443/login", "example.com"));
 }
 #[test]
@@ -231,12 +231,100 @@ fn https_credentials_are_not_returned_to_http_pages() {
         "https://example.com"
     ));
     assert!(!hosts_match("example.com", "http://example.com"));
-    assert!(hosts_match("http://example.com", "https://example.com"));
+    assert!(!hosts_match("http://example.com", "https://example.com"));
 }
 #[test]
 fn test_domain_matching_is_exact_by_default() {
     assert!(!hosts_match("example.com", "login.example.com"));
     assert!(!hosts_match("mail.example.com", "example.com"));
+}
+
+#[test]
+fn browser_credentials_are_bound_to_normalized_origins() {
+    for (saved, requested, expected) in [
+        (
+            "https://example.com:8443/login",
+            "https://example.com:9443",
+            false,
+        ),
+        (
+            "https://example.com:8443/login",
+            "https://example.com",
+            false,
+        ),
+        (
+            "https://example.com:8443/login",
+            "https://example.com:8443",
+            true,
+        ),
+        ("https://example.com:443/login", "https://EXAMPLE.com", true),
+        ("example.com", "https://example.com:9443", false),
+        ("http://example.com:80", "https://example.com", false),
+        ("http://example.com:80", "http://example.com", true),
+        ("https://[::1]:8443", "https://[::1]:9443", false),
+        ("https://[::1]:8443", "https://[::1]:8443", true),
+        ("https://éxample.com", "https://xn--xample-9ua.com", true),
+        (
+            "https://*.example.com:8443",
+            "https://login.example.com:8443",
+            true,
+        ),
+        (
+            "https://*.example.com:8443",
+            "https://login.example.com:9443",
+            false,
+        ),
+        ("*.github.io", "https://attacker.github.io", false),
+        (
+            r"https://trusted.example\@attacker.example/login",
+            "https://attacker.example",
+            false,
+        ),
+        (
+            r"https://trusted.example\@attacker.example/login",
+            "https://trusted.example",
+            false,
+        ),
+        (
+            "https://user@attacker.example",
+            "https://attacker.example",
+            false,
+        ),
+        (
+            "https://trusted.example\t@attacker.example",
+            "https://attacker.example",
+            false,
+        ),
+        (
+            "https://trusted.example\n@attacker.example",
+            "https://attacker.example",
+            false,
+        ),
+        ("ftp://example.com", "https://example.com", false),
+        ("https://example.com:70000", "https://example.com", false),
+        ("https://example.com", "https://*.example.com", false),
+    ] {
+        let mut vault = Vault::default();
+        vault.entries.push(VaultEntry {
+            id: 1,
+            password: "synthetic-secret".into(),
+            url: Some(saved.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            hosts_match(saved, requested),
+            expected,
+            "{saved:?} -> {requested:?}"
+        );
+        assert_eq!(vault.browser_login_json(requested, 1).is_some(), expected);
+        assert_eq!(
+            vault.get_entry(&Target::Url(requested.into())).is_ok(),
+            expected
+        );
+        let summaries: serde_json::Value =
+            serde_json::from_str(&vault.browser_logins_json(requested)).unwrap();
+        assert_eq!(summaries.as_array().unwrap().len(), usize::from(expected));
+    }
 }
 #[test]
 fn test_explicit_wildcard_matches_only_subdomains() {

@@ -6,39 +6,22 @@
     "use strict";
 
     function createSubmissionCoordinator(options) {
-        const resumedForms = new WeakSet();
         const pendingForms = new WeakSet();
 
         async function onSubmit(event) {
             const form = event.target;
-            if (!options.isForm(form)) return;
-            if (resumedForms.delete(form)) return;
-            if (!event.isTrusted) return;
-
-            // A double click can dispatch another submit event while the
-            // credential prompt for this form is still open. Keep that event
-            // from navigating away, but do not open a second prompt.
-            if (pendingForms.has(form)) {
-                event.preventDefault();
-                return;
-            }
-
+            if (!options.isForm(form) || !event.isTrusted || !options.userActivated()) return;
+            if (pendingForms.has(form) || options.shouldIgnore()) return;
             const credentials = options.credentialsFor(form);
-            if (!credentials.password || options.shouldIgnore()) return;
+            if (!credentials.password) return;
 
-            // This must run before the first await in this function.
-            event.preventDefault();
+            // Snapshot and send before navigation, but never cancel/replay the
+            // site's submission or wait for a password-dependent result.
             pendingForms.add(form);
             try {
-                await options.handle({
-                    form,
-                    submitter: event.submitter,
-                    credentials
-                });
+                await options.handle({ form, submitter: event.submitter, credentials });
             } finally {
                 pendingForms.delete(form);
-                resumedForms.add(form);
-                options.resume(form, event.submitter, resumedForms);
             }
         }
 

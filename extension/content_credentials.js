@@ -101,27 +101,12 @@ function restoreUsernameFromPreviousStep() {
     });
 }
 
-// ===============================
-// Check if credentials match saved ones
-// ===============================
-function findMatchingAccount(username, password, accounts) {
-    return accounts.find(acc => {
-        if (username) {
-            return accountUsername(acc) === username && acc.password === password;
-        }
-        return acc.password === password;
-    });
-}
-
 // On password-only logins the username field may be missing; fall back to
-// the last username seen on this domain, or the site's only saved account.
-function resolveUsername(username, accounts) {
+// the last username typed on this origin.
+function resolveUsername(username) {
     if (username) return username;
     if (storedUsername && storedDomain === getDomainFromUrl(window.location.href)) {
         return storedUsername;
-    }
-    if (accounts.length === 1 && accountUsername(accounts[0])) {
-        return accountUsername(accounts[0]);
     }
     return "";
 }
