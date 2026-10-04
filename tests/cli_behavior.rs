@@ -1,4 +1,5 @@
 use std::{
+    io::{Read, Seek},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -12,19 +13,32 @@ trait CommandTimeout {
 
 impl CommandTimeout for Command {
     fn output_timeout(&mut self, context: &str) -> Output {
+        // A detached descendant can keep inherited stdout/stderr handles alive
+        // after the launcher exits (notably on Windows). File captures let us
+        // collect the launcher's output without waiting for pipe EOF.
+        let mut stdout = tempfile::tempfile().expect("could not create stdout capture");
+        let mut stderr = tempfile::tempfile().expect("could not create stderr capture");
         let mut child = self
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::from(stdout.try_clone().unwrap()))
+            .stderr(Stdio::from(stderr.try_clone().unwrap()))
             .spawn()
             .unwrap_or_else(|error| panic!("could not start {context}: {error}"));
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    return child
-                        .wait_with_output()
-                        .unwrap_or_else(|error| panic!("could not collect {context}: {error}"));
+                Ok(Some(status)) => {
+                    stdout.rewind().unwrap();
+                    stderr.rewind().unwrap();
+                    let mut captured_stdout = Vec::new();
+                    let mut captured_stderr = Vec::new();
+                    stdout.read_to_end(&mut captured_stdout).unwrap();
+                    stderr.read_to_end(&mut captured_stderr).unwrap();
+                    return Output {
+                        status,
+                        stdout: captured_stdout,
+                        stderr: captured_stderr,
+                    };
                 }
                 Ok(None) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(25));
@@ -184,14 +198,12 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     let port = unused_port();
     let key = root.path().join("vault.key");
 
-    // A detached Windows server can retain an inherited capture pipe after the
-    // short-lived `pm start` process exits. Use inherited output here so the
-    // test waits for the launcher process rather than the detached server.
-    let started = isolated_pm(root.path())
-        .args(["--port", &port.to_string(), "start"])
-        .status()
-        .unwrap();
-    assert!(started.success(), "pm start exited with status {started}");
+    let started = run(root.path(), port, &["start"]);
+    assert!(
+        started.status.success(),
+        "pm start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
     let mut server = ServerGuard {
         root: root.path().to_path_buf(),
         port,
@@ -356,8 +368,7 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
     let replacement_key = root.path().join("replacement.key").display().to_string();
     let initial = isolated_pm(root.path())
         .args(["--json", "vaults"])
-        .output()
-        .unwrap();
+        .output_timeout("pm vaults before server startup");
     assert!(initial.status.success());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&initial.stdout).unwrap()["output"],
@@ -483,5 +494,73 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
         run(root.path(), port, &["unlock", "--key", &second_key])
             .status
             .success()
+    );
+}
+
+#[test]
+fn capture_inheritance_fixture() {
+    let Ok(mode) = std::env::var("PM_TEST_CAPTURE_MODE") else {
+        return;
+    };
+    let root = PathBuf::from(std::env::var_os("PM_TEST_CAPTURE_ROOT").unwrap());
+    if mode == "descendant" {
+        std::fs::write(root.join("ready"), b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("release").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        if !root.join("release").exists() {
+            println!("descendant waited for pipe EOF timeout");
+        }
+        std::fs::write(root.join("finished"), b"finished").unwrap();
+        return;
+    }
+    assert_eq!(mode, "launcher");
+    // Deliberately inherit the capture handles, just as a detached Windows
+    // process can. The launcher exits while its descendant holds them open.
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "capture_inheritance_fixture", "--nocapture"])
+        .env("PM_TEST_CAPTURE_MODE", "descendant")
+        .spawn()
+        .unwrap();
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !root.join("ready").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(root.join("ready").exists(), "descendant did not start");
+    println!("launcher exited while descendant remained alive");
+}
+
+#[test]
+fn output_capture_returns_when_launcher_exits_while_descendant_holds_handles() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "capture_inheritance_fixture", "--nocapture"])
+        .env("PM_TEST_CAPTURE_MODE", "launcher")
+        .env("PM_TEST_CAPTURE_ROOT", root.path())
+        .output_timeout("launcher with inherited output handles");
+    // Release the descendant before assertions so even a failed check cleans up.
+    std::fs::write(root.path().join("release"), b"release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !root.path().join("finished").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        root.path().join("finished").exists(),
+        "descendant did not finish"
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("launcher exited while descendant remained alive"));
+    assert!(
+        !stdout.contains("descendant waited for pipe EOF timeout"),
+        "output capture waited for the descendant instead of the launcher"
     );
 }
