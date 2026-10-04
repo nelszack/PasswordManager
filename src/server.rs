@@ -33,7 +33,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 mod commands;
 mod presentation;
-use commands::handle_connection_inner;
+use commands::handle_command;
 mod response;
 use response::{
     deliver_entry, respond_domain_error, respond_domain_error_with_context, respond_domain_result,
@@ -75,10 +75,30 @@ const MAX_TCP_MSG: usize = 16 * 1024 * 1024;
 const TOKEN_HEX_LEN: usize = 64;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CLIENT_CONNECTIONS: usize = 128;
+// Reserve space for both ciphertext and decrypted payload before allocating.
+// Fail fast under pressure rather than queue unauthenticated requests.
+const REQUEST_MEMORY_KIB: usize = 64 * 1024;
+static REQUEST_MEMORY: Semaphore = Semaphore::const_new(REQUEST_MEMORY_KIB);
+
+fn reserve_request_memory(
+    budget: &Semaphore,
+    bytes: usize,
+) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    let kib = bytes.checked_mul(2)?.div_ceil(1024);
+    budget.try_acquire_many(u32::try_from(kib).ok()?).ok()
+}
 
 struct BufferedResponse {
     code: ResponseCode,
     message: String,
+}
+
+#[derive(Default)]
+enum CommandEffect {
+    #[default]
+    None,
+    StopServer,
+    Audit(crate::vault::AuditSnapshot, bool),
 }
 
 impl Drop for BufferedResponse {
@@ -242,23 +262,29 @@ fn schedule_auto_lock(
         if lock_generation.load(Ordering::Acquire) != generation {
             return;
         }
-        let mut server_info = server_info.lock().await;
-        let mut vlt = vlt.lock().await;
-        if lock_generation.load(Ordering::Acquire) == generation
-            && !server_info.locked
-            && vlt.is_some()
-        {
-            let result = lock_vlt(&mut vlt, &mut server_info);
-            let mut last_error = background_error.lock().await;
-            match result {
-                Ok(()) => *last_error = None,
-                Err(error) => {
-                    let message = format!("Automatic lock failed: {error}");
-                    eprintln!("{message}");
-                    *last_error = Some(message);
-                }
+        let mut server_info = server_info.lock_owned().await;
+        let mut vlt = vlt.lock_owned().await;
+        let result = tokio::task::spawn_blocking(move || {
+            if lock_generation.load(Ordering::Acquire) == generation
+                && !server_info.locked
+                && vlt.is_some()
+            {
+                Some(lock_vlt(&mut vlt, &mut server_info))
+            } else {
+                None
             }
+        })
+        .await;
+        let warning = match result {
+            Ok(Some(Ok(()))) => None,
+            Ok(Some(Err(error))) => Some(format!("Automatic lock failed: {error}")),
+            Ok(None) => return,
+            Err(error) => Some(format!("Automatic lock worker failed: {error}")),
+        };
+        if let Some(message) = warning.as_deref() {
+            eprintln!("{message}");
         }
+        *background_error.lock().await = warning;
     });
 }
 pub async fn server(
@@ -339,20 +365,72 @@ struct ConnectionState {
 
 async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
     TRANSPORT_RESPONSE_KEY
-        .scope(RefCell::new(None), async {
+        .scope(RefCell::new(None), async move {
+            let Ok(Some(command)) =
+                tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &state.token)).await
+            else {
+                return;
+            };
+            let kill_tx = state.kill_tx.clone();
+            // Wait for vault ownership asynchronously. Only its current owner
+            // occupies a blocking worker; the connection limit bounds the queue.
+            let server_info = Arc::clone(&state.server_info).lock_owned().await;
+            let vlt = Arc::clone(&state.vlt).lock_owned().await;
+            let runtime = tokio::runtime::Handle::current();
+            let result = tokio::task::spawn_blocking(move || {
+                // Reuse the command helpers' async bookkeeping, but buffer
+                // every response here; socket writes stay on the Tokio runtime.
+                runtime.block_on(RESPONSE_BUFFER.scope(RefCell::new(Vec::new()), async move {
+                    let mut effect = CommandEffect::None;
+                    handle_command(&mut stream, state, command, server_info, vlt, &mut effect)
+                        .await;
+                    let responses =
+                        RESPONSE_BUFFER.with(|buffer| std::mem::take(&mut *buffer.borrow_mut()));
+                    (stream, responses, effect)
+                }))
+            })
+            .await;
+            let (mut stream, responses, effect) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("Vault command worker failed: {error}");
+                    return;
+                }
+            };
+            let stop_server = matches!(&effect, CommandEffect::StopServer);
             RESPONSE_BUFFER
-                .scope(RefCell::new(Vec::new()), async {
-                    handle_connection_inner(&mut stream, state).await;
+                .scope(RefCell::new(responses), async {
+                    if let CommandEffect::Audit(snapshot, check_breaches) = effect {
+                        // Network calls never hold vault ownership or a blocking worker.
+                        let outcome = snapshot.audit(check_breaches).await;
+                        let code = if outcome.incomplete {
+                            ResponseCode::Failure
+                        } else {
+                            ResponseCode::Success
+                        };
+                        respond_with_code(code, &outcome.report, &mut stream).await;
+                    }
                     flush_buffered_responses(&mut stream).await;
                 })
                 .await;
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
+            if stop_server {
+                let _ = kill_tx.send(()).await;
+            }
         })
         .await;
-    let _ = stream.flush().await;
-    let _ = stream.shutdown().await;
 }
 
 async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
+    handle_tcp_with_budget(message, token, &REQUEST_MEMORY).await
+}
+
+async fn handle_tcp_with_budget(
+    message: &mut TcpStream,
+    token: &str,
+    budget: &Semaphore,
+) -> Option<ServerCommand> {
     let mut preface = [0u8; SECURE_PREFACE.len()];
     if message.read_exact(&mut preface).await.is_err() || &preface != SECURE_PREFACE {
         return None;
@@ -369,12 +447,14 @@ async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerComman
     if !(16..=MAX_TCP_MSG + 16).contains(&len) {
         return None;
     }
+    let _memory = reserve_request_memory(budget, len)?;
     let mut ciphertext = vec![0u8; len];
     if message.read_exact(&mut ciphertext).await.is_err() {
         return None;
     }
     let mut buf = decrypt_record(&keys.request, &record_header[..24], &ciphertext)?;
     ciphertext.zeroize();
+    drop(ciphertext);
     TRANSPORT_RESPONSE_KEY.with(|key| {
         *key.borrow_mut() = Some(Zeroizing::new(keys.response));
     });
@@ -389,16 +469,9 @@ async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerComman
     parsed
 }
 async fn handler(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
-    let mut buff = [0u8; 16];
-    let n = message.peek(&mut buff).await.ok()?;
-    if n == 0 {
-        return None;
-    }
-    if buff.starts_with(SECURE_PREFACE) {
-        handle_tcp(message, token).await
-    } else {
-        None
-    }
+    // TCP does not preserve write boundaries. handle_tcp reads the complete
+    // preface under the connection's handshake timeout before validating it.
+    handle_tcp(message, token).await
 }
 
 fn lock_vlt(

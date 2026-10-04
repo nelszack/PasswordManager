@@ -166,22 +166,23 @@ fn manager() -> Result<&'static mpsc::Sender<ClipboardCommand>, String> {
 }
 
 pub fn copy_in_background(secret: String, timeout: u8) {
-    let secret = Zeroizing::new(secret);
-    if timeout == 0 {
-        return;
-    }
-    let result = (|| {
-        let (reply, response) = mpsc::sync_channel(1);
-        manager()?
-            .send(ClipboardCommand::Copy(secret, timeout, reply))
-            .map_err(|_| "clipboard manager stopped".to_string())?;
-        response
-            .recv()
-            .map_err(|_| "clipboard manager stopped".to_string())?
-    })();
-    if let Err(error) = result {
+    if let Err(error) = try_copy_in_background(secret, timeout) {
         eprintln!("Warning: could not copy secret: {error}");
     }
+}
+
+pub fn try_copy_in_background(secret: String, timeout: u8) -> Result<(), String> {
+    let secret = Zeroizing::new(secret);
+    if timeout == 0 {
+        return Ok(());
+    }
+    let (reply, response) = mpsc::sync_channel(1);
+    manager()?
+        .send(ClipboardCommand::Copy(secret, timeout, reply))
+        .map_err(|_| "clipboard manager stopped".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "clipboard manager stopped".to_string())?
 }
 
 /// A lock waits for queued copies and cleanup, but never for their countdown.

@@ -33,7 +33,8 @@
   <main>
     <section class="intro">
       <h2>About this reference</h2>
-      <p>Usage, command descriptions, options, and defaults below are generated. Run <code>pm &lt;COMMAND&gt; --help</code> for terminal help.</p>
+      <p>Usage, command descriptions, options, and defaults below are generated. Run <code>pm &lt;COMMAND&gt; --help</code> for terminal help and available examples.</p>
+      <p>Global <code>--port PORT</code> overrides the configured loopback port for one invocation; <code>--json</code> wraps output in an object containing <code>ok</code> and <code>output</code> or <code>error</code>; <code>--quiet</code> suppresses successful output. <code>--json</code> and <code>--quiet</code> cannot be combined. See the <a href="../README.md">README</a> for setup, defaults, and workflows.</p>
     </section>
     <section class="command" id="pm-genpass">
       <h2><code>pm genpass</code></h2>
@@ -122,8 +123,15 @@ Zero disables automatic locking for this unlock session. If omitted, uses the co
     </section>
     <section class="command" id="pm-native-host">
       <h2><code>pm native-host</code></h2>
-      <p>Install or run the browser native-messaging bridge</p>
+      <p>Install, update, or run the browser native-messaging bridge</p>
       <pre><code>Usage: pm native-host &lt;COMMAND&gt;</code></pre>
+    </section>
+    <section class="command" id="pm-native-host-update">
+      <h2><code>pm native-host update</code></h2>
+      <p>Point an already registered native host at this pm executable.
+
+Preserves browser manifests and approved extension IDs. On Windows, fully close the browser before updating the native-host executable.</p>
+      <pre><code>Usage: pm native-host update</code></pre>
     </section>
     <section class="command" id="pm-native-host-install">
       <h2><code>pm native-host install</code></h2>
@@ -182,7 +190,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <p>Restore a trashed entry to the active vault</p>
       <pre><code>Usage: pm restore --id &lt;ID&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID shown by `pm trash`</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>1-based position shown by the latest `pm trash` listing</dd>
       </dl>
     </section>
     <section class="command" id="pm-purge">
@@ -190,7 +198,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <p>Permanently erase one or all trashed entries</p>
       <pre><code>Usage: pm purge [OPTIONS]</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable ID of one trashed entry to erase permanently</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>1-based position of a trashed entry in the latest `pm trash` listing</dd>
         <dt><code>--all</code></dt><dd>Permanently erase every entry in trash</dd>
       </dl>
     </section>
@@ -281,7 +289,7 @@ Without `--key`, securely prompts twice for a new master password.</p>
       <h2><code>pm rekey</code></h2>
       <p>Re-encrypt the unlocked vault with a new master password or key file.
 
-The replacement is written successfully before the old encrypted vault is removed. Existing external key files are never overwritten.</p>
+Atomically replaces ciphertext at the same vault filename. Existing external key files are never overwritten or removed.</p>
       <pre><code>Usage: pm rekey [OPTIONS]</code></pre>
       <dl class="flags">
         <dt><code>--key &lt;KEY_PATH&gt;</code></dt><dd>Create a key outside application data; relative paths use the current directory</dd>
@@ -310,9 +318,9 @@ The replacement is written successfully before the old encrypted vault is remove
       <pre><code>Usage: pm view [OPTIONS]</code></pre>
       <dl class="flags">
         <dt><code>--type &lt;KIND&gt;</code></dt><dd>Include only items of this category</dd>
-        <dt><code>--totp</code></dt><dd>Include only login items with a configured authenticator</dd>
-        <dt><code>--no-totp</code></dt><dd>Include only login items without a configured authenticator</dd>
-        <dt><code>--weak</code></dt><dd>Include only login items whose password is considered weak</dd>
+        <dt><code>--totp</code></dt><dd>Include only items with a configured authenticator</dd>
+        <dt><code>--no-totp</code></dt><dd>Include only items without a configured authenticator</dd>
+        <dt><code>--weak</code></dt><dd>Include only items with a non-empty primary secret and zxcvbn score of 0–2</dd>
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old</dd>
         <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results Default: <code>id</code>.</dd>
         <dt><code>--descending</code></dt><dd>Reverse the selected sort order</dd>
@@ -323,15 +331,15 @@ The replacement is written successfully before the old encrypted vault is remove
       <p>Search item metadata and apply optional health/type filters</p>
       <pre><code>Usage: pm search [OPTIONS] [QUERY]</code></pre>
       <dl class="flags">
-        <dt><code>QUERY &lt;QUERY&gt;</code></dt><dd>Case-insensitive text matched across name, username, URL, and notes</dd>
+        <dt><code>QUERY &lt;QUERY&gt;</code></dt><dd>Case-insensitive text matched across name, username, URLs, notes, custom-field names, and non-secret custom-field values</dd>
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Require this text in the entry name</dd>
         <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Require this text in the username</dd>
         <dt><code>--url &lt;URL&gt;</code></dt><dd>Require this text in the URL</dd>
         <dt><code>--notes &lt;NOTES&gt;</code></dt><dd>Require this text in the notes</dd>
         <dt><code>--type &lt;KIND&gt;</code></dt><dd>Include only items of this category</dd>
-        <dt><code>--totp</code></dt><dd>Include only login items with a configured authenticator</dd>
-        <dt><code>--no-totp</code></dt><dd>Include only login items without a configured authenticator</dd>
-        <dt><code>--weak</code></dt><dd>Include only login items whose password is considered weak</dd>
+        <dt><code>--totp</code></dt><dd>Include only items with a configured authenticator</dd>
+        <dt><code>--no-totp</code></dt><dd>Include only items without a configured authenticator</dd>
+        <dt><code>--weak</code></dt><dd>Include only items with a non-empty primary secret and zxcvbn score of 0–2</dd>
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old</dd>
         <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results Default: <code>id</code>.</dd>
         <dt><code>--descending</code></dt><dd>Reverse the selected sort order</dd>
@@ -362,12 +370,17 @@ The replacement is written successfully before the old encrypted vault is remove
     </section>
     <section class="command" id="pm-get">
       <h2><code>pm get</code></h2>
-      <p>Display one item&#39;s details or primary secret</p>
+      <p>Display item details, or print its primary secret with `--password-only`.
+
+Details redact the primary secret, notes, and secret custom fields. Use --reveal-secrets to display secret custom fields. The default form copies the primary secret when the configured clipboard timeout is nonzero.</p>
       <pre><code>Usage: pm get [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
         <dt><code>--password-only</code></dt><dd>Print only the primary secret, without copying it to the clipboard</dd>
+        <dt><code>--reveal-secrets</code></dt><dd>Display secret custom-field values in item details</dd>
+        <dt><code>--field &lt;FIELD&gt;</code></dt><dd>Print only this custom field&#39;s value (case-insensitive name)</dd>
+        <dt><code>--copy</code></dt><dd>Copy the selected custom field instead of printing its value</dd>
       </dl>
     </section>
     <section class="command" id="pm-import">

@@ -245,4 +245,19 @@ impl Vault {
             .ok_or_else(|| VaultError::NotFound("Not found.\n".into()))?;
         Ok(Zeroizing::new(self.entries[index].password.clone()))
     }
+
+    pub fn get_custom_field(
+        &self,
+        target: &Target,
+        name: &str,
+    ) -> Result<Zeroizing<String>, VaultError> {
+        let index = self
+            .entry_index(target)
+            .ok_or_else(|| VaultError::NotFound("Entry not found.".into()))?;
+        self.custom_fields(self.entries[index].id)
+            .iter()
+            .find(|field| field.name.eq_ignore_ascii_case(name))
+            .map(|field| Zeroizing::new(field.value.clone()))
+            .ok_or_else(|| VaultError::NotFound("Custom field not found.".into()))
+    }
 }

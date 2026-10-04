@@ -36,7 +36,12 @@ messages, and network responses are untrusted inputs.
 Vaults and backups authenticate their ciphertext and format metadata. Password
 keys use Argon2id; external key files must be kept separately from application
 data. File permissions restrict vault and token access to the current user.
+Vault and backup writes enforce a 128 MiB encrypted-file limit before replacement.
+Backup restoration enforces the same limit on the actual file read; external
+key files must be regular files within a 1 MiB limit.
 The loopback server uses a rotating token and authenticated encrypted transport.
+A shared 64 MiB budget bounds ciphertext and plaintext request buffers before
+authentication; requests exceeding the available budget are rejected.
 The extension derives site identity from browser sender metadata and requires
 site-scoped selection rather than trusting a domain supplied by page scripts.
 
@@ -52,8 +57,8 @@ cached encryption keys. Locking also requests immediate cleanup of the latest
 server-owned clipboard secret, only if the clipboard still contains that value.
 The clipboard worker retains its copy while retrying transient cleanup failures;
 that buffer can outlive the locked vault when the clipboard is unavailable.
-A manual cleanup failure
-is reported even though the vault itself has already locked.
+A manual cleanup failure is reported even though the vault itself has already
+locked. Background cleanup failures appear in server status and the extension badge.
 
 Vault mutations use an atomic file replacement. A pre-replacement failure rolls
 back memory. A directory-sync failure after replacement retains the committed
@@ -68,6 +73,11 @@ verify which credential opens the file after an interrupted operation.
 
 - Malware running as the same user, administrators, debuggers, or a compromised
   operating system can access unlocked secrets or the local session token.
+- `pm get` redacts secret custom fields by default. `--reveal-secrets` displays
+  them, `--field NAME` prints a selected custom-field value, and `--password-only`
+  prints the primary secret. `--field NAME --copy` copies without printing the
+  value. `--json` wraps the same output without additional redaction. Terminal
+  logs can retain explicitly revealed values.
 - Autofill necessarily gives the selected secret to the destination page. A
   compromised website or browser can read it after delivery.
 - Zeroization reduces the lifetime of application-owned buffers; it cannot

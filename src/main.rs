@@ -252,6 +252,13 @@ async fn main() {
             }
         }
         (CliCommands::NativeHost { command }, _) => match command {
+            NativeHostCommands::Update => match native_messaging::update() {
+                Ok(path) => client::print_success(&format!(
+                    "Native messaging host updated at {}",
+                    path.display()
+                )),
+                Err(error) => client::exit_error(&error, 1),
+            },
             NativeHostCommands::Install {
                 extension_id,
                 browser,
@@ -606,15 +613,25 @@ async fn main() {
             CliCommands::Get {
                 target,
                 password_only,
+                reveal_secrets,
+                field,
+                copy,
             },
             true,
         ) => {
-            send_command(if password_only {
+            send_command(if let Some(name) = field {
+                ServerCommand::GetField {
+                    target: target_type(target),
+                    name,
+                    copy_timeout: copy.then_some(conf.clipboard.timeout),
+                }
+            } else if password_only {
                 ServerCommand::GetSecret(target_type(target))
             } else {
-                ServerCommand::GetWithOptions {
+                ServerCommand::GetDetails {
                     target: target_type(target),
                     copy_timeout: conf.clipboard.timeout,
+                    reveal_secrets,
                 }
             });
         }

@@ -152,7 +152,7 @@ pub enum CliCommands {
     Start,
     #[command(hide = true)]
     Run,
-    /// Install or run the browser native-messaging bridge.
+    /// Install, update, or run the browser native-messaging bridge.
     NativeHost {
         #[command(subcommand)]
         command: NativeHostCommands,
@@ -181,7 +181,7 @@ pub enum CliCommands {
     Trash,
     /// Restore a trashed entry to the active vault.
     Restore {
-        /// Stable entry ID shown by `pm trash`.
+        /// 1-based position shown by the latest `pm trash` listing.
         #[arg(long)]
         id: usize,
     },
@@ -224,8 +224,8 @@ pub enum CliCommands {
     },
     /// Re-encrypt the unlocked vault with a new master password or key file.
     ///
-    /// The replacement is written successfully before the old encrypted vault
-    /// is removed. Existing external key files are never overwritten.
+    /// Atomically replaces ciphertext at the same vault filename. Existing
+    /// external key files are never overwritten or removed.
     Rekey {
         /// Create a key outside application data; relative paths use the current directory.
         #[arg(long = "key")]
@@ -290,9 +290,13 @@ pub enum CliCommands {
         #[command(flatten)]
         metadata: MetadataArgs,
     },
-    /// Display one item's details or primary secret.
+    /// Display item details, or print its primary secret with `--password-only`.
+    ///
+    /// Details redact the primary secret, notes, and secret custom fields.
+    /// Use --reveal-secrets to display secret custom fields. The default form copies the primary
+    /// secret when the configured clipboard timeout is nonzero.
     #[command(
-        after_help = "Examples:\n  pm get --id 4\n  pm get --entry-name github --password-only"
+        after_help = "Examples:\n  pm get --id 4\n  pm get --entry-name github --password-only\n  pm get --id 4 --reveal-secrets\n  pm get --id 4 --field recovery-code --copy"
     )]
     Get {
         #[command(flatten)]
@@ -300,6 +304,15 @@ pub enum CliCommands {
         /// Print only the primary secret, without copying it to the clipboard.
         #[arg(long)]
         password_only: bool,
+        /// Display secret custom-field values in item details.
+        #[arg(long, conflicts_with_all = ["password_only", "field"])]
+        reveal_secrets: bool,
+        /// Print only this custom field's value (case-insensitive name).
+        #[arg(long, conflicts_with = "password_only", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        field: Option<String>,
+        /// Copy the selected custom field instead of printing its value.
+        #[arg(long, requires = "field")]
+        copy: bool,
     },
     /// Import CSV, JSON, Bitwarden JSON, or this application's portable JSON.
     ///
@@ -360,6 +373,14 @@ pub enum CliCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum NativeHostCommands {
+    /// Point an already registered native host at this pm executable.
+    ///
+    /// Preserves browser manifests and approved extension IDs. On Windows,
+    /// fully close the browser before updating the native-host executable.
+    #[command(
+        after_help = "Example:\n  /path/to/new/pm native-host update\n\nRestart the server and reload the extension after upgrading."
+    )]
+    Update,
     /// Register the native host for an unpacked Chrome-family extension.
     #[command(
         after_help = "Example:\n  pm native-host install --extension-id abcdefghijklmnopabcdefghijklmnop --browser chrome\n\nReload the extension after installation. On Windows, fully close the browser before reinstalling an upgraded native host."
@@ -563,13 +584,13 @@ pub struct ListArgs {
     /// Include only items of this category.
     #[arg(long = "type", value_enum)]
     pub kind: Option<ItemKind>,
-    /// Include only login items with a configured authenticator.
+    /// Include only items with a configured authenticator.
     #[arg(long, conflicts_with = "no_totp")]
     pub totp: bool,
-    /// Include only login items without a configured authenticator.
+    /// Include only items without a configured authenticator.
     #[arg(long, conflicts_with = "totp")]
     pub no_totp: bool,
-    /// Include only login items whose password is considered weak.
+    /// Include only items with a non-empty primary secret and zxcvbn score of 0–2.
     #[arg(long)]
     pub weak: bool,
     /// Show passwords at least this many days old.
@@ -629,7 +650,7 @@ pub struct DeleteArgs {
 
 #[derive(Args, Debug)]
 pub struct PurgeArgs {
-    /// Stable ID of one trashed entry to erase permanently.
+    /// 1-based position of a trashed entry in the latest `pm trash` listing.
     #[arg(long, conflicts_with = "all", required_unless_present = "all")]
     pub id: Option<usize>,
     /// Permanently erase every entry in trash.
@@ -639,7 +660,8 @@ pub struct PurgeArgs {
 
 #[derive(Args, Debug)]
 pub struct SearchArgs {
-    /// Case-insensitive text matched across name, username, URL, and notes.
+    /// Case-insensitive text matched across name, username, URLs, notes, custom-field
+    /// names, and non-secret custom-field values.
     #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak", "stale_days"])]
     pub query: Option<String>,
     /// Require this text in the entry name.

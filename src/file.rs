@@ -1,9 +1,49 @@
 use directories::ProjectDirs;
 use std::{
     env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
+use zeroize::Zeroizing;
+
+/// Check the opened file and bound the actual read, even if it grows after
+/// metadata inspection. Returned and partial buffers are zeroized on drop.
+pub(crate) fn read_bounded_file(path: &Path, max_bytes: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+    fn validate(metadata: &fs::Metadata, max_bytes: u64) -> io::Result<()> {
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a regular file",
+            ));
+        }
+        if metadata.len() > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file exceeds the {max_bytes} byte limit"),
+            ));
+        }
+        Ok(())
+    }
+    validate(&fs::metadata(path)?, max_bytes)?;
+    let file = fs::File::open(path)?;
+    validate(&file.metadata()?, max_bytes)?;
+    read_bounded(file, max_bytes)
+}
+
+fn read_bounded(reader: impl Read, max_bytes: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut contents = Zeroizing::new(Vec::new());
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut contents)?;
+    if contents.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds the {max_bytes} byte limit"),
+        ));
+    }
+    Ok(contents)
+}
 
 #[cfg(target_os = "windows")]
 pub(crate) const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -272,6 +312,34 @@ mod test {
         assert!(file_exists(&file_path));
         assert!(file_exists(temp_dir.path()));
         assert!(!file_exists(temp_dir.path().join("missing")));
+    }
+
+    #[test]
+    fn bounded_reads_validate_files_and_enforce_the_limit_on_actual_bytes() {
+        for contents in [vec![], vec![7; 7], vec![7; 8]] {
+            assert_eq!(&*read_bounded(contents.as_slice(), 8).unwrap(), &contents);
+        }
+        // Models bytes added after metadata was checked. Read at most one
+        // extra byte to detect overflow, rather than buffering the whole input.
+        let mut input = io::Cursor::new(vec![7; 64]);
+        assert_eq!(
+            read_bounded(&mut input, 8).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(input.position(), 9);
+
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("input");
+        fs::write(&path, b"12345678").unwrap();
+        assert_eq!(&*read_bounded_file(&path, 8).unwrap(), b"12345678");
+        assert_eq!(
+            read_bounded_file(&path, 7).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_bounded_file(directory.path(), 8).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

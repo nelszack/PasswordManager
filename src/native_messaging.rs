@@ -147,6 +147,19 @@ pub fn install(extension_id: &str, browser: NativeBrowser) -> Result<PathBuf, St
     Ok(manifest_path)
 }
 
+pub fn update() -> Result<PathBuf, String> {
+    update_host_in(&data_dir().join("native-messaging"))
+}
+
+fn update_host_in(host_dir: &Path) -> Result<PathBuf, String> {
+    let host_path = host_dir.join(HOST_BINARY_NAME);
+    fs::symlink_metadata(&host_path).map_err(|error| {
+        format!("could not find registered native host at {}: {error}; run pm native-host install first", host_path.display())
+    })?;
+    install_host_link(&host_path)?;
+    Ok(host_path)
+}
+
 #[derive(Clone, Copy)]
 #[cfg_attr(not(test), allow(dead_code))]
 enum NativePlatform {
@@ -202,11 +215,15 @@ fn install_host_link(host_path: &Path) -> Result<(), String> {
                 host_path.display()
             ));
         }
-        fs::remove_file(host_path)
-            .map_err(|error| format!("could not update {}: {error}", host_path.display()))?;
     }
-    symlink(&executable, host_path)
-        .map_err(|error| format!("could not link {}: {error}", host_path.display()))
+    let staged = host_path.with_extension(format!("update-{}", std::process::id()));
+    symlink(&executable, &staged)
+        .map_err(|error| format!("could not stage {}: {error}", host_path.display()))?;
+    let result = fs::rename(&staged, host_path);
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result.map_err(|error| format!("could not update {}: {error}", host_path.display()))
 }
 
 #[cfg(target_os = "windows")]
@@ -216,7 +233,7 @@ fn install_host_link(host_path: &Path) -> Result<(), String> {
         .map_err(|error| format!("could not locate the pm executable: {error}"))?;
     fs::copy(&executable, host_path)
         .map(|_| ())
-        .map_err(|error| format!("could not install {}: {error}", host_path.display()))
+        .map_err(|error| format!("could not install {}: {error}; fully close the browser, then rerun pm native-host update", host_path.display()))
 }
 
 #[cfg(not(target_os = "windows"))]

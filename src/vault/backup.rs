@@ -7,6 +7,16 @@ impl Vault {
         key_pass: &mut PasswordType,
         force: bool,
     ) -> Result<(), VaultError> {
+        self.encrypted_backup_with_limit(path, key_pass, force, MAX_BACKUP_BYTES)
+    }
+
+    pub(super) fn encrypted_backup_with_limit(
+        &self,
+        path: String,
+        key_pass: &mut PasswordType,
+        force: bool,
+        max_bytes: u64,
+    ) -> Result<(), VaultError> {
         if let PasswordType::Password(password) = &key_pass
             && let Err(error) = validate_new_password(password)
         {
@@ -25,10 +35,18 @@ impl Vault {
             created: chrono::Utc::now().to_rfc3339(),
             vault: self,
         };
-        let plaintext = rmp_serde::to_vec(&envelope)
-            .map_err(|error| format!("could not encode backup: {error}"))?;
-        let mut output = try_encrypt_file_in_place(key_pass, plaintext)?;
         let prefix_len = BACKUP_MAGIC.len() + 1;
+        let mut plaintext = Zeroizing::new(
+            rmp_serde::to_vec(&envelope)
+                .map_err(|error| format!("could not encode backup: {error}"))?,
+        );
+        super::persistence::validate_encrypted_size(
+            plaintext.len(),
+            prefix_len,
+            max_bytes,
+            "backup",
+        )?;
+        let mut output = try_encrypt_file_in_place(key_pass, std::mem::take(&mut *plaintext))?;
         let encrypted_len = output.len();
         output.reserve(prefix_len);
         output.resize(encrypted_len + prefix_len, 0);
@@ -105,13 +123,8 @@ pub(crate) fn restore_encrypted_backup(
     force: bool,
 ) -> Result<String, VaultError> {
     let mut vault_lookup_key = Zeroizing::new(key_pass.clone());
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("could not open backup file {path:?}: {error}"))?;
-    if metadata.len() > MAX_BACKUP_BYTES {
-        return Err(("backup file exceeds the 128 MiB limit".to_string()).into());
-    }
-    let mut contents =
-        fs::read(path).map_err(|error| format!("could not read backup file {path:?}: {error}"))?;
+    let mut contents = crate::file::read_bounded_file(Path::new(path), MAX_BACKUP_BYTES)
+        .map_err(|error| format!("could not read backup file {path:?}: {error}"))?;
     if contents.len() < BACKUP_MAGIC.len() + 1
         || &contents[..BACKUP_MAGIC.len()] != BACKUP_MAGIC
         || contents[BACKUP_MAGIC.len()] != BACKUP_VERSION

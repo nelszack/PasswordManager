@@ -1,4 +1,6 @@
-use crate::file::{key_file_path, new_key_file_path, set_private_perms, sync_parent};
+use crate::file::{
+    key_file_path, new_key_file_path, read_bounded_file, set_private_perms, sync_parent,
+};
 use crate::types::PasswordType;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -6,18 +8,20 @@ use chacha20poly1305::{
     aead::{Aead, AeadInOut, Generate, KeyInit, Payload},
 };
 use std::{
-    fs::{self, OpenOptions, read},
+    fs::{self, OpenOptions},
     io::Write,
 };
 use zeroize::{Zeroize, Zeroizing};
 
 const SALT_LEN: usize = 16;
+const MAX_KEY_FILE_BYTES: u64 = 1024 * 1024;
 const NONCE_LEN: usize = 24;
 const VAULT_MAGIC: &[u8; 8] = b"PMVAULT\0";
 const VAULT_VERSION: u8 = 1;
 const KDF_KEYFILE: u8 = 0;
 const KDF_ARGON2ID: u8 = 1;
 const HEADER_LEN: usize = 8 + 1 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
+pub(crate) const ENCRYPTED_FILE_OVERHEAD: usize = HEADER_LEN + 16;
 const SALT_CONTEXT: &str = "vault-password-salt-v1";
 
 #[derive(Clone, Copy)]
@@ -202,9 +206,8 @@ pub fn try_gen_master_key(key_pass: &mut PasswordType, new: bool) -> Result<[u8;
                 let bytes = Zeroizing::new(generate_key(&file_path)?);
                 master_key_from_keyfile(&*bytes)
             } else {
-                let bytes = Zeroizing::new(read(&file_path).map_err(|e| {
-                    format!("could not read key file {}: {e}", file_path.display())
-                })?);
+                let bytes = read_bounded_file(&file_path, MAX_KEY_FILE_BYTES)
+                    .map_err(|e| format!("could not read key file {}: {e}", file_path.display()))?;
                 master_key_from_keyfile(&bytes)
             }
         }

@@ -7,8 +7,8 @@ normal builds do not include those helpers.
 Clone the source repository before running these commands; release archives
 contain this guide but not the developer fuzz harness.
 
-Install a nightly Rust toolchain and `cargo-fuzz`, then run from the repository
-root:
+Use a native C/C++ build toolchain, install nightly Rust and `cargo-fuzz`, then
+run from the repository root:
 
 ```bash
 rustup toolchain install nightly
@@ -33,8 +33,9 @@ cargo +nightly fuzz run imports -- -max_total_time=600 -max_len=65536
   secret-bearing records after parsing.
 
 The security-fuzz workflow runs bounded checks on relevant pull requests and
-longer weekly sessions. It caches discovered corpus entries per target and uploads
-crash artifacts on failure. Fuzzer findings fail CI; timeout completion is normal.
+longer weekly or manually triggered sessions (60 seconds per target on pull
+requests and 600 seconds otherwise). It caches discovered corpus entries per
+target and uploads crash artifacts on failure. Fuzzer findings fail CI; timeout completion is normal.
 Sanitizers and coverage instrumentation require nightly Rust. Stable builds can
 run a basic parser smoke check without coverage guidance:
 

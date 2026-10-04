@@ -312,17 +312,6 @@ fn typed_items_multiple_urls_and_list_options_parse() {
         Cli::try_parse_from(["pm", "update", "--id", "1", "--url", "a", "--clear-urls"]).is_err()
     );
 
-    let scripted =
-        Cli::try_parse_from(["pm", "--json", "get", "--id", "2", "--password-only"]).unwrap();
-    assert!(scripted.json);
-    assert!(matches!(
-        scripted.command,
-        Some(CliCommands::Get {
-            password_only: true,
-            ..
-        })
-    ));
-
     let import = Cli::try_parse_from([
         "pm",
         "import",
@@ -399,4 +388,56 @@ fn test_totp_commands_parse() {
     ));
 
     assert!(Cli::try_parse_from(["pm", "totp", "show", "--id", "7", "--copy-time", "20"]).is_err());
+}
+
+#[test]
+fn get_output_options_require_explicit_secret_disclosure() {
+    let scripted =
+        Cli::try_parse_from(["pm", "--json", "get", "--id", "2", "--password-only"]).unwrap();
+    assert!(scripted.json);
+    assert!(matches!(
+        scripted.command,
+        Some(CliCommands::Get {
+            password_only: true,
+            ..
+        })
+    ));
+
+    let cli = Cli::try_parse_from(["pm", "get", "--id", "1"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(CliCommands::Get {
+            reveal_secrets: false,
+            field: None,
+            copy: false,
+            ..
+        })
+    ));
+    assert!(Cli::try_parse_from(["pm", "get", "--id", "1", "--reveal-secrets"]).is_ok());
+    let cli = Cli::try_parse_from([
+        "pm",
+        "get",
+        "--id",
+        "1",
+        "--field",
+        "recovery-code",
+        "--copy",
+    ])
+    .unwrap();
+    assert!(
+        matches!(cli.command, Some(CliCommands::Get { field: Some(ref name), copy: true, .. }) if name == "recovery-code")
+    );
+    for flags in [
+        vec!["--copy"],
+        vec!["--field", ""],
+        vec!["--password-only", "--reveal-secrets"],
+        vec!["--field", "token", "--password-only"],
+        vec!["--field", "token", "--reveal-secrets"],
+    ] {
+        let args: Vec<_> = ["pm", "get", "--id", "1"]
+            .into_iter()
+            .chain(flags)
+            .collect();
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }

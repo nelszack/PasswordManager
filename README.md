@@ -1,7 +1,8 @@
 # Password Manager
 
 See the browser-friendly [complete command and flag reference](docs/commands.html)
-for usage details and examples for every CLI command.
+for command descriptions, usage, and flags. Run `pm <COMMAND> --help` for
+terminal help and available examples.
 
 A secure, local-first password manager with a CLI interface and browser extension.
 
@@ -30,34 +31,64 @@ A secure, local-first password manager with a CLI interface and browser extensio
 
 ## Installation
 
+Build from the repository root with a current stable Rust toolchain and a native
+C/C++ build toolchain (MSVC on Windows):
+
 ```bash
-cargo build --release
+cargo build --release --locked
 ```
 
-The binary will be at `target/release/pm`.
+The binary will be at `target/release/pm` (`target/release/pm.exe` on Windows).
+Add that directory to your `PATH`, or use the full executable path in the
+commands below. Release archives include a prebuilt binary and the extension;
+keep the binary at a stable path before registering the browser native host.
 
-`cargo build` (including `--release`) automatically refreshes completions for
-`$SHELL` (PowerShell on Windows) and updates an already registered native host.
-Register the host once with `pm native-host install`; builds preserve browser
-manifests and extension IDs. Unix hosts link to the current build profile's `pm`.
-Windows hosts use a small launcher that forwards to that profile's `pm.exe`, so
-future builds do not need to copy the executable into the host. If replacement
-is blocked, Cargo prints a warning; fully close the browser, including background
-processes, and rerun `cargo build`. Restart the server and reload the extension
-after upgrading to use the newly built code.
+Building does not change shell completions or browser native-host registrations.
+Use `pm completions` to generate a completion file as described in
+[Shell Completions](#shell-completions), and register the native host once with
+`pm native-host install` as described in [Browser Extension](#browser-extension).
 
-Bash completions go to `~/.local/share/bash-completion/completions/pm`, Zsh to
-`~/.zfunc/_pm`, and Fish to `~/.config/fish/completions/pm.fish` (respecting XDG
-paths). Add `~/.zfunc` to Zsh's `fpath` before `compinit`. PowerShell completions
-are written to `target/debug/completions/pm.ps1` (or `target/release/completions/pm.ps1`);
-dot-source that file from `$PROFILE` once. Existing shells may need to reload
-completions. Set `PM_COMPLETION_SHELL` to select a shell or
-`PM_COMPLETION_OUTPUT` to update a specific completion file you already source.
-`PM_DATA_DIR` and Cargo's target directory are respected. Set
-`PM_SKIP_BUILD_UPDATES=1` to disable installation side effects; CI and cross
-compilation skip them automatically. No Python or separate build command is needed.
+After upgrading, run the intended executable explicitly to update an existing
+native host while preserving browser manifests and approved extension IDs:
+
+```bash
+./target/release/pm native-host update
+```
+
+Unix hosts link to that executable. Windows copies it to the registered host;
+fully close the browser, including background processes, before updating.
+Restart the server and reload the extension after upgrading. Regenerate any
+installed shell completions with `pm completions` to pick up new commands.
 
 ## Usage
+
+### Create Your First Vault
+
+```bash
+pm start
+pm new
+pm unlock
+pm add --name "Example account" --username alice --url https://example.com
+pm view
+pm lock
+```
+
+`pm new` prompts twice for a master password, creates an empty vault, and leaves
+it locked. New master passwords must contain at least 14 characters and pass a
+predictability check. Use `pm unlock` before adding or reading entries.
+
+For a vault protected by an external key instead:
+
+```bash
+pm start
+mkdir -p ./keys
+pm new --key ./keys/vault.key
+pm unlock --key ./keys/vault.key
+```
+
+The key's parent directory must exist. The new key path must not already exist
+and must be outside the application data directory. Keep the key separately from the vault. `pm init` and `pm create` are
+aliases for `pm new`. Creating another vault locks the currently open vault.
 
 ### Start the Server
 
@@ -71,6 +102,9 @@ it is not displayed to the user or stored in the extension. A clean shutdown
 removes the token file. Before any command is sent, the server proves possession
 of that token with a fresh challenge. Commands and responses are then protected
 with direction-specific XChaCha20-Poly1305 session keys.
+
+Check the server with `pm status`; stop it with `pm kill`. The server holds one
+unlocked vault at a time. Lock it before unlocking a different vault.
 
 ### Generate a Password
 
@@ -123,7 +157,7 @@ hidden prompt and handled like login passwords.
 
 Add searchable custom fields with `--field NAME=VALUE`. For sensitive values,
 use `--secret-field NAME`; the value is read through a hidden prompt and is not
-included in search results or ordinary listings:
+searched or displayed in ordinary listings (field names remain visible):
 
 ```bash
 pm add --name "Hosting" --field environment=production --secret-field recovery-code
@@ -150,7 +184,9 @@ descending order.
 
 ### Search and Filter Entries
 
-Search across names, usernames, URLs, and notes (passwords are never searched):
+Search across names, usernames, all associated URLs, notes, custom-field names,
+and non-secret custom-field values (passwords and secret field values are never
+searched):
 
 ```bash
 pm search github
@@ -167,7 +203,14 @@ combined, so every supplied filter must match. Matching is case-insensitive.
 The `--type`, `--totp`, `--no-totp`, `--weak`, and `--stale-days` filters work with both
 `view` and `search`. Supported types are `login`, `secure-note`,
 `payment-card`, `identity`, `wifi`, `software-license`, `ssh-key`, and
-`api-secret`. Weakness filtering ignores items with no primary secret.
+`api-secret`. TOTP and weakness filters apply across item types; `--no-totp`
+also includes non-login items without authenticators. Add `--type login` to limit
+these filters to accounts. Weakness filtering ignores items with no primary
+secret and selects zxcvbn scores of 0–2.
+
+Vault writes enforce the same 128 MiB encrypted-file limit used during unlock.
+An operation that exceeds the limit fails before replacement and rolls back its
+in-memory changes.
 
 ### Get a Password
 
@@ -175,10 +218,32 @@ The `--type`, `--totp`, `--no-totp`, `--weak`, and `--stale-days` filters work w
 pm get --entry-name "github.com"
 ```
 
+`get` prints item details with the primary secret, notes, and secret custom fields
+redacted. It copies a non-empty primary secret when the clipboard timeout is
+nonzero. Use `--password-only` to print just the primary secret without copying.
+Use `--reveal-secrets` to display secret custom-field values, or `--field NAME`
+to print one custom field by its case-insensitive name. Add `--copy` to copy that
+field without printing its value; this requires a nonzero clipboard timeout and
+reports clipboard failures. These field options do not copy the primary secret.
+`--json` wraps the same output and respects the selected reveal option.
+
+```bash
+pm get --id 3 --reveal-secrets
+pm get --id 3 --field recovery-code
+pm get --id 3 --field recovery-code --copy
+```
+
 ### Update an Entry
 
 ```bash
 pm update --name "New Name" --entry-name "github.com"
+```
+
+Change the primary secret through a hidden prompt, or generate a replacement:
+
+```bash
+pm update --id 3 --password
+pm update --id 3 --password --generate-password
 ```
 
 Item types and URL associations can be changed without altering the secret:
@@ -210,8 +275,10 @@ pm purge --id 1
 pm purge --all
 ```
 
-`restore` and `purge --id` use the IDs shown by `pm trash`. Purging is
-permanent.
+`restore` and `purge --id` use the **1-based positions** shown by the latest
+`pm trash` listing, rather than active entries' stable IDs. These positions change
+when trash items are restored or purged; list the trash again before selecting
+another item. Purging is permanent.
 
 Trash retention can optionally purge old items whenever a vault is unlocked.
 It is disabled by default; configure a number of days to enable it.
@@ -267,7 +334,10 @@ TOTP. Reports identify affected entries but never print their passwords.
 `--breaches` performs an opt-in Pwned Passwords range check. It sends only the
 first five characters of each password's SHA-1 hash, requests padded responses,
 and never sends a password or complete hash. The ordinary audit remains fully
-offline. A network failure is reported without suppressing the local results.
+offline. Network failures retain both local results and successful
+breach findings, identify entries with unchecked breach status, and return a
+failure exit status to indicate an incomplete audit. Up to eight requests run
+concurrently with a 15-second request timeout and a four-minute overall deadline.
 
 ### TOTP Authenticator
 
@@ -344,6 +414,9 @@ pm rekey --key /secure/removable-media/replacement.key
 New vault, rekey, import, and backup passwords must contain at least 14
 characters and pass a predictability check.
 
+Existing key files must be regular files no larger than 1 MiB. Generated key
+files contain 32 random bytes.
+
 New key files must be outside the application data directory, so copying the
 encrypted vault does not also copy its key. Relative paths are resolved from
 the directory where `pm` is run.
@@ -384,7 +457,7 @@ already exists, restoration requires `--force`.
 Backup files use a versioned format and XChaCha20-Poly1305 authenticated
 encryption with a fresh nonce and, for passwords, a fresh Argon2id salt. They
 are written atomically with private file permissions. The format contains all
-encrypted recovery material and is limited to 128 MiB when restoring.
+encrypted recovery material and is limited to 128 MiB when creating and restoring.
 
 For interoperability with other password managers, plaintext import/export is
 still available:
@@ -409,8 +482,11 @@ pm import --path backup.csv --conflicts replace
 pm import --path backup.csv --conflicts keep-both
 ```
 
-Imports into the current vault require it to be unlocked and leave it unlocked.
-Previewing does not prompt for the vault password or change its lock state.
+Imports and previews against the current vault require it to be unlocked and
+leave it unlocked. Use `--new --preview` to preview against an empty vault while
+the server's vault is locked. Previews require a running server but do not prompt
+for a new vault password or change the current lock state. A completed `--new`
+import leaves the new vault locked.
 `--key` is used only with `--new`, where it creates the new vault's external key.
 Import files are limited to 128 MiB and 100,000 items.
 
@@ -421,11 +497,15 @@ an `(imported)` suffix.
 The format is detected from the input content; exports use a versioned portable
 JSON envelope when the path ends in `.json`, otherwise CSV. Portable JSON
 preserves active item types, additional URLs, custom fields, password-age
-metadata, bounded password history, and TOTP configurations. Imported IDs are
-always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
-CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV. Duplicate rows with the same
-name, username, and URL are skipped. Password values are preserved exactly,
-including whitespace and empty strings; a missing password field is rejected.
+metadata, password history (bounded by the configured limit), and TOTP
+configurations. Imported IDs are always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
+CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV with compatible login columns.
+Bitwarden imports include login items only and use their first URI; they do not
+import Bitwarden TOTP secrets, custom fields, or other item types. Other CSV/JSON
+imports become login items; use this application's portable JSON for rich metadata.
+Conflicts compare the exact name, username, and primary URL, including duplicate
+rows within one input file. They are skipped by default; `--conflicts` changes
+that behavior. Password values are preserved exactly, including whitespace and empty strings; a missing password field is rejected.
 Both export formats contain plaintext secrets; portable JSON can also contain
 TOTP secrets and password history, so
 exports should be protected or deleted after use. Export refuses to replace an
@@ -476,6 +556,26 @@ host reads the config file, so use `pm config --server-port PORT` instead of a
 one-time flag when the extension must use the alternate port. Stop the running
 server before changing its configured port, then start it again.
 
+### Configuration and Data Locations
+
+`config.toml` lives in the platform configuration directory; encrypted `.enc`
+vaults, the session token, and the native-host installation live in the application
+data directory. On Linux these default to `~/.config/password_manager` and
+`~/.local/share/password_manager`, respecting `XDG_CONFIG_HOME` and
+`XDG_DATA_HOME`. macOS and Windows use platform paths from the `directories` crate.
+
+Set `PM_CONFIG_DIR` and `PM_DATA_DIR` to override the directories. Use absolute
+paths and the same values for the server, CLI, and browser-launched native host.
+A browser launched outside your shell may not inherit those overrides. Use the
+same `PM_DATA_DIR` when installing or updating the native host.
+
+Built-in defaults are a 12-character generated password, no generation statistics,
+clipboard copying enabled for generated values and newly added login passwords,
+a 15-second clipboard timeout, a 15-minute inactivity timeout, ten password-history
+revisions, disabled trash expiration, and server port 7878. `pm config --reset`
+restores all defaults. Invalid configuration files produce an error and are left
+unchanged.
+
 ### Structured and Scripted Output
 
 Public commands accept global `--json` and `--quiet` flags. JSON output
@@ -493,34 +593,39 @@ pm get --id 3 --password-only
 
 ### Shell Completions
 
-Generate tab completion for your shell:
+Generate or replace a completion file explicitly using the intended installed
+executable. Use a separate file for the chosen shell:
 
 ```bash
-# bash
-sudo mkdir -p /etc/bash_completion.d
-pm completions bash | sudo tee /etc/bash_completion.d/pm > /dev/null
+# Bash: bash-completion can load this standard user location
+mkdir -p ~/.local/share/bash-completion/completions
+pm completions bash --output ~/.local/share/bash-completion/completions/pm
 
-# zsh
-pm completions zsh > ~/.zshrc.d/_pm
+# Zsh: add ~/.zfunc to fpath before running compinit in ~/.zshrc
+mkdir -p ~/.zfunc
+pm completions zsh --output ~/.zfunc/_pm
 
-# fish
-pm completions fish > ~/.config/fish/completions/pm.fish
-
-# powershell
-pm completions powershell > $PROFILE
+# Fish: loaded automatically by Fish
+mkdir -p ~/.config/fish/completions
+pm completions fish --output ~/.config/fish/completions/pm.fish
 ```
 
-Or write to a file with `pm completions <shell> --output <path>`. Supported
-shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`. You may need to
-restart your shell (or `source` the file) for completions to take effect.
+Create the destination directory first. For PowerShell, generate a separate file
+and add a dot-source line to your existing profile:
 
-If tab still completes filenames instead of commands/flags, the script isn't
-being sourced. Check with `type _pm` (or `complete -p pm`), and add an
-explicit source line to your `~/.bashrc`:
+```powershell
+pm completions powershell --output "$HOME/pm-completions.ps1"
+# Add this line to $PROFILE:
+. "$HOME/pm-completions.ps1"
+```
+
+Supported shells are `bash`, `zsh`, `fish`, `elvish`, and `powershell`. Omitting
+`--output` or using `--output -` writes to standard output. Reload your shell after
+setup. If Bash still completes filenames, check `complete -p pm` and source the
+file from `~/.bashrc`:
 
 ```bash
-echo 'source /etc/bash_completion.d/pm' >> ~/.bashrc
-source ~/.bashrc
+source ~/.local/share/bash-completion/completions/pm
 ```
 
 ## Browser Extension
@@ -550,7 +655,7 @@ It does not offer autofill or save prompts on plaintext HTTP pages.
    when a login is submitted.
 
 The service worker talks to `com.myproject.password_manager` through Chrome's
-native-messaging API. Chrome launches the registered `pm-native-host` link,
+native-messaging API. The browser launches the registered native-host executable,
 which forwards a small, validated command set to the authenticated local
 server. The extension no longer requests localhost access or stores the server
 session token. Page origins are derived from trusted browser sender metadata;
@@ -561,8 +666,10 @@ installer creates a host link and writes
 the browser manifest in the browser's per-user application-support directory.
 On Windows it installs `pm-native-host.exe` and registers the manifest under
 the current user's browser registry key, so administrator rights are not
-required. If the `pm` executable moves or is upgraded on Windows, rerun the
-install command.
+required. Unix registrations link to the executable; Windows registration
+copies it. If you move the executable or install a new release binary, run
+`pm native-host update` using the new executable. This preserves browser
+manifests and approved extension IDs. On Windows, fully close the browser first.
 
 Autofill is form-aware: choosing an account fills only the username and current
 password fields associated with that control. Other login forms and
@@ -626,16 +733,18 @@ on-page controls.
 ## Architecture
 
 - `src/main.rs` - CLI entry point and command routing
-- `src/server.rs` - Background server for extension communication
+- `src/server.rs` and `src/server/` - Authenticated local server, command handling, and output rendering
 - `src/client.rs` - Client for server communication
 - `src/native_messaging.rs` - Chrome native host protocol and registration
-- `src/vault.rs` - Vault management and storage
+- `src/vault.rs` and `src/vault/` - Vault records, mutations, recovery, import/export, and persistence
 - `src/encryption.rs` - Encryption/decryption utilities
 - `src/password.rs` - Password generation and strength checking
 - `src/cli.rs` - CLI argument parsing
 - `src/config.rs` - Configuration management
 - `src/clipboard.rs` - Clipboard operations
-- `src/file.rs` - File import/export
+- `src/file.rs` - Application paths, key-path validation, private permissions, and atomic file writes
+- `src/protocol.rs` - Authenticated encrypted local transport
+- `src/lib.rs` - Shared production library used by the CLI and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
 - `docs/commands.template.html` - Static layout used by the command-reference generator
 - `extension/` - Browser extension (Chrome/Chromium)
@@ -650,7 +759,8 @@ clear the latest server-owned copy immediately. Cleanup preserves text copied by
 another application. A timeout of `0` disables copying, as before.
 
 Clipboard history managers may retain copies. CLI-generated copies have independent
-timeouts and are not canceled by server locking. See the threat model for limits.
+timeouts and are not canceled by server locking. See [SECURITY.md](SECURITY.md)
+for the threat model and limits.
 
 ## Security
 
@@ -675,16 +785,44 @@ vulnerability-reporting process.
 
 ## Testing
 
-Run the complete unit, protocol-integration, and security regression suite with:
+Run Rust and extension unit checks from the repository root:
 
 ```bash
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-node --test extension/*.test.js
+cargo fmt --all -- --check
+cargo test --locked --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+npm ci
+npm run test:extension
 npm run test:extension:coverage
+```
+
+The extension coverage command requires Node.js 26.7 or newer. CI uses Node 26
+for coverage and Node 22 for browser end-to-end tests.
+
+Browser tests launch headed Chromium and require a graphical session. The
+real native-host/server integration test runs on Linux and requires the binary
+at `target/debug/pm`; it is skipped if the binary is missing. Set up and run on
+Linux with:
+
+```bash
+cargo build --locked
+npx playwright install --with-deps chromium
 npm run test:e2e:coverage
-# After installing cargo-llvm-cov:
-cargo llvm-cov --all-features --workspace --fail-under-lines 65
+# On Linux without a graphical session (requires Xvfb):
+xvfb-run --auto-servernum npm run test:e2e:coverage
+```
+
+The coverage command writes reports under `test-results/e2e-coverage`; use
+`npm run test:e2e` to run without coverage collection. Browser tests use temporary
+profiles and synthetic vaults. Most fixtures enable HTTP in a temporary extension
+copy; production injection remains HTTPS-only.
+
+For Rust coverage, install the LLVM tools and coverage runner first:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --locked --all-features --workspace --fail-under-lines 65
 ```
 
 After changing CLI commands or flags, regenerate and verify the browser command
@@ -699,13 +837,15 @@ The suite covers authenticated encrypted transport, native-message validation,
 encrypted backup recovery and tamper detection, hostile encryption parameters,
 secret redaction, vault recovery state, TOTP vectors, URL matching, and
 plaintext import/export compatibility. GitHub Actions runs the full test and
-strict-lint suite on Linux, macOS, and Windows for every push and pull request.
+strict-lint suite on Linux, macOS, and Windows for pushes to `main` and pull
+requests. Browser end-to-end and coverage jobs run separately on Linux.
 
 Dependency changes are scanned against the RustSec advisory database and
 reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
 weekly, including npm browser-test dependencies and the fuzz harness. Scheduled
-security checks audit the Rust and npm lockfiles. GitHub's secret scanning and
-push protection remain enabled for the repository.
+security checks audit the Rust and npm lockfiles, including the fuzz lockfile.
+Repository secret-scanning and push-protection settings are managed separately
+from the checked-in workflows.
 
 Coverage-guided fuzz targets and scheduled CI sessions exercise encrypted headers,
 native messages, and import parsers. See [fuzz/README.md](fuzz/README.md) for local
@@ -753,19 +893,13 @@ use structured server status; the CLI retains its human-readable status output.
 
 Vault mutations share `src/vault/transaction.rs`. Individual edits snapshot only
 the affected entry and recovery records; imports snapshot the full state. A
-failed mutation or write restores the snapshot, and temporary secrets are wiped
-on drop. Import previews and execution share a plan based on non-secret fields.
+failure before atomic replacement restores the snapshot; a directory-sync failure
+after replacement keeps committed memory and keys and reports uncertain durability.
+Temporary secrets are wiped on drop. Import previews and execution share a plan
+based on non-secret fields.
 
 The extension's `content.js` initializes the page integration. The manifest loads
 separate scripts for messaging, controls, password generation, typed autofill,
 DOM observation, and credential capture, in the same isolated browser world.
 
-Run the checks with:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-npm run test:extension:coverage
-npm run test:e2e:coverage
-```
+See [Testing](#testing) for prerequisites and the checks used by CI.

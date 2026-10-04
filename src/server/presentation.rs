@@ -10,11 +10,24 @@ fn kind(view: &EntryView<'_>) -> ItemKind {
 }
 
 pub(super) fn entry_details(view: &EntryView<'_>) -> Zeroizing<String> {
+    entry_details_with_secrets(view, false)
+}
+
+pub(super) fn entry_details_with_secrets(
+    view: &EntryView<'_>,
+    reveal_secrets: bool,
+) -> Zeroizing<String> {
     let fields = Zeroizing::new(
         view.metadata
             .map_or(&[][..], |metadata| metadata.custom_fields.as_slice())
             .iter()
-            .map(|field| format!("{}={}", field.name, field.value))
+            .map(|field| {
+                if field.secret && !reveal_secrets {
+                    format!("{}=<redacted>", field.name)
+                } else {
+                    format!("{}={}", field.name, field.value)
+                }
+            })
             .collect::<Vec<_>>(),
     );
     let fields = Zeroizing::new(fields.join("\n"));

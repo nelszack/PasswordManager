@@ -107,21 +107,54 @@ fn test_encrypt_decrypt_pass() {
     }
 }
 #[test]
-fn test_encrypt_decrypt_key() {
+fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
     crate::file::init_test_data_dir();
     let directory = tempfile::tempdir().unwrap();
-    let temp = directory.path().join("temp.enc");
-    gen_master_key(
-        &mut PasswordType::Key(temp.to_string_lossy().into_owned()),
-        true,
+    let path = directory.path().join("vault.key");
+    let key_file = || PasswordType::Key(path.to_str().unwrap().into());
+    gen_master_key(&mut key_file(), true);
+    for (label, bytes) in [
+        ("generated key", fs::read(&path).unwrap()),
+        (
+            "maximum-size external key",
+            vec![7; MAX_KEY_FILE_BYTES as usize],
+        ),
+    ] {
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            try_gen_master_key(&mut key_file(), false).unwrap(),
+            master_key_from_keyfile(&bytes),
+            "{label}"
+        );
+        let plaintext = b"this is a test";
+        let encrypted = encrypt_file(&mut key_file(), plaintext);
+        assert_eq!(
+            decrypt_file(&mut key_file(), &encrypted).unwrap(),
+            plaintext,
+            "{label}"
+        );
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_KEY_FILE_BYTES + 1)
+        .unwrap();
+    assert!(
+        try_gen_master_key(&mut key_file(), false)
+            .unwrap_err()
+            .contains("byte limit")
     );
-    let plaintext = "this is a test".as_bytes();
-    let mut pass = PasswordType::Key(temp.to_str().unwrap().to_string());
-    let encrypt = encrypt_file(&mut pass, plaintext);
-    let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-    fs::remove_file(temp).unwrap();
-    assert_eq!(decrypt, plaintext)
+    assert!(
+        try_gen_master_key(
+            &mut PasswordType::Key(directory.path().to_str().unwrap().into()),
+            false
+        )
+        .unwrap_err()
+        .contains("regular file")
+    );
 }
+
 #[test]
 fn test_decrypt_invalid_and_unversioned_data_returns_none() {
     let mut pass = PasswordType::Password("test123".into());

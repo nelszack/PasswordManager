@@ -102,6 +102,24 @@ impl Zeroize for ServerCommand {
                 target.zeroize();
                 copy_timeout.zeroize();
             }
+            Self::GetDetails {
+                target,
+                copy_timeout,
+                reveal_secrets,
+            } => {
+                target.zeroize();
+                copy_timeout.zeroize();
+                reveal_secrets.zeroize();
+            }
+            Self::GetField {
+                target,
+                name,
+                copy_timeout,
+            } => {
+                target.zeroize();
+                name.zeroize();
+                copy_timeout.zeroize();
+            }
             Self::RestorePassword { target, revision } => {
                 target.zeroize();
                 revision.zeroize();
@@ -150,13 +168,22 @@ pub enum ServerCommand {
     Search(SearchFilter),
     Add(PasswordEntry),
     AddTyped(TypedEntry),
-    AddTypedWithOptions { entry: TypedEntry, copy_timeout: u8 },
+    AddTypedWithOptions {
+        entry: TypedEntry,
+        copy_timeout: u8,
+    },
     Get(Target),
-    GetWithOptions { target: Target, copy_timeout: u8 },
+    GetWithOptions {
+        target: Target,
+        copy_timeout: u8,
+    },
     GetSecret(Target),
     Delete(Target),
     History(Target),
-    RestorePassword { target: Target, revision: usize },
+    RestorePassword {
+        target: Target,
+        revision: usize,
+    },
     Trash,
     RestoreTrash(usize),
     PurgeTrash(Option<usize>),
@@ -166,13 +193,29 @@ pub enum ServerCommand {
     RestoreBackup(BackupRequest),
     Update(EntryUpdate),
     UpdateTyped(TypedUpdate),
-    Export { path: String, force: bool },
+    Export {
+        path: String,
+        force: bool,
+    },
     Import(ImportRequest),
     New(PasswordType),
     Rekey(PasswordType),
     BrowserLogins(String),
-    BrowserLogin { domain: String, id: usize },
+    BrowserLogin {
+        domain: String,
+        id: usize,
+    },
     StatusData,
+    GetDetails {
+        target: Target,
+        copy_timeout: u8,
+        reveal_secrets: bool,
+    },
+    GetField {
+        target: Target,
+        name: String,
+        copy_timeout: Option<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]

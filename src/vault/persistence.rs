@@ -342,11 +342,31 @@ pub(super) fn write_vault_with_key(
     vlt: &Vault,
     key_pass: &mut PasswordType,
 ) -> Result<(), VaultError> {
+    #[cfg(test)]
+    let max_bytes = TEST_MAX_VAULT_BYTES.get();
+    #[cfg(not(test))]
+    let max_bytes = MAX_VAULT_BYTES;
+    write_vault_with_limit(vlt, key_pass, max_bytes)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MAX_VAULT_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(MAX_VAULT_BYTES) };
+}
+
+fn write_vault_with_limit(
+    vlt: &Vault,
+    key_pass: &mut PasswordType,
+    max_bytes: u64,
+) -> Result<(), VaultError> {
     let fname = vlt.metadata.filename.clone();
     let file_path = data_dir().join(&fname);
-    let buf = run_blocking_io(|| rmp_serde::to_vec(&vlt))
-        .map_err(|e| VaultError::Persistence(format!("could not encode vault: {e}")))?;
-    let mut txt = try_encrypt_file_in_place(key_pass, buf)?;
+    let mut buf = Zeroizing::new(
+        run_blocking_io(|| rmp_serde::to_vec(&vlt))
+            .map_err(|e| VaultError::Persistence(format!("could not encode vault: {e}")))?,
+    );
+    validate_encrypted_size(buf.len(), 0, max_bytes, "vault")?;
+    let mut txt = try_encrypt_file_in_place(key_pass, std::mem::take(&mut *buf))?;
     let result = run_blocking_io(|| {
         let mut temporary = NamedTempFile::new_in(data_dir()).map_err(|e| {
             VaultError::Persistence(format!("could not create vault temp file: {e}"))
@@ -378,6 +398,23 @@ pub(super) fn write_vault_with_key(
     });
     txt.zeroize();
     result
+}
+
+pub(super) fn validate_encrypted_size(
+    plaintext_bytes: usize,
+    prefix_bytes: usize,
+    max_bytes: u64,
+    label: &str,
+) -> Result<(), VaultError> {
+    let encrypted_bytes = plaintext_bytes
+        .checked_add(crate::encryption::ENCRYPTED_FILE_OVERHEAD)
+        .and_then(|size| size.checked_add(prefix_bytes));
+    if encrypted_bytes.is_none_or(|size| size as u64 > max_bytes) {
+        return Err(VaultError::Validation(format!(
+            "{label} exceeds the {max_bytes} byte encrypted-file limit; reduce its size before saving"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn persist_private_file(
@@ -477,6 +514,56 @@ pub(crate) fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_mutation_rolls_back_and_keeps_the_saved_vault_and_key() {
+        let (mut vault, mut info) = stored_vault();
+        let before = vault.clone();
+        let path = data_dir().join(&vault.metadata.filename);
+        let ciphertext = fs::read(&path).unwrap();
+        struct RestoreLimit(u64);
+        impl Drop for RestoreLimit {
+            fn drop(&mut self) {
+                TEST_MAX_VAULT_BYTES.set(self.0);
+            }
+        }
+        let _restore = RestoreLimit(TEST_MAX_VAULT_BYTES.replace(ciphertext.len() as u64));
+        let result = vault.transaction(TransactionScope::Entry(1), &mut info, |vault| {
+            vault.entries[0].notes = Some("x".repeat(1024));
+            Ok((true, ()))
+        });
+        assert!(matches!(result, Err(VaultError::Validation(_))));
+        assert_eq!(vault, before);
+        assert_eq!(fs::read(&path).unwrap(), ciphertext);
+        let mut key = session(42);
+        let (_, reopened) = lookup_vault_in(&data_dir(), &mut key, Some(&vault.metadata.filename))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.entries, before.entries);
+        let mut replacement = PasswordType::Password("new-master-password-for-size-test".into());
+        assert!(write_vault_with_limit(&vault, &mut replacement, 1).is_err());
+        assert!(
+            matches!(replacement, PasswordType::Password(ref password) if password == "new-master-password-for-size-test")
+        );
+        assert_eq!(fs::read(&path).unwrap(), ciphertext);
+        // A file exactly at the limit remains writable and reopenable.
+        write_vault_with_limit(
+            &vault,
+            info.keypass.as_mut().unwrap(),
+            ciphertext.len() as u64,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn size_validation_includes_header_tag_and_backup_prefix() {
+        let overhead = crate::encryption::ENCRYPTED_FILE_OVERHEAD as u64;
+        assert!(validate_encrypted_size(10, 0, overhead + 10, "vault").is_ok());
+        assert!(validate_encrypted_size(10, 0, overhead + 9, "vault").is_err());
+        assert!(validate_encrypted_size(10, 9, overhead + 19, "backup").is_ok());
+        assert!(validate_encrypted_size(10, 9, overhead + 18, "backup").is_err());
+        assert!(validate_encrypted_size(usize::MAX, 9, u64::MAX, "backup").is_err());
+    }
 
     fn session(byte: u8) -> PasswordType {
         PasswordType::Session {

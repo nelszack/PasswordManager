@@ -85,6 +85,59 @@ fn unused_port() -> u16 {
         .port()
 }
 
+#[test]
+fn native_host_updates_are_explicit_and_preserve_browser_manifests() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    let missing = run(root.path(), port, &["native-host", "update"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("install first"));
+    let host_dir = root.path().join("data/native-messaging");
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let host = host_dir.join(if cfg!(windows) {
+        "pm-native-host.exe"
+    } else {
+        "pm-native-host"
+    });
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.path().join("old-pm"), &host).unwrap();
+    #[cfg(windows)]
+    std::fs::write(&host, b"old executable").unwrap();
+    let manifest = host_dir.join("com.myproject.password_manager.json");
+    let original = br#"{"allowed_origins":["chrome-extension://abcdefghijklmnopabcdefghijklmnop/"],"path":"existing-host"}"#;
+    std::fs::write(&manifest, original).unwrap();
+    for _ in 0..2 {
+        let output = run(root.path(), port, &["native-host", "update"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), original);
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(&host).unwrap(),
+            std::fs::canonicalize(env!("CARGO_BIN_EXE_pm")).unwrap()
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            std::fs::read(&host).unwrap(),
+            std::fs::read(env!("CARGO_BIN_EXE_pm")).unwrap()
+        );
+    }
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&host).unwrap();
+        std::fs::write(&host, b"unrelated executable").unwrap();
+        assert!(
+            !run(root.path(), port, &["native-host", "update"])
+                .status
+                .success()
+        );
+        assert_eq!(std::fs::read(&host).unwrap(), b"unrelated executable");
+    }
+}
+
 struct ServerGuard {
     root: PathBuf,
     port: u16,
@@ -306,6 +359,15 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         assert!(path.is_file());
     }
 
+    // Portable imports let the executable exercise secret fields without a TTY prompt.
+    let mut portable: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_export).unwrap()).unwrap();
+    portable["items"][0]["custom_fields"] = serde_json::json!([
+        {"name": "recovery-code", "value": "synthetic-custom-secret", "secret": true},
+        {"name": "environment", "value": "production", "secret": false}
+    ]);
+    std::fs::write(&json_export, serde_json::to_vec(&portable).unwrap()).unwrap();
+
     let previewed = isolated_pm(root.path())
         .args(["--port", &port.to_string(), "import", "--path"])
         .arg(&json_export)
@@ -326,6 +388,74 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         .output_timeout("pm import");
     assert!(imported.status.success());
     assert!(String::from_utf8_lossy(&run(root.path(), port, &["view"]).stdout).contains("bob"));
+
+    assert!(
+        run(root.path(), port, &["config", "--clipboard-timeout", "0"])
+            .status
+            .success()
+    );
+    for (flags, visible) in [
+        (vec![], false),
+        (vec!["--reveal-secrets"], true),
+        (vec!["--field", "RECOVERY-CODE"], true),
+    ] {
+        let args: Vec<_> = ["--json", "get", "--entry-name", "example"]
+            .into_iter()
+            .chain(flags)
+            .collect();
+        let result = run(root.path(), port, &args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            output["output"]
+                .as_str()
+                .unwrap()
+                .contains("synthetic-custom-secret"),
+            visible
+        );
+        assert!(
+            !output["output"]
+                .as_str()
+                .unwrap()
+                .contains(&String::from_utf8_lossy(&secret.stdout).to_string())
+        );
+    }
+    let public = run(
+        root.path(),
+        port,
+        &["get", "--entry-name", "example", "--field", "environment"],
+    );
+    assert!(public.status.success());
+    assert_eq!(String::from_utf8_lossy(&public.stdout).trim(), "production");
+    for args in [
+        vec![
+            "--json",
+            "get",
+            "--entry-name",
+            "example",
+            "--field",
+            "missing",
+        ],
+        vec![
+            "--json",
+            "get",
+            "--entry-name",
+            "example",
+            "--field",
+            "recovery-code",
+            "--copy",
+        ],
+    ] {
+        let result = run(root.path(), port, &args);
+        assert!(!result.status.success());
+        let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(output["ok"], false);
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("synthetic-custom-secret"));
+    }
 
     let backup = root.path().join("vault.pmbackup");
     let backed_up = isolated_pm(root.path())

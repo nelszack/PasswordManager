@@ -14,32 +14,96 @@ pub(super) fn parse_pwned_range(body: &str, prefix: &str) -> HashMap<String, u64
         .collect()
 }
 
-pub(super) async fn breached_hashes<'a>(
-    password_hashes: impl Iterator<Item = &'a str>,
-) -> Result<HashMap<String, u64>, String> {
+struct BreachCheck {
+    matches: HashMap<String, u64>,
+    unchecked_prefixes: HashSet<String>,
+    error: Option<String>,
+}
+
+async fn breached_hashes<'a>(password_hashes: impl Iterator<Item = &'a str>) -> BreachCheck {
     let prefixes = password_hashes
         .map(|hash| hash[..5].to_string())
         .collect::<HashSet<_>>();
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("password-manager/0.1 breach-audit")
         .build()
-        .map_err(|error| format!("could not initialize breach checker: {error}"))?;
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return BreachCheck {
+                matches: HashMap::new(),
+                unchecked_prefixes: prefixes,
+                error: Some(format!("could not initialize breach checker: {error}")),
+            };
+        }
+    };
+    // Finish before the CLI's five-minute response timeout, retaining partial results.
+    check_breached_prefixes(prefixes, std::time::Duration::from_secs(240), |prefix| {
+        fetch_breached_prefix(client.clone(), prefix)
+    })
+    .await
+}
+
+async fn check_breached_prefixes<F, Fut>(
+    prefixes: HashSet<String>,
+    timeout: std::time::Duration,
+    fetch: F,
+) -> BreachCheck
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<HashMap<String, u64>, String>> + Send + 'static,
+{
+    let mut check = BreachCheck {
+        matches: HashMap::new(),
+        unchecked_prefixes: prefixes.clone(),
+        error: None,
+    };
     const MAX_CONCURRENT_REQUESTS: usize = 8;
     let mut pending = prefixes.into_iter();
     let mut requests = tokio::task::JoinSet::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let spawn = |requests: &mut tokio::task::JoinSet<_>, prefix: String| {
+        let response = fetch(prefix.clone());
+        requests.spawn(async move { (prefix, response.await) });
+    };
     for prefix in pending.by_ref().take(MAX_CONCURRENT_REQUESTS) {
-        requests.spawn(fetch_breached_prefix(client.clone(), prefix));
+        spawn(&mut requests, prefix);
     }
-
-    let mut matches = HashMap::new();
-    while let Some(result) = requests.join_next().await {
-        matches.extend(result.map_err(|error| format!("breach-check task failed: {error}"))??);
+    loop {
+        let result = match tokio::time::timeout_at(deadline, requests.join_next()).await {
+            Ok(Some(result)) => result,
+            Ok(None) => break,
+            Err(_) => {
+                let message = "overall breach-check deadline exceeded";
+                check.error = Some(match check.error.take() {
+                    Some(error) => format!("{error}; {message}"),
+                    None => message.into(),
+                });
+                break;
+            }
+        };
+        match result {
+            Ok((prefix, Ok(matches))) => {
+                check.unchecked_prefixes.remove(&prefix);
+                check.matches.extend(matches);
+            }
+            Ok((_, Err(error))) => {
+                check.error.get_or_insert(error);
+            }
+            Err(error) => {
+                check
+                    .error
+                    .get_or_insert_with(|| format!("breach-check task failed: {error}"));
+            }
+        }
         if let Some(prefix) = pending.next() {
-            requests.spawn(fetch_breached_prefix(client.clone(), prefix));
+            spawn(&mut requests, prefix);
         }
     }
-    Ok(matches)
+    // Drop/abort pending requests immediately on deadline or completion.
+    requests.abort_all();
+    check
 }
 
 async fn fetch_breached_prefix(
@@ -259,14 +323,177 @@ impl AuditSnapshot {
         } else {
             None
         };
-        let (breached, error) = match breach_result.as_ref() {
-            Some(Ok(matches)) => (Some(matches), None),
-            Some(Err(error)) => (None, Some(error.as_str())),
-            None => (None, None),
-        };
-        AuditOutcome {
-            report: self.report(breached, error),
-            incomplete: error.is_some(),
+        self.audit_outcome(breach_result.as_ref())
+    }
+
+    fn audit_outcome(&self, check: Option<&BreachCheck>) -> AuditOutcome {
+        let mut report = self.report(
+            check.map(|check| &check.matches),
+            check.and_then(|check| check.error.as_deref()),
+        );
+        if let Some(check) = check {
+            let unchecked: Vec<_> = self
+                .entries
+                .iter()
+                .filter(|entry| check.unchecked_prefixes.contains(&entry.password_hash[..5]))
+                .collect();
+            if !unchecked.is_empty() {
+                report.push_str(&format!(
+                    "Breach checks incomplete: {} of {} login entries checked successfully.\n",
+                    self.entries.len() - unchecked.len(),
+                    self.entries.len(),
+                ));
+                for entry in unchecked {
+                    report.push_str(&format!(
+                        "Unchecked breach status: {}. {}\n",
+                        entry.id, entry.name
+                    ));
+                }
+            }
         }
+        AuditOutcome {
+            report,
+            incomplete: check
+                .is_some_and(|check| check.error.is_some() || !check.unchecked_prefixes.is_empty()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn range_checks_bound_concurrency_and_preserve_complete_or_partial_results() {
+        for (total, failures, known_breaches) in [
+            (0, vec![], false),
+            (1, vec![], false),
+            (12, vec![], true),
+            (12, vec![1, 6], true),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let failed_prefixes: HashSet<String> =
+                failures.into_iter().map(|id| format!("{id:05}")).collect();
+            let prefixes = (0..total).map(|id| format!("{id:05}")).collect();
+            let result = check_breached_prefixes(prefixes, Duration::from_secs(1), |prefix| {
+                let calls = Arc::clone(&calls);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                let failed = failed_prefixes.contains(&prefix);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    if failed {
+                        Err("synthetic network failure".into())
+                    } else if known_breaches {
+                        Ok(HashMap::from([(format!("{prefix}{}", "A".repeat(35)), 42)]))
+                    } else {
+                        Ok(HashMap::new())
+                    }
+                }
+            })
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), total);
+            assert_eq!(peak.load(Ordering::SeqCst), total.min(8));
+            assert_eq!(
+                result.matches.len(),
+                (total - failed_prefixes.len()) * usize::from(known_breaches)
+            );
+            assert_eq!(result.error.is_some(), !failed_prefixes.is_empty());
+            assert_eq!(result.unchecked_prefixes, failed_prefixes);
+        }
+    }
+
+    #[tokio::test]
+    async fn overall_deadline_retains_results_and_cancels_hanging_ranges() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        struct Dropped(Arc<AtomicUsize>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let start = tokio::time::Instant::now();
+        let result = check_breached_prefixes(
+            HashSet::from(["00000".into(), "00001".into()]),
+            Duration::from_millis(30),
+            |prefix| {
+                let dropped = Arc::clone(&dropped);
+                async move {
+                    if prefix == "00000" {
+                        Ok(HashMap::from([("known-hash".into(), 42)]))
+                    } else {
+                        let _dropped = Dropped(dropped);
+                        std::future::pending().await
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(result.matches.get("known-hash"), Some(&42));
+        assert_eq!(result.unchecked_prefixes, HashSet::from(["00001".into()]));
+        assert!(result.error.unwrap().contains("deadline exceeded"));
+        tokio::task::yield_now().await;
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn partial_report_marks_unchecked_entries_without_exposing_passwords() {
+        let passwords = [
+            "synthetic-breached-password",
+            "synthetic-unchecked-password",
+        ];
+        let vault = Vault {
+            entries: passwords
+                .iter()
+                .enumerate()
+                .map(|(index, password)| VaultEntry {
+                    id: index + 1,
+                    name: format!("Account {}", index + 1),
+                    password: (*password).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            metadata: VaultMetadata::default(),
+            recovery: RecoveryData::default(),
+        };
+        let snapshot = vault.audit_snapshot(&AuditOptions::default());
+        let check = BreachCheck {
+            matches: HashMap::from([(password_hash(passwords[0]), 42)]),
+            unchecked_prefixes: HashSet::from([password_hash(passwords[1])[..5].to_owned()]),
+            error: Some("synthetic network failure".into()),
+        };
+        let outcome = snapshot.audit_outcome(Some(&check));
+        assert!(outcome.incomplete);
+        assert!(
+            outcome
+                .report
+                .contains("Breached password: 1. Account 1 (seen 42 times)")
+        );
+        assert!(
+            outcome
+                .report
+                .contains("Unchecked breach status: 2. Account 2")
+        );
+        assert!(
+            outcome
+                .report
+                .contains("1 of 2 login entries checked successfully")
+        );
+        for password in passwords {
+            assert!(!outcome.report.contains(password));
+        }
+        assert!(!snapshot.audit(false).await.incomplete);
     }
 }

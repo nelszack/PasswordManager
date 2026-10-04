@@ -2374,17 +2374,54 @@ fn encrypted_backup_round_trip_preserves_complete_vault_state() {
 }
 
 #[test]
-fn encrypted_backup_rejects_tampering_and_invalid_vault_state() {
+fn encrypted_backup_rejects_invalid_files_tampering_and_invalid_vault_state() {
     init_test_data_dir();
     let directory = tempfile::tempdir().unwrap();
     let tampered_path = directory.path().join("tampered.pmbackup");
     let invalid_path = directory.path().join("invalid.pmbackup");
     let password = format!("adversarial-backup-{:016x}", rand::random::<u64>());
-    let mut key = PasswordType::Password(password);
+    let mut key = PasswordType::Password(password.clone());
+
+    let oversized_path = directory.path().join("oversized.pmbackup");
+    fs::File::create(&oversized_path)
+        .unwrap()
+        .set_len(MAX_BACKUP_BYTES + 1)
+        .unwrap();
+    for (path, expected_error) in [
+        (oversized_path.as_path(), "byte limit"),
+        (directory.path(), "regular file"),
+    ] {
+        let error = restore_encrypted_backup(path.to_str().unwrap(), &mut key, false).unwrap_err();
+        assert!(
+            error.to_string().contains(expected_error),
+            "{}: {error}",
+            path.display()
+        );
+    }
 
     let vault = recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
+    // Oversized writes must preserve both an existing destination and the password.
+    fs::write(&tampered_path, b"existing-backup").unwrap();
+    let error = vault
+        .encrypted_backup_with_limit(tampered_path.display().to_string(), &mut key, true, 1)
+        .unwrap_err();
+    assert!(matches!(error, VaultError::Validation(_)));
+    assert_eq!(fs::read(&tampered_path).unwrap(), b"existing-backup");
+    assert!(matches!(key, PasswordType::Password(ref value) if value == &password));
+    fs::remove_file(&tampered_path).unwrap();
+    assert!(
+        vault
+            .encrypted_backup_with_limit(tampered_path.display().to_string(), &mut key, false, 1)
+            .is_err()
+    );
+    assert!(!tampered_path.exists());
+
     vault
         .encrypted_backup(tampered_path.display().to_string(), &mut key, false)
+        .unwrap();
+    let length = fs::metadata(&tampered_path).unwrap().len();
+    vault
+        .encrypted_backup_with_limit(tampered_path.display().to_string(), &mut key, true, length)
         .unwrap();
     let mut tampered = fs::read(&tampered_path).unwrap();
     *tampered.last_mut().unwrap() ^= 1;

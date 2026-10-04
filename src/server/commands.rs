@@ -1,26 +1,25 @@
 use super::*;
 
 #[allow(clippy::needless_borrow)]
-pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: ConnectionState) {
+pub(super) async fn handle_command(
+    mut stream: &mut TcpStream,
+    state: ConnectionState,
+    msg: ServerCommand,
+    mut server_info: tokio::sync::OwnedMutexGuard<ServerInfo>,
+    mut vlt: tokio::sync::OwnedMutexGuard<Option<Vault>>,
+    effect: &mut CommandEffect,
+) {
     let ConnectionState {
-        server_info,
-        vlt,
-        kill_tx,
-        token,
+        server_info: server_info_handle,
+        vlt: vlt_handle,
+        kill_tx: _,
+        token: _,
         lock_generation,
         inactivity_timeout,
         background_error,
         password_history_limit,
         trash_retention_days,
     } = state;
-    let Ok(Some(msg)) = tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &token)).await
-    else {
-        return;
-    };
-    let server_info_handle = Arc::clone(&server_info);
-    let vlt_handle = Arc::clone(&vlt);
-    let mut server_info = server_info.lock().await;
-    let mut vlt = vlt.lock().await;
     if !server_info.locked
         && !matches!(
             &msg,
@@ -56,10 +55,7 @@ pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: C
                 return;
             }
             respond("Server stopped.", &mut stream).await;
-            drop(vlt);
-            drop(server_info);
-            flush_buffered_responses(&mut stream).await;
-            let _ = kill_tx.send(()).await;
+            *effect = CommandEffect::StopServer;
         }
         ServerCommand::Lock(send) => {
             lock_generation.fetch_add(1, Ordering::AcqRel);
@@ -412,15 +408,7 @@ pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: C
                 // the vault is available, then release the live state before
                 // any network-backed breach checks begin.
                 let audit_snapshot = vault.audit_snapshot(&options);
-                drop(vlt);
-                drop(server_info);
-                let outcome = audit_snapshot.audit(options.check_breaches).await;
-                let code = if outcome.incomplete {
-                    ResponseCode::Failure
-                } else {
-                    ResponseCode::Success
-                };
-                respond_with_code(code, &outcome.report, &mut stream).await;
+                *effect = CommandEffect::Audit(audit_snapshot, options.check_breaches);
             }
         }
         ServerCommand::Totp(mut command) => {
@@ -600,6 +588,83 @@ pub(super) async fn handle_connection_inner(mut stream: &mut TcpStream, state: C
                 }
             } else {
                 respond_failure("Vault locked.", &mut stream).await;
+            }
+        }
+        ServerCommand::GetDetails {
+            target,
+            copy_timeout,
+            reveal_secrets,
+        } => {
+            if server_info.locked {
+                respond_failure("Vault locked.", &mut stream).await;
+            } else {
+                match vlt
+                    .as_ref()
+                    .ok_or(crate::vault::VaultError::Locked)
+                    .and_then(|vault| vault.get_entry(&target))
+                {
+                    Ok(crate::vault::EntryOutput::Details(view)) => {
+                        respond(
+                            &presentation::entry_details_with_secrets(&view, reveal_secrets),
+                            &mut stream,
+                        )
+                        .await;
+                        if !view.entry.password.is_empty() {
+                            copy_in_background(view.entry.password.clone(), copy_timeout);
+                        }
+                    }
+                    Ok(crate::vault::EntryOutput::SiteLogins(output)) => {
+                        respond(&output, &mut stream).await
+                    }
+                    Err(error) => respond_domain_error(&error, &mut stream).await,
+                }
+            }
+        }
+        ServerCommand::GetField {
+            target,
+            name,
+            copy_timeout,
+        } => {
+            if server_info.locked {
+                respond_failure("Vault locked.", &mut stream).await;
+            } else if copy_timeout == Some(0) {
+                respond_domain_error(
+                    &crate::vault::VaultError::InvalidInput(
+                        "Clipboard copying is disabled; configure a nonzero clipboard timeout."
+                            .into(),
+                    ),
+                    &mut stream,
+                )
+                .await;
+            } else {
+                match vlt
+                    .as_ref()
+                    .ok_or(crate::vault::VaultError::Locked)
+                    .and_then(|vault| vault.get_custom_field(&target, &name))
+                {
+                    Ok(mut value) => {
+                        if let Some(timeout) = copy_timeout {
+                            match crate::clipboard::try_copy_in_background(
+                                std::mem::take(&mut *value),
+                                timeout,
+                            ) {
+                                Ok(()) => {
+                                    respond("Custom field copied to clipboard.", &mut stream).await
+                                }
+                                Err(error) => {
+                                    respond_failure(
+                                        &format!("Could not copy custom field: {error}"),
+                                        &mut stream,
+                                    )
+                                    .await
+                                }
+                            }
+                        } else {
+                            respond(&value, &mut stream).await;
+                        }
+                    }
+                    Err(error) => respond_domain_error(&error, &mut stream).await,
+                }
             }
         }
         ServerCommand::GetSecret(target) => {
