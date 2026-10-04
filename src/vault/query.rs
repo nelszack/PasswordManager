@@ -45,26 +45,30 @@ impl Vault {
             } else {
                 entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
             }
+        } else if options.sort == SortField::Id {
+            entries.sort_by_key(|entry| entry.id);
+            if options.descending {
+                entries.reverse();
+            }
         } else {
-            entries.sort_by(|left, right| {
-                let ordering = match options.sort {
-                    SortField::Id => left.id.cmp(&right.id),
-                    SortField::Created => left.created.cmp(&right.created),
-                    SortField::Modified => left.modified.cmp(&right.modified),
-                    SortField::PasswordAge => self
-                        .password_changed_with_metadata(left, metadata_by_id.get(&left.id).copied())
-                        .cmp(self.password_changed_with_metadata(
-                            right,
-                            metadata_by_id.get(&right.id).copied(),
-                        )),
-                    SortField::Name => unreachable!("name sorting uses cached lowercase keys"),
+            let timestamp = |entry: &&VaultEntry| {
+                let value = match options.sort {
+                    SortField::Created => &entry.created,
+                    SortField::Modified => &entry.modified,
+                    SortField::PasswordAge => self.password_changed_with_metadata(
+                        entry,
+                        metadata_by_id.get(&entry.id).copied(),
+                    ),
+                    _ => unreachable!("name and ID sorting are handled separately"),
                 };
-                if options.descending {
-                    ordering.reverse()
-                } else {
-                    ordering
-                }
-            });
+                // Unknown imported dates sort before known dates in ascending order.
+                parse_entry_timestamp(value)
+            };
+            if options.descending {
+                entries.sort_by_cached_key(|entry| std::cmp::Reverse(timestamp(entry)));
+            } else {
+                entries.sort_by_cached_key(timestamp);
+            }
         }
         entries
     }

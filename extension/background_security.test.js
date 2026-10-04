@@ -7,19 +7,20 @@ test("production content scripts are injected only on HTTPS pages", () => {
     assert.deepEqual(manifest.content_scripts[0].matches, ["https://*/*"]);
 });
 
-test("sender domains come from trusted HTTP(S) sender metadata", () => {
-    assert.equal(security.senderDomain({ url: "https://Login.Example.COM./path" }), "login.example.com");
-    assert.equal(security.senderDomain({ tab: { url: "http://localhost:3000/login" } }), "localhost");
-    assert.equal(security.senderDomain({ url: "file:///tmp/login.html" }), null);
-    assert.equal(security.senderDomain({ url: "chrome-extension://abcdefghijklmnop/" }), null);
-    assert.equal(security.senderDomain({ url: "not a url" }), null);
+test("sender domains and origins use trusted HTTP(S) metadata without unsafe fallbacks", () => {
+    for (const [label, sender, domain, origin] of [
+        ["HTTPS sender", { url: "https://Login.Example.COM./path" }, "login.example.com", "https://login.example.com"],
+        ["tab fallback", { tab: { url: "http://localhost:3000/login" } }, "localhost", "http://localhost:3000"],
+        ["file", { url: "file:///tmp/login.html" }, null, null],
+        ["extension", { url: "chrome-extension://abcdefghijklmnop/" }, null, null],
+        ["malformed", { url: "not a url" }, null, null],
+        ["invalid sender with trusted tab", { url: "not a url", tab: { url: "https://trusted.example/login" } }, null, null]
+    ]) {
+        assert.equal(security.senderDomain(sender), domain, label);
+        assert.equal(security.senderOrigin(sender), origin, label);
+    }
 });
 
-test("sender origins preserve the trusted scheme and port", () => {
-    assert.equal(security.senderOrigin({ url: "https://Login.Example.COM./path" }), "https://login.example.com");
-    assert.equal(security.senderOrigin({ tab: { url: "http://localhost:3000/login" } }), "http://localhost:3000");
-    assert.equal(security.senderOrigin({ url: "file:///tmp/login.html" }), null);
-});
 
 test("pending credentials are isolated by browser tab", () => {
     assert.equal(security.pendingStorageKey({ tab: { id: 42 } }), "pmPopupPending:42");
@@ -76,13 +77,4 @@ test("secure picker messages only come from the extension picker page", () => {
         id: "abcdefghijklmnop",
         url: picker
     }, "abcdefghijklmnop", credentialPrompt), false);
-});
-
-test("untrusted sender URL data never falls back to a valid tab URL", () => {
-    const sender = {
-        url: "not a url",
-        tab: { url: "https://trusted.example/login" }
-    };
-    assert.equal(security.senderDomain(sender), null);
-    assert.equal(security.senderOrigin(sender), null);
 });

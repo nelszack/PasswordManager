@@ -19,6 +19,14 @@ fn csv_field(headers: &[String], record: &csv::StringRecord, aliases: &[&str]) -
         .map(str::to_string)
 }
 
+fn csv_password(headers: &[String], record: &csv::StringRecord) -> Option<String> {
+    headers
+        .iter()
+        .position(|header| header == "password")
+        .and_then(|index| record.get(index))
+        .map(str::to_string)
+}
+
 pub(super) fn import_csv(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
     let mut reader = csv::Reader::from_reader(contents.as_bytes());
     let headers: Vec<String> = reader
@@ -33,7 +41,7 @@ pub(super) fn import_csv(contents: &str, path: &str) -> Result<Vec<ImportedItem>
         let name = csv_field(&headers, &row, &["name", "title"])
             .or_else(|| csv_field(&headers, &row, &["url", "website", "loginuri"]))
             .ok_or_else(|| format!("an imported CSV row in {path:?} has no name or URL"))?;
-        let password = csv_field(&headers, &row, &["password"])
+        let password = csv_password(&headers, &row)
             .ok_or_else(|| format!("an imported CSV row in {path:?} has no password"))?;
         let now = chrono::Local::now().to_string();
         entries.push(ImportedItem::login(VaultEntry {
@@ -140,8 +148,11 @@ pub(super) fn import_json(contents: &str, path: &str) -> Result<Vec<ImportedItem
         let name = json_text(value, &["name", "title"])
             .or_else(|| url.clone())
             .ok_or_else(|| format!("an imported JSON item in {path:?} has no name or URL"))?;
-        let password = json_text(login, &["password"])
-            .or_else(|| json_text(value, &["password"]))
+        let password = login
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("password").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
             .ok_or_else(|| format!("an imported JSON item in {path:?} has no password"))?;
         let now = chrono::Local::now().to_string();
         entries.push(ImportedItem::login(VaultEntry {
@@ -304,6 +315,9 @@ impl Vault {
                     vault.entries[index].zeroize();
                     vault.entries[index] = std::mem::take(&mut imported.entry);
                     if imported.portable {
+                        if old_password.is_some() {
+                            imported.password_changed = Some(vault.entries[index].modified.clone());
+                        }
                         vault.replace_portable_records(
                             id,
                             &mut imported,
@@ -311,6 +325,20 @@ impl Vault {
                             password_history_limit,
                         );
                     } else if let Some(password) = old_password {
+                        vault.apply_metadata_update(
+                            id,
+                            MetadataUpdate {
+                                password_changed: true,
+                                kind: None,
+                                add_urls: &[],
+                                remove_urls: &[],
+                                clear_urls: false,
+                                primary_url: None,
+                                set_fields: &[],
+                                remove_fields: &[],
+                                clear_fields: false,
+                            },
+                        );
                         vault.push_password_history_with_limit(
                             id,
                             password,

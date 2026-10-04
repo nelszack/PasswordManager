@@ -163,23 +163,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_reference_contains_commands_and_excludes_internal_commands() {
-        let rendered = rendered_reference(REFERENCE_MARKER).unwrap();
-        assert!(rendered.contains("pm export"));
-        assert!(rendered.contains("--force"));
-        assert!(!rendered.contains("generate-command-reference"));
-        assert!(!rendered.contains("pm run"));
-    }
-
-    #[test]
-    fn generated_reference_is_independent_of_platform_line_endings() {
-        let lf = rendered_reference("before\n{{COMMAND_REFERENCE}}\nafter\n").unwrap();
-        let crlf = rendered_reference(&normalize_newlines(
+    fn generated_reference_contains_public_commands_and_normalizes_line_endings() {
+        let templates = [
+            REFERENCE_MARKER,
+            "before\n{{COMMAND_REFERENCE}}\nafter\n",
             "before\r\n{{COMMAND_REFERENCE}}\r\nafter\r\n",
-        ))
-        .unwrap();
-
+        ];
+        for template in templates {
+            let rendered = rendered_reference(&normalize_newlines(template)).unwrap();
+            assert!(rendered.contains("pm export"));
+            assert!(rendered.contains("--force"));
+            assert!(!rendered.contains("generate-command-reference"));
+            assert!(!rendered.contains("pm run"));
+            assert!(!rendered.contains('\r'));
+        }
+        let lf = rendered_reference(templates[1]).unwrap();
+        let crlf = rendered_reference(&normalize_newlines(templates[2])).unwrap();
         assert_eq!(crlf, lf);
-        assert!(!crlf.contains('\r'));
     }
 }

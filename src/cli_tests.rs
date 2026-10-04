@@ -44,19 +44,23 @@ fn server_port_config_option_parses() {
 }
 
 #[test]
-fn test_get_by_entry_name_parses() {
-    let cli = Cli::try_parse_from(["pm", "get", "--entry-name", "foo"]).unwrap();
-    match cli.command {
-        Some(CliCommands::Get { target, .. }) => {
-            assert_eq!(target.id, None);
-            assert_eq!(target.entry_name.as_deref(), Some("foo"));
-        }
-        _ => panic!("expected Get command"),
+fn test_get_selectors_parse_and_reject_vault_targets() {
+    for (selector, value, expected_id, expected_name) in [
+        ("--entry-name", "foo", None, Some("foo")),
+        ("--id", "3", Some(3), None),
+    ] {
+        let cli = Cli::try_parse_from(["pm", "get", selector, value]).unwrap();
+        let Some(CliCommands::Get { target, .. }) = cli.command else {
+            panic!("expected Get command");
+        };
+        assert_eq!(target.id, expected_id, "{selector}");
+        assert_eq!(target.entry_name.as_deref(), expected_name, "{selector}");
     }
+    assert!(Cli::try_parse_from(["pm", "get", "--vault", "--key", "k.bin"]).is_err());
 }
 
 #[test]
-fn test_delete_by_entry_name_parses() {
+fn test_delete_by_entry_name_parses_and_requires_a_target() {
     let cli = Cli::try_parse_from(["pm", "delete", "--entry-name", "foo"]).unwrap();
     match cli.command {
         Some(CliCommands::Delete(target)) => {
@@ -65,6 +69,7 @@ fn test_delete_by_entry_name_parses() {
         }
         _ => panic!("expected Delete command"),
     }
+    assert!(Cli::try_parse_from(["pm", "delete"]).is_err());
 }
 
 #[test]
@@ -99,29 +104,7 @@ fn test_update_by_entry_name_parses() {
 }
 
 #[test]
-fn test_get_by_id_parses() {
-    let cli = Cli::try_parse_from(["pm", "get", "--id", "3"]).unwrap();
-    match cli.command {
-        Some(CliCommands::Get { target, .. }) => {
-            assert_eq!(target.id, Some(3));
-            assert_eq!(target.entry_name, None);
-        }
-        _ => panic!("expected Get command"),
-    }
-}
-
-#[test]
-fn test_get_rejects_vault_target() {
-    assert!(Cli::try_parse_from(["pm", "get", "--vault", "--key", "k.bin"]).is_err());
-}
-
-#[test]
-fn test_delete_requires_target() {
-    assert!(Cli::try_parse_from(["pm", "delete"]).is_err());
-}
-
-#[test]
-fn test_genpass_parses() {
+fn test_genpass_parses_and_rejects_invalid_option_combinations() {
     let cli = Cli::try_parse_from(["pm", "genpass", "--length", "20", "--copy"]).unwrap();
     match cli.command {
         Some(CliCommands::Genpass {
@@ -136,10 +119,6 @@ fn test_genpass_parses() {
         }
         _ => panic!("expected Genpass command"),
     }
-}
-
-#[test]
-fn generator_rejects_empty_and_ignored_option_combinations() {
     assert!(Cli::try_parse_from(["pm", "genpass", "--length", "0"]).is_err());
     assert!(Cli::try_parse_from(["pm", "genpass", "--passphrase", "--words", "0"]).is_err());
     assert!(Cli::try_parse_from(["pm", "genpass", "--no-symbols", "--symbols", "abc"]).is_err());

@@ -76,5 +76,5 @@ function createGeneratorButton(input) {
     });
 
     positionButton();
-    registerPositionedControl(input, button, null, positionButton);
+    registerPositionedControl(input, button, positionButton);
 }

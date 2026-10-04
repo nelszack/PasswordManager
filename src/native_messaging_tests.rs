@@ -216,9 +216,12 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
 }
 
 #[test]
-fn rejects_oversized_native_messages() {
+fn native_bridge_rejects_oversized_and_truncated_frames() {
     let mut input = Cursor::new(((MAX_NATIVE_MESSAGE + 1) as u32).to_ne_bytes());
     assert!(read_message(&mut input).is_err());
+    let mut framed = 12u32.to_ne_bytes().to_vec();
+    framed.extend_from_slice(b"short");
+    assert!(read_message(&mut Cursor::new(framed)).is_err());
 }
 
 #[test]
@@ -264,13 +267,6 @@ fn native_bridge_does_not_echo_rejected_credentials() {
     assert_eq!(response["id"], 91);
     assert_eq!(response["success"], false);
     assert!(!String::from_utf8_lossy(&output).contains(secret));
-}
-
-#[test]
-fn native_bridge_rejects_truncated_frames() {
-    let mut framed = 12u32.to_ne_bytes().to_vec();
-    framed.extend_from_slice(b"short");
-    assert!(read_message(&mut Cursor::new(framed)).is_err());
 }
 
 #[test]

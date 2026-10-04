@@ -123,6 +123,10 @@ pm view --sort modified --descending
 pm view --sort password-age
 ```
 
+Date sorting compares actual timestamps across time zones and supported formats.
+Entries with unrecognized dates sort first in ascending order and last in
+descending order.
+
 ### Search and Filter Entries
 
 Search across names, usernames, URLs, and notes (passwords are never searched):
@@ -390,7 +394,8 @@ Previewing does not prompt for the vault password or change its lock state.
 Import files are limited to 128 MiB and 100,000 items.
 
 `replace` preserves the existing stable ID and records a changed password in
-history. `keep-both` adds a new stable ID and appends an `(imported)` suffix.
+history, resetting its password age. `keep-both` adds a new stable ID and appends
+an `(imported)` suffix.
 
 The format is detected from the input content; exports use a versioned portable
 JSON envelope when the path ends in `.json`, otherwise CSV. Portable JSON
@@ -398,8 +403,10 @@ preserves active item types, additional URLs, custom fields, password-age
 metadata, bounded password history, and TOTP configurations. Imported IDs are
 always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
 CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV. Duplicate rows with the same
-name, username, and URL are skipped. Both export formats contain plaintext
-secrets; portable JSON can also contain TOTP secrets and password history, so
+name, username, and URL are skipped. Password values are preserved exactly,
+including whitespace and empty strings; a missing password field is rejected.
+Both export formats contain plaintext secrets; portable JSON can also contain
+TOTP secrets and password history, so
 exports should be protected or deleted after use. Export refuses to replace an
 existing file unless `--force` is supplied.
 

@@ -216,48 +216,61 @@ mod tests {
     }
 
     #[test]
-    fn structured_frames_round_trip_and_preserve_the_highest_error_code() {
-        let mut frames = encode_response(ResponseCode::Success, "first");
-        frames.extend(encode_response(ResponseCode::NotFound, "missing"));
-        let response = decode_responses(&frames).unwrap();
-        assert_eq!(response.code, ResponseCode::NotFound as i32);
-        assert_eq!(response.message, "first\nmissing\n");
+    fn structured_frames_preserve_codes_utf8_and_newlines() {
+        for (label, messages, expected_code, expected_message) in [
+            (
+                "highest error code",
+                vec![
+                    (ResponseCode::Success, "first"),
+                    (ResponseCode::NotFound, "missing"),
+                ],
+                ResponseCode::NotFound,
+                "first\nmissing\n",
+            ),
+            (
+                "wording independent of classification",
+                vec![(ResponseCode::Conflict, "wording may change freely")],
+                ResponseCode::Conflict,
+                "wording may change freely\n",
+            ),
+            (
+                "UTF-8 and existing newline",
+                vec![
+                    (ResponseCode::Success, "héllo 🔐\n"),
+                    (ResponseCode::Success, "done"),
+                ],
+                ResponseCode::Success,
+                "héllo 🔐\ndone\n",
+            ),
+        ] {
+            let frames = messages
+                .into_iter()
+                .flat_map(|(code, message)| encode_response(code, message))
+                .collect::<Vec<_>>();
+            let response = decode_responses(&frames).unwrap();
+            assert_eq!(response.code, expected_code as i32, "{label}");
+            assert_eq!(response.message, expected_message, "{label}");
+        }
     }
 
     #[test]
-    fn malformed_and_unknown_frames_are_rejected() {
-        assert!(decode_responses(b"not-a-frame").is_err());
-        let mut frame = encode_response(ResponseCode::Success, "ok");
-        frame[4] = 99;
-        assert!(decode_responses(&frame).is_err());
-        frame[4] = 0;
-        frame.pop();
-        assert!(decode_responses(&frame).is_err());
-    }
-
-    #[test]
-    fn response_codes_are_not_derived_from_human_readable_messages() {
-        let frame = encode_response(ResponseCode::Conflict, "wording may change freely");
-        let response = decode_responses(&frame).unwrap();
-        assert_eq!(response.code, ResponseCode::Conflict as i32);
-        assert_eq!(response.message, "wording may change freely\n");
-    }
-
-    #[test]
-    fn framing_preserves_utf8_and_does_not_duplicate_existing_newlines() {
-        let mut frames = encode_response(ResponseCode::Success, "héllo 🔐\n");
-        frames.extend(encode_response(ResponseCode::Success, "done"));
-        let response = decode_responses(&frames).unwrap();
-        assert_eq!(response.message, "héllo 🔐\ndone\n");
-    }
-
-    #[test]
-    fn empty_and_invalid_utf8_responses_are_rejected() {
-        assert!(decode_responses(&[]).is_err());
-
-        let mut frame = encode_response(ResponseCode::Success, "x");
-        *frame.last_mut().unwrap() = 0xff;
-        assert!(decode_responses(&frame).is_err());
+    fn malformed_unknown_empty_and_invalid_utf8_frames_are_rejected() {
+        let valid = encode_response(ResponseCode::Success, "ok");
+        let mut unknown = valid.clone();
+        unknown[4] = 99;
+        let mut truncated = valid;
+        truncated.pop();
+        let mut invalid_utf8 = encode_response(ResponseCode::Success, "x");
+        *invalid_utf8.last_mut().unwrap() = 0xff;
+        for (label, frame) in [
+            ("not a frame", b"not-a-frame".to_vec()),
+            ("unknown code", unknown),
+            ("truncated", truncated),
+            ("empty", Vec::new()),
+            ("invalid UTF-8", invalid_utf8),
+        ] {
+            assert!(decode_responses(&frame).is_err(), "{label}");
+        }
     }
 
     #[test]

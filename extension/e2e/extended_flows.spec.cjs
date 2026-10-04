@@ -7,6 +7,10 @@ function html(body, script = "") {
 }
 
 function fixture(pathname, port) {
+    if (pathname === "/identity") return html(`
+        <form><input id="fullName" autocomplete="name">
+        <input id="email" autocomplete="email">
+        <input id="address" autocomplete="address-line1"></form>`);
     if (pathname === "/iframe-card") return html(`<form><input id="card" autocomplete="cc-number"></form>`);
     if (pathname === "/iframe-card-cross") return html(
         `<iframe id="cardFrame" src="http://localhost:${port}/iframe-card" width="500" height="200"></iframe>`
@@ -99,7 +103,11 @@ test.describe("extended credential flows", () => {
         origin = `http://127.0.0.1:${server.address().port}`;
         browser = await launchExtension({ env: {
             PM_E2E_NATIVE_AUTOFILL_ITEMS: JSON.stringify([
-                { id: 9, name: "Test Visa", kind: "payment-card", primary_secret: "4111111111111111", custom_fields: [] }
+                { id: 9, name: "Test Visa", kind: "payment-card", primary_secret: "4111111111111111", custom_fields: [] },
+                { id: 10, name: "Home identity", kind: "identity", username: "alice@example.com", primary_secret: "", custom_fields: [
+                    { name: "full name", value: "Alice Example", secret: false },
+                    { name: "address line 1", value: "123 Example Street", secret: false }
+                ] }
             ])
         }, accounts: [
             { id: 7, name: "Alice", username: "alice@example.com", password: "saved-password", has_totp: true, domain: origin },
@@ -119,14 +127,6 @@ test.describe("extended credential flows", () => {
         if (page && !page.isClosed()) await browser.coverPage(page, true);
     });
 
-    test("saved credentials fill the intended form", async () => {
-        await page.goto(`${origin}/simple`);
-        const picker = await openPicker(browser.context,
-            page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await picker.getByRole("button", { name: /Alice/ }).click();
-        await expect(page.locator("#username")).toHaveValue("alice@example.com");
-        await expect(page.locator("#password")).toHaveValue("saved-password");
-    });
 
     test("a changing input role replaces its picker instead of stacking controls", async () => {
         await page.goto(`${origin}/changing-role`);
@@ -136,11 +136,13 @@ test.describe("extended credential flows", () => {
         await expect(page.getByRole("button", { name: "Choose saved credentials" })).toHaveCount(2);
     });
 
-    test("an exact match resumes without a save prompt", async () => {
+    test("saved credentials fill the form and exact matches resume without a save prompt", async () => {
         await page.goto(`${origin}/simple`);
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
         await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect(page.locator("#username")).toHaveValue("alice@example.com");
+        await expect(page.locator("#password")).toHaveValue("saved-password");
         const promptsBefore = browser.context.pages().filter(candidate =>
             candidate.url().includes("credential_prompt.html") && !candidate.isClosed()
         ).length;
@@ -245,6 +247,19 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/dynamic-shadow`);
         await expect(page.locator("#shadowHost")).toBeAttached();
         await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+    });
+
+    test("identity fields fill only after selection in the secure picker window", async () => {
+        await page.goto(`${origin}/identity`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose identity" }).first());
+        await expect(picker.locator("#destination")).toHaveText(`Fill on: ${origin}`);
+        await expect(page.locator("#fullName")).toHaveValue("");
+        await expect(page.getByText("Home identity")).toHaveCount(0);
+        await picker.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#fullName")).toHaveValue("Alice Example");
+        await expect(page.locator("#email")).toHaveValue("alice@example.com");
+        await expect(page.locator("#address")).toHaveValue("123 Example Street");
     });
 
     test("cross-origin card autofill displays both sites and requires confirmation", async () => {

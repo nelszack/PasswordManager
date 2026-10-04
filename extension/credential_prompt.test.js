@@ -2,31 +2,35 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const prompt = require("./credential_prompt_state.js");
 
-test("a missing site is treated as an empty credential lookup", () => {
-    assert.deepEqual(prompt.accountsFromLookup({
-        success: false,
-        error: "Not found."
-    }), []);
-    assert.deepEqual(prompt.accountsFromLookup({
-        success: true,
-        data: '[{"id":7,"username":"alice"}]'
-    }), [{ id: 7, username: "alice" }]);
+test("credential lookups distinguish missing sites from native and malformed errors", () => {
+    // a missing site is treated as an empty credential lookup
+    {
+        assert.deepEqual(prompt.accountsFromLookup({
+            success: false,
+            error: "Not found."
+        }), []);
+        assert.deepEqual(prompt.accountsFromLookup({
+            success: true,
+            data: '[{"id":7,"username":"alice"}]'
+        }), [{ id: 7, username: "alice" }]);
+    }
+    // credential lookup still reports native and malformed response errors
+    {
+        assert.throws(() => prompt.accountsFromLookup({
+            success: false,
+            error: "Vault is locked"
+        }), /locked/);
+        assert.throws(() => prompt.accountsFromLookup({
+            success: true,
+            data: "not json"
+        }), /Invalid credential response/);
+        assert.throws(() => prompt.accountsFromLookup({
+            success: true,
+            data: "{}"
+        }), /Invalid credential response/);
+    }
 });
 
-test("credential lookup still reports native and malformed response errors", () => {
-    assert.throws(() => prompt.accountsFromLookup({
-        success: false,
-        error: "Vault is locked"
-    }), /locked/);
-    assert.throws(() => prompt.accountsFromLookup({
-        success: true,
-        data: "not json"
-    }), /Invalid credential response/);
-    assert.throws(() => prompt.accountsFromLookup({
-        success: true,
-        data: "{}"
-    }), /Invalid credential response/);
-});
 
 test("credential prompt metadata selects a matching username for updates", () => {
     const data = prompt.describe([

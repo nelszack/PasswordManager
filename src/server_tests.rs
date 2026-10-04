@@ -196,51 +196,37 @@ async fn scoped_responses_are_buffered_until_state_work_finishes() {
 }
 
 #[test]
-fn test_server_info_default() {
-    let info = ServerInfo::default();
-    assert!(info.locked);
-    assert!(info.keypass.is_none());
-}
-
-#[test]
-fn test_server_info_with_password() {
-    let mut info = ServerInfo {
-        locked: false,
-        keypass: Some(PasswordType::Password("secret".to_string())),
-    };
-    info.zeroize();
-    assert!(info.locked);
-    assert!(info.keypass.is_none());
-}
-
-#[test]
-fn test_server_info_with_key() {
-    let mut info = ServerInfo {
-        locked: false,
-        keypass: Some(PasswordType::Key("key.pem".to_string())),
-    };
-    info.zeroize();
-    assert!(info.locked);
-    assert!(info.keypass.is_none());
-}
-
-#[test]
-fn test_password_type_zeroize_password() {
-    let mut pt = PasswordType::Password("secret_password".to_string());
-    pt.zeroize();
-    match &pt {
-        PasswordType::Password(s) => assert_eq!(s, ""),
-        _ => panic!("Expected Password variant"),
+fn test_server_info_zeroize_restores_locked_defaults() {
+    let defaults = ServerInfo::default();
+    assert!(defaults.locked);
+    assert!(defaults.keypass.is_none());
+    for credential in [
+        PasswordType::Password("secret".into()),
+        PasswordType::Key("key.pem".into()),
+    ] {
+        let mut info = ServerInfo {
+            locked: false,
+            keypass: Some(credential),
+        };
+        info.zeroize();
+        assert!(info.locked);
+        assert!(info.keypass.is_none());
     }
 }
 
 #[test]
-fn test_password_type_zeroize_key() {
-    let mut pt = PasswordType::Key("secret_key.pem".to_string());
-    pt.zeroize();
-    match &pt {
-        PasswordType::Key(s) => assert_eq!(s, ""),
-        _ => panic!("Expected Key variant"),
+fn test_password_type_zeroize_password_and_key() {
+    for mut credential in [
+        PasswordType::Password("secret_password".into()),
+        PasswordType::Key("secret_key.pem".into()),
+    ] {
+        let original_variant = std::mem::discriminant(&credential);
+        credential.zeroize();
+        assert_eq!(std::mem::discriminant(&credential), original_variant);
+        match &credential {
+            PasswordType::Password(value) | PasswordType::Key(value) => assert!(value.is_empty()),
+            _ => panic!("credential variant changed during zeroization"),
+        }
     }
 }
 

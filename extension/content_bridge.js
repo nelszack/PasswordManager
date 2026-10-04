@@ -29,53 +29,6 @@ function fetchAccounts(domain) {
     });
 }
 
-// Card and identity data is fetched only after the user opens its picker.
-// This avoids placing unrelated plaintext vault items into every page at load.
-function fetchAutofillItems() {
-    return new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: "getAutofillItems" }, (response) => {
-            let items = [];
-            if (response && response.success) {
-                try {
-                    items = JSON.parse(response.data);
-                    if (!Array.isArray(items)) items = [];
-                } catch {
-                    items = [];
-                }
-            }
-            resolve(items);
-        });
-    });
-}
-
-function fetchAutofillItem(id) {
-    return new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: "getAutofillItem", id }, (response) => {
-            if (chrome.runtime.lastError || !response?.success) return resolve(null);
-            try {
-                const item = JSON.parse(response.data);
-                resolve(item && item.id === id ? item : null);
-            } catch (_) {
-                resolve(null);
-            }
-        });
-    });
-}
-
-function fetchTotp(id) {
-    return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({ action: "getTotp", id }, (response) => {
-            if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-            } else if (!response?.success) {
-                reject(new Error(response?.error || "TOTP unavailable"));
-            } else {
-                resolve(response.data);
-            }
-        });
-    });
-}
-
 const securePickerResolvers = new Map();
 const credentialPromptResolvers = new Map();
 

@@ -77,35 +77,31 @@ fn test_update(config_path: &Path) {
 #[test]
 fn test_is_config_exists() {
     let (_directory, config_path) = isolated_config();
+    assert!(!is_config(&config_path));
     fs::File::create(&config_path).unwrap();
     assert!(is_config(&config_path));
 }
 #[test]
-fn test_is_config_not_exists() {
-    let (_directory, config_path) = isolated_config();
-    assert!(!is_config(&config_path));
-}
-#[test]
-fn test_update_single_field() {
-    let (_directory, config_path) = isolated_config();
-    default_test_config(true, &config_path);
-    update(
-        read_config(&config_path),
-        ConfigArgs {
-            reset: false,
-            genpass_length: Some(24),
-            genpass_stats: None,
-            genpass_copy: None,
-            password_copy: None,
-            clipboard_timeout: None,
-            unlock_timeout: None,
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    );
-    let conf = read_config(&config_path);
-    assert_eq!(conf.genpass.length, 24);
-    assert!(!conf.genpass.stats);
+fn test_update_single_field_preserves_unmodified_fields() {
+    for (length, persist_defaults) in [(24, true), (50, false)] {
+        let (_directory, config_path) = isolated_config();
+        let original = default_test_config(persist_defaults, &config_path);
+        let mut expected = Config::default();
+        expected.genpass.length = length;
+        update(
+            original,
+            ConfigArgs {
+                genpass_length: Some(length),
+                ..ConfigArgs::default()
+            },
+            &config_path,
+        );
+        assert_eq!(
+            read_config(&config_path),
+            expected,
+            "length {length}, persisted defaults {persist_defaults}"
+        );
+    }
 }
 #[test]
 fn test_default_config_values() {
@@ -253,116 +249,53 @@ fn test_config_round_trip() {
 }
 
 #[test]
-fn test_config_update_zero_timeout() {
-    let (_directory, config_path) = isolated_config();
-    default_test_config(true, &config_path);
-    update(
-        read_config(&config_path),
-        ConfigArgs {
-            reset: false,
-            genpass_length: None,
-            genpass_stats: None,
-            genpass_copy: None,
-            password_copy: None,
-            clipboard_timeout: Some(0),
-            unlock_timeout: Some(0),
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    );
-    let conf = read_config(&config_path);
-    assert_eq!(conf.clipboard.timeout, 0);
-    assert_eq!(conf.unlock.timeout, 0);
-}
-
-#[test]
-fn test_config_update_max_values() {
-    let (_directory, config_path) = isolated_config();
-    default_test_config(true, &config_path);
-    update(
-        read_config(&config_path),
-        ConfigArgs {
-            reset: false,
-            genpass_length: Some(u8::MAX),
-            genpass_stats: Some(true),
-            genpass_copy: Some(false),
-            password_copy: None,
-            clipboard_timeout: Some(u8::MAX),
-            unlock_timeout: Some(u64::MAX),
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    );
-    let conf = read_config(&config_path);
-    assert_eq!(conf.genpass.length, u8::MAX);
-    assert!(conf.genpass.stats);
-    assert!(!conf.genpass.copy);
-    assert_eq!(conf.clipboard.timeout, u8::MAX);
-    assert_eq!(conf.unlock.timeout, u64::MAX);
-}
-
-#[test]
-fn test_config_preserves_unmodified_fields() {
-    let (_directory, config_path) = isolated_config();
-    update(
-        default_test_config(false, &config_path),
-        ConfigArgs {
-            reset: false,
-            genpass_length: Some(50),
-            genpass_stats: None,
-            genpass_copy: None,
-            password_copy: None,
-            clipboard_timeout: None,
-            unlock_timeout: None,
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    );
-    let conf = read_config(&config_path);
-    assert_eq!(conf.genpass.length, 50);
-    assert!(!conf.genpass.stats);
-    assert!(conf.genpass.copy);
-    assert_eq!(conf.clipboard.timeout, 15);
-    assert_eq!(conf.unlock.timeout, 15 * 60);
+fn test_config_update_boundary_values() {
+    for (length, clipboard_timeout, unlock_timeout, stats, copy) in [
+        (12, 0, 0, false, true),
+        (u8::MAX, u8::MAX, u64::MAX, true, false),
+    ] {
+        let (_directory, config_path) = isolated_config();
+        default_test_config(true, &config_path);
+        update(
+            read_config(&config_path),
+            ConfigArgs {
+                genpass_length: Some(length),
+                genpass_stats: Some(stats),
+                genpass_copy: Some(copy),
+                clipboard_timeout: Some(clipboard_timeout),
+                unlock_timeout: Some(unlock_timeout),
+                ..ConfigArgs::default()
+            },
+            &config_path,
+        );
+        let conf = read_config(&config_path);
+        assert_eq!(conf.genpass.length, length);
+        assert_eq!(conf.genpass.stats, stats);
+        assert_eq!(conf.genpass.copy, copy);
+        assert_eq!(conf.clipboard.timeout, clipboard_timeout);
+        assert_eq!(conf.unlock.timeout, unlock_timeout);
+    }
 }
 
 #[test]
 fn invalid_config_is_reported_without_overwriting_the_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("config.toml");
-    let invalid = b"[genpass]\nlength = not-a-number\n";
-    fs::write(&config_path, invalid).unwrap();
-
-    let error = try_read_config(&config_path).unwrap_err();
-
-    assert!(error.contains("left unchanged"));
-    assert_eq!(fs::read(&config_path).unwrap(), invalid);
-}
-
-#[test]
-fn zero_server_port_is_rejected_without_overwriting_the_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("config.toml");
-    let invalid = b"[server]\nport = 0\n";
-    fs::write(&config_path, invalid).unwrap();
-
-    let error = try_read_config(&config_path).unwrap_err();
-
-    assert!(error.contains("server.port must be between 1 and 65535"));
-    assert_eq!(fs::read(&config_path).unwrap(), invalid);
-}
-
-#[test]
-fn zero_generator_length_is_rejected_without_overwriting_the_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("config.toml");
-    let invalid = b"[genpass]\nlength = 0\n";
-    fs::write(&config_path, invalid).unwrap();
-
-    let error = try_read_config(&config_path).unwrap_err();
-
-    assert!(error.contains("genpass.length must be between 1 and 255"));
-    assert_eq!(fs::read(&config_path).unwrap(), invalid);
+    for (invalid, expected_error) in [
+        ("[genpass]\nlength = not-a-number\n", "left unchanged"),
+        (
+            "[server]\nport = 0\n",
+            "server.port must be between 1 and 65535",
+        ),
+        (
+            "[genpass]\nlength = 0\n",
+            "genpass.length must be between 1 and 255",
+        ),
+    ] {
+        let (_directory, config_path) = isolated_config();
+        fs::write(&config_path, invalid).unwrap();
+        let error = try_read_config(&config_path).unwrap_err();
+        assert!(error.contains(expected_error), "{invalid:?}: {error}");
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), invalid);
+    }
 }
 
 #[test]

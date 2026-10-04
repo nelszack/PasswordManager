@@ -443,6 +443,13 @@ fn run_blocking_io<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
+fn parse_entry_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f %:z"))
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+}
+
 #[derive(Serialize)]
 struct BackupEnvelopeRef<'a> {
     version: u8,
@@ -522,9 +529,7 @@ impl Vault {
 
     fn password_is_stale(&self, entry: &VaultEntry, days: u64) -> bool {
         let changed = self.password_changed(entry);
-        let parsed = chrono::DateTime::parse_from_rfc3339(changed)
-            .or_else(|_| chrono::DateTime::parse_from_str(changed, "%Y-%m-%d %H:%M:%S%.f %:z"));
-        let Ok(changed) = parsed else {
+        let Some(changed) = parse_entry_timestamp(changed) else {
             return false;
         };
         chrono::Utc::now().signed_duration_since(changed.with_timezone(&chrono::Utc))

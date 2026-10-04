@@ -185,29 +185,24 @@ test("picker fetches only the selected login and targets the originating documen
     assert.equal(env.requests.find(request => request.action === "getLoginItem").domain, env.sender.url);
 });
 
-test("a server lock before the next status poll prevents login delivery", async () => {
-    const env = securityEnvironment();
-    const token = await env.open();
-    env.setLocked();
-    const result = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
-    assert.equal(result.success, false);
-    assert.equal(result.error, "Vault locked.");
-    assert.equal(env.deliveries.length, 0);
-});
 
-test("locked status and native disconnect invalidate already open pickers", async () => {
-    for (const operation of ["lock", "disconnect"]) {
+test("locks before or after polling and native disconnects prevent picker delivery", async () => {
+    for (const operation of ["lock-before-poll", "lock-after-poll", "disconnect"]) {
         const env = securityEnvironment();
         const token = await env.open();
-        if (operation === "lock") {
+        if (operation === "disconnect") env.disconnect();
+        else {
             env.setLocked();
-            await env.message({ action: "getStatus" });
-        } else env.disconnect();
+            if (operation === "lock-after-poll") await env.message({ action: "getStatus" });
+        }
         const result = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
-        assert.equal(result.success, false);
-        assert.match(result.error, /expired/);
-        assert.equal(env.deliveries.length, 0);
-        assert.ok(env.removed.includes(42));
+        assert.equal(result.success, false, operation);
+        if (operation === "lock-before-poll") assert.equal(result.error, "Vault locked.");
+        else {
+            assert.match(result.error, /expired/, operation);
+            assert.ok(env.removed.includes(42), operation);
+        }
+        assert.equal(env.deliveries.length, 0, operation);
     }
 });
 

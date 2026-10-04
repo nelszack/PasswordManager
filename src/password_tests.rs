@@ -2,53 +2,39 @@ use super::*;
 use rand::rngs::StdRng;
 
 #[test]
-fn test_generate_password_length() {
-    for len in 1..=64u8 {
-        let pass = generate_password(len);
-        assert_eq!(pass.len(), len as usize);
-    }
-}
-
-#[test]
-fn test_generate_password_charset() {
+fn test_generate_password_length_and_character_classes() {
     const CHARSET: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+";
-    let pass = generate_password(200);
-    for c in pass.chars() {
-        assert!(
-            CHARSET.contains(&(c as u8)),
-            "Character '{}' not in charset",
-            c
-        );
-    }
-}
-
-#[test]
-fn test_generate_password_empty_is_rejected() {
-    assert!(generate_password_with_options(0, &PasswordOptions::default()).is_err());
-}
-
-#[test]
-fn test_practical_lengths_guarantee_all_character_classes() {
-    for len in [4, 12, 32, 255] {
+    for len in 1..=u8::MAX {
         let pass = generate_password(len);
-        assert!(pass.chars().any(|c| c.is_ascii_uppercase()));
-        assert!(pass.chars().any(|c| c.is_ascii_lowercase()));
-        assert!(pass.chars().any(|c| c.is_ascii_digit()));
-        assert!(pass.chars().any(|c| "!@#$%^&*-_=+".contains(c)));
+        assert_eq!(pass.len(), len as usize, "length {len}");
+        assert!(
+            pass.bytes().all(|byte| CHARSET.contains(&byte)),
+            "charset at length {len}"
+        );
+        if len >= 4 {
+            assert!(
+                pass.chars().any(|c| c.is_ascii_uppercase()),
+                "uppercase at length {len}"
+            );
+            assert!(
+                pass.chars().any(|c| c.is_ascii_lowercase()),
+                "lowercase at length {len}"
+            );
+            assert!(
+                pass.chars().any(|c| c.is_ascii_digit()),
+                "digits at length {len}"
+            );
+            assert!(
+                pass.chars().any(|c| "!@#$%^&*-_=+".contains(c)),
+                "symbols at length {len}"
+            );
+        }
     }
 }
 
 #[test]
-fn test_generate_password_boundary_lengths() {
-    for len in &[1u8, 2, 11, 12, 13, 64, 127, 200, 255] {
-        let pass = generate_password(*len);
-        assert_eq!(pass.len(), *len as usize, "Length {} failed", len);
-    }
-}
-
-#[test]
-fn seeded_generation_is_reproducible() {
+fn seeded_generation_is_reproducible_and_advances_between_passwords() {
     let mut first = StdRng::seed_from_u64(42);
     let mut second = StdRng::seed_from_u64(42);
     let options = PasswordOptions::default();
@@ -56,6 +42,11 @@ fn seeded_generation_is_reproducible() {
         generate_password_with_rng(64, &options, &mut first).unwrap(),
         generate_password_with_rng(64, &options, &mut second).unwrap()
     );
+    let mut rng = StdRng::seed_from_u64(7);
+    let options = PasswordOptions::default();
+    let first = generate_password_with_rng(32, &options, &mut rng).unwrap();
+    let second = generate_password_with_rng(32, &options, &mut rng).unwrap();
+    assert_ne!(first, second);
 }
 
 #[test]
@@ -78,6 +69,7 @@ fn test_custom_character_classes_and_ambiguous_filter() {
 
 #[test]
 fn invalid_or_empty_character_sets_are_rejected() {
+    assert!(generate_password_with_options(0, &PasswordOptions::default()).is_err());
     let no_characters = PasswordOptions {
         uppercase: false,
         lowercase: false,
@@ -124,13 +116,4 @@ fn test_passphrase_word_count_and_separator() {
     assert!(generate_passphrase(0, "-").is_err());
     assert!(generate_passphrase(2, "\n").is_err());
     assert!(generate_passphrase(2, "\r\n").is_err());
-}
-
-#[test]
-fn seeded_stream_advances_between_passwords() {
-    let mut rng = StdRng::seed_from_u64(7);
-    let options = PasswordOptions::default();
-    let first = generate_password_with_rng(32, &options, &mut rng).unwrap();
-    let second = generate_password_with_rng(32, &options, &mut rng).unwrap();
-    assert_ne!(first, second);
 }

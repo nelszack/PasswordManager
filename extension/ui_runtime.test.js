@@ -84,27 +84,43 @@ test("popup runtime renders cached/live status and performs an explicit lock", a
     assert.equal(env.elements.statusText.innerText, "Server not running");
 });
 
-test("picker runtime renders native items and completes trusted selections", async () => {
-    const env = environment(["items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin", "crossOriginText"], {
-        getSecurePickerData: {
-            success: true,
-            kind: "login",
-            origin: "https://example.com", topOrigin: "https://example.com", crossOrigin: false,
-            items: [{ id: 7, name: "Personal", username: "alice" }]
-        },
-        completeSecurePicker: { success: true }
-    }, "?token=picker-token");
-    env.context.PasswordManagerPickerState = require("./picker_state.js");
-    execute("picker.js", env.context);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(env.elements.title.textContent, "Choose saved credentials");
-    assert.equal(env.elements.destination.textContent, "Fill on: https://example.com");
-    assert.equal(env.elements.crossOriginWarning.hidden, true);
-    assert.equal(env.elements.items.children.length, 1);
-    env.elements.items.children[0].dispatch("click", { isTrusted: true });
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(env.context.closed, true);
-    assert.equal(env.messages.at(-1).id, 7);
+test("picker runtime discloses destinations and requires trusted, confirmed selections", async () => {
+    for (const crossOrigin of [false, true]) {
+        const item = crossOrigin ? { id: 2, name: "Visa" } : { id: 7, name: "Personal", username: "alice" };
+        const origin = crossOrigin ? "https://embedded.example" : "https://example.com";
+        const env = environment([
+            "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin", "crossOriginText"
+        ], {
+            getSecurePickerData: {
+                success: true, kind: crossOrigin ? "payment-card" : "login", origin,
+                topOrigin: crossOrigin ? "https://shop.example" : origin, crossOrigin,
+                items: [item]
+            },
+            completeSecurePicker: { success: true }
+        }, crossOrigin ? "?token=card-token" : "?token=picker-token");
+        env.context.PasswordManagerPickerState = require("./picker_state.js");
+        execute("picker.js", env.context);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(env.elements.title.textContent, crossOrigin ? "Choose payment card" : "Choose saved credentials");
+        assert.equal(env.elements.destination.textContent, `Fill on: ${origin}`);
+        assert.equal(env.elements.crossOriginWarning.hidden, !crossOrigin);
+        assert.equal(env.elements.items.children.length, 1);
+        env.elements.items.children[0].dispatch("click", { isTrusted: false });
+        assert.equal(env.messages.length, 1, "synthetic selection is ignored");
+        if (crossOrigin) {
+            assert.match(env.elements.crossOriginText.textContent, /https:\/\/shop.example/);
+            env.elements.items.children[0].dispatch("click", { isTrusted: true });
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(env.messages.length, 1, "unconfirmed selection is ignored");
+            assert.match(env.elements.status.textContent, /Confirm/);
+            env.elements.confirmCrossOrigin.checked = true;
+        }
+        env.elements.items.children[0].dispatch("click", { isTrusted: true });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(env.messages.at(-1).id, item.id);
+        if (crossOrigin) assert.equal(env.messages.at(-1).confirmCrossOrigin, true);
+        assert.equal(env.context.closed, true);
+    }
 });
 
 test("credential prompt runtime renders metadata and submits only trusted actions", async () => {
@@ -129,34 +145,4 @@ test("credential prompt runtime renders metadata and submits only trusted action
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(env.context.closed, true);
     assert.equal(env.messages.at(-1).selection.action, "update");
-});
-
-test("picker discloses embedded and main origins and requires explicit confirmation", async () => {
-    const env = environment([
-        "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin", "crossOriginText"
-    ], {
-        getSecurePickerData: {
-            success: true, kind: "payment-card", origin: "https://embedded.example",
-            topOrigin: "https://shop.example", crossOrigin: true,
-            items: [{ id: 2, name: "Visa" }]
-        },
-        completeSecurePicker: { success: true }
-    }, "?token=card-token");
-    env.context.PasswordManagerPickerState = require("./picker_state.js");
-    execute("picker.js", env.context);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(env.elements.destination.textContent, "Fill on: https://embedded.example");
-    assert.equal(env.elements.crossOriginWarning.hidden, false);
-    assert.match(env.elements.crossOriginText.textContent, /https:\/\/shop.example/);
-    env.elements.items.children[0].dispatch("click", { isTrusted: false });
-    assert.equal(env.messages.length, 1);
-    env.elements.items.children[0].dispatch("click", { isTrusted: true });
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(env.messages.length, 1);
-    assert.match(env.elements.status.textContent, /Confirm/);
-    env.elements.confirmCrossOrigin.checked = true;
-    env.elements.items.children[0].dispatch("click", { isTrusted: true });
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(env.messages.at(-1).confirmCrossOrigin, true);
-    assert.equal(env.context.closed, true);
 });

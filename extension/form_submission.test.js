@@ -24,7 +24,7 @@ function setup({ password = "secret", handle = async () => {}, shouldIgnore = ()
     return { coordinator, event, calls };
 }
 
-test("submission is cancelled synchronously before asynchronous work", async () => {
+test("submission is cancelled synchronously and concurrent attempts cannot duplicate prompts", async () => {
     let release;
     const pending = new Promise(resolve => { release = resolve; });
     const context = setup({
@@ -33,26 +33,29 @@ test("submission is cancelled synchronously before asynchronous work", async () 
             await pending;
         }
     });
-
-    const result = context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, ["prevent", "handle"]);
+    const first = context.coordinator.onSubmit(context.event);
+    assert.deepEqual(context.calls, ["prevent", "handle"], "cancels before awaiting");
+    await context.coordinator.onSubmit(context.event);
+    assert.deepEqual(context.calls, ["prevent", "handle", "prevent"], "blocks concurrent submit");
     release();
-    await result;
-    assert.deepEqual(context.calls, ["prevent", "handle", "resume"]);
+    await first;
+    assert.deepEqual(context.calls, ["prevent", "handle", "prevent", "resume"]);
 });
 
-test("synthetic submissions cannot open a credential prompt", async () => {
-    const context = setup();
-    context.event.isTrusted = false;
-    await context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, []);
+test("synthetic, passwordless, ignored, and non-form submissions pass through", async () => {
+    for (const scenario of ["synthetic", "passwordless", "ignored", "non-form"]) {
+        const context = setup({
+            password: scenario === "passwordless" ? "" : "secret",
+            shouldIgnore: () => scenario === "ignored",
+            handle: async () => context.calls.push("handle")
+        });
+        if (scenario === "synthetic") context.event.isTrusted = false;
+        if (scenario === "non-form") context.event.target = {};
+        await context.coordinator.onSubmit(context.event);
+        assert.deepEqual(context.calls, [], scenario);
+    }
 });
 
-test("passwordless forms are not intercepted", async () => {
-    const context = setup({ password: "" });
-    await context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, []);
-});
 
 test("errors still resume the user's submission", async () => {
     const context = setup({ handle: async () => { throw new Error("bridge failed"); } });
@@ -60,42 +63,8 @@ test("errors still resume the user's submission", async () => {
     assert.deepEqual(context.calls, ["prevent", "resume"]);
 });
 
-test("the resumed submit event passes through once", async () => {
-    const context = setup();
-    await context.coordinator.onSubmit(context.event);
-    await context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, ["prevent", "resume"]);
-});
 
-test("concurrent submissions are blocked without opening duplicate prompts", async () => {
-    let release;
-    const pending = new Promise(resolve => { release = resolve; });
-    const context = setup({
-        handle: async () => {
-            context.calls.push("handle");
-            await pending;
-        }
-    });
 
-    const first = context.coordinator.onSubmit(context.event);
-    await context.coordinator.onSubmit(context.event);
-    assert.deepEqual(context.calls, ["prevent", "handle", "prevent"]);
-
-    release();
-    await first;
-    assert.deepEqual(context.calls, ["prevent", "handle", "prevent", "resume"]);
-});
-
-test("ignored and non-form submissions pass through", async () => {
-    const ignored = setup({ shouldIgnore: () => true });
-    await ignored.coordinator.onSubmit(ignored.event);
-    assert.deepEqual(ignored.calls, []);
-
-    const notAForm = setup();
-    notAForm.event.target = {};
-    await notAForm.coordinator.onSubmit(notAForm.event);
-    assert.deepEqual(notAForm.calls, []);
-});
 
 test("a later user submission is handled after the resumed event", async () => {
     const context = setup({
@@ -107,7 +76,9 @@ test("a later user submission is handled after the resumed event", async () => {
     });
 
     await context.coordinator.onSubmit(context.event);
+    assert.deepEqual(context.calls, ["prevent", "handle", "resume"]);
     await context.coordinator.onSubmit(context.event); // requestSubmit replay
+    assert.deepEqual(context.calls, ["prevent", "handle", "resume"], "replay passes through once");
     await context.coordinator.onSubmit(context.event); // a new user attempt
     assert.deepEqual(context.calls, [
         "prevent", "handle", "resume",
@@ -115,31 +86,22 @@ test("a later user submission is handled after the resumed event", async () => {
     ]);
 });
 
-test("multi-step advances remember usernames before navigation", () => {
-    const calls = [];
-    scheduleCredentialAdvance({ username: "alice", password: "" }, {
-        remember: username => calls.push(["remember", username]),
-        shouldIgnore: () => false,
-        prompt: () => calls.push(["prompt"]),
-        defer: callback => callback()
-    });
-    assert.deepEqual(calls, [["remember", "alice"]]);
+test("multi-step advances remember usernames and prompt only from a captured password", () => {
+    for (const password of ["", "secret"]) {
+        const calls = [];
+        const credentials = { username: "alice", password };
+        scheduleCredentialAdvance(credentials, {
+            remember: username => calls.push(["remember", username]),
+            shouldIgnore: () => false,
+            prompt: captured => calls.push(["prompt", captured]),
+            defer: callback => callback()
+        });
+        const expected = [["remember", "alice"]];
+        if (password) expected.push(["prompt", credentials]);
+        assert.deepEqual(calls, expected, password || "username-only step");
+    }
 });
 
-test("scripted password advances prompt from the captured snapshot", () => {
-    const calls = [];
-    const credentials = { username: "alice", password: "secret" };
-    scheduleCredentialAdvance(credentials, {
-        remember: username => calls.push(["remember", username]),
-        shouldIgnore: () => false,
-        prompt: captured => calls.push(["prompt", captured]),
-        defer: callback => callback()
-    });
-    assert.deepEqual(calls, [
-        ["remember", "alice"],
-        ["prompt", credentials]
-    ]);
-});
 
 test("normal form submission suppresses the scripted-advance fallback", () => {
     const calls = [];

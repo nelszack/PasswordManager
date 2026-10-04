@@ -284,18 +284,28 @@ mod test {
     }
 
     #[test]
-    fn relative_new_key_paths_resolve_from_the_client_working_directory() {
-        let resolved = resolve_new_key_path("keys/vault.key").unwrap();
-        assert!(Path::new(&resolved).is_absolute());
-        assert!(Path::new(&resolved).ends_with(Path::new("keys/vault.key")));
-        assert!(resolve_new_key_path("").is_err());
-    }
-
-    #[test]
-    fn relative_existing_keys_resolve_from_the_client_working_directory() {
-        let resolved = resolve_key_path("keys/vault.key").unwrap();
-        assert!(Path::new(&resolved).is_absolute());
-        assert!(Path::new(&resolve_key_path("vault.key").unwrap()).is_absolute());
-        assert!(resolve_key_path("").is_err());
+    fn relative_key_paths_resolve_from_the_client_working_directory() {
+        for (label, resolve) in [
+            (
+                "new key",
+                resolve_new_key_path as fn(&str) -> Result<String, String>,
+            ),
+            (
+                "existing key",
+                resolve_key_path as fn(&str) -> Result<String, String>,
+            ),
+        ] {
+            let resolved = resolve("keys/vault.key").unwrap();
+            assert!(Path::new(&resolved).is_absolute(), "{label}");
+            assert!(
+                Path::new(&resolved).ends_with(Path::new("keys/vault.key")),
+                "{label}"
+            );
+            assert!(
+                Path::new(&resolve("vault.key").unwrap()).is_absolute(),
+                "{label}"
+            );
+            assert!(resolve("").is_err(), "{label}");
+        }
     }
 }

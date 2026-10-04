@@ -92,11 +92,19 @@ proptest! {
 
 #[test]
 fn test_encrypt_decrypt_pass() {
-    let plaintext = "this is a test".as_bytes();
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypt = encrypt_file(&mut pass, plaintext);
-    let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-    assert_eq!(decrypt, plaintext)
+    for (label, plaintext) in [
+        ("ordinary", b"this is a test".to_vec()),
+        ("empty", Vec::new()),
+        ("large", vec![0u8; 10000]),
+    ] {
+        let mut pass = PasswordType::Password("test123".into());
+        let encrypted = encrypt_file(&mut pass, &plaintext);
+        assert_eq!(
+            decrypt_file(&mut pass, &encrypted).unwrap(),
+            plaintext,
+            "{label}"
+        );
+    }
 }
 #[test]
 fn test_encrypt_decrypt_key() {
@@ -115,26 +123,12 @@ fn test_encrypt_decrypt_key() {
     assert_eq!(decrypt, plaintext)
 }
 #[test]
-fn test_encrypt_decrypt_empty_plaintext() {
-    let plaintext = b"";
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypt = encrypt_file(&mut pass, plaintext);
-    let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-    assert_eq!(decrypt, plaintext);
-}
-#[test]
-fn test_encrypt_decrypt_large_plaintext() {
-    let plaintext = vec![0u8; 10000];
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypt = encrypt_file(&mut pass, &plaintext);
-    let decrypt = decrypt_file(&mut pass, &encrypt).unwrap();
-    assert_eq!(decrypt, plaintext);
-}
-#[test]
-fn test_decrypt_invalid_data_returns_none() {
+fn test_decrypt_invalid_and_unversioned_data_returns_none() {
     let mut pass = PasswordType::Password("test123".into());
     let result = decrypt_file(&mut pass, b"short");
     assert!(result.is_none());
+    let mut pass = PasswordType::Password("test123".into());
+    assert!(decrypt_file(&mut pass, &[0; 64]).is_none());
 }
 #[test]
 fn test_decrypt_wrong_password_returns_none() {
@@ -157,11 +151,6 @@ fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
 }
 #[test]
-fn unversioned_encryption_format_is_rejected() {
-    let mut pass = PasswordType::Password("test123".into());
-    assert!(decrypt_file(&mut pass, &[0; 64]).is_none());
-}
-#[test]
 fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
     let plaintext = b"same plaintext";
     let mut first_session = PasswordType::Password("test123".into());
@@ -182,7 +171,7 @@ fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
 }
 
 #[test]
-fn authenticated_header_rejects_tampering() {
+fn authenticated_vault_rejects_header_ciphertext_tampering_and_truncation() {
     let mut pass = PasswordType::Password("test123".into());
     let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
     for offset in [8, 9, 10, 22, HEADER_LEN - 1] {
@@ -193,10 +182,6 @@ fn authenticated_header_rejects_tampering() {
             "tampered header byte {offset} was accepted"
         );
     }
-}
-
-#[test]
-fn authenticated_ciphertext_rejects_tampering_and_truncation() {
     let mut pass = PasswordType::Password("test123".into());
     let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
     let mut tampered = encrypted.clone();
