@@ -272,3 +272,15 @@ fn native_bridge_rejects_truncated_frames() {
     framed.extend_from_slice(b"short");
     assert!(read_message(&mut Cursor::new(framed)).is_err());
 }
+
+#[test]
+fn native_status_requires_and_preserves_structured_server_state() {
+    let status = crate::protocol::ServerStatus::new(false, Some("Lock failed".into()));
+    let output = serde_json::to_string(&status).unwrap();
+    let parsed = response_data("status", output).unwrap();
+    assert_eq!(parsed["locked"], false);
+    assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(parsed["warning"], "Lock failed");
+    assert!(response_data("status", "Status: Unlocked".into()).is_err());
+    assert!(response_data("status", r#"{"locked":"false","version":"0.1.0"}"#.into()).is_err());
+}

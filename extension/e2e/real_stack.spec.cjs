@@ -26,7 +26,9 @@ function startFixture() {
             <form id="login"><input id="username" autocomplete="username">
             <input id="password" type="password" autocomplete="current-password">
             <button type="submit">Sign in</button></form>
-            <script>login.onsubmit = event => event.preventDefault();</script>
+            <script>login.onsubmit = event => {
+                event.preventDefault(); document.body.dataset.submitted = "yes";
+            };</script>
         </body></html>`);
     });
     return new Promise(resolve => server.listen(0, "127.0.0.1", () => resolve(server)));
@@ -120,6 +122,18 @@ test("the extension saves through the real native host into a temporary vault", 
         await expect(secondPicker.getByRole("button", { name: /Real Native Entry/ })).toBeVisible();
         runPm(environment, "lock");
         await expect.poll(() => secondPicker.isClosed()).toBe(true);
+
+        runPm(environment, "kill");
+        serverStarted = false;
+        await page.goto(origin);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await page.locator("#username").fill("stopped@example.com");
+        await page.locator("#password").fill("stopped-server-password");
+        const automaticPrompts = [];
+        browser.context.on("page", popup => automaticPrompts.push(popup));
+        await page.getByRole("button", { name: "Sign in" }).click();
+        await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes");
+        expect(automaticPrompts).toHaveLength(0);
     } finally {
         if (serverStarted) {
             try {

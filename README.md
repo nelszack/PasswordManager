@@ -668,3 +668,30 @@ completions. Draft releases include generated notes, SHA-256 checksums, and
 GitHub build-provenance attestations. Prerelease tags such as
 `v0.2.0-beta.1` are marked as prereleases, but still remain drafts until you
 publish them.
+
+## Development
+
+Vault logic lives in `src/vault/`, grouped by entries, queries, recovery, TOTP,
+imports, exports, backups, and persistence. Read operations return domain records;
+`src/server/presentation.rs` renders CLI output, and `src/server/response.rs`
+handles protocol delivery and maps domain errors to response codes. Native clients
+use structured server status; the CLI retains its human-readable status output.
+
+Vault mutations share `src/vault/transaction.rs`. Individual edits snapshot only
+the affected entry and recovery records; imports snapshot the full state. A
+failed mutation or write restores the snapshot, and temporary secrets are wiped
+on drop. Import previews and execution share a plan based on non-secret fields.
+
+The extension's `content.js` initializes the page integration. The manifest loads
+separate scripts for messaging, controls, password generation, typed autofill,
+DOM observation, and credential capture, in the same isolated browser world.
+
+Run the checks with:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+npm run test:extension:coverage
+npm run test:e2e:coverage
+```

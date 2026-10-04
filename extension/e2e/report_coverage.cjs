@@ -50,7 +50,6 @@ for (const [name, script] of [...scripts].sort()) {
     console.log(`${name}: ${(100 * covered / script.source.length).toFixed(2)}% byte coverage`);
 }
 const required = {
-    "content.js": 38,
     "content_fields.js": 60,
     "credential_prompt.js": 40,
     "form_submission.js": 60
@@ -63,6 +62,23 @@ for (const [name, minimum] of Object.entries(required)) {
         throw new Error(`${name} browser coverage ${percent.toFixed(2)}% is below ${minimum}%`);
     }
 }
+// Preserve the former bundled content.js baseline across all extracted runtime
+// modules, and require the browser suite to capture each manifest-listed module.
+const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../manifest.json"), "utf8"));
+const runtimeScripts = [...new Set(manifest.content_scripts.flatMap(entry => entry.js))]
+    .filter(name => name === "content.js" || (name.startsWith("content_")
+        && !["content_fields.js", "content_detection.js"].includes(name)));
+let runtimeHit = 0;
+let runtimeTotal = 0;
+for (const name of runtimeScripts) {
+    const script = scripts.get(name);
+    if (!script) throw new Error(`Playwright did not capture ${name} coverage`);
+    runtimeHit += coveredBytes(script);
+    runtimeTotal += script.source.length;
+}
+const runtimePercent = runtimeTotal ? 100 * runtimeHit / runtimeTotal : 0;
+console.log(`Content runtime coverage: ${runtimePercent.toFixed(2)}%`);
+if (runtimePercent < 38) throw new Error(`Content runtime coverage ${runtimePercent.toFixed(2)}% is below 38%`);
 const percent = total ? 100 * hit / total : 0;
 console.log(`Extension browser coverage: ${percent.toFixed(2)}% (${hit}/${total} bytes)`);
 if (percent < 40) throw new Error(`Extension browser coverage ${percent.toFixed(2)}% is below 40%`);

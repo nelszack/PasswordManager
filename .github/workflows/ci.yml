@@ -43,7 +43,7 @@ jobs:
           node --check extension/native_protocol.js
           node --check extension/pending_credentials.js
           node --check extension/relay.js
-          node --check extension/content.js
+          node -e "for (const script of require('./extension/manifest.json').content_scripts.flatMap(entry => entry.js)) require('node:child_process').execFileSync(process.execPath, ['--check', 'extension/' + script])"
           node --check extension/popup.js
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
           node --test extension/*.test.js

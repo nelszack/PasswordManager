@@ -113,6 +113,12 @@ test.describe("extended credential flows", () => {
         if (server) await new Promise(resolve => server.close(resolve));
     });
 
+    test.afterEach(async () => {
+        // Save coverage before the next test navigates and V8 discards this
+        // document's content-script execution contexts.
+        if (page && !page.isClosed()) await browser.coverPage(page, true);
+    });
+
     test("saved credentials fill the intended form", async () => {
         await page.goto(`${origin}/simple`);
         const picker = await openPicker(browser.context,
@@ -195,6 +201,16 @@ test.describe("extended credential flows", () => {
         );
     });
 
+    test("password generation fills matching registration fields", async () => {
+        await page.goto(`${origin}/registration`);
+        await page.getByRole("button", { name: "Generate a strong password" }).first().click();
+        const generated = await page.locator("#newPassword").inputValue();
+        expect(generated).toHaveLength(20);
+        await expect(page.locator("#confirmPassword")).toHaveValue(generated);
+        await page.locator("#newPassword").fill("");
+        await page.locator("#confirmPassword").fill("");
+    });
+
     test("click and submit handling creates one prompt", async () => {
         await page.goto(`${origin}/duplicate`);
         await page.locator("#username").fill("duplicate@example.com");
@@ -257,6 +273,29 @@ test.describe("extended credential flows", () => {
         await browser.coverPage(picker);
         await picker.goto(`chrome-extension://${browser.extensionId}/picker.html`);
         await expect(picker.locator("#status")).toHaveText("Missing picker token");
+
+        const prompt = await browser.context.newPage();
+        await prompt.goto(`chrome-extension://${browser.extensionId}/credential_prompt.html`);
+        await expect(prompt.locator("#status")).toHaveText("Missing credential prompt token");
+        await browser.coverPage(prompt, true);
+        await prompt.reload();
+        await expect(prompt.locator("#status")).toHaveText("Missing credential prompt token");
+        await expect(prompt.locator("#credentials")).toBeHidden();
+    });
+
+    test("a save prompt retains its metadata across reloading", async () => {
+        await page.goto(`${origin}/simple`);
+        await page.locator("#username").fill("reload@example.com");
+        await page.locator("#password").fill("reload-password");
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
+        await expect(prompt.locator("#credentials")).toBeVisible();
+        // A native popup may change renderer while its first profiler attaches.
+        // Restart recording in the loaded extension document before the reload.
+        await browser.coverPage(prompt, true);
+        await prompt.reload();
+        await expect(prompt.locator("#credentials")).toBeVisible();
+        await expect(prompt.locator("#site")).toHaveText(origin);
+        await expect(prompt.locator("#username")).toHaveValue("reload@example.com");
     });
 });
 
@@ -278,15 +317,15 @@ test("production manifest does not inject credential controls after an HTTP down
 
 test.describe("native-host failures", () => {
     const cases = [
-        { mode: "missing", installHost: false, message: /native messaging host not found/i },
-        { mode: "locked", message: /vault is locked/i },
-        { mode: "unavailable", message: /server is unavailable/i },
-        { mode: "malformed", message: /invalid credential response/i },
-        { mode: "timeout", message: /request timed out/i }
+        { mode: "missing", installHost: false },
+        { mode: "locked" },
+        { mode: "unavailable" },
+        { mode: "malformed" },
+        { mode: "timeout" }
     ];
 
     for (const scenario of cases) {
-        test(`${scenario.mode} errors remain visible and hide the form`, async () => {
+        test(`${scenario.mode} does not open an automatic save prompt`, async () => {
             test.setTimeout(30_000);
             test.skip(process.platform !== "linux");
             const server = await startServer();
@@ -298,9 +337,11 @@ test.describe("native-host failures", () => {
                 await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
                 await page.locator("#username").fill("failure@example.com");
                 await page.locator("#password").fill("failure-password");
-                const prompt = await openPrompt(browser.context, page.locator("#submit"));
-                await expect(prompt.locator("#status")).toHaveText(scenario.message, { timeout: 10_000 });
-                await expect(prompt.locator("#credentials")).toBeHidden();
+                const prompts = [];
+                browser.context.on("page", popup => prompts.push(popup));
+                await page.locator("#submit").click();
+                await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes", { timeout: 20_000 });
+                expect(prompts).toHaveLength(0);
             } finally {
                 await browser.close();
                 await new Promise(resolve => server.close(resolve));

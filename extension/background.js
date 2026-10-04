@@ -48,6 +48,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 function closeNativePort(error) {
     invalidateSecurePickers();
+    invalidateCredentialPrompts();
     const message = error || "Native messaging host disconnected";
     for (const pending of pendingRequests.values()) {
         clearTimeout(pending.timer);
@@ -111,7 +112,10 @@ function sameStatus(left, right) {
 }
 
 function publishStatus(status) {
-    if (!status.native || !status.running || status.locked) invalidateSecurePickers();
+    if (!status.native || !status.running || status.locked) {
+        invalidateSecurePickers();
+        invalidateCredentialPrompts();
+    }
     setBadge(status);
     if (sameStatus(cachedStatus, status)) return;
 
@@ -388,6 +392,12 @@ function discardCredentialPrompt(token, action = "cancel", closeWindow = true) {
     }
 }
 
+function invalidateCredentialPrompts() {
+    for (const [token, pending] of pendingCredentialPrompts) {
+        if (!pending.completing) discardCredentialPrompt(token, "skipped");
+    }
+}
+
 async function openCredentialPrompt(request, sender) {
     const domain = PasswordManagerSecurity.senderOrigin(sender);
     const tabId = sender?.tab?.id;
@@ -407,6 +417,21 @@ async function openCredentialPrompt(request, sender) {
         throw new Error("Invalid credential prompt request");
     }
 
+    // The background owns this request across page navigation. Only open an
+    // automatic prompt after an authenticated lookup confirms that the vault
+    // is available, including the expected NotFound result for a new site.
+    let accounts;
+    try {
+        accounts = PasswordManagerCredentialPrompt.accountsFromLookup(
+            await nativeRequest("getCredentials", { domain })
+        );
+    } catch (_) {
+        return { success: true, skipped: true };
+    }
+    if (PasswordManagerCredentialPrompt.hasExactMatch(accounts, username, password)) {
+        return { success: true, matched: true };
+    }
+
     const token = crypto.randomUUID();
     const pending = {
         tabId,
@@ -414,8 +439,8 @@ async function openCredentialPrompt(request, sender) {
         domain,
         username,
         password,
-        data: null,
-        loading: true,
+        data: PasswordManagerCredentialPrompt.describe(accounts, username, domain),
+        loading: false,
         error: null,
         expiresAt: Date.now() + 2 * 60_000,
         windowId: null,
@@ -443,36 +468,8 @@ async function openCredentialPrompt(request, sender) {
             credentialPromptWindows.set(window.id, token);
             setTimeout(() => discardCredentialPrompt(token), 2 * 60_000);
             resolve({ success: true, token });
-            // Create the durable extension window before doing native I/O.
-            // This matters during pagehide, when Helium may destroy the
-            // originating document while the account lookup is in flight.
-            setTimeout(() => loadCredentialPrompt(token), 0);
         });
     });
-}
-
-async function loadCredentialPrompt(token) {
-    const pending = pendingCredentialPrompts.get(token);
-    if (!pending) return;
-    try {
-        const accounts = PasswordManagerCredentialPrompt.accountsFromLookup(
-            await nativeRequest("getCredentials", { domain: pending.domain })
-        );
-        if (!pendingCredentialPrompts.has(token)) return;
-        if (PasswordManagerCredentialPrompt.hasExactMatch(
-            accounts, pending.username, pending.password
-        )) {
-            discardCredentialPrompt(token, "matched");
-            return;
-        }
-        pending.data = PasswordManagerCredentialPrompt.describe(
-            accounts, pending.username, pending.domain
-        );
-    } catch (error) {
-        pending.error = error?.message || "Credentials unavailable";
-    } finally {
-        pending.loading = false;
-    }
 }
 
 async function completeCredentialPrompt(request, sender) {

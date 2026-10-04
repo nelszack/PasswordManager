@@ -26,6 +26,12 @@
         "form_submission.js",
         "content_fields.js",
         "content_detection.js",
+        "content_controls.js",
+        "content_generator.js",
+        "content_autofill.js",
+        "content_bridge.js",
+        "content_observer.js",
+        "content_credentials.js",
         "content.js"
       ],
       "run_at": "document_idle",

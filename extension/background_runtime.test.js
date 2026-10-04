@@ -87,7 +87,9 @@ function securityEnvironment() {
     let listener, nativeListener, disconnect;
     let locked = false;
     let holdLogin = false, heldLoginResponse;
-    const requests = [], deliveries = [], removed = [];
+    let holdCredentials = false, heldCredentialResponse;
+    let credentialResponse = { success: true, data: "[]" };
+    const requests = [], deliveries = [], removed = [], created = [];
     const event = capture => ({ addListener(fn) { capture?.(fn); } });
     const origin = "https://shop.example";
     const chrome = {
@@ -108,6 +110,7 @@ function securityEnvironment() {
                         const response = { id: request.id, success: true, nativeVersion: "0.1.0" };
                         if (request.action === "status") response.data = `Status: ${locked ? "Locked" : "Unlocked"}\nVersion: 0.1.0`;
                         else if (locked) Object.assign(response, { success: false, error: "Vault locked." });
+                        else if (request.action === "getCredentials") Object.assign(response, credentialResponse);
                         else if (request.action === "getLoginItems") response.data = JSON.stringify([
                             { id: 1, name: "Personal", username: "alice", has_totp: true }
                         ]);
@@ -117,6 +120,7 @@ function securityEnvironment() {
                         else if (request.action === "getAutofillItem") response.data = JSON.stringify({ id: 2, primary_secret: "synthetic-card" });
                         else response.data = JSON.stringify({ id: 1, password: "synthetic-secret" });
                         if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
+                        else if (holdCredentials && request.action === "getCredentials") heldCredentialResponse = response;
                         else queueMicrotask(() => nativeListener(response));
                     }
                 };
@@ -128,7 +132,7 @@ function securityEnvironment() {
             sendMessage: async (tab, message, options) => { deliveries.push({ tab, message, options }); }
         },
         windows: {
-            create(_options, callback) { callback({ id: 42 }); },
+            create(options, callback) { created.push(options); callback({ id: 42 }); },
             remove(id, callback) { removed.push(id); callback?.(); },
             onRemoved: event()
         }
@@ -148,7 +152,10 @@ function securityEnvironment() {
     const pickerSender = { id: chrome.runtime.id, url: chrome.runtime.getURL("picker.html") };
     const message = (request, source = sender) => new Promise(resolve => listener(request, source, resolve));
     return {
-        context, requests, deliveries, removed, sender, pickerSender, message,
+        context, requests, deliveries, removed, created, sender, pickerSender, message,
+        setCredentialResponse(response) { credentialResponse = response; },
+        holdCredentials() { holdCredentials = true; },
+        releaseCredentials() { nativeListener(heldCredentialResponse); },
         setLocked() { locked = true; },
         holdLogin() { holdLogin = true; },
         releaseLogin() { nativeListener(heldLoginResponse); },
@@ -235,4 +242,73 @@ test("locking cancels an in-flight selection and duplicate clicks cannot deliver
     assert.equal(result.success, false);
     assert.match(result.error, /expired/);
     assert.equal(env.deliveries.length, 0);
+});
+
+test("automatic save prompts wait for a successful lookup before opening any window", async () => {
+    const env = securityEnvironment();
+    await new Promise(resolve => setImmediate(resolve));
+    env.holdCredentials();
+    const opening = env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
+    assert.equal(env.created.length, 0);
+    env.releaseCredentials();
+    const result = await opening;
+    assert.equal(result.success, true);
+    assert.ok(result.token);
+    assert.equal(env.created.length, 1);
+});
+
+test("stopped, locked, disconnected, and malformed backends never open automatic prompts", async () => {
+    for (const response of [
+        { success: false, error: "Server is not running" },
+        { success: false, error: "Native messaging host disconnected" },
+        { success: false, error: "Native messaging request timed out" },
+        { success: true, data: "not-json" },
+        { success: true, data: "{}" }
+    ]) {
+        const env = securityEnvironment();
+        env.setCredentialResponse(response);
+        const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
+        assert.equal(result.success, true);
+        assert.equal(result.skipped, true);
+        assert.equal(env.created.length, 0);
+    }
+    const env = securityEnvironment();
+    env.setLocked();
+    const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
+    assert.equal(result.skipped, true);
+    assert.equal(env.created.length, 0);
+});
+
+test("new sites still prompt while exact matches do not flash a popup", async () => {
+    for (const response of [
+        { success: false, error: "Not found." },
+        { success: true, data: "[]" },
+        { success: true, data: JSON.stringify([{ id: 1, username: "alice", password: "existing-secret" }]) }
+    ]) {
+        const env = securityEnvironment();
+        env.setCredentialResponse(response);
+        const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "existing-secret" });
+        if (response.data?.includes("existing-secret")) {
+            assert.equal(result.matched, true);
+            assert.equal(env.created.length, 0);
+        } else {
+            assert.ok(result.token);
+            assert.equal(env.created.length, 1);
+        }
+    }
+});
+
+test("disconnecting or locking closes an existing automatic save prompt", async () => {
+    for (const operation of ["lock", "disconnect"]) {
+        const env = securityEnvironment();
+        await new Promise(resolve => setImmediate(resolve));
+        const opened = await env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
+        assert.ok(opened.token);
+        if (operation === "lock") {
+            env.setLocked();
+            await env.message({ action: "getStatus" });
+        } else env.disconnect();
+        assert.ok(env.removed.includes(42));
+        assert.equal(env.deliveries.at(-1).message.result.action, "skipped");
+    }
 });

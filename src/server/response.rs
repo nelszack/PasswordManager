@@ -40,7 +40,7 @@ pub(super) async fn flush_buffered_responses(stream: &mut TcpStream) {
 }
 
 async fn write_response(code: ResponseCode, message: &str, stream: &mut TcpStream) {
-    let mut frame = encode_response(code, message);
+    let frame = Zeroizing::new(encode_response(code, message));
     let transport = TRANSPORT_RESPONSE_KEY.try_with(|key| {
         key.borrow()
             .as_deref()
@@ -58,9 +58,60 @@ async fn write_response(code: ResponseCode, message: &str, stream: &mut TcpStrea
         }
     })
     .await;
-    frame.zeroize();
     if let Some(record) = encrypted.as_mut() {
         record.zeroize();
     }
     let _ = stream.flush().await;
+}
+
+fn domain_code(error: &crate::vault::VaultError) -> ResponseCode {
+    use crate::vault::VaultError;
+    match error {
+        VaultError::NotFound(_) => ResponseCode::NotFound,
+        VaultError::InvalidInput(_) | VaultError::Validation(_) => ResponseCode::InvalidInput,
+        VaultError::Conflict(_) => ResponseCode::Conflict,
+        VaultError::Locked | VaultError::Persistence(_) => ResponseCode::Failure,
+    }
+}
+
+pub(super) async fn respond_domain_error(error: &crate::vault::VaultError, stream: &mut TcpStream) {
+    respond_domain_error_with_context(error, &error.to_string(), stream).await;
+}
+
+pub(super) async fn respond_domain_error_with_context(
+    error: &crate::vault::VaultError,
+    message: &str,
+    stream: &mut TcpStream,
+) {
+    respond_with_code(domain_code(error), message, stream).await;
+}
+
+pub(super) async fn respond_domain_result(
+    result: Result<String, crate::vault::VaultError>,
+    stream: &mut TcpStream,
+) {
+    match result {
+        Ok(output) => {
+            let output = zeroize::Zeroizing::new(output);
+            respond(&output, stream).await;
+        }
+        Err(error) => respond_domain_error(&error, stream).await,
+    }
+}
+
+pub(super) async fn deliver_entry(
+    result: Result<crate::vault::EntryOutput<'_>, crate::vault::VaultError>,
+    timeout: u8,
+    stream: &mut TcpStream,
+) {
+    match result {
+        Ok(crate::vault::EntryOutput::Details(view)) => {
+            respond(&presentation::entry_details(&view), stream).await;
+            if !view.entry.password.is_empty() {
+                copy_in_background(view.entry.password.clone(), timeout);
+            }
+        }
+        Ok(crate::vault::EntryOutput::SiteLogins(output)) => respond(&output, stream).await,
+        Err(error) => respond_domain_error(&error, stream).await,
+    }
 }

@@ -54,3 +54,17 @@ test("status equality includes user-visible errors", () => {
     assert.equal(state.equal(status, { ...status, versionError: "Versions differ" }), false);
     assert.equal(state.equal(null, null), true);
 });
+
+test("structured status uses explicit fields even when warning text mentions locks", () => {
+    assert.deepEqual(state.parseServerStatus({ locked: false, version: "0.1.0", warning: "Previous lock failed" }),
+        { locked: false, serverVersion: "0.1.0", error: "Previous lock failed" });
+    assert.deepEqual(state.parseServerStatus({ locked: true, version: "0.1.0", warning: null }),
+        { locked: true, serverVersion: "0.1.0" });
+    assert.deepEqual(state.parseServerStatus({ locked: true, version: "0.1.0", warning: "" }),
+        { locked: true, serverVersion: "0.1.0" });
+    for (const value of [null, [], 1, {}, { locked: "false", version: "0.1.0" },
+        { locked: false, version: "" }, { locked: false, version: 1 },
+        { locked: false, version: "0.1.0", warning: 1 }, "unlocked", "Status: unavailable\nVersion: 0.1.0"]) {
+        assert.throws(() => state.parseServerStatus(value), /Invalid server status/);
+    }
+});

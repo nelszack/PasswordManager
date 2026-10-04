@@ -1,4 +1,8 @@
 #![allow(unused_must_use)]
+use super::audit::password_hash;
+use super::browser::{url_match_json, url_scheme};
+use super::import::{import_csv, import_json};
+use super::totp::{normalize_totp_configuration, parse_totp_configuration};
 use super::*;
 use crate::encryption::gen_master_key;
 use crate::file::init_test_data_dir;
@@ -34,7 +38,8 @@ fn browser_login_summaries_are_secret_free_and_selection_is_site_scoped() {
                 ..VaultEntry::default()
             },
         ],
-        ..Vault::default()
+        metadata: VaultMetadata::default(),
+        recovery: RecoveryData::default(),
     };
     vault.recovery.entry_metadata.push(EntryMetadata {
         entry_id: 3,
@@ -2078,7 +2083,7 @@ fn oversized_import_files_are_rejected_before_their_contents_are_read() {
         )
         .unwrap_err();
 
-    assert!(error.contains("128 MiB limit"), "{error}");
+    assert!(error.to_string().contains("128 MiB limit"), "{error}");
 }
 
 #[test]
@@ -2110,7 +2115,7 @@ fn imports_with_too_many_items_are_rejected_before_vault_changes() {
         )
         .unwrap_err();
 
-    assert!(error.contains("100000 item limit"), "{error}");
+    assert!(error.to_string().contains("100000 item limit"), "{error}");
     assert_eq!(vault, before);
 }
 
@@ -2406,7 +2411,7 @@ fn plaintext_exports_do_not_replace_existing_files_without_force() {
     )]);
 
     let error = vault.export(path.display().to_string(), false).unwrap_err();
-    assert!(error.contains("already exists"), "{error}");
+    assert!(error.to_string().contains("already exists"), "{error}");
     assert_eq!(fs::read_to_string(&path).unwrap(), "keep this file");
 
     vault.export(path.display().to_string(), true).unwrap();
@@ -2498,6 +2503,7 @@ fn encrypted_backup_round_trip_preserves_complete_vault_state() {
     assert!(
         restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, false)
             .unwrap_err()
+            .to_string()
             .contains("--force")
     );
     assert_eq!(
@@ -2526,6 +2532,7 @@ fn encrypted_backup_rejects_tampering_and_invalid_vault_state() {
     assert!(
         restore_encrypted_backup(tampered_path.to_str().unwrap(), &mut key, false)
             .unwrap_err()
+            .to_string()
             .contains("corrupted")
     );
 
@@ -2552,6 +2559,7 @@ fn encrypted_backup_rejects_tampering_and_invalid_vault_state() {
     assert!(
         restore_encrypted_backup(invalid_path.to_str().unwrap(), &mut key, false)
             .unwrap_err()
+            .to_string()
             .contains("duplicate entry IDs")
     );
     assert!(find_vault(&mut key).is_none());
@@ -2618,6 +2626,7 @@ fn production_kdf_covers_vault_unlock_rekey_backup_restore_and_tamper_workflows(
         assert!(
             restore_encrypted_backup(tampered_path.to_str().unwrap(), &mut tamper_key, false)
                 .unwrap_err()
+                .to_string()
                 .contains("corrupted")
         );
 
@@ -2686,4 +2695,83 @@ fn pwned_range_parser_ignores_padding_and_reconstructs_hashes() {
     let parsed = parse_pwned_range("ABCDE:0\r\n12345:9\r\n", "FFFFF");
     assert_eq!(parsed.get("FFFFF12345"), Some(&9));
     assert!(!parsed.contains_key("FFFFFABCDE"));
+}
+
+#[test]
+fn import_rolls_back_when_id_allocation_fails_after_an_earlier_row() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "name,url,username,password").unwrap();
+    writeln!(file, "first,https://first.example,user,first-secret").unwrap();
+    writeln!(file, "second,https://second.example,user,second-secret").unwrap();
+    let mut vault = Vault::default();
+    vault.recovery.next_entry_id = usize::MAX - 1;
+    let before = vault.clone();
+    let result = vault.import_with_options(
+        file.path().display().to_string(),
+        ConflictPolicy::Skip,
+        false,
+        HISTORY_LIMIT,
+        &mut ServerInfo::default(),
+    );
+    assert!(result.is_err());
+    assert_eq!(vault, before);
+}
+
+#[test]
+fn domain_reads_classify_missing_records_and_invalid_selectors() {
+    let vault = Vault::default();
+    assert!(matches!(
+        vault.get_entry(&Target::Id(1)),
+        Err(VaultError::NotFound(_))
+    ));
+    assert!(matches!(
+        vault.get_entry(&Target::Vault {
+            key: PasswordType::Password(String::new()),
+            keep_key: false
+        }),
+        Err(VaultError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        vault.get_secret(&Target::Url("example.com".into())),
+        Err(VaultError::NotFound(_))
+    ));
+}
+
+#[test]
+fn import_preview_matches_execution_for_conflicts_between_source_rows() {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "name,url,username,password").unwrap();
+    writeln!(file, "new,https://example.com,alice,first-secret").unwrap();
+    writeln!(file, "new,https://example.com,alice,second-secret").unwrap();
+    writeln!(file, "new,https://example.com,alice,third-secret").unwrap();
+    for policy in [
+        ConflictPolicy::Skip,
+        ConflictPolicy::Replace,
+        ConflictPolicy::KeepBoth,
+    ] {
+        let mut vault = Vault::default();
+        let before = vault.clone();
+        let path = file.path().display().to_string();
+        let mut preview = vault
+            .import_with_options(
+                path.clone(),
+                policy,
+                true,
+                HISTORY_LIMIT,
+                &mut ServerInfo::default(),
+            )
+            .unwrap();
+        assert_eq!(vault, before);
+        let actual = vault
+            .import_with_options(
+                path,
+                policy,
+                false,
+                HISTORY_LIMIT,
+                &mut ServerInfo::default(),
+            )
+            .unwrap();
+        preview.preview = false;
+        assert_eq!(preview, actual);
+    }
 }

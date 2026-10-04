@@ -353,7 +353,7 @@ fn handle_request(mut request: NativeRequest) -> NativeResponse {
 
 fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, String> {
     match request.action.as_str() {
-        "status" => Ok(ServerCommand::Status),
+        "status" => Ok(ServerCommand::StatusData),
         "getCredentials" => Ok(ServerCommand::Get(Target::Url(required(
             request.domain.take(),
             "domain",
@@ -416,7 +416,11 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
 }
 
 fn response_data(action: &str, mut output: String) -> Result<Value, String> {
-    let result = if action == "getTotp" {
+    let result = if action == "status" {
+        serde_json::from_str::<crate::protocol::ServerStatus>(&output)
+            .map(|status| json!(status))
+            .map_err(|error| format!("invalid server status response: {error}"))
+    } else if action == "getTotp" {
         let parse = || {
             let output = output.trim();
             let value = output

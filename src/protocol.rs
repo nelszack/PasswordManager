@@ -302,3 +302,21 @@ mod tests {
         assert!(verify_server_hello(&real_token, &tampered).is_none());
     }
 }
+
+/// Machine-readable server state. CLI presentation is kept outside this contract.
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServerStatus {
+    pub locked: bool,
+    pub version: String,
+    pub warning: Option<String>,
+}
+impl ServerStatus {
+    pub fn new(locked: bool, warning: Option<String>) -> Self {
+        Self {
+            locked,
+            version: env!("CARGO_PKG_VERSION").into(),
+            warning,
+        }
+    }
+}

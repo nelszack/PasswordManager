@@ -98,10 +98,11 @@ pub fn send_command(command: ServerCommand) {
 
 fn server_token() -> Result<String, String> {
     let path = data_dir().join(TOKEN_FILE);
-    let token = fs::read_to_string(&path)
-        .map_err(|e| format!("could not read session token at {}: {e}", path.display()))?
-        .trim()
-        .to_string();
+    let contents = Zeroizing::new(
+        fs::read_to_string(&path)
+            .map_err(|e| format!("could not read session token at {}: {e}", path.display()))?,
+    );
+    let token = contents.trim().to_string();
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!("invalid session token at {}", path.display()));
     }

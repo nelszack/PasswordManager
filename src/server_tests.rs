@@ -1,5 +1,6 @@
 use super::*;
 use crate::file::init_test_data_dir;
+use crate::vault::RecoveryData;
 use crate::vault::{Vault, VaultEntry, VaultMetadata};
 
 async fn tcp_pair() -> (TcpStream, TcpStream) {
@@ -29,7 +30,7 @@ async fn auto_lock_clears_secrets_even_when_the_vault_cannot_be_written() {
             ..VaultEntry::default()
         }],
         metadata: VaultMetadata { filename },
-        ..Vault::default()
+        recovery: RecoveryData::default(),
     })));
     let info = Arc::new(Mutex::new(ServerInfo {
         locked: false,
@@ -62,7 +63,7 @@ fn manual_lock_does_not_depend_on_a_writable_vault_destination() {
         metadata: VaultMetadata {
             filename: "missing-directory/vault.enc".into(),
         },
-        ..Vault::default()
+        recovery: RecoveryData::default(),
     });
     let mut info = ServerInfo {
         locked: false,
@@ -102,7 +103,7 @@ async fn auto_lock_completes_while_a_detached_breach_audit_is_slow() {
         metadata: VaultMetadata {
             filename: "auto-lock-during-audit.vault".into(),
         },
-        ..Vault::default()
+        recovery: RecoveryData::default(),
     };
     let snapshot = vault.audit_snapshot(&AuditOptions {
         check_breaches: true,
@@ -227,7 +228,7 @@ fn test_server_info_with_key() {
 fn test_password_type_zeroize_password() {
     let mut pt = PasswordType::Password("secret_password".to_string());
     pt.zeroize();
-    match pt {
+    match &pt {
         PasswordType::Password(s) => assert_eq!(s, ""),
         _ => panic!("Expected Password variant"),
     }
@@ -237,7 +238,7 @@ fn test_password_type_zeroize_password() {
 fn test_password_type_zeroize_key() {
     let mut pt = PasswordType::Key("secret_key.pem".to_string());
     pt.zeroize();
-    match pt {
+    match &pt {
         PasswordType::Key(s) => assert_eq!(s, ""),
         _ => panic!("Expected Key variant"),
     }
@@ -462,13 +463,14 @@ async fn browser_login_commands_check_lock_state_and_site_at_selection() {
                 keypass: None,
             })),
             vlt: Arc::new(Mutex::new(Some(Vault {
+                metadata: VaultMetadata::default(),
                 entries: vec![VaultEntry {
                     id: 1,
                     password: "synthetic-secret".into(),
                     url: Some("https://example.com".into()),
                     ..VaultEntry::default()
                 }],
-                ..Vault::default()
+                recovery: RecoveryData::default(),
             }))),
             kill_tx,
             token: token.clone(),

@@ -126,6 +126,7 @@ impl Zeroize for ServerCommand {
             Self::Kill
             | Self::Lock(_)
             | Self::Status
+            | Self::StatusData
             | Self::View(_)
             | Self::BrowserAutofill
             | Self::BrowserAutofillItem(_)
@@ -170,6 +171,7 @@ pub enum ServerCommand {
     Rekey(PasswordType),
     BrowserLogins(String),
     BrowserLogin { domain: String, id: usize },
+    StatusData,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -545,6 +547,40 @@ impl Zeroize for ImportRequest {
         self.path.zeroize();
         self.key_pass.zeroize();
         self.password_history_limit.zeroize();
+    }
+}
+
+impl Zeroize for PasswordType {
+    fn zeroize(&mut self) {
+        match self {
+            PasswordType::Key(k) => {
+                k.zeroize();
+            }
+            PasswordType::Password(p) => {
+                p.zeroize();
+            }
+            PasswordType::Session {
+                encryption_key,
+                salt,
+                kdf,
+                memory_kib,
+                iterations,
+                parallelism,
+            } => {
+                encryption_key.zeroize();
+                salt.zeroize();
+                kdf.zeroize();
+                memory_kib.zeroize();
+                iterations.zeroize();
+                parallelism.zeroize();
+            }
+        }
+    }
+}
+
+impl Drop for PasswordType {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 

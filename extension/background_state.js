@@ -1,13 +1,22 @@
 var PasswordManagerBackgroundState = (() => {
     function parseServerStatus(value) {
-        const data = String(value);
-        const warning = data.split("\nWarning: ", 2)[1];
-        const serverVersion = data.match(/^Version:\s*(\S+)$/im)?.[1];
-        return {
-            locked: /\blocked\b/i.test(data),
-            ...(serverVersion ? { serverVersion } : {}),
-            ...(warning ? { error: warning } : {})
-        };
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+            if (typeof value.locked !== "boolean" || typeof value.version !== "string"
+                || !value.version || (value.warning != null && typeof value.warning !== "string")) {
+                throw new Error("Invalid server status");
+            }
+            return {
+                locked: value.locked,
+                serverVersion: value.version,
+                ...(value.warning ? { error: value.warning } : {})
+            };
+        }
+        // Compatibility with native hosts installed before structured status.
+        if (typeof value !== "string") throw new Error("Invalid server status");
+        const match = /^Status: (Locked|Unlocked)\nVersion: ([^\s]+)(?:\nWarning: ([\s\S]*))?$/i.exec(value);
+        if (!match) throw new Error("Invalid server status");
+        return { locked: match[1].toLowerCase() === "locked", serverVersion: match[2],
+            ...(match[3] ? { error: match[3] } : {}) };
     }
 
     function versionError(status = {}) {

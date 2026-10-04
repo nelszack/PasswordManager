@@ -64,9 +64,15 @@ async function launchExtension(options = {}) {
         ]
     });
     const coveredPages = new Map();
-    async function coverPage(page) {
+    const completedCoverage = [];
+    async function coverPage(page, restart = false) {
         if (!COVERAGE_DIR) return false;
-        if (coveredPages.has(page)) return coveredPages.get(page);
+        if (coveredPages.has(page)) {
+            if (!restart) return coveredPages.get(page);
+            if (await coveredPages.get(page)) {
+                completedCoverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
+            }
+        }
         const started = page.coverage.startJSCoverage({ resetOnNavigation: false })
             .then(() => true, () => false);
         coveredPages.set(page, started);
@@ -86,7 +92,7 @@ async function launchExtension(options = {}) {
         context, extensionId, nativeLog, profile, temporaryRoot, testHome, coverPage,
         async close() {
             if (COVERAGE_DIR) {
-                const coverage = [];
+                const coverage = [...completedCoverage];
                 for (const [page, started] of coveredPages) {
                     if (await started && !page.isClosed()) {
                         coverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
