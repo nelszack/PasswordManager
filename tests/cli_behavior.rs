@@ -138,6 +138,82 @@ fn native_host_updates_are_explicit_and_preserve_browser_manifests() {
     }
 }
 
+#[test]
+fn running_native_host_does_not_lock_the_build_executable() {
+    use std::io::Write;
+
+    let root = tempfile::tempdir().unwrap();
+    let build_binary = root
+        .path()
+        .join(if cfg!(windows) { "pm.exe" } else { "pm" });
+    std::fs::copy(env!("CARGO_BIN_EXE_pm"), &build_binary).unwrap();
+    let host_dir = root.path().join("data/native-messaging");
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let host = host_dir.join(if cfg!(windows) {
+        "pm-native-host.exe"
+    } else {
+        "pm-native-host"
+    });
+    #[cfg(windows)]
+    std::fs::write(&host, b"old launcher").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.path().join("old-pm"), &host).unwrap();
+    let updated = Command::new(&build_binary)
+        .env("PM_CONFIG_DIR", root.path().join("config"))
+        .env("PM_DATA_DIR", root.path().join("data"))
+        .args(["native-host", "update"])
+        .output_timeout("update native host from build executable");
+    assert!(updated.status.success(), "{:?}", updated);
+
+    let mut child = Command::new(&host)
+        .env("PM_CONFIG_DIR", root.path().join("config"))
+        .env("PM_DATA_DIR", root.path().join("data"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let result = (|| {
+            let mut header = [0; 4];
+            stdout.read_exact(&mut header)?;
+            let length = u32::from_ne_bytes(header) as usize;
+            if length > 1024 * 1024 {
+                return Err(std::io::Error::other("oversized native response"));
+            }
+            let mut response = vec![0; length];
+            stdout.read_exact(&mut response)?;
+            Ok(response)
+        })();
+        let _ = sender.send(result);
+    });
+    // Wait for a response so the host is definitely running, then keep its
+    // stdin open to reproduce the browser's persistent native connection.
+    let request = br#"{"id":1,"action":"unsupported"}"#;
+    let sent = child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&(request.len() as u32).to_ne_bytes())
+        .and_then(|_| child.stdin.as_mut().unwrap().write_all(request));
+    let response = receiver.recv_timeout(Duration::from_secs(10));
+    let rebuilt = std::fs::remove_file(&build_binary)
+        .and_then(|_| std::fs::copy(env!("CARGO_BIN_EXE_pm"), &build_binary));
+    let still_running = child.try_wait();
+    let _ = child.kill();
+    let _ = child.wait();
+    reader.join().unwrap();
+
+    sent.unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&response.unwrap().unwrap()).unwrap();
+    assert_eq!(response["id"], 1);
+    assert_eq!(response["success"], false);
+    assert!(still_running.unwrap().is_none());
+    rebuilt.expect("running browser host must allow replacing the build executable");
+}
+
 struct ServerGuard {
     root: PathBuf,
     port: u16,

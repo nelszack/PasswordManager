@@ -60,6 +60,21 @@ fully close the browser, including background processes, before updating.
 Restart the server and reload the extension after upgrading. Regenerate any
 installed shell completions with `pm completions` to pick up new commands.
 
+If a Windows build fails with `failed to remove file ...\\target\\release\\pm.exe`,
+a running process is holding the build executable open. Older native-host
+launchers ran that executable directly. Fully exit the browser, including its
+background processes, and stop the server with `.\target\release\pm.exe kill`.
+Then build and replace the old launcher with the current copied host:
+
+```powershell
+cargo build --release --locked
+.\target\release\pm.exe native-host update
+```
+
+Reopen the browser after updating. The copied Windows native host allows future
+builds while the browser is open. A server started from `target\release\pm.exe`
+still needs to be stopped with `pm kill` before rebuilding that executable.
+
 ## Usage
 
 ### Create Your First Vault
