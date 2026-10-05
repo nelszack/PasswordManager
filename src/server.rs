@@ -39,6 +39,8 @@ use response::deliver_responses;
 pub use response::{respond, respond_with_code};
 mod session_token;
 use session_token::*;
+mod instance_lock;
+use instance_lock::acquire_server_lock;
 
 pub use crate::vault::VaultCredentials as ServerInfo;
 pub const DEFAULT_PORT: u16 = 7878;
@@ -125,6 +127,9 @@ pub fn start(port: u16) -> Result<String, String> {
             server_addr(port)
         ));
     }
+    // Provide an actionable startup error. The child acquires and holds the
+    // authoritative lock itself, closing the race between this check and spawn.
+    drop(acquire_server_lock(&data_dir())?);
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not locate the pm executable: {error}"))?;
     let mut command = Command::new(executable);
@@ -217,11 +222,13 @@ pub async fn server(
     password_history_limit: usize,
     trash_retention_days: u64,
 ) -> Result<(), String> {
+    let directory = data_dir();
+    let instance_lock = Arc::new(acquire_server_lock(&directory)?);
     let address = server_addr(port);
     let listener = TcpListener::bind(address)
         .await
         .map_err(|error| format!("could not bind password manager server to {address}: {error}"))?;
-    let token_path = data_dir().join(TOKEN_FILE);
+    let token_path = directory.join(TOKEN_FILE);
     let mut token = rotate_token_file(&token_path)
         .map_err(|error| format!("could not initialize server: {error}"))?;
 
@@ -244,6 +251,7 @@ pub async fn server(
                     }
                 };
                 let state = ConnectionState {
+                    instance_lock: Some(Arc::clone(&instance_lock)),
                     session: Arc::clone(&session),
                     kill_tx: kill_tx.clone(),
                     token: token.clone(),
@@ -272,6 +280,9 @@ pub async fn server(
 
 #[derive(Clone)]
 struct ConnectionState {
+    // Accepted commands retain directory ownership through blocking work and
+    // response delivery, even if the listener has already stopped.
+    instance_lock: Option<Arc<fs::File>>,
     session: Arc<Mutex<VaultSession>>,
     kill_tx: mpsc::Sender<()>,
     token: String,
@@ -285,6 +296,7 @@ struct ConnectionState {
 async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
     TRANSPORT_RESPONSE_KEY
         .scope(RefCell::new(None), async move {
+            let _instance_lock = state.instance_lock.clone();
             let Ok(Some(command)) =
                 tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &state.token)).await
             else {

@@ -50,7 +50,8 @@ function environment(children = []) {
         createSecureTypedButton: input => controls.push([input, "card"]),
         createSecureCredentialButton: input => controls.push([input, "login"]),
         removeSecurePickerButton: input => controls.push([input, "remove"]),
-        createGeneratorButton: () => assert.fail("unexpected generator")
+        createGeneratorButton: () => assert.fail("unexpected generator"),
+        removeGeneratorButton: () => {}
     };
     vm.createContext(context);
     const filename = require.resolve("./content_observer.js");
@@ -118,4 +119,21 @@ test("input attribute changes reclassify controls and detached additions are ski
     env.flush();
     assert.deepEqual(env.controls, [[input, "remove"]]);
     assert.equal(detached.scans, 0);
+});
+
+test("ancestor visibility changes rescan descendants and ignore extension style writes", () => {
+    for (const attributeName of ["class", "style", "hidden", "open"]) {
+        const input = new Input();
+        const container = new Element([input]);
+        const env = environment([container]);
+        env.controls.length = 0;
+        env.notify([{ type: "attributes", target: container, attributeName, addedNodes: [] }]);
+        assert.equal(env.frames.length, 1);
+        env.flush();
+        assert.deepEqual(env.controls, [[input, "login"]]);
+        const extensionButton = new Element();
+        extensionButton.classList = { contains: value => value === "my-extension-ui" };
+        env.notify([{ type: "attributes", target: extensionButton, attributeName: "style", addedNodes: [] }]);
+        assert.equal(env.frames.length, 0);
+    }
 });

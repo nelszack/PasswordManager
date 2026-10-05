@@ -45,6 +45,13 @@ function fixture(pathname, port) {
                 "beforeend", '<input type="password" autocomplete="current-password">'
             );
         };`);
+    if (pathname === "/dynamic-controls") return html(`
+        <form id="dynamicForm" hidden>
+          <input id="dynamicUsername" autocomplete="username">
+          <input id="dynamicPassword" type="password" autocomplete="current-password">
+          <input id="newPassword" type="password" autocomplete="new-password">
+          <input id="confirmPassword" type="password" autocomplete="new-password">
+        </form>`);
     if (pathname === "/iframe-login") return html(`
         <form><input id="username" autocomplete="username">
         <input id="password" type="password" autocomplete="current-password"></form>`);
@@ -291,6 +298,42 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/dynamic-shadow`);
         await expect(page.locator("#shadowHost")).toBeAttached();
         await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+    });
+
+    test("hidden forms and reinserted inputs regain picker and generator controls", async () => {
+        await page.goto(`${origin}/dynamic-controls`);
+        const pickers = page.getByRole("button", { name: "Choose saved credentials" });
+        const generators = page.getByRole("button", { name: "Generate a strong password" });
+        await expect(pickers).toHaveCount(0);
+        await expect(generators).toHaveCount(0);
+        await page.evaluate(() => { document.querySelector("#dynamicForm").hidden = false; });
+        await expect(pickers).toHaveCount(2);
+        await expect(generators).toHaveCount(2);
+        await expect(pickers.first()).toBeVisible();
+        await page.evaluate(() => { document.querySelector("#dynamicForm").style.display = "none"; });
+        await expect(pickers.first()).toBeHidden();
+        await page.evaluate(() => { document.querySelector("#dynamicForm").style.display = ""; });
+        await expect(pickers.first()).toBeVisible();
+        await expect(generators.first()).toBeVisible();
+        await page.evaluate(() => {
+            window.detachedForm = document.querySelector("#dynamicForm");
+            window.detachedForm.remove();
+        });
+        await expect(pickers).toHaveCount(0);
+        await expect(generators).toHaveCount(0);
+        await page.evaluate(() => document.body.appendChild(window.detachedForm));
+        await expect(pickers).toHaveCount(2);
+        await expect(generators).toHaveCount(2);
+        await generators.first().click();
+        await expect(page.locator("#newPassword")).toHaveValue(/.{20}/);
+        await expect(page.locator("#confirmPassword")).toHaveValue(await page.locator("#newPassword").inputValue());
+        await page.evaluate(() => {
+            const input = document.querySelector("#confirmPassword");
+            input.type = "text";
+            input.autocomplete = "username";
+        });
+        await expect(generators).toHaveCount(1);
+        await expect(pickers).toHaveCount(3);
     });
 
     test("identity fields fill only after selection in the secure picker window", async () => {

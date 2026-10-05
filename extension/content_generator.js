@@ -26,12 +26,22 @@ function generatePagePassword(length = 20) {
     return characters.join("");
 }
 
+const generatorControls = new WeakMap();
+
+function removeGeneratorButton(input) {
+    generatorControls.get(input)?.remove();
+}
+
 function createGeneratorButton(input) {
-    if (input.dataset.hasPasswordGenerator) return;
-    input.dataset.hasPasswordGenerator = "true";
+    const existing = generatorControls.get(input);
+    if (existing) {
+        existing.position();
+        return;
+    }
 
     const button = document.createElement("button");
     button.type = "button";
+    button.className = "my-extension-ui";
     button.innerText = "✨";
     button.title = "Generate a strong password";
     button.setAttribute("aria-label", "Generate a strong password");
@@ -76,5 +86,9 @@ function createGeneratorButton(input) {
     });
 
     positionButton();
-    registerPositionedControl(input, button, positionButton);
+    const control = { position: positionButton, remove: null };
+    control.remove = registerPositionedControl(input, button, positionButton, () => {
+        if (generatorControls.get(input) === control) generatorControls.delete(input);
+    });
+    generatorControls.set(input, control);
 }

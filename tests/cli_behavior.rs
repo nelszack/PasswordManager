@@ -221,6 +221,208 @@ struct ServerGuard {
 }
 
 #[test]
+fn servers_on_different_ports_cannot_share_a_data_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let first_port = unused_port();
+    assert!(run(root.path(), first_port, &["start"]).status.success());
+    let _first = ServerGuard {
+        root: root.path().into(),
+        port: first_port,
+        active: true,
+    };
+    let token_path = root.path().join("data/session.key");
+    let token = std::fs::read(&token_path).unwrap();
+    assert!(run(root.path(), first_port, &["start"]).status.success());
+
+    let second_port = unused_port();
+    for command in ["start", "run"] {
+        let rejected = run(root.path(), second_port, &[command]);
+        assert!(!rejected.status.success(), "{rejected:?}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("already owns this data directory")
+        );
+        assert_eq!(std::fs::read(&token_path).unwrap(), token);
+        assert!(run(root.path(), first_port, &["status"]).status.success());
+    }
+
+    let independent = tempfile::tempdir().unwrap();
+    assert!(
+        run(independent.path(), second_port, &["start"])
+            .status
+            .success()
+    );
+    let _second = ServerGuard {
+        root: independent.path().into(),
+        port: second_port,
+        active: true,
+    };
+    assert!(
+        run(independent.path(), second_port, &["status"])
+            .status
+            .success()
+    );
+    assert!(run(root.path(), first_port, &["status"]).status.success());
+}
+
+#[test]
+fn file_commands_resolve_client_paths_and_preserve_application_files() {
+    let root = tempfile::tempdir().unwrap();
+    let server_directory = root.path().join("server");
+    let client_directory = root.path().join("client");
+    std::fs::create_dir(&server_directory).unwrap();
+    std::fs::create_dir(&client_directory).unwrap();
+    let port = unused_port();
+    let started = isolated_pm(root.path())
+        .current_dir(&server_directory)
+        .args(["--port", &port.to_string(), "start"])
+        .output_timeout("start in another directory");
+    assert!(started.status.success(), "{started:?}");
+    let _server = ServerGuard {
+        root: root.path().into(),
+        port,
+        active: true,
+    };
+    let key = root.path().join("vault.key");
+    for command in ["new", "unlock"] {
+        let result = run(
+            root.path(),
+            port,
+            &[command, "--key", key.to_str().unwrap()],
+        );
+        assert!(result.status.success(), "{result:?}");
+    }
+    std::fs::write(client_directory.join("import.json"),
+        r#"[{"name":"Synthetic account","username":"alice","password":"synthetic-secret","url":"https://example.com"}]"#).unwrap();
+    let from_client = |args: &[&str]| {
+        isolated_pm(root.path())
+            .current_dir(&client_directory)
+            .args(["--port", &port.to_string()])
+            .args(args)
+            .output_timeout("client file command")
+    };
+    for args in [
+        vec!["import", "--path", "import.json", "--preview"],
+        vec!["import", "--path", "import.json"],
+        vec!["export", "--path", "export.json"],
+        vec!["export", "--path", "export.json", "--force"],
+        vec![
+            "backup",
+            "create",
+            "--path",
+            "vault.pmbackup",
+            "--key",
+            key.to_str().unwrap(),
+        ],
+    ] {
+        let result = from_client(&args);
+        assert!(result.status.success(), "{args:?}: {result:?}");
+    }
+    let exported: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(client_directory.join("export.json")).unwrap())
+            .unwrap();
+    assert_eq!(exported["items"][0]["password"], "synthetic-secret");
+    assert!(client_directory.join("vault.pmbackup").is_file());
+    assert!(!server_directory.join("export.json").exists());
+    assert!(!server_directory.join("vault.pmbackup").exists());
+    assert_protected_output_destinations(root.path(), port, &key);
+    assert!(run(root.path(), port, &["lock"]).status.success());
+    let restored = from_client(&[
+        "backup",
+        "restore",
+        "--path",
+        "vault.pmbackup",
+        "--key",
+        key.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(restored.status.success(), "{restored:?}");
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["unlock", "--key", key.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    let secret = run(root.path(), port, &["get", "--id", "1", "--password-only"]);
+    assert!(secret.status.success(), "{secret:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&secret.stdout).trim(),
+        "synthetic-secret"
+    );
+}
+
+fn assert_protected_output_destinations(root: &Path, port: u16, key: &Path) {
+    let vault = std::fs::read_dir(root.join("data"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "enc"))
+        .unwrap();
+    let other_vault = root.join("data/other.enc");
+    std::fs::copy(&vault, &other_vault).unwrap();
+    let destinations = vec![
+        vault.clone(),
+        other_vault,
+        root.join("data/session.key"),
+        root.join("data/server.lock"),
+        root.join("config/config.toml"),
+    ];
+    #[cfg(unix)]
+    let destinations = {
+        let mut destinations = destinations;
+        use std::os::unix::fs::symlink;
+        let alias = root.join("vault-alias.json");
+        symlink(&vault, &alias).unwrap();
+        destinations.push(alias);
+        let linked_directory = root.join("linked-data");
+        symlink(root.join("data"), &linked_directory).unwrap();
+        destinations.push(linked_directory.join("session.key"));
+        destinations
+    };
+    for path in destinations {
+        // Windows byte-range locks can reject reads of the lock file itself.
+        let original = (!path.ends_with("server.lock")).then(|| std::fs::read(&path).unwrap());
+        let original_size = std::fs::metadata(&path).unwrap().len();
+        for command in [vec!["export"], vec!["backup", "create"]] {
+            let mut args = command;
+            args.extend(["--path", path.to_str().unwrap(), "--force"]);
+            if args[0] == "backup" {
+                args.extend(["--key", key.to_str().unwrap()]);
+            }
+            let result = run(root, port, &args);
+            assert!(!result.status.success(), "{args:?}: {result:?}");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), original_size);
+            if let Some(original) = &original {
+                assert_eq!(std::fs::read(&path).unwrap(), *original);
+            }
+            assert!(run(root, port, &["status"]).status.success());
+        }
+    }
+    for path in [
+        root.join("data/new-export.json"),
+        root.join("config/new-export.json"),
+    ] {
+        let result = run(root, port, &["export", "--path", path.to_str().unwrap()]);
+        assert!(!result.status.success(), "{result:?}");
+        assert!(!path.exists());
+    }
+    assert!(run(root, port, &["lock"]).status.success());
+    let result = run(
+        root,
+        port,
+        &[
+            "unlock",
+            "--key",
+            key.to_str().unwrap(),
+            "--vault-file",
+            vault.file_name().unwrap().to_str().unwrap(),
+        ],
+    );
+    assert!(result.status.success(), "{result:?}");
+}
+
+#[test]
 fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();

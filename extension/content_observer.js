@@ -13,6 +13,8 @@ function attachInput(input, formUsernames) {
     }
     if (isUsableInput(input) && input.type === "password" && isNewPasswordInput(input)) {
         createGeneratorButton(input);
+    } else {
+        removeGeneratorButton(input);
     }
 }
 
@@ -49,8 +51,12 @@ function observeInputs() {
     let attachScheduled = false;
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
-            if (mutation.type === "attributes" && mutation.target instanceof HTMLInputElement) {
-                scheduleAttach(mutation.target);
+            if (mutation.type === "attributes") {
+                if (mutation.target.classList?.contains("my-extension-ui")) continue;
+                if (mutation.target instanceof HTMLInputElement
+                    || ["class", "style", "hidden", "open"].includes(mutation.attributeName)) {
+                    scheduleAttach(mutation.target);
+                }
             }
             for (const node of mutation.addedNodes) {
                 if (node.nodeType === 1) scheduleAttach(node);
@@ -64,7 +70,7 @@ function observeInputs() {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["class", "style", "hidden", "type", "autocomplete", "disabled", "readonly"]
+            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly"]
         });
     };
     const scheduleAttach = root => {

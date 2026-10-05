@@ -4,18 +4,19 @@ let layoutObserverStarted = false;
 let repositionScheduled = false;
 let controlResizeObserver = null;
 
-function registerPositionedControl(input, button, position) {
-    const record = { input, button, position };
-    positionedControls.add(record);
-    startLayoutObserver();
-    controlResizeObserver?.observe(input);
-    return () => {
+function registerPositionedControl(input, button, position, onRemove = () => {}) {
+    const record = { input, button, position, remove() {
         positionedControls.delete(record);
         button.remove();
         if (![...positionedControls].some(control => control.input === input)) {
             controlResizeObserver?.unobserve(input);
         }
-    };
+        onRemove();
+    } };
+    positionedControls.add(record);
+    startLayoutObserver();
+    controlResizeObserver?.observe(input);
+    return record.remove;
 }
 
 function startLayoutObserver() {
@@ -29,9 +30,7 @@ function startLayoutObserver() {
             repositionScheduled = false;
             for (const control of positionedControls) {
                 if (!control.input.isConnected) {
-                    control.button.remove();
-                    controlResizeObserver?.unobserve(control.input);
-                    positionedControls.delete(control);
+                    control.remove();
                     continue;
                 }
                 control.position();
@@ -46,11 +45,17 @@ function startLayoutObserver() {
     controlResizeObserver = new ResizeObserver(reposition);
     for (const control of positionedControls) controlResizeObserver.observe(control.input);
 
-    // Child insertion can move controls without changing their own dimensions.
-    // Attribute changes are handled by the focused input observer below.
-    new MutationObserver(reposition).observe(document.body, {
+    // Ancestor visibility/layout changes can move or hide controls without
+    // changing the inputs themselves. Ignore our own style writes to avoid
+    // scheduling another layout frame after every reposition.
+    new MutationObserver(mutations => {
+        if (mutations.some(mutation => mutation.type !== "attributes"
+            || !mutation.target.classList?.contains("my-extension-ui"))) reposition();
+    }).observe(document.body, {
         childList: true,
-        subtree: true
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style", "hidden", "open"]
     });
 }
 
@@ -62,7 +67,10 @@ function removeSecurePickerButton(input) {
 
 function createSecurePickerButton(input, kind, icon, title, onSelection) {
     const existing = securePickerControls.get(input);
-    if (existing?.kind === kind) return;
+    if (existing?.kind === kind) {
+        existing.position();
+        return;
+    }
     existing?.remove();
 
     const button = document.createElement("button");
@@ -87,16 +95,12 @@ function createSecurePickerButton(input, kind, icon, title, onSelection) {
         button.style.top = rect.top + rect.height / 2 - 14 + "px";
     };
     positionButton();
-    const unregister = registerPositionedControl(input, button, positionButton);
-    const control = {
-        kind,
-        remove() {
-            unregister();
-            if (securePickerControls.get(input) === control) {
-                securePickerControls.delete(input);
-            }
+    const control = { kind, position: positionButton, remove: null };
+    control.remove = registerPositionedControl(input, button, positionButton, () => {
+        if (securePickerControls.get(input) === control) {
+            securePickerControls.delete(input);
         }
-    };
+    });
     securePickerControls.set(input, control);
     button.addEventListener("click", async event => {
         if (!event.isTrusted) return;

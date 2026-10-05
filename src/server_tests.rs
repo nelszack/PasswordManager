@@ -17,6 +17,7 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
 fn test_connection_state(session: VaultSession) -> ConnectionState {
     let (kill_tx, _) = mpsc::channel(1);
     ConnectionState {
+        instance_lock: None,
         session: Arc::new(Mutex::new(session)),
         kill_tx,
         token: "ab".repeat(32),

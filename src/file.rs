@@ -60,6 +60,7 @@ pub(crate) fn hidden_windows_command(
 }
 
 pub const TOKEN_FILE: &str = "session.key";
+pub(crate) const SERVER_LOCK_FILE: &str = "server.lock";
 pub const CONFIG_DIR_ENV: &str = "PM_CONFIG_DIR";
 pub const DATA_DIR_ENV: &str = "PM_DATA_DIR";
 
@@ -141,7 +142,10 @@ pub fn set_private_dir_perms(path: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 pub fn sync_parent(path: &Path) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     fs::File::open(parent)?.sync_all()
 }
 
@@ -152,6 +156,41 @@ pub fn sync_parent(_path: &Path) -> std::io::Result<()> {
 
 pub fn file_exists(file_path: impl AsRef<Path>) -> bool {
     file_path.as_ref().exists()
+}
+
+/// Export and backup destinations must not replace application-owned files.
+/// Resolve parent symlinks and existing destination symlinks before checking.
+pub(crate) fn validate_external_output_path(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let candidate = fs::canonicalize(parent)?.join(path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination must name a file")
+    })?);
+    let existing = match fs::canonicalize(path) {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    for directory in [data_dir(), config_dir()] {
+        let protected = match fs::canonicalize(directory) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if candidate.starts_with(&protected)
+            || existing
+                .as_ref()
+                .is_some_and(|path| path.starts_with(&protected))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "export and backup destinations must be outside application data and configuration directories",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn key_file_path(name: &str) -> Result<PathBuf, String> {
@@ -312,6 +351,13 @@ mod test {
         assert!(file_exists(&file_path));
         assert!(file_exists(temp_dir.path()));
         assert!(!file_exists(temp_dir.path().join("missing")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_accepts_a_bare_filename() {
+        sync_parent(Path::new("relative-export.json")).unwrap();
+        sync_parent(Path::new("./relative-backup.pmbackup")).unwrap();
     }
 
     #[test]

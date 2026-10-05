@@ -72,6 +72,20 @@ fn resolved_key(path: String) -> PasswordType {
     )
 }
 
+fn resolved_file(path: String) -> String {
+    if path.is_empty() {
+        client::exit_error("file path cannot be empty", 2);
+    }
+    std::path::absolute(&path)
+        .map_err(|error| format!("could not resolve file path: {error}"))
+        .and_then(|path| {
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| "file path must contain valid Unicode".to_string())
+        })
+        .unwrap_or_else(|error| client::exit_error(&error, 2))
+}
+
 pub(super) fn run(
     command: CliCommands,
     conf: &config::Config,
@@ -252,7 +266,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                 key_path,
                 force,
             } => ServerCommand::Backup(BackupRequest {
-                path,
+                path: resolved_file(path),
                 key_pass: key_path.map_or_else(
                     || PasswordType::Password(prompt_for_new_master_password()),
                     resolved_key,
@@ -280,7 +294,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                     resolved_key,
                 );
                 ServerCommand::RestoreBackup(BackupRequest {
-                    path,
+                    path: resolved_file(path),
                     key_pass,
                     force,
                 })
@@ -346,7 +360,10 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                 }
             }
         }
-        CliCommands::Export { path, force } => ServerCommand::Export { path, force },
+        CliCommands::Export { path, force } => ServerCommand::Export {
+            path: resolved_file(path),
+            force,
+        },
 
         CliCommands::Import {
             path,
@@ -367,7 +384,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                 })
             };
             ServerCommand::Import(ImportRequest {
-                path,
+                path: resolved_file(path),
                 new,
                 key_pass: keypass,
                 preview,

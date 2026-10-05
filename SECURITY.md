@@ -37,6 +37,11 @@ Vaults and backups authenticate their ciphertext and format metadata. Password
 keys use Argon2id; external key files must be kept separately from application
 data. File permissions restrict vault and token access to the current user.
 Vault and backup writes enforce a 128 MiB encrypted-file limit before replacement.
+Export and backup destinations cannot replace files in application data or
+configuration directories, including through symlink aliases. An exclusive
+operating-system file lock prevents servers on different ports from sharing one
+data directory and rotating each other's session tokens or writing competing
+vault states.
 Backup restoration enforces the same limit on the actual file read; external
 key files must be regular files within a 1 MiB limit.
 The loopback server uses a rotating token and authenticated encrypted transport.

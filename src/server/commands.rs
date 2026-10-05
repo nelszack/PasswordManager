@@ -63,6 +63,7 @@ fn handle_command(
     };
     let (server_info, vlt) = session.parts_mut();
     let ConnectionState {
+        instance_lock: _instance_lock,
         session: session_handle,
         kill_tx: _,
         token: _,

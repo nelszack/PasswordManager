@@ -422,6 +422,13 @@ pub(super) fn persist_private_file(
     contents: &[u8],
     force: bool,
 ) -> Result<(), VaultError> {
+    crate::file::validate_external_output_path(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            VaultError::InvalidInput(error.to_string())
+        } else {
+            VaultError::Persistence(format!("could not validate destination: {error}"))
+        }
+    })?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

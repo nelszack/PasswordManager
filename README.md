@@ -120,6 +120,9 @@ with direction-specific XChaCha20-Poly1305 session keys.
 
 Check the server with `pm status`; stop it with `pm kill`. The server holds one
 unlocked vault at a time. Lock it before unlocking a different vault.
+Only one server can own an application data directory, including when different
+ports are requested. Its private `server.lock` file stays in place after shutdown;
+the operating system releases the lock when the server exits.
 
 ### Generate a Password
 
@@ -445,6 +448,11 @@ succeeds durably; after an interruption, verify which credential opens the vault
 Historical backups and filesystem snapshots still use their original credentials.
 
 ### Import/Export
+
+Relative import, export, and backup paths are resolved from the directory where
+you run the CLI, independently of where the background server was started.
+Exports and backups must be saved outside the application's data and configuration
+directories. `--force` cannot override this protection.
 
 For a complete backup that preserves entries, stable IDs, item types, additional
 URLs, custom fields, password-age metadata, password history, trash, and TOTP
