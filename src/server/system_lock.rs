@@ -26,6 +26,8 @@ impl Watch {
             (self.lock)();
         }
     }
+    // Cocoa observer registration has no fallible setup result to report.
+    #[cfg(any(test, not(target_os = "macos")))]
     fn warning(&self, source: &'static str, error: impl std::fmt::Display) {
         self.warnings
             .lock()
