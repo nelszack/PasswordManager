@@ -39,6 +39,51 @@ struct NativeRequest {
     name: Option<String>,
     #[serde(default, rename = "entryId")]
     entry_id: Option<usize>,
+    #[serde(default, rename = "vaultFile")]
+    vault_file: Option<String>,
+    #[serde(default, rename = "keyPath")]
+    key_path: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    reveal: bool,
+    #[serde(default)]
+    item: Option<ManagementInput>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ManagementInput {
+    name: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    kind: crate::types::ItemKind,
+    #[serde(default)]
+    urls: Vec<String>,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    fields: Vec<crate::types::CustomField>,
+    #[serde(default, rename = "removeFields")]
+    remove_fields: Vec<String>,
+    #[serde(default, rename = "removeUrls")]
+    remove_urls: Vec<String>,
+}
+
+impl Zeroize for ManagementInput {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.urls.zeroize();
+        self.notes.zeroize();
+        self.fields.zeroize();
+        self.remove_fields.zeroize();
+        self.remove_urls.zeroize();
+    }
 }
 
 impl Zeroize for NativeRequest {
@@ -50,6 +95,10 @@ impl Zeroize for NativeRequest {
         self.password.zeroize();
         self.name.zeroize();
         self.entry_id.zeroize();
+        self.vault_file.zeroize();
+        self.key_path.zeroize();
+        self.query.zeroize();
+        self.item.zeroize();
         *self = Self::default();
     }
 }
@@ -362,9 +411,15 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
 
 fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> NativeResponse {
     let id = request.id;
-    let result = command_for_request(&mut request)
-        .and_then(|command| client.request(command))
-        .and_then(|output| response_data(&request.action, output));
+    let result = if request.action == "managerVaults" {
+        crate::vault::list_vaults()
+            .map(|vaults| json!(vaults))
+            .map_err(|e| e.to_string())
+    } else {
+        command_for_request(&mut request)
+            .and_then(|command| client.request(command))
+            .and_then(|output| response_data(&request.action, output))
+    };
     request.zeroize();
     match result {
         Ok(data) => NativeResponse::success(id, data),
@@ -375,6 +430,52 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
 fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, String> {
     match request.action.as_str() {
         "status" => Ok(ServerCommand::StatusData),
+        "managerUnlock" => {
+            let config =
+                crate::config::try_read_config(&crate::file::config_dir().join("config.toml"))?;
+            let key = if let Some(path) = request.key_path.take().filter(|path| !path.is_empty()) {
+                if request.password.as_ref().is_some_and(|p| !p.is_empty()) {
+                    return Err("choose a master password or key path, not both".into());
+                }
+                crate::types::PasswordType::Key(crate::file::resolve_key_path(&path)?)
+            } else {
+                crate::types::PasswordType::Password(required(
+                    request.password.take(),
+                    "master password",
+                    64 * 1024,
+                )?)
+            };
+            if let Some(filename) = &request.vault_file {
+                crate::vault::validate_vault_filename(filename).map_err(|e| e.to_string())?;
+            }
+            Ok(ServerCommand::Unlock(crate::types::UnlockInfo {
+                key,
+                timeout: config.unlock.timeout,
+                vault_file: request.vault_file.take(),
+            }))
+        }
+        "managerList" => Ok(ServerCommand::ManagementList(crate::types::SearchFilter {
+            query: Some(optional_text(request.query.take(), "query", 4096)?),
+            list: crate::types::ListOptions {
+                sort: crate::types::SortField::Name,
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        "managerItem" => Ok(ServerCommand::ManagementItem {
+            id: management_id(request)?,
+            reveal: request.reveal,
+        }),
+        "managerCopy" => {
+            let config =
+                crate::config::try_read_config(&crate::file::config_dir().join("config.toml"))?;
+            Ok(ServerCommand::ManagementCopy {
+                id: management_id(request)?,
+                timeout: config.clipboard.timeout,
+            })
+        }
+        "managerDelete" => Ok(ServerCommand::Delete(Target::Id(management_id(request)?))),
+        "managerAdd" | "managerUpdate" => management_save(request),
         "getCredentials" => Ok(ServerCommand::Get(Target::Url(required(
             request.domain.take(),
             "domain",
@@ -435,7 +536,9 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
 }
 
 fn response_data(action: &str, mut output: String) -> Result<Value, String> {
-    let result = if action == "status" {
+    let result = if matches!(action, "managerList" | "managerItem") {
+        serde_json::from_str(&output).map_err(|_| "invalid management response".to_string())
+    } else if action == "status" {
         serde_json::from_str::<crate::protocol::ServerStatus>(&output)
             .map(|status| json!(status))
             .map_err(|error| format!("invalid server status response: {error}"))
@@ -460,6 +563,87 @@ fn response_data(action: &str, mut output: String) -> Result<Value, String> {
     };
     output.zeroize();
     result
+}
+
+fn management_id(request: &NativeRequest) -> Result<usize, String> {
+    request
+        .entry_id
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "invalid entry ID".into())
+}
+
+fn management_save(request: &mut NativeRequest) -> Result<ServerCommand, String> {
+    use crate::types::*;
+    let mut item = zeroize::Zeroizing::new(request.item.take().ok_or("missing item")?);
+    if item.name.trim().is_empty()
+        || item.name.len() > 4096
+        || item.username.len() > 4096
+        || item.notes.len() > 64 * 1024
+        || item.password.as_ref().is_some_and(|p| p.len() > 64 * 1024)
+        || item.urls.len() > 100
+        || item.urls.iter().any(|url| url.len() > 2048)
+        || item.remove_urls.len() > 100
+        || item.remove_urls.iter().any(|url| url.len() > 2048)
+        || item.fields.len() > 100
+        || item.remove_fields.len() > 100
+        || item
+            .remove_fields
+            .iter()
+            .any(|name| name.is_empty() || name.len() > 4096)
+        || item.fields.iter().any(|field| {
+            field.name.trim().is_empty() || field.name.len() > 4096 || field.value.len() > 64 * 1024
+        })
+    {
+        return Err("invalid item fields or item exceeds management limits".into());
+    }
+    let mut names = std::collections::HashSet::new();
+    if item
+        .fields
+        .iter()
+        .any(|field| !names.insert(field.name.to_lowercase()))
+    {
+        return Err("custom field names must be unique".into());
+    }
+    let urls = std::mem::take(&mut item.urls);
+    if request.action == "managerAdd" {
+        Ok(ServerCommand::AddTypedWithOptions {
+            entry: TypedEntry {
+                entry: PasswordEntry {
+                    name: std::mem::take(&mut item.name),
+                    username: Some(std::mem::take(&mut item.username)),
+                    password: item.password.take().unwrap_or_default(),
+                    url: urls.first().cloned(),
+                    notes: Some(std::mem::take(&mut item.notes)),
+                    copy: false,
+                },
+                kind: item.kind,
+                additional_urls: urls.into_iter().skip(1).collect(),
+                custom_fields: std::mem::take(&mut item.fields),
+            },
+            copy_timeout: 0,
+        })
+    } else {
+        // A blank editor password is sent as null, preserving the current secret.
+        Ok(ServerCommand::UpdateTyped(TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(management_id(request)?),
+                update: EntryChanges {
+                    name: Some(std::mem::take(&mut item.name)),
+                    username: Some(std::mem::take(&mut item.username)),
+                    url: urls.first().cloned(),
+                    notes: Some(std::mem::take(&mut item.notes)),
+                },
+                password: item.password.take(),
+            },
+            kind: Some(item.kind),
+            clear_urls: urls.is_empty(),
+            add_url: urls.into_iter().skip(1).collect(),
+            remove_url: std::mem::take(&mut item.remove_urls),
+            set_fields: std::mem::take(&mut item.fields),
+            remove_fields: std::mem::take(&mut item.remove_fields),
+            clear_fields: false,
+        }))
+    }
 }
 
 #[cfg(test)]

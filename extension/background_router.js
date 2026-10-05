@@ -17,6 +17,18 @@ const PasswordManagerBackgroundRouter = {
         }
 
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+            if (typeof request.action === "string" && request.action.startsWith("manager")) {
+                const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("manager.html"));
+                const allowed = ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete"];
+                if (!trusted || !allowed.includes(request.action)) {
+                    sendResponse({ success: false, error: "Invalid vault management request" });
+                    return false;
+                }
+                const fields = { entryId: request.entryId, query: request.query, reveal: request.reveal,
+                    vaultFile: request.vaultFile, password: request.password, keyPath: request.keyPath, item: request.item };
+                sendAction(request.action, fields, sendResponse, !["managerVaults", "managerList", "managerItem", "managerCopy"].includes(request.action));
+                return true;
+            }
             if (request.action === "openCredentialPrompt") {
                 prompts.open(request, sender)
                     .then(sendResponse)

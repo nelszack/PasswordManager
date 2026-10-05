@@ -27,6 +27,7 @@
         "content_fields.js",
         "content_detection.js",
         "content_controls.js",
+        "password_generator.js",
         "content_generator.js",
         "content_autofill.js",
         "content_bridge.js",

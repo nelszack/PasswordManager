@@ -14,6 +14,42 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
+#[tokio::test]
+async fn os_lock_event_discards_session_secrets_and_invalidates_inactivity_timers() {
+    let state = test_connection_state(VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Password("synthetic-master".into())),
+        },
+        vault: Some(Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                password: "synthetic-password".into(),
+                ..Default::default()
+            }],
+            metadata: VaultMetadata::default(),
+            recovery: RecoveryData::default(),
+        }),
+    });
+    let handler = system_lock_handler(
+        Arc::downgrade(&state.session),
+        Arc::downgrade(&state.background_error),
+        state.lock_generation.clone(),
+    );
+    let repeated = handler.clone();
+    tokio::task::spawn_blocking(move || {
+        handler();
+        repeated();
+    })
+    .await
+    .unwrap();
+    let session = state.session.lock().await;
+    assert!(session.is_locked());
+    assert!(session.vault.is_none());
+    assert!(session.credentials.keypass.is_none());
+    assert_eq!(state.lock_generation.load(Ordering::Acquire), 2);
+}
+
 fn test_connection_state(session: VaultSession) -> ConnectionState {
     let (kill_tx, _) = mpsc::channel(1);
     ConnectionState {
@@ -24,6 +60,7 @@ fn test_connection_state(session: VaultSession) -> ConnectionState {
         lock_generation: Arc::new(AtomicU64::new(0)),
         inactivity_timeout: Arc::new(AtomicU64::new(0)),
         background_error: Arc::new(Mutex::new(None)),
+        system_lock: None,
         password_history_limit: 10,
         trash_retention_days: 0,
     }

@@ -46,6 +46,8 @@ jobs:
           node --check extension/relay.js
           node -e "for (const script of require('./extension/manifest.json').content_scripts.flatMap(entry => entry.js)) require('node:child_process').execFileSync(process.execPath, ['--check', 'extension/' + script])"
           node --check extension/popup.js
+          node --check extension/manager.js
+          node --check extension/password_generator.js
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
           node --test extension/*.test.js
       - name: Run tests

@@ -1,29 +1,16 @@
-function secureRandomIndex(limit) {
-    const ceiling = Math.floor(0x100000000 / limit) * limit;
-    const value = new Uint32Array(1);
-    do {
-        crypto.getRandomValues(value);
-    } while (value[0] >= ceiling);
-    return value[0] % limit;
-}
-
-function generatePagePassword(length = 20) {
-    const groups = [
-        "ABCDEFGHJKLMNPQRSTUVWXYZ",
-        "abcdefghijkmnopqrstuvwxyz",
-        "23456789",
-        "!@#$%^&*-_=+"
-    ];
-    const all = groups.join("");
-    const characters = groups.map(group => group[secureRandomIndex(group.length)]);
-    while (characters.length < length) {
-        characters.push(all[secureRandomIndex(all.length)]);
-    }
-    for (let index = characters.length - 1; index > 0; index--) {
-        const swap = secureRandomIndex(index + 1);
-        [characters[index], characters[swap]] = [characters[swap], characters[index]];
-    }
-    return characters.join("");
+let pageGeneratorSettings = PasswordManagerGenerator.defaults;
+let pageGeneratorStorage = {};
+chrome.storage.local.get(["pmGenerator", "pmGeneratorsByOrigin"], result => {
+    pageGeneratorStorage = result;
+    pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    for (const key of ["pmGenerator", "pmGeneratorsByOrigin"]) if (changes[key]) pageGeneratorStorage[key] = changes[key].newValue;
+    pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
+});
+function generatePagePassword(length) {
+    return PasswordManagerGenerator.generate(length === undefined ? pageGeneratorSettings : { ...pageGeneratorSettings, length });
 }
 
 const generatorControls = new WeakMap();

@@ -5,6 +5,20 @@ use super::outcome::{
 use super::*;
 use crate::vault::{available, unlock_selected_vault};
 
+fn combined_lock_warning(
+    background: &Mutex<Option<String>>,
+    monitor: Option<&system_lock::Monitor>,
+) -> Option<String> {
+    let warnings = [
+        background.blocking_lock().clone(),
+        monitor.and_then(system_lock::Monitor::warning),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    (!warnings.is_empty()).then(|| warnings.join("; "))
+}
+
 fn handle_command(
     responses: &mut Vec<BufferedResponse>,
     state: ConnectionState,
@@ -70,6 +84,7 @@ fn handle_command(
         lock_generation,
         inactivity_timeout,
         background_error,
+        system_lock,
         password_history_limit,
         trash_retention_days,
     } = state;
@@ -212,14 +227,14 @@ fn handle_command(
             }
         }
         ServerCommand::Status => {
-            let warning = background_error.blocking_lock().clone();
+            let warning = combined_lock_warning(&background_error, system_lock.as_deref());
             respond(
                 &status_message(server_info.locked, warning.as_deref()),
                 responses,
             );
         }
         ServerCommand::StatusData => {
-            let warning = background_error.blocking_lock().clone();
+            let warning = combined_lock_warning(&background_error, system_lock.as_deref());
             let status = crate::protocol::ServerStatus::new(server_info.locked, warning);
             respond(
                 &serde_json::to_string(&status).expect("status is serializable"),
@@ -457,6 +472,52 @@ fn handle_command(
                     }),
                 responses,
             );
+        }
+        ServerCommand::ManagementList(filter) => {
+            respond_domain_result(
+                vlt.as_ref()
+                    .ok_or(crate::vault::VaultError::Locked)
+                    .and_then(|vault| vault.management_list_json(filter)),
+                responses,
+            );
+        }
+        ServerCommand::ManagementItem { id, reveal } => {
+            match vlt
+                .as_ref()
+                .ok_or(crate::vault::VaultError::Locked)
+                .and_then(|vault| vault.management_item_json(id, reveal))
+            {
+                Ok(item) => {
+                    let item = Zeroizing::new(item);
+                    respond(&item, responses);
+                }
+                Err(error) => respond_domain_error(&error, responses),
+            }
+        }
+        ServerCommand::ManagementCopy { id, timeout } => {
+            if timeout == 0 {
+                respond_failure(
+                    "Clipboard copying is disabled; configure a nonzero clipboard timeout.",
+                    responses,
+                );
+            } else {
+                match vlt
+                    .as_ref()
+                    .ok_or(crate::vault::VaultError::Locked)
+                    .and_then(|vault| vault.get_secret(&Target::Id(id)))
+                {
+                    Ok(mut secret) => match crate::clipboard::try_copy_in_background(
+                        std::mem::take(&mut *secret),
+                        timeout,
+                    ) {
+                        Ok(()) => respond("Secret copied to clipboard.", responses),
+                        Err(error) => {
+                            respond_failure(&format!("Could not copy secret: {error}"), responses)
+                        }
+                    },
+                    Err(error) => respond_domain_error(&error, responses),
+                }
+            }
         }
         ServerCommand::BrowserAutofill => {
             if let Some(vault) = vlt.as_ref() {

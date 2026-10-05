@@ -49,6 +49,11 @@ A shared 64 MiB budget bounds ciphertext and plaintext request buffers before
 authentication; requests exceeding the available budget are rejected.
 The extension derives site identity from browser sender metadata and requires
 site-scoped selection rather than trusting a domain supplied by page scripts.
+Vault-management requests are separately restricted to the extension's manager
+page using the browser-provided extension ID and page URL. List responses contain
+summaries only; explicit reveal requests fetch one selected item. TOTP seeds are
+never returned by vault-management reads. Management copying uses the server's
+clipboard worker and existing lock cleanup.
 Site matching parses HTTP(S) URLs and compares scheme, normalized hostname,
 and effective port; bare domains default to HTTPS. Ambiguous URLs fail closed.
 Save prompts request summaries and never delay or replay form submissions based
@@ -70,6 +75,13 @@ The clipboard worker retains its copy while retrying transient cleanup failures;
 that buffer can outlive the locked vault when the clipboard is unavailable.
 A manual cleanup failure is reported even though the vault itself has already
 locked. Background cleanup failures appear in server status and the extension badge.
+
+System-event locking uses the same session and clipboard cleanup path. OS
+notification availability varies by platform and desktop; unavailable sources
+are reported in status. Linux standalone-locker detection checks same-user
+executables at 250 ms intervals. These notifications and checks supplement the
+inactivity timer and cannot guarantee delivery before a forced suspend or process
+termination. Resume notifications also request locking.
 
 Vault mutations use an atomic file replacement. A pre-replacement failure rolls
 back memory. A directory-sync failure after replacement retains the committed

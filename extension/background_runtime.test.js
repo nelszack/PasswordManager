@@ -104,6 +104,23 @@ function securityEnvironment() {
     };
 }
 
+test("vault management cannot be called by websites, content scripts, or other extension pages", async () => {
+    const env = securityEnvironment();
+    await new Promise(resolve => setImmediate(resolve));
+    const manager = { id: "abcdefghijklmnopabcdefghijklmnop", url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/manager.html" };
+    for (const action of ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete"]) {
+        for (const sender of [env.sender, env.pickerSender, { ...manager, id: "different" }, { ...manager, url: manager.url + ".evil" }]) {
+            const before = env.requests.length;
+            assert.equal((await env.message({ action, entryId: 1, password: "synthetic" }, sender)).success, false);
+            assert.equal(env.requests.length, before);
+        }
+        const before = env.requests.length;
+        assert.equal((await env.message({ action, entryId: 1 }, manager)).success, true);
+        assert.equal(env.requests.slice(before).filter(request => request.action === action).length, 1);
+    }
+    assert.equal((await env.message({ action: "managerUnknown" }, manager)).success, false);
+});
+
 test("background worker starts, publishes status, and rejects untrusted credential requests", async () => {
     const env = securityEnvironment();
     await new Promise(resolve => setImmediate(resolve));

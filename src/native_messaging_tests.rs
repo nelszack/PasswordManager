@@ -2,6 +2,32 @@ use super::*;
 use proptest::prelude::*;
 use std::io::Cursor;
 
+#[test]
+fn management_edits_validate_fields_and_preserve_unmodified_secrets() {
+    let mut request: NativeRequest = serde_json::from_value(json!({ "id": 1, "action": "managerUpdate", "entryId": 4,
+        "item": { "name": "Example", "password": null, "urls": ["https://new.example"], "removeUrls": ["https://old.example"],
+            "fields": [{ "name": "environment", "value": "prod", "secret": false }] } })).unwrap();
+    let command = command_for_request(&mut request).unwrap();
+    let ServerCommand::UpdateTyped(update) = command else {
+        panic!("expected update")
+    };
+    assert!(update.entry.password.is_none());
+    assert!(!update.clear_urls);
+    assert_eq!(
+        update.entry.update.url.as_deref(),
+        Some("https://new.example")
+    );
+    assert_eq!(update.remove_url, ["https://old.example"]);
+    let mut invalid: NativeRequest = serde_json::from_value(
+        json!({ "id": 1, "action": "managerAdd", "item": { "name": "", "password": "synthetic" } }),
+    )
+    .unwrap();
+    assert!(command_for_request(&mut invalid).is_err());
+    let mut invalid: NativeRequest = serde_json::from_value(json!({ "id": 1, "action": "managerAdd", "item": { "name": "Example", "fields": [
+        { "name": "same", "value": "synthetic", "secret": true }, { "name": "SAME", "value": "synthetic", "secret": false } ] } })).unwrap();
+    assert!(command_for_request(&mut invalid).is_err());
+}
+
 proptest! {
     #[test]
     fn arbitrary_native_frames_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..8192)) {

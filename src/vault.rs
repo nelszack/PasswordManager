@@ -37,6 +37,7 @@ mod recovery;
 mod totp;
 
 mod browser;
+mod management;
 mod query;
 use backup::validate_backup_vault;
 use browser::hostname;
@@ -303,6 +304,10 @@ pub struct ImportReport {
     pub skipped: usize,
     pub renamed: usize,
     pub preview: bool,
+    pub unsupported: usize,
+    pub loss_count: usize,
+    /// Bounded, secret-free descriptions indexed by source row/item.
+    pub losses: Vec<String>,
 }
 
 pub(crate) struct AuditSnapshot {
@@ -459,7 +464,25 @@ impl std::fmt::Display for ImportReport {
             self.replaced,
             self.renamed,
             self.skipped
-        )
+        )?;
+        if self.unsupported > 0 || self.loss_count > 0 {
+            write!(
+                formatter,
+                " {} unsupported items, {} data-loss warnings.",
+                self.unsupported, self.loss_count
+            )?;
+            for loss in &self.losses {
+                write!(formatter, "\nWarning: {loss}")?;
+            }
+            if self.loss_count > self.losses.len() {
+                write!(
+                    formatter,
+                    "\n{} additional warnings omitted.",
+                    self.loss_count - self.losses.len()
+                )?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -1,5 +1,23 @@
 use super::totp::normalize_totp_configuration;
 use super::*;
+mod formats;
+
+#[derive(Default)]
+struct ImportLosses {
+    unsupported: usize,
+    count: usize,
+    messages: Vec<String>,
+    source_positions: Vec<usize>,
+}
+
+impl ImportLosses {
+    fn warn(&mut self, item: usize, message: &str) {
+        self.count += 1;
+        if self.messages.len() < 100 {
+            self.messages.push(format!("Source item {item}: {message}"));
+        }
+    }
+}
 
 fn normalized_header(value: &str) -> String {
     value
@@ -19,53 +37,9 @@ fn csv_field(headers: &[String], record: &csv::StringRecord, aliases: &[&str]) -
         .map(str::to_string)
 }
 
-fn csv_password(headers: &[String], record: &csv::StringRecord) -> Option<String> {
-    headers
-        .iter()
-        .position(|header| header == "password")
-        .and_then(|index| record.get(index))
-        .map(str::to_string)
-}
-
+#[cfg(any(test, feature = "fuzzing"))]
 pub(super) fn import_csv(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
-    let mut reader = csv::Reader::from_reader(contents.as_bytes());
-    let headers: Vec<String> = reader
-        .headers()
-        .map_err(|e| format!("invalid CSV headers in {path:?}: {e}"))?
-        .iter()
-        .map(normalized_header)
-        .collect();
-    let mut entries = Vec::new();
-    for row in reader.records() {
-        let row = row.map_err(|e| format!("invalid CSV data in {path:?}: {e}"))?;
-        let name = csv_field(&headers, &row, &["name", "title"])
-            .or_else(|| csv_field(&headers, &row, &["url", "website", "loginuri"]))
-            .ok_or_else(|| format!("an imported CSV row in {path:?} has no name or URL"))?;
-        let password = csv_password(&headers, &row)
-            .ok_or_else(|| format!("an imported CSV row in {path:?} has no password"))?;
-        let now = chrono::Local::now().to_string();
-        entries.push(ImportedItem::login(VaultEntry {
-            id: 0,
-            name,
-            username: csv_field(&headers, &row, &["username", "loginusername", "login"]),
-            password,
-            url: csv_field(
-                &headers,
-                &row,
-                &["url", "website", "loginuri", "formactionorigin"],
-            ),
-            notes: csv_field(&headers, &row, &["notes", "note", "extra", "comments"]),
-            created: csv_field(&headers, &row, &["created", "timecreated"])
-                .unwrap_or_else(|| now.clone()),
-            modified: csv_field(
-                &headers,
-                &row,
-                &["modified", "timemodified", "timepasswordchanged"],
-            )
-            .unwrap_or(now),
-        }));
-    }
-    Ok(entries)
+    formats::csv_with_losses(contents, path).map(|(items, _)| items)
 }
 
 fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -76,7 +50,15 @@ fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub(super) fn import_json(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
+    import_json_with_losses(contents, path).map(|(items, _)| items)
+}
+
+fn import_json_with_losses(
+    contents: &str,
+    path: &str,
+) -> Result<(Vec<ImportedItem>, ImportLosses), String> {
     let root: serde_json::Value =
         serde_json::from_str(contents).map_err(|e| format!("invalid JSON in {path:?}: {e}"))?;
     if root.get("format").and_then(serde_json::Value::as_str) == Some(PORTABLE_FORMAT) {
@@ -88,7 +70,7 @@ pub(super) fn import_json(contents: &str, path: &str) -> Result<Vec<ImportedItem
                 portable.version
             ));
         }
-        return portable
+        let items = portable
             .items
             .into_iter()
             .map(|mut item| {
@@ -122,54 +104,10 @@ pub(super) fn import_json(contents: &str, path: &str) -> Result<Vec<ImportedItem
                     totp: item.totp,
                 })
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
+        return Ok((items, ImportLosses::default()));
     }
-    let bitwarden = root.get("items").is_some();
-    let values = root
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-        .or_else(|| root.as_array())
-        .ok_or_else(|| {
-            "JSON import must be an array or a Bitwarden object with items".to_string()
-        })?;
-    let mut entries = Vec::new();
-    for value in values {
-        if bitwarden && value.get("type").and_then(serde_json::Value::as_u64) != Some(1) {
-            continue;
-        }
-        let login = value.get("login").unwrap_or(value);
-        let url = json_text(value, &["url", "website"]).or_else(|| {
-            login
-                .get("uris")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|uris| uris.first())
-                .and_then(|uri| json_text(uri, &["uri"]))
-        });
-        let name = json_text(value, &["name", "title"])
-            .or_else(|| url.clone())
-            .ok_or_else(|| format!("an imported JSON item in {path:?} has no name or URL"))?;
-        let password = login
-            .get("password")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| value.get("password").and_then(serde_json::Value::as_str))
-            .map(str::to_string)
-            .ok_or_else(|| format!("an imported JSON item in {path:?} has no password"))?;
-        let now = chrono::Local::now().to_string();
-        entries.push(ImportedItem::login(VaultEntry {
-            id: 0,
-            name,
-            username: json_text(login, &["username", "login"]),
-            password,
-            url,
-            notes: json_text(value, &["notes", "note"]),
-            created: json_text(value, &["created", "creationDate"]).unwrap_or_else(|| now.clone()),
-            modified: json_text(value, &["modified", "revisionDate"]).unwrap_or(now),
-        }));
-    }
-    if entries.is_empty() {
-        return Err(format!("no supported login entries were found in {path:?}"));
-    }
-    Ok(entries)
+    formats::external_json(root, path)
 }
 
 impl Vault {
@@ -287,17 +225,25 @@ impl Vault {
             }
         };
         let trimmed = contents.trim_start();
-        let imported = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            import_json(&contents, &path)?
+        let (imported, mut losses) = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            import_json_with_losses(&contents, &path)?
         } else {
-            import_csv(&contents, &path)?
+            formats::csv_with_losses(&contents, &path)?
         };
-        if imported.len() > MAX_IMPORT_ITEMS {
+        if imported.len() + losses.unsupported > MAX_IMPORT_ITEMS {
             return Err(
                 (format!("import contains more than the {MAX_IMPORT_ITEMS} item limit")).into(),
             );
         }
-        let plan = self.plan_import(imported, conflicts, preview);
+        for (position, item) in imported.iter().enumerate() {
+            if item.password_history.len() > password_history_limit {
+                losses.warn(losses.source_positions.get(position).copied().unwrap_or(position + 1), "password history exceeds the configured retention limit; oldest revisions will be omitted");
+            }
+        }
+        let mut plan = self.plan_import(imported, conflicts, preview);
+        plan.report.unsupported = losses.unsupported;
+        plan.report.loss_count = losses.count;
+        plan.report.losses = losses.messages;
         if preview {
             return Ok(plan.report);
         }
@@ -457,6 +403,60 @@ struct ImportPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rich_preview_and_execution_report_the_same_losses_and_keep_source_positions() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{}", json!({ "items": [
+            { "type": 99, "password": "synthetic-unsupported" },
+            { "type": 1, "name": "Account", "login": {
+                "password": "synthetic-password", "totp": "JBSWY3DPEHPK3PXP",
+                "uris": [{ "uri": "https://one.example" }, { "uri": "https://two.example" }] },
+                "passwordHistory": [{ "password": "synthetic-newer" }, { "password": "synthetic-older" }],
+                "fields": [{ "name": "token", "value": "synthetic-token", "type": 1 }] }
+        ] })).unwrap();
+        let mut vault = Vault::default();
+        let before = vault.clone();
+        let path = file.path().display().to_string();
+        let preview = vault
+            .import_with_options(
+                path.clone(),
+                ConflictPolicy::Skip,
+                true,
+                1,
+                &mut VaultCredentials::default(),
+            )
+            .unwrap();
+        assert_eq!(vault, before);
+        assert_eq!(preview.added, 1);
+        assert_eq!(preview.unsupported, 1);
+        assert_eq!(preview.loss_count, 2);
+        assert!(preview.losses[1].starts_with("Source item 2:"));
+        assert!(!preview.to_string().contains("synthetic-"));
+        let imported = vault
+            .import_with_options(
+                path,
+                ConflictPolicy::Skip,
+                false,
+                1,
+                &mut VaultCredentials::default(),
+            )
+            .unwrap();
+        assert_eq!(imported.losses, preview.losses);
+        assert_eq!(imported.unsupported, preview.unsupported);
+        assert_eq!(vault.entries[0].password, "synthetic-password");
+        assert_eq!(
+            vault.recovery.entry_metadata[0].additional_urls,
+            ["https://two.example"]
+        );
+        assert!(vault.recovery.entry_metadata[0].custom_fields[0].secret);
+        assert_eq!(vault.recovery.password_history.len(), 1);
+        assert_eq!(
+            vault.recovery.password_history[0].password,
+            "synthetic-newer"
+        );
+        assert_eq!(vault.recovery.totp.len(), 1);
+    }
 
     fn batch() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();

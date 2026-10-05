@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Vault manager</title><link rel="stylesheet" href="manager.css"></head>
+<body>
+  <header><h1>Vault manager</h1><span id="connection">Checking connection…</span><button id="lock" disabled>Lock vault</button></header>
+  <p id="message" role="status" aria-live="polite"></p>
+  <section id="locked" hidden>
+    <h2>Unlock vault</h2><p id="setup">Start the server with <code>pm start</code>. Enter a master password or an absolute key-file path.</p>
+    <form id="unlockForm"><label>Vault<select id="vault" required></select></label>
+      <label>Master password<input id="master" type="password" autocomplete="current-password"></label>
+      <label>Key-file path (instead of a password)<input id="keyPath" autocomplete="off"></label><button>Unlock</button></form>
+  </section>
+  <main id="unlocked" hidden>
+    <section><h2>Items</h2><label>Search<input id="search" type="search" placeholder="Name, username, URL or metadata"></label><button id="new">Add item</button><p id="count"></p><div id="items"></div></section>
+    <section id="editor" hidden>
+      <h2 id="editorTitle">Item details</h2>
+      <form id="editForm">
+        <label>Name<input id="name" required maxlength="4096"></label>
+        <label>Type<select id="kind"><option value="login">Login</option><option value="secure-note">Secure note</option><option value="payment-card">Payment card</option><option value="identity">Identity</option><option value="wifi">Wi-Fi</option><option value="software-license">Software license</option><option value="ssh-key">SSH key</option><option value="api-secret">API secret</option></select></label>
+        <label>Username / owner<input id="username" maxlength="4096" autocomplete="off"></label>
+        <label>Primary secret<input id="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the existing secret" maxlength="65536"></label>
+        <label id="multilineLabel" hidden>Note body / private key (visible while editing)<textarea id="secretMultiline" rows="6" maxlength="65536" autocomplete="off" placeholder="Leave blank to keep the existing secret"></textarea></label>
+        <div class="actions"><button id="reveal" type="button">Reveal secrets</button><button id="copy" type="button">Copy secret</button><button id="generateItem" type="button">Generate replacement</button></div>
+        <label>URLs (one per line)<textarea id="urls" rows="3"></textarea></label>
+        <label>Notes<textarea id="notes" rows="5" maxlength="65536"></textarea></label>
+        <h3>Custom fields</h3><div id="fields"></div><button id="addField" type="button">Add field</button>
+        <p id="dates"></p><p id="authenticator"></p>
+        <div class="actions"><button>Save item</button><button id="delete" type="button">Move to trash</button><button id="cancel" type="button">Close</button></div>
+      </form>
+    </section>
+  </main>
+  <section id="generator">
+    <h2>Password generator</h2>
+    <form id="generatorForm">
+      <label>Mode<select id="genMode"><option value="password">Password</option><option value="passphrase">Passphrase</option></select></label>
+      <label>Length<input id="genLength" type="number" min="1" max="255" value="20" required></label>
+      <div class="actions"><label><input id="genUppercase" type="checkbox" checked>Uppercase</label><label><input id="genLowercase" type="checkbox" checked>Lowercase</label><label><input id="genDigits" type="checkbox" checked>Digits</label><label><input id="genSymbols" type="checkbox" checked>Symbols</label></div>
+      <label>Allowed symbols<input id="genSymbolSet" value="!@#$%^&amp;*-_=+"></label>
+      <label><input id="genAmbiguous" type="checkbox" checked>Exclude ambiguous characters</label>
+      <label>Passphrase words<input id="genWords" type="number" min="1" max="32" value="6" required></label>
+      <label>Separator<input id="genSeparator" value="-" maxlength="16"></label>
+      <label>Site origin (optional; blank saves browser defaults)<input id="genSite" type="url" placeholder="https://example.com"></label>
+      <div class="actions"><button>Generate</button><button id="saveGenerator" type="button">Save browser defaults</button></div>
+      <button id="removeSiteGenerator" type="button">Remove site override</button>
+      <label>Generated value<input id="generated" readonly autocomplete="off"></label>
+      <p>Saved settings apply to generation buttons on signup forms. Site overrides match the exact HTTPS origin, including its port. Generated values are never stored in extension storage.</p>
+    </form>
+  </section>
+  <script src="password_generator.js"></script><script src="manager.js"></script>
+</body></html>

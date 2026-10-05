@@ -40,6 +40,7 @@ pub use response::{respond, respond_with_code};
 mod session_token;
 use session_token::*;
 mod instance_lock;
+mod system_lock;
 use instance_lock::acquire_server_lock;
 
 pub use crate::vault::VaultCredentials as ServerInfo;
@@ -217,6 +218,29 @@ fn schedule_auto_lock(
         *background_error.lock().await = warning;
     });
 }
+fn system_lock_handler(
+    session: std::sync::Weak<Mutex<VaultSession>>,
+    background_error: std::sync::Weak<Mutex<Option<String>>>,
+    generation: Arc<AtomicU64>,
+) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        let Some(session) = session.upgrade() else {
+            return;
+        };
+        generation.fetch_add(1, Ordering::AcqRel);
+        let mut session = session.blocking_lock();
+        if session.is_locked() {
+            return;
+        }
+        let warning = lock_session(&mut session)
+            .err()
+            .map(|error| format!("System lock cleanup warning: {error}"));
+        if let Some(error) = background_error.upgrade() {
+            *error.blocking_lock() = warning;
+        }
+    })
+}
+
 pub async fn server(
     port: u16,
     password_history_limit: usize,
@@ -236,6 +260,11 @@ pub async fn server(
     let lock_generation = Arc::new(AtomicU64::new(0));
     let inactivity_timeout = Arc::new(AtomicU64::new(0));
     let background_error = Arc::new(Mutex::new(None));
+    let system_lock = system_lock::Monitor::start(system_lock_handler(
+        Arc::downgrade(&session),
+        Arc::downgrade(&background_error),
+        Arc::clone(&lock_generation),
+    ));
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
 
@@ -258,6 +287,7 @@ pub async fn server(
                     lock_generation: Arc::clone(&lock_generation),
                     inactivity_timeout: Arc::clone(&inactivity_timeout),
                     background_error: Arc::clone(&background_error),
+                    system_lock: Some(Arc::clone(&system_lock)),
                     password_history_limit,
                     trash_retention_days,
                 };
@@ -272,6 +302,8 @@ pub async fn server(
             }
         }
     }
+    system_lock.stop();
+    session.lock().await.lock();
     let _ = crate::clipboard::clear_owned();
     remove_token_file_if_current(&token_path, &token);
     token.zeroize();
@@ -289,6 +321,7 @@ struct ConnectionState {
     lock_generation: Arc<AtomicU64>,
     inactivity_timeout: Arc<AtomicU64>,
     background_error: Arc<Mutex<Option<String>>>,
+    system_lock: Option<Arc<system_lock::Monitor>>,
     password_history_limit: usize,
     trash_retention_days: u64,
 }

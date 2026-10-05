@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { max-width: 1080px; margin: auto; padding: 24px; }
+header, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+header h1 { margin-right: auto; }
+main { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(320px, 2fr); gap: 24px; }
+section { border: 1px solid #8886; border-radius: 10px; padding: 20px; margin: 18px 0; }
+label { display: block; margin: 12px 0; }
+input:not([type=checkbox]), select, textarea { display: block; box-sizing: border-box; width: 100%; font: inherit; padding: 9px; margin-top: 4px; border: 1px solid #888; border-radius: 5px; }
+button { font: inherit; cursor: pointer; padding: 9px 12px; border: 1px solid #888; border-radius: 5px; }
+button:disabled { cursor: default; opacity: .5; }
+#items button { width: 100%; text-align: left; margin: 5px 0; overflow-wrap: anywhere; }
+#message { min-height: 1.5em; overflow-wrap: anywhere; }
+.custom-field { padding: 12px; border: 1px solid #8886; border-radius: 5px; margin: 10px 0; }
+[hidden] { display: none !important; }
+@media (max-width: 700px) { main { display: block; } body { padding: 12px; } }

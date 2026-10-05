@@ -142,6 +142,8 @@ impl Zeroize for ServerCommand {
                 filter.notes.zeroize();
             }
             Self::BrowserLogins(domain) | Self::BrowserLogin { domain, .. } => domain.zeroize(),
+            Self::ManagementList(filter) => filter.query.zeroize(),
+            Self::ManagementItem { .. } | Self::ManagementCopy { .. } => {}
             Self::Kill
             | Self::Lock(_)
             | Self::Status
@@ -215,6 +217,16 @@ pub enum ServerCommand {
         target: Target,
         name: String,
         copy_timeout: Option<u8>,
+    },
+    // Append protocol variants to preserve the indices of installed clients.
+    ManagementList(SearchFilter),
+    ManagementItem {
+        id: usize,
+        reveal: bool,
+    },
+    ManagementCopy {
+        id: usize,
+        timeout: u8,
     },
 }
 

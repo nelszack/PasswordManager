@@ -22,12 +22,15 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
 - **TOTP Authenticator**: Encrypted per-entry authenticator secrets with current-code generation
 - **Browser Extension**: Login, payment-card, identity, and TOTP autofill with save/update prompts
+- **Browser Vault Manager**: Extension-owned unlock, search, add/edit, reveal/copy, and delete-to-trash controls
 - **In-page Password Generation**: Fill new-password and confirmation fields securely
 - **Clipboard Integration**: Prompt copy completion, coordinated auto-clear, and lock cleanup
 - **Import/Export**: Interoperable CSV plus versioned, full-fidelity portable JSON
 - **Import Planning**: Non-mutating previews with skip, replace, and keep-both policies
+- **Import Loss Reporting**: Rich Bitwarden items and explicit reports for unsupported data
 - **Encrypted Backups**: Versioned, authenticated full-vault backup and disaster recovery
 - **Background Server**: Long-running server for quick access
+- **System Event Locking**: Lock on screen lock, session disconnect, and suspend/resume events
 
 ## Installation
 
@@ -412,10 +415,21 @@ retains automatic vault discovery.
 The timeout is based on inactivity: each authenticated vault operation resets it;
 passive status polling does not.
 Durations accept seconds or `s`, `m`, `h`, and `d` suffixes. New configurations
-default to 15 minutes; a value of `0` disables automatic locking.
+default to 15 minutes; a value of `0` disables inactivity locking.
 Locking clears vault memory without depending on storage writes. If automatic
 clipboard cleanup fails, `pm status` reports a warning and the extension shows a
 warning badge; the vault itself is already locked.
+
+The server also locks on operating-system screen-lock and suspend/resume events,
+even when the inactivity timeout is zero. Linux listens to logind lock hints and
+sleep signals, plus GNOME/KDE/freedesktop screensaver notifications. It holds a
+logind delay inhibitor while preparing for suspend, releasing it after vault
+cleanup. Standalone `hyprlock`, `swaylock`, `i3lock`, and `xsecurelock` processes
+owned by the same user are also checked every 250 ms, covering lockers that do
+not publish a D-Bus hint. Windows uses session and power notifications; macOS uses
+workspace sleep/session notifications and the distributed screen-lock notification.
+Unavailable event sources appear in `pm status` and the browser status warning;
+Linux connections retry automatically. Inactivity locking remains available.
 
 ### Change the Master Password or Key File
 
@@ -505,6 +519,21 @@ pm import --path backup.csv --conflicts replace
 pm import --path backup.csv --conflicts keep-both
 ```
 
+Bitwarden JSON imports preserve logins, secure notes, cards, identities, SSH keys,
+all login URLs, TOTP, password history, and custom fields. Folder names and
+favorites are retained as custom fields. Hidden fields, card security codes, and
+sensitive identity numbers stay secret fields; secure-note bodies become primary
+secrets rather than ordinary searchable notes. History follows the configured
+retention limit.
+
+Both previews and completed imports report unsupported item counts and bounded,
+secret-free warnings. These identify omitted passkeys, attachments, linked fields,
+and unsupported matching/access policies. Unsupported authenticator configurations
+and additional CSV/JSON properties are retained as secret fields when possible.
+Encrypted Bitwarden exports must first be exported as unencrypted JSON. CSV
+imports accept Bitwarden's login column aliases and typed rows; extra columns are
+kept as secret fields. Review `--preview` warnings before importing.
+
 Imports and previews against the current vault require it to be unlocked and
 leave it unlocked. Use `--new --preview` to preview against an empty vault while
 the server's vault is locked. Previews require a running server but do not prompt
@@ -523,12 +552,16 @@ preserves active item types, additional URLs, custom fields, password-age
 metadata, password history (bounded by the configured limit), and TOTP
 configurations. Imported IDs are always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
 CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV with compatible login columns.
-Bitwarden imports include login items only and use their first URI; they do not
-import Bitwarden TOTP secrets, custom fields, or other item types. Other CSV/JSON
-imports become login items; use this application's portable JSON for rich metadata.
+Bitwarden imports preserve supported item types and their rich metadata as
+described above. Generic CSV/JSON defaults to login items and accepts explicit
+item types; extra properties are retained as secret fields with a report of
+unsupported behavior. Portable JSON provides full fidelity for this application's
+own metadata.
 Conflicts compare the exact name, username, and primary URL, including duplicate
 rows within one input file. They are skipped by default; `--conflicts` changes
-that behavior. Password values are preserved exactly, including whitespace and empty strings; a missing password field is rejected.
+that behavior. Password values are preserved exactly, including whitespace and
+empty strings. Generic login items require a password field; typed imports use
+their corresponding secret, such as a note body, card number, or private key.
 Both export formats contain plaintext secrets; portable JSON can also contain
 TOTP secrets and password history, so
 exports should be protected or deleted after use. Export refuses to replace an
@@ -653,6 +686,27 @@ source ~/.local/share/bash-completion/completions/pm
 
 ## Browser Extension
 
+Choose **Open vault manager** in the extension popup to open the extension-owned
+management page. It can unlock a selected vault using its master password or an
+absolute external-key path, search items, add/edit all supported item types,
+manage custom fields and URLs, reveal selected secrets, copy primary secrets,
+and move entries to encrypted trash. Blank password and hidden-field values
+preserve existing secrets during an edit. Use **Reveal secrets** before changing
+the name or visibility of a hidden field whose value is not currently shown.
+Revealed values clear after 30 seconds; locking or disconnecting clears the editor.
+Copying uses the configured server clipboard timeout and lock cleanup.
+Multiline note bodies and SSH private keys have their own editor.
+
+The manager also contains browser generator settings: password length,
+uppercase/lowercase/digits, a custom symbol set, ambiguous-character exclusion,
+or passphrases with a word count and separator. **Save browser defaults** applies
+these options to generation buttons on signup forms, including already-open
+pages. These browser settings are independent of CLI defaults. Only settings
+are saved in extension storage; generated values and vault secrets are not.
+Enter an exact HTTPS origin in **Site origin** to save an override for that site
+instead. Origins include the scheme and port; overrides do not extend to other
+subdomains. **Remove site override** returns that site to the browser defaults.
+
 The browser extension injects credential-handling code only into HTTPS pages.
 It does not offer autofill or save prompts on plaintext HTTP pages.
 
@@ -699,7 +753,7 @@ password fields associated with that control. Other login forms and
 new/confirmation-password fields on the page are left unchanged. Forms created
 or revealed after page load are detected automatically.
 
-New-password fields receive a generator button. It creates a 20-character
+New-password fields receive a generator button. By default it creates a 20-character
 password locally with the browser's cryptographic random-number generator and
 fills matching new/confirmation fields. The generated value is not sent across
 the extension bridge unless the user submits and chooses to save it.
@@ -762,8 +816,9 @@ continuously, including changes made through the CLI and automatic locking.
 They also show a warning when the extension release, installed native host,
 and running password-manager server are not the same version. Restart the
 server and reinstall/reload the extension after an upgrade to clear it.
-The popup can lock the vault; entry management happens through the CLI and
-on-page controls.
+The popup can lock the vault and open the vault manager. Management requests are
+accepted only from that extension-owned page; website content scripts retain
+their existing site-scoped permissions.
 
 ## Architecture
 
