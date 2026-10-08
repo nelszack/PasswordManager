@@ -2,16 +2,35 @@ use std::{
     io::{Read, Seek},
     net::TcpListener,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 trait CommandTimeout {
+    fn spawn_timeout(&mut self, context: &str) -> Child;
     fn output_timeout(&mut self, context: &str) -> Output;
 }
 
 impl CommandTimeout for Command {
+    fn spawn_timeout(&mut self, context: &str) -> Child {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.spawn() {
+                Ok(child) => return child,
+                // A parallel fork can briefly retain the writable descriptor
+                // of a freshly copied executable until its own exec closes it.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => panic!("could not start {context}: {error}"),
+            }
+        }
+    }
+
     fn output_timeout(&mut self, context: &str) -> Output {
         // A detached descendant can keep inherited stdout/stderr handles alive
         // after the launcher exits (notably on Windows). File captures let us
@@ -22,8 +41,7 @@ impl CommandTimeout for Command {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout.try_clone().unwrap()))
             .stderr(Stdio::from(stderr.try_clone().unwrap()))
-            .spawn()
-            .unwrap_or_else(|error| panic!("could not start {context}: {error}"));
+            .spawn_timeout(context);
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             match child.try_wait() {
@@ -171,8 +189,7 @@ fn running_native_host_does_not_lock_the_build_executable() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn_timeout("run native host from copied build executable");
     let mut stdout = child.stdout.take().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let reader = thread::spawn(move || {
@@ -983,6 +1000,32 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
             .status
             .success()
     );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn command_launch_waits_for_a_busy_executable() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("pm");
+    std::fs::copy(env!("CARGO_BIN_EXE_pm"), &executable).unwrap();
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    let mut command = Command::new(&executable);
+    command.arg("--version");
+    assert_eq!(
+        command.spawn().unwrap_err().kind(),
+        std::io::ErrorKind::ExecutableFileBusy
+    );
+    let release = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        drop(writer);
+    });
+    let output = command.output_timeout("executable with a transient writable handle");
+    release.join().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("pm "));
 }
 
 #[test]
