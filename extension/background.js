@@ -18,7 +18,8 @@ const pickers = PasswordManagerBackgroundPickers.create({
 });
 const prompts = PasswordManagerBackgroundPrompts.create({
     chrome, security: PasswordManagerSecurity, promptState: PasswordManagerCredentialPrompt,
-    pendingCredentials, nativeRequest: native.request, refreshStatus: () => status.refresh(), crypto, setTimeout
+    pendingCredentials, matchesFilledLogin: pickers.matchesFilledLogin,
+    nativeRequest: native.request, refreshStatus: () => status.refresh(), crypto, setTimeout
 });
 const manifest = chrome.runtime.getManifest();
 const status = PasswordManagerBackgroundStatus.create({

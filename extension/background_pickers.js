@@ -3,6 +3,32 @@ const PasswordManagerBackgroundPickers = {
     create({ chrome, security, protocol, nativeRequest, crypto, setTimeout }) {
         const pendingPickers = new Map();
         const pickerWindows = new Map();
+        const filledLogins = new Map();
+        const filledLoginLifetime = 10 * 60_000;
+
+        function filledLoginKey({ tabId, frameId, domain }) {
+            return JSON.stringify([tabId, frameId, domain]);
+        }
+
+        async function loginFingerprint(username, password) {
+            const bytes = new TextEncoder().encode(JSON.stringify([username, password]));
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        }
+
+        async function matchesFilledLogin(sender, username, password) {
+            const key = filledLoginKey({
+                tabId: sender?.tab?.id, frameId: sender?.frameId,
+                domain: security.senderOrigin(sender)
+            });
+            const record = filledLogins.get(key);
+            if (!record || record.expiresAt <= Date.now()) return false;
+            // A password-only step can omit the username selected in the picker.
+            const fingerprint = await loginFingerprint(username || record.username, password);
+            return filledLogins.get(key) === record && record.expiresAt > Date.now()
+                && record.fingerprint === fingerprint;
+        }
+
         function parseNativeItems(response) {
             return protocol.parseItems(response);
         }
@@ -35,6 +61,7 @@ const PasswordManagerBackgroundPickers = {
 
         function invalidateSecurePickers() {
             pendingPickers.clear();
+            filledLogins.clear();
             for (const windowId of pickerWindows.keys()) {
                 chrome.windows.remove(windowId, () => void chrome.runtime.lastError);
             }
@@ -132,6 +159,7 @@ const PasswordManagerBackgroundPickers = {
             pending.completing = true;
             // Lock/disconnect invalidation also cancels selections awaiting native I/O.
             let payload;
+            let filledLogin;
             try {
                 if (pending.kind === "login") {
                     const response = await nativeRequest("getLoginItem", {
@@ -139,6 +167,13 @@ const PasswordManagerBackgroundPickers = {
                     });
                     if (!response.success) throw new Error(response.error || "Login unavailable");
                     payload = JSON.parse(response.data);
+                    const username = payload.username && payload.username !== "None"
+                        ? String(payload.username).trim() : "";
+                    filledLogin = {
+                        username,
+                        fingerprint: await loginFingerprint(username, payload.password),
+                        expiresAt: Date.now() + filledLoginLifetime
+                    };
                 } else if (pending.kind === "totp") {
                     const response = await nativeRequest("getTotp", { entryId: selected.id });
                     if (!response.success) throw new Error(response.error || "TOTP unavailable");
@@ -152,11 +187,25 @@ const PasswordManagerBackgroundPickers = {
                     throw new Error("Secure picker expired");
                 }
                 pendingPickers.delete(request.token);
-                await chrome.tabs.sendMessage(
-                    pending.tabId,
-                    { action: "securePickerResult", token: request.token, payload },
-                    { documentId: pending.documentId }
-                );
+                const key = filledLoginKey(pending);
+                if (filledLogin) {
+                    // Remember only a fingerprint of the explicitly selected secret,
+                    // before delivery so an immediate submit can recognize it.
+                    filledLogins.set(key, filledLogin);
+                    setTimeout(() => {
+                        if (filledLogins.get(key) === filledLogin) filledLogins.delete(key);
+                    }, filledLoginLifetime);
+                }
+                try {
+                    await chrome.tabs.sendMessage(
+                        pending.tabId,
+                        { action: "securePickerResult", token: request.token, payload },
+                        { documentId: pending.documentId }
+                    );
+                } catch (error) {
+                    if (filledLogin && filledLogins.get(key) === filledLogin) filledLogins.delete(key);
+                    throw error;
+                }
                 return { success: true };
             } finally {
                 pending.completing = false;
@@ -178,7 +227,7 @@ const PasswordManagerBackgroundPickers = {
             pendingPickers.delete(token);
         }
 
-        return { open: openSecurePicker, complete: completeSecurePicker, invalidate: invalidateSecurePickers, data, windowRemoved };
+        return { open: openSecurePicker, complete: completeSecurePicker, invalidate: invalidateSecurePickers, data, windowRemoved, matchesFilledLogin };
     }
 };
 

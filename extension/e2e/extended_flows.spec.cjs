@@ -24,6 +24,14 @@ function fixture(pathname, port) {
             passwordNext.onclick = () => { document.querySelector("main").innerHTML =
                 '<label>Authenticator code <input id="totp" autocomplete="one-time-code"></label>'; };
         };`);
+    if (pathname === "/picker-username") return html(`
+        <form><input id="username" autocomplete="username">
+        <button id="next" type="button">Next</button></form>`, `
+        next.onclick = () => location.assign('/picker-password');`);
+    if (pathname === "/picker-password") return html(`
+        <form><input id="password" type="password" autocomplete="current-password">
+        <button id="next" type="button">Next</button></form>`, `
+        next.onclick = () => location.assign('/totp');`);
     if (pathname === "/registration") return html(`
         <form id="register"><input id="email" type="email" autocomplete="username">
         <input id="newPassword" type="password" autocomplete="new-password">
@@ -122,6 +130,14 @@ test.describe("extended credential flows", () => {
             { id: 8, name: "Bob", username: "bob@example.com", password: "bob-password", has_totp: false, domain: origin }
         ] });
         page = browser.context.pages()[0] || await browser.context.newPage();
+        await browser.context.serviceWorkers()[0].evaluate(() => {
+            const open = prompts.open;
+            prompts.open = async (...args) => {
+                const result = await open(...args);
+                globalThis.lastAutomaticPromptResult = result;
+                return result;
+            };
+        });
     });
 
     test.afterAll(async () => {
@@ -144,17 +160,54 @@ test.describe("extended credential flows", () => {
         await expect(page.getByRole("button", { name: "Choose saved credentials" })).toHaveCount(2);
     });
 
-    test("saved credentials fill the form and submission proceeds while a summary-only prompt is open", async () => {
+    test("submitting unchanged saved credentials proceeds without a save prompt", async () => {
         await page.goto(`${origin}/login`);
         const loginPicker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
         await loginPicker.getByRole("button", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
+        await browser.context.serviceWorkers()[0].evaluate(() => { globalThis.lastAutomaticPromptResult = null; });
+        await page.locator("#submit").click();
+        await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes");
+        // Wait for the background request to finish before asserting no window.
+        await expect.poll(() => browser.context.serviceWorkers()[0].evaluate(() =>
+            globalThis.lastAutomaticPromptResult
+        )).toEqual({ success: true, skipped: true });
+        expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
+    });
+
+    test("edited autofilled passwords still offer an update", async () => {
+        await page.goto(`${origin}/login`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect(page.locator("#password")).toHaveValue("saved-password");
+        await page.locator("#password").fill("edited-autofilled-password");
         const prompt = await openPrompt(browser.context, page.locator("#submit"));
         await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes");
         await expect(prompt.locator("#status")).toContainText("already exists");
         await prompt.locator("#cancel").click();
+    });
+
+    test("a selected login survives navigation to a password-only step without prompting", async () => {
+        await page.goto(`${origin}/picker-username`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }));
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect(page.locator("#username")).toHaveValue("alice@example.com");
+        await page.locator("#next").click();
+        await expect(page).toHaveURL(`${origin}/picker-password`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
+        await page.locator("#password").fill("saved-password");
+        await browser.context.serviceWorkers()[0].evaluate(() => { globalThis.lastAutomaticPromptResult = null; });
+        await page.locator("#next").click();
+        await expect(page).toHaveURL(`${origin}/totp`);
+        await expect(page.locator("#totp")).toBeVisible();
+        await expect.poll(() => browser.context.serviceWorkers()[0].evaluate(() =>
+            globalThis.lastAutomaticPromptResult
+        )).toEqual({ success: true, skipped: true });
+        expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
     });
 
     test("script-driven submits cannot trigger vault lookups or block the page", async () => {

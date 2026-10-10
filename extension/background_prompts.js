@@ -1,6 +1,6 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundPrompts = {
-    create({ chrome, security, promptState, pendingCredentials, nativeRequest, refreshStatus, crypto, setTimeout }) {
+    create({ chrome, security, promptState, pendingCredentials, matchesFilledLogin, nativeRequest, refreshStatus, crypto, setTimeout }) {
         const pendingCredentialPrompts = new Map();
         const credentialPromptWindows = new Map();
         function credentialPromptSenderAllowed(sender) {
@@ -66,8 +66,11 @@ const PasswordManagerBackgroundPrompts = {
             } catch (_) {
                 return { success: true, skipped: true };
             }
-            // Account summaries contain no stored passwords. Opening and completing
-            // this prompt never disclose whether the submitted password was a match.
+            // Compare only with a login explicitly released to this tab/frame/origin.
+            // Never fetch unselected secrets to test passwords supplied by a page.
+            if (await matchesFilledLogin(sender, username, password)) {
+                return { success: true, skipped: true };
+            }
             const token = crypto.randomUUID();
             const pending = {
                 tabId,

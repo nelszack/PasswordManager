@@ -57,7 +57,11 @@ clipboard worker and existing lock cleanup.
 Site matching parses HTTP(S) URLs and compares scheme, normalized hostname,
 and effective port; bare domains default to HTTPS. Ambiguous URLs fail closed.
 Save prompts request summaries and never delay or replay form submissions based
-on a password match. New Unix key files are private at creation; Windows key
+on a password match. Unchanged logins explicitly selected through the secure
+picker suppress save prompts using a short-lived fingerprint scoped to the
+originating tab, frame, and origin. This comparison never fetches unselected
+vault secrets; locking or disconnecting clears the fingerprints.
+New Unix key files are private at creation; Windows key
 writers deny shared data access until the private ACL is installed and the
 writer closes. Terminal presentation escapes controls in imported metadata.
 

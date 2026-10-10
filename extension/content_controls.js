@@ -124,6 +124,7 @@ function createSecurePickerButton(input, kind, icon, title, onSelection) {
 function createSecureCredentialButton(input) {
     createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", account => {
         const fields = credentialFields(input);
+        storeUsernameForLater(accountUsername(account).trim());
         fillInput(fields.usernameField, accountUsername(account));
         fillInput(fields.passwordField, account.password);
         (fields.passwordField || fields.usernameField)?.focus();

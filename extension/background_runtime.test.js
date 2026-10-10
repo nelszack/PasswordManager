@@ -15,6 +15,8 @@ function loadWorker(context) {
 
 function securityEnvironment() {
     let listener, nativeListener, disconnect;
+    let now = Date.now();
+    let deliveryError = null;
     let locked = false;
     let holdLogin = false, heldLoginResponse;
     let holdCredentials = false, heldCredentialResponse;
@@ -48,7 +50,7 @@ function securityEnvironment() {
                             { id: 2, name: "Visa", kind: "payment-card" }
                         ]);
                         else if (request.action === "getAutofillItem") response.data = JSON.stringify({ id: 2, primary_secret: "synthetic-card" });
-                        else response.data = JSON.stringify({ id: 1, password: "synthetic-secret" });
+                        else response.data = JSON.stringify({ id: 1, username: "alice", password: "synthetic-secret" });
                         if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
                         else if (holdCredentials && request.action === "getLoginItems") heldCredentialResponse = response;
                         else if (holdSave && ["saveCredentials", "updateCredentials"].includes(request.action)) heldSaveResponse = response;
@@ -60,7 +62,10 @@ function securityEnvironment() {
         storage: { local: { set() {} } },
         tabs: {
             get: async () => ({ url: origin }),
-            sendMessage: async (tab, message, options) => { deliveries.push({ tab, message, options }); }
+            sendMessage: async (tab, message, options) => {
+                if (deliveryError) throw new Error(deliveryError);
+                deliveries.push({ tab, message, options });
+            }
         },
         windows: {
             create(options, callback) { created.push(options); callback({ id: 42 }); },
@@ -69,7 +74,8 @@ function securityEnvironment() {
         }
     };
     const context = vm.createContext({
-        chrome, importScripts() {}, URL, crypto: require("node:crypto").webcrypto,
+        chrome, importScripts() {}, URL, TextEncoder, crypto: require("node:crypto").webcrypto,
+        Date: class extends Date { static now() { return now; } },
         setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, queueMicrotask,
         PasswordManagerRelay: require("./relay.js"),
         PasswordManagerSecurity: require("./background_security.js"),
@@ -84,13 +90,15 @@ function securityEnvironment() {
     const message = (request, source = sender) => new Promise(resolve => listener(request, source, resolve));
     return {
         context, requests, deliveries, removed, created, badge, sender, pickerSender, message,
+        advanceTime(milliseconds) { now += milliseconds; },
+        failDelivery(error) { deliveryError = error; },
         setCredentialResponse(response) { credentialResponse = response; },
         holdSave() { holdSave = true; },
         releaseSave() { nativeListener(heldSaveResponse); },
         windowRemoved(id) { removedWindowListener(id); },
         holdCredentials() { holdCredentials = true; },
         releaseCredentials() { nativeListener(heldCredentialResponse); },
-        setLocked() { locked = true; },
+        setLocked(value = true) { locked = value; },
         holdLogin() { holdLogin = true; },
         releaseLogin() { nativeListener(heldLoginResponse); },
         disconnect() { disconnect(); },
@@ -196,6 +204,69 @@ test("picker fetches only the selected login and targets the originating documen
     assert.equal(env.requests.find(request => request.action === "getLoginItem").domain, env.sender.url);
 });
 
+test("unchanged selected logins skip prompts across same-origin login steps", async () => {
+    const env = securityEnvironment();
+    const token = await env.open();
+    assert.equal((await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender)).success, true);
+    const windows = env.created.length;
+    for (const [username, sender] of [
+        ["alice", env.sender],
+        ["", { ...env.sender, url: "https://shop.example/password", documentId: "next-document" }],
+        ["alice", { ...env.sender, url: "https://shop.example/signed-in", documentId: "redirected-document" }]
+    ]) {
+        const result = await env.message({ action: "openCredentialPrompt", username, password: "synthetic-secret" }, sender);
+        assert.equal(result.success, true);
+        assert.equal(result.skipped, true);
+        assert.equal(result.token, undefined);
+    }
+    assert.equal(env.created.length, windows);
+    assert.equal(env.requests.filter(request => request.action === "getLoginItem").length, 1);
+    assert.equal(env.requests.some(request => ["saveCredentials", "updateCredentials"].includes(request.action)), false);
+});
+
+test("changed credentials and other tabs, frames, or origins still open prompts", async t => {
+    for (const scenario of [
+        { name: "changed password", password: "changed-secret" },
+        { name: "changed username", username: "bob" },
+        { name: "other tab", sender: { tab: { id: 8 } } },
+        { name: "other frame", sender: { frameId: 3 } },
+        { name: "other hostname", sender: { url: "https://other.example" } },
+        { name: "other scheme", sender: { url: "http://shop.example" } },
+        { name: "other port", sender: { url: "https://shop.example:8443" } },
+        { name: "expired selection", advance: 10 * 60_000 }
+    ]) {
+        await t.test(scenario.name, async () => {
+            const env = securityEnvironment();
+            const token = await env.open();
+            await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+            if (scenario.advance) env.advanceTime(scenario.advance);
+            const result = await env.message({ action: "openCredentialPrompt",
+                username: scenario.username || "alice", password: scenario.password || "synthetic-secret"
+            }, { ...env.sender, ...scenario.sender });
+            assert.ok(result.token);
+            assert.equal(result.skipped, undefined);
+        });
+    }
+});
+
+test("failed delivery and vault invalidation discard selected-login fingerprints", async t => {
+    for (const action of ["failed delivery", "lock", "disconnect"]) {
+        await t.test(action, async () => {
+            const env = securityEnvironment();
+            const token = await env.open();
+            if (action === "failed delivery") env.failDelivery("Document disappeared");
+            const selection = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+            assert.equal(selection.success, action !== "failed delivery");
+            if (action === "lock") { env.setLocked(); await env.message({ action: "getStatus" }); }
+            if (action === "disconnect") env.disconnect();
+            env.failDelivery(null);
+            env.setLocked(false);
+            const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "synthetic-secret" });
+            assert.ok(result.token);
+        });
+    }
+});
+
 test("locks and disconnects invalidate pending pickers and save prompts", async t => {
     for (const kind of ["picker", "prompt"]) {
         const operations = kind === "picker"
@@ -289,7 +360,7 @@ test("automatic prompts wait for lookup and open only with an available vault", 
     }
 });
 
-test("automatic prompts use summaries and behave identically for every entered password", async () => {
+test("automatic prompts use summaries and never compare unselected vault passwords", async () => {
     for (const password of ["existing-secret", "different-secret"]) {
         const env = securityEnvironment();
         const result = await env.message({ action: "openCredentialPrompt", username: "alice", password });
