@@ -1,4 +1,3 @@
-#![allow(unused_must_use)]
 use super::audit::password_hash;
 use super::browser::url_match_json;
 use super::import::{import_csv, import_json};
@@ -884,7 +883,7 @@ fn test_import_new_persists_vault_to_disk() {
         )
         .unwrap();
 
-    vlt.as_ref().unwrap().lock_vault(&mut server_info);
+    vlt.as_ref().unwrap().lock_vault(&mut server_info).unwrap();
 
     let vlt1 = unlock_vault(&mut ServerInfo {
         locked: true,
@@ -1155,21 +1154,25 @@ fn test_add_multiple_entries_ids_sequential() {
         recovery: RecoveryData::default(),
     };
     for i in 0..5 {
-        vlt.add_entry(
-            PasswordEntry {
-                name: format!("entry{}", i),
-                username: Some(format!("user{}", i)),
-                password: format!("pass{}", i),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            &mut ServerInfo {
-                locked: true,
-                keypass: None,
-            },
+        assert!(
+            vlt.add_entry(
+                PasswordEntry {
+                    name: format!("entry{}", i),
+                    username: Some(format!("user{}", i)),
+                    password: format!("pass{}", i),
+                    url: None,
+                    notes: None,
+                    copy: false,
+                },
+                &mut ServerInfo {
+                    locked: true,
+                    keypass: None,
+                },
+            )
+            .unwrap()
         );
     }
+    assert_eq!(vlt.entries.len(), 5);
     for (i, entry) in vlt.entries.iter().enumerate() {
         assert_eq!(entry.id, i + 1);
     }
@@ -1184,27 +1187,33 @@ fn test_delete_entry_preserves_other_ids() {
         recovery: RecoveryData::default(),
     };
     for i in 0..5 {
-        vlt.add_entry(
-            PasswordEntry {
-                name: format!("entry{}", i),
-                username: Some(format!("user{}", i)),
-                password: format!("pass{}", i),
-                url: None,
-                notes: None,
-                copy: false,
-            },
+        assert!(
+            vlt.add_entry(
+                PasswordEntry {
+                    name: format!("entry{}", i),
+                    username: Some(format!("user{}", i)),
+                    password: format!("pass{}", i),
+                    url: None,
+                    notes: None,
+                    copy: false,
+                },
+                &mut ServerInfo {
+                    locked: true,
+                    keypass: None,
+                },
+            )
+            .unwrap()
+        );
+    }
+    assert!(
+        vlt.delete_entry(
+            Target::Id(2),
             &mut ServerInfo {
                 locked: true,
                 keypass: None,
             },
-        );
-    }
-    vlt.delete_entry(
-        Target::Id(2),
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
+        )
+        .unwrap()
     );
     assert_eq!(
         vlt.entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
@@ -1242,12 +1251,15 @@ fn test_delete_name_with_only_first_match() {
         },
         recovery: RecoveryData::default(),
     };
-    vlt.delete_entry(
-        Target::Name("dup".into()),
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
+    assert!(
+        vlt.delete_entry(
+            Target::Name("dup".into()),
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+        )
+        .unwrap()
     );
     assert_eq!(vlt.entries.len(), 1);
     assert_eq!(vlt.entries[0].id, 2);
@@ -1369,22 +1381,25 @@ fn test_update_no_changes() {
     };
     let original_modified = vlt.entries[0].modified.clone();
     thread::sleep(std::time::Duration::from_millis(10));
-    vlt.update_entry_with_limit(
-        EntryUpdate {
-            target: Target::Id(1),
-            update: EntryChanges {
-                name: None,
-                username: None,
-                url: None,
-                notes: None,
+    assert!(
+        !vlt.update_entry_with_limit(
+            EntryUpdate {
+                target: Target::Id(1),
+                update: EntryChanges {
+                    name: None,
+                    username: None,
+                    url: None,
+                    notes: None,
+                },
+                password: None,
             },
-            password: None,
-        },
-        &mut ServerInfo {
-            locked: true,
-            keypass: None,
-        },
-        HISTORY_LIMIT,
+            &mut ServerInfo {
+                locked: true,
+                keypass: None,
+            },
+            HISTORY_LIMIT,
+        )
+        .unwrap()
     );
     assert_eq!(vlt.entries[0].modified, original_modified);
 }
@@ -2325,6 +2340,12 @@ fn encrypted_backup_rejects_invalid_files_tampering_and_invalid_vault_state() {
     let password = format!("adversarial-backup-{:016x}", rand::random::<u64>());
     let mut key = PasswordType::Password(password.clone());
 
+    let missing_path = directory.path().join("missing.pmbackup");
+    let error =
+        restore_encrypted_backup(missing_path.to_str().unwrap(), &mut key, false).unwrap_err();
+    assert!(matches!(error, VaultError::Persistence(_)), "{error}");
+    assert!(matches!(&key, PasswordType::Password(saved) if saved == &password));
+
     let oversized_path = directory.path().join("oversized.pmbackup");
     fs::File::create(&oversized_path)
         .unwrap()
@@ -2335,6 +2356,7 @@ fn encrypted_backup_rejects_invalid_files_tampering_and_invalid_vault_state() {
         (directory.path(), "regular file"),
     ] {
         let error = restore_encrypted_backup(path.to_str().unwrap(), &mut key, false).unwrap_err();
+        assert!(matches!(error, VaultError::Validation(_)), "{error}");
         assert!(
             error.to_string().contains(expected_error),
             "{}: {error}",
@@ -2435,7 +2457,11 @@ fn production_kdf_covers_vault_unlock_rekey_backup_restore_and_tamper_workflows(
             PRODUCTION_KDF_PARAMETERS.parallelism
         );
 
-        vault.as_ref().unwrap().lock_vault(&mut server_info);
+        vault
+            .as_ref()
+            .unwrap()
+            .lock_vault(&mut server_info)
+            .unwrap();
         let mut old_unlock = ServerInfo {
             locked: true,
             keypass: Some(PasswordType::Password(old_password)),

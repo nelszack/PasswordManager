@@ -1,5 +1,28 @@
 use super::*;
 
+#[derive(Serialize)]
+struct ManagementItem<'a> {
+    id: usize,
+    name: &'a str,
+    username: Option<&'a str>,
+    kind: ItemKind,
+    urls: Vec<&'a str>,
+    notes: Option<&'a str>,
+    password: Option<&'a str>,
+    has_secret: bool,
+    fields: Vec<ManagementField<'a>>,
+    has_totp: bool,
+    created: &'a str,
+    modified: &'a str,
+}
+
+#[derive(Serialize)]
+struct ManagementField<'a> {
+    name: &'a str,
+    secret: bool,
+    value: Option<&'a str>,
+}
+
 impl Vault {
     /// Summaries contain no notes, passwords, authenticator seeds or field values.
     pub fn management_list_json(&self, filter: SearchFilter) -> Result<String, VaultError> {
@@ -36,28 +59,33 @@ impl Vault {
             .entry_metadata
             .iter()
             .find(|m| m.entry_id == id);
-        let mut urls = entry.url.iter().collect::<Vec<_>>();
+        let mut urls = entry.url.as_deref().into_iter().collect::<Vec<_>>();
         if let Some(metadata) = metadata {
-            urls.extend(metadata.additional_urls.iter());
+            urls.extend(metadata.additional_urls.iter().map(String::as_str));
         }
         let fields: Vec<_> = metadata
             .into_iter()
             .flat_map(|m| &m.custom_fields)
-            .map(|field| {
-                json!({
-                    "name": field.name, "secret": field.secret,
-                    "value": if field.secret && !reveal { None } else { Some(&field.value) },
-                })
+            .map(|field| ManagementField {
+                name: &field.name,
+                secret: field.secret,
+                value: (!(field.secret && !reveal)).then_some(field.value.as_str()),
             })
             .collect();
-        serde_json::to_string(&json!({
-            "id": entry.id, "name": entry.name, "username": entry.username,
-            "kind": metadata.map_or(ItemKind::Login, |m| m.kind), "urls": urls,
-            "notes": entry.notes, "password": reveal.then_some(&entry.password),
-            "has_secret": !entry.password.is_empty(), "fields": fields,
-            "has_totp": self.recovery.totp.iter().any(|t| t.entry_id == id),
-            "created": entry.created, "modified": entry.modified,
-        }))
+        serde_json::to_string(&ManagementItem {
+            id: entry.id,
+            name: &entry.name,
+            username: entry.username.as_deref(),
+            kind: metadata.map_or(ItemKind::Login, |m| m.kind),
+            urls,
+            notes: entry.notes.as_deref(),
+            password: reveal.then_some(entry.password.as_str()),
+            has_secret: !entry.password.is_empty(),
+            fields,
+            has_totp: self.recovery.totp.iter().any(|t| t.entry_id == id),
+            created: &entry.created,
+            modified: &entry.modified,
+        })
         .map_err(|_| VaultError::InvalidInput("could not encode item details".into()))
     }
 }
@@ -72,17 +100,26 @@ mod tests {
                 id: 4,
                 name: "Example".into(),
                 password: "synthetic-password".into(),
+                url: Some("https://example.com".into()),
                 notes: Some("private-notes".into()),
                 ..Default::default()
             }],
             recovery: RecoveryData {
                 entry_metadata: vec![EntryMetadata {
                     entry_id: 4,
-                    custom_fields: vec![CustomField {
-                        name: "token".into(),
-                        value: "secret-token".into(),
-                        secret: true,
-                    }],
+                    additional_urls: vec!["https://accounts.example.com".into()],
+                    custom_fields: vec![
+                        CustomField {
+                            name: "token".into(),
+                            value: "secret-token".into(),
+                            secret: true,
+                        },
+                        CustomField {
+                            name: "environment".into(),
+                            value: "prod \"blue\" 🔐".into(),
+                            secret: false,
+                        },
+                    ],
                     ..Default::default()
                 }],
                 totp: vec![TotpRecord {
@@ -105,10 +142,30 @@ mod tests {
         let details = vault.management_item_json(4, false).unwrap();
         assert!(!details.contains("synthetic-password"));
         assert!(!details.contains("secret-token"));
+        let mut expected = json!({
+            "id": 4, "name": "Example", "username": null, "kind": "login",
+            "urls": ["https://example.com", "https://accounts.example.com"],
+            "notes": "private-notes", "password": null, "has_secret": true,
+            "fields": [
+                { "name": "token", "secret": true, "value": null },
+                { "name": "environment", "secret": false, "value": "prod \"blue\" 🔐" },
+            ],
+            "has_totp": true, "created": "", "modified": "",
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&details).unwrap(),
+            expected
+        );
         let revealed = vault.management_item_json(4, true).unwrap();
         assert!(revealed.contains("synthetic-password"));
         assert!(revealed.contains("secret-token"));
         assert!(!revealed.contains("authenticator-seed"));
+        expected["password"] = json!("synthetic-password");
+        expected["fields"][0]["value"] = json!("secret-token");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&revealed).unwrap(),
+            expected
+        );
         assert!(vault.management_item_json(5, true).is_err());
         let search = vault
             .management_list_json(SearchFilter {

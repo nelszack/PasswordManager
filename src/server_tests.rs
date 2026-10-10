@@ -56,7 +56,7 @@ fn test_connection_state(session: VaultSession) -> ConnectionState {
         instance_lock: None,
         session: Arc::new(Mutex::new(session)),
         kill_tx,
-        token: "ab".repeat(32),
+        token: Zeroizing::new("ab".repeat(32)),
         lock_generation: Arc::new(AtomicU64::new(0)),
         inactivity_timeout: Arc::new(AtomicU64::new(0)),
         background_error: Arc::new(Mutex::new(None)),
@@ -325,6 +325,26 @@ async fn response_codes_are_explicit_and_independent_of_message_wording() {
         response.message,
         "wording without classification keywords\n"
     );
+
+    let directory = tempfile::tempdir().unwrap();
+    let missing_path = directory.path().join("missing.pmbackup");
+    for (path, expected_code) in [
+        (missing_path.as_path(), ResponseCode::Failure),
+        (directory.path(), ResponseCode::InvalidInput),
+    ] {
+        let response = dispatch_test_command(
+            Vault::default(),
+            ServerCommand::RestoreBackup(BackupRequest {
+                path: path.to_str().unwrap().into(),
+                key_pass: PasswordType::Password("synthetic-backup-password".into()),
+                force: false,
+            }),
+            true,
+        )
+        .await;
+        assert_eq!(response.code, expected_code as i32, "{}", path.display());
+        assert!(response.message.contains("could not read backup file"));
+    }
 }
 
 #[tokio::test]
@@ -434,7 +454,7 @@ fn session_token_rotation_replaces_old_tokens_and_cleanup_is_generation_safe() {
     let mut first = rotate_token_file(&path).unwrap();
     let mut second = rotate_token_file(&path).unwrap();
     assert_ne!(first, second);
-    assert_eq!(fs::read_to_string(&path).unwrap(), second);
+    assert_eq!(fs::read_to_string(&path).unwrap(), *second);
 
     remove_token_file_if_current(&path, &first);
     assert!(path.exists());

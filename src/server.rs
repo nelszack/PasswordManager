@@ -317,7 +317,7 @@ struct ConnectionState {
     instance_lock: Option<Arc<fs::File>>,
     session: Arc<Mutex<VaultSession>>,
     kill_tx: mpsc::Sender<()>,
-    token: String,
+    token: Zeroizing<String>,
     lock_generation: Arc<AtomicU64>,
     inactivity_timeout: Arc<AtomicU64>,
     background_error: Arc<Mutex<Option<String>>>,

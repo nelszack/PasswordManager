@@ -399,12 +399,24 @@ pub struct PasswordEntry {
 }
 
 /// Metadata changes supplied by any client. Secret replacement lives in EntryUpdate.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct EntryChanges {
     pub name: Option<String>,
     pub username: Option<String>,
     pub url: Option<String>,
     pub notes: Option<String>,
+}
+
+impl std::fmt::Debug for EntryChanges {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EntryChanges")
+            .field("name", &self.name)
+            .field("username", &self.username)
+            .field("url", &self.url)
+            .field("notes", &self.notes.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 // Keep the original MessagePack field order for installed native hosts and servers.
@@ -750,18 +762,23 @@ mod test {
         });
         assert!(!format!("{unlock:?}").contains(master_secret));
 
+        let notes_secret = "private-notes-that-must-not-leak";
+        let changes = EntryChanges {
+            notes: Some(notes_secret.into()),
+            ..Default::default()
+        };
+        let changes_debug = format!("{changes:?}");
+        assert!(changes_debug.contains("<redacted>"));
+        assert!(!changes_debug.contains(notes_secret));
+
         let update_secret = "updated-password-that-must-not-leak";
         let update = ServerCommand::Update(EntryUpdate {
             target: Target::Id(1),
-            update: EntryChanges {
-                name: None,
-                username: None,
-                url: None,
-                notes: None,
-            },
+            update: changes,
             password: Some(update_secret.into()),
         });
         assert!(!format!("{update:?}").contains(update_secret));
+        assert!(!format!("{update:?}").contains(notes_secret));
 
         let import_secret = "import-password-that-must-not-leak";
         let import = ServerCommand::Import(ImportRequest {

@@ -14,7 +14,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::types::EntryChanges;
 
@@ -350,17 +350,15 @@ fn run_with_io(
         };
         let request = serde_json::from_slice::<NativeRequest>(&payload);
         payload.zeroize();
-        let mut response = match request {
+        let response = Zeroizing::new(match request {
             Ok(request) => handle_request(client, request),
             Err(error) => NativeResponse::error(0, format!("invalid request: {error}")),
-        };
-        let write_result = write_message(writer, &response);
-        response.zeroize();
-        write_result?;
+        });
+        write_message(writer, &response)?;
     }
 }
 
-fn read_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
+fn read_message(reader: &mut impl Read) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let mut length = [0u8; 4];
     match reader.read_exact(&mut length) {
         Ok(()) => {}
@@ -371,7 +369,7 @@ fn read_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
     if length > MAX_NATIVE_MESSAGE {
         return Err("native message exceeds the 1 MiB limit".to_string());
     }
-    let mut payload = vec![0u8; length];
+    let mut payload = Zeroizing::new(vec![0u8; length]);
     reader
         .read_exact(&mut payload)
         .map_err(|error| format!("could not read native message: {error}"))?;
@@ -379,18 +377,17 @@ fn read_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
 }
 
 fn write_message(writer: &mut impl Write, response: &NativeResponse) -> Result<(), String> {
-    let mut payload = serde_json::to_vec(response)
+    let mut payload = Zeroizing::new(Vec::new());
+    serde_json::to_writer(&mut *payload, response)
         .map_err(|error| format!("could not encode native response: {error}"))?;
     if payload.len() > MAX_NATIVE_MESSAGE {
         return Err("native response exceeds Chrome's 1 MiB limit".to_string());
     }
-    let result = writer
+    writer
         .write_all(&(payload.len() as u32).to_ne_bytes())
         .and_then(|_| writer.write_all(&payload))
         .and_then(|_| writer.flush())
-        .map_err(|error| format!("could not write native response: {error}"));
-    payload.zeroize();
-    result
+        .map_err(|error| format!("could not write native response: {error}"))
 }
 
 fn required(value: Option<String>, field: &str, max_length: usize) -> Result<String, String> {

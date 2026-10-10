@@ -1,9 +1,9 @@
 use super::*;
 
-pub(super) fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill(&mut bytes);
-    hex::encode(bytes)
+pub(super) fn random_token() -> Zeroizing<String> {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    rand::rng().fill(&mut *bytes);
+    Zeroizing::new(hex::encode(bytes.as_slice()))
 }
 
 pub(super) fn write_token_file(token: &str, path: &Path) -> Result<(), String> {
@@ -26,7 +26,7 @@ pub(super) fn write_token_file(token: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn rotate_token_file(path: &Path) -> Result<String, String> {
+pub(super) fn rotate_token_file(path: &Path) -> Result<Zeroizing<String>, String> {
     let token = random_token();
     write_token_file(&token, path)?;
     Ok(token)

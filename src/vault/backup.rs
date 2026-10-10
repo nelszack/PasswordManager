@@ -123,8 +123,16 @@ pub(crate) fn restore_encrypted_backup(
     force: bool,
 ) -> Result<String, VaultError> {
     let mut vault_lookup_key = Zeroizing::new(key_pass.clone());
-    let mut contents = crate::file::read_bounded_file(Path::new(path), MAX_BACKUP_BYTES)
-        .map_err(|error| format!("could not read backup file {path:?}: {error}"))?;
+    let mut contents =
+        crate::file::read_bounded_file(Path::new(path), MAX_BACKUP_BYTES).map_err(|error| {
+            let message = format!("could not read backup file {path:?}: {error}");
+            match error.kind() {
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                    VaultError::Validation(message)
+                }
+                _ => VaultError::Persistence(message),
+            }
+        })?;
     if contents.len() < BACKUP_MAGIC.len() + 1
         || &contents[..BACKUP_MAGIC.len()] != BACKUP_MAGIC
         || contents[BACKUP_MAGIC.len()] != BACKUP_VERSION

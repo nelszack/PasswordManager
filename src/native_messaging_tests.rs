@@ -248,6 +248,23 @@ fn native_bridge_rejects_oversized_and_truncated_frames() {
     let mut framed = 12u32.to_ne_bytes().to_vec();
     framed.extend_from_slice(b"short");
     assert!(read_message(&mut Cursor::new(framed)).is_err());
+
+    let secret = "synthetic-response-secret";
+    let response = Zeroizing::new(NativeResponse::success(
+        1,
+        Value::String(secret.repeat(MAX_NATIVE_MESSAGE / secret.len() + 1)),
+    ));
+    let mut output = Vec::new();
+    let error = write_message(&mut output, &response).unwrap_err();
+    assert!(error.contains("1 MiB limit"));
+    assert!(!error.contains(secret));
+    assert!(output.is_empty());
+
+    let response = Zeroizing::new(NativeResponse::success(1, json!({ "password": secret })));
+    let mut header_only = [0u8; 4];
+    let error = write_message(&mut header_only.as_mut_slice(), &response).unwrap_err();
+    assert!(error.contains("could not write native response"));
+    assert!(!error.contains(secret));
 }
 
 #[test]

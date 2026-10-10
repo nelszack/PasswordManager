@@ -145,10 +145,20 @@ pub enum ResponseCode {
     Conflict = 4,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct ProtocolResponse {
     pub code: i32,
     pub message: String,
+}
+
+impl std::fmt::Debug for ProtocolResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProtocolResponse")
+            .field("code", &self.code)
+            .field("message", &"<redacted>")
+            .finish()
+    }
 }
 
 pub fn encode_response(code: ResponseCode, message: &str) -> Vec<u8> {
@@ -234,6 +244,12 @@ mod tests {
                 "wording may change freely\n",
             ),
             (
+                "secret response",
+                vec![(ResponseCode::Success, "response-password-must-stay-private")],
+                ResponseCode::Success,
+                "response-password-must-stay-private\n",
+            ),
+            (
                 "UTF-8 and existing newline",
                 vec![
                     (ResponseCode::Success, "héllo 🔐\n"),
@@ -250,6 +266,9 @@ mod tests {
             let response = decode_responses(&frames).unwrap();
             assert_eq!(response.code, expected_code as i32, "{label}");
             assert_eq!(response.message, expected_message, "{label}");
+            let debug = format!("{response:?}");
+            assert!(debug.contains("<redacted>"), "{label}");
+            assert!(!debug.contains(expected_message.trim_end()), "{label}");
         }
     }
 
