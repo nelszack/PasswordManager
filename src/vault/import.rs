@@ -84,6 +84,9 @@ fn import_json_with_losses(
                         })?;
                     item.totp = Some(normalized);
                 }
+                if let Some(credentials) = &item.duo {
+                    crate::duo::validate_credentials(credentials).map_err(|e| e.to_string())?;
+                }
                 Ok(ImportedItem {
                     portable: true,
                     entry: VaultEntry {
@@ -102,6 +105,7 @@ fn import_json_with_losses(
                     password_changed: item.password_changed,
                     password_history: item.password_history,
                     totp: item.totp,
+                    duo: item.duo,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -120,6 +124,21 @@ impl Vault {
     ) {
         self.remove_metadata_records(&[entry_id]);
         self.remove_totp_records(&[entry_id]);
+        self.recovery.duo.retain_mut(|r| {
+            if r.entry_id == entry_id {
+                r.zeroize();
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(credentials) = imported.duo.take() {
+            self.recovery.duo.push(DuoRecord {
+                review_key: None,
+                entry_id,
+                credentials,
+            });
+        }
 
         let mut retained = Vec::with_capacity(self.recovery.password_history.len());
         for mut revision in std::mem::take(&mut self.recovery.password_history) {

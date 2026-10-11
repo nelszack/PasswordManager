@@ -2,6 +2,7 @@
 const byId = id => document.getElementById(id);
 let unlocked = false, selected = null, original = null, epoch = 0, searchTimer;
 let fieldRows = [];
+let duoTimer, duoSerial = 0, duoBusy = false, duoRendered = "";
 let mutationPending = false, revealSerial = 0, revealTimer, revealedValues = [];
 function secretControl() { return ["secure-note", "ssh-key"].includes(byId("kind").value) ? byId("secretMultiline") : byId("password"); }
 function renderSecretControl() {
@@ -26,6 +27,7 @@ function runMutation(operation) {
     run(async () => { try { await operation(); } finally { mutationPending = false; } });
 }
 function closeEditor() {
+    stopDuo(); byId("duo").hidden = true; byId("duoRequests").replaceChildren(); duoRendered = "";
     clearTimeout(revealTimer); revealedValues = [];
     revealSerial++;
     selected = null; original = null; fieldRows = [];
@@ -91,8 +93,9 @@ async function openItem(id) {
     renderSecretControl();
     byId("urls").value = item.urls.join("\n"); item.fields.forEach(addField);
     byId("dates").textContent = `Created: ${item.created} · Modified: ${item.modified}`;
-    byId("authenticator").textContent = item.has_totp ? "TOTP configured; use the page picker or pm totp show for a current code." : "";
+    byId("authenticator").textContent = item.has_totp ? "Authenticator configured; use the page picker or pm totp show for a code. HOTP requests advance its counter." : "";
     byId("editor").hidden = false; byId("delete").hidden = false;
+    byId("duo").hidden = !item.has_duo; byId("duoStatus").textContent = item.has_duo ? "Check requests or enable monitoring. Monitoring stops when the vault locks." : "";
     byId("reveal").disabled = false; byId("copy").disabled = !item.has_secret;
 }
 byId("unlockForm").addEventListener("submit", event => {
@@ -187,6 +190,85 @@ chrome.storage.local.get("pmGenerator", result => {
     for (const [id, key] of [["genMode", "mode"], ["genLength", "length"], ["genWords", "words"], ["genSeparator", "separator"], ["genSymbolSet", "symbolSet"]]) byId(id).value = settings[key];
     for (const [id, key] of [["genUppercase", "uppercase"], ["genLowercase", "lowercase"], ["genDigits", "digits"], ["genSymbols", "symbols"], ["genAmbiguous", "excludeAmbiguous"]]) byId(id).checked = settings[key];
 });
+
+function stopDuo() {
+    clearTimeout(duoTimer); duoSerial++;
+    byId("duoWatch").checked = false;
+    for (const input of byId("duoRequests").querySelectorAll("input")) input.value = "";
+}
+function duoCurrent(id, serial) { return unlocked && selected === id && original?.has_duo && serial === duoSerial; }
+async function checkDuo() {
+    if (duoBusy || !unlocked || !selected || !original?.has_duo) return;
+    const id = selected, serial = duoSerial; duoBusy = true;
+    byId("duoCheck").disabled = true;
+    try {
+        const requests = await send("managerDuoRequests", { entryId: id });
+        if (!duoCurrent(id, serial)) return;
+        if (!Array.isArray(requests)) throw new Error("Invalid Duo request response");
+        byId("duoStatus").textContent = requests.length ? `${requests.length} pending request(s).` : "No pending requests.";
+        const key = JSON.stringify(requests.map(r => [r.id, r.fingerprint]));
+        if (key !== duoRendered) {
+            for (const input of byId("duoRequests").querySelectorAll("input")) input.value = "";
+            byId("duoRequests").replaceChildren(...requests.map(r => duoRequest(r, id, serial)));
+            duoRendered = key;
+        }
+    } catch (error) {
+        if (duoCurrent(id, serial)) {
+            stopDuo(); byId("duoRequests").replaceChildren(); duoRendered = "";
+            byId("duoStatus").textContent = error.message;
+        }
+    } finally {
+        duoBusy = false; byId("duoCheck").disabled = false;
+        if (byId("duoWatch").checked && unlocked && original?.has_duo) duoTimer = setTimeout(() => run(checkDuo), 5000);
+    }
+}
+function duoRequest(r, id, serial) {
+    const row = document.createElement("article"); row.className = "duo-request";
+    for (const [label, value] of [["Application", r.application], ["Account", r.username], ["Location", r.location], ["Summary", r.summary], ["Request", r.id], ["Expires", new Date(r.expires_at * 1000).toLocaleString()]]) {
+        const p = document.createElement("p"); p.textContent = `${label}: ${value || "Not provided"}`; row.append(p);
+    }
+    let code;
+    if (r.code_digits) {
+        const label = document.createElement("label"); label.textContent = `${r.code_digits}-digit verification code shown on the login page`;
+        code = document.createElement("input"); code.type = "password"; code.inputMode = "numeric";
+        code.autocomplete = "off"; code.maxLength = r.code_digits; label.append(code); row.append(label);
+    }
+    if (r.unsupported) { const p = document.createElement("p"); p.textContent = r.unsupported; row.append(p); }
+    const actions = document.createElement("div"); actions.className = "actions";
+    for (const approve of [true, false]) {
+        const button = document.createElement("button"); button.type = "button"; button.textContent = approve ? "Approve login" : "Deny login";
+        button.disabled = approve && Boolean(r.unsupported);
+        button.addEventListener("click", event => {
+            if (!event.isTrusted) return;
+            runMutation(async () => {
+            if (!duoCurrent(id, serial) || !row.isConnected) return;
+            if (r.expires_at * 1000 <= Date.now()) throw new Error("Request expired. Check requests again.");
+            if (approve && code && !new RegExp(`^[0-9]{${r.code_digits}}$`).test(code.value)) throw new Error("Enter the verification code shown on the login page.");
+            const action = approve ? "Approve" : "Deny";
+            if (!window.confirm(`${action} this login for ${r.application || "unknown application"}, account ${r.username || "unknown account"}, location ${r.location || "unknown location"}?`)) return;
+            if (!duoCurrent(id, serial) || !row.isConnected) return;
+            const verificationCode = approve ? code?.value || "" : "";
+            if (code) code.value = "";
+            for (const control of row.querySelectorAll("button,input")) control.disabled = true;
+            try {
+                const result = await send("managerDuoRespond", { entryId: id, requestId: r.id, fingerprint: r.fingerprint, approve, verificationCode });
+                if (duoCurrent(id, serial)) { message(result); duoRendered = ""; await checkDuo(); }
+            } catch (error) {
+                if (duoCurrent(id, serial)) { stopDuo(); byId("duoRequests").replaceChildren(); duoRendered = ""; }
+                throw error;
+            }
+            });
+        });
+        actions.append(button);
+    }
+    row.append(actions); return row;
+}
+byId("duoCheck").addEventListener("click", () => run(checkDuo));
+byId("duoWatch").addEventListener("change", () => {
+    clearTimeout(duoTimer);
+    if (byId("duoWatch").checked) run(checkDuo);
+});
+
 async function refresh() {
     const status = await new Promise(resolve => chrome.runtime.sendMessage({ action: "getStatus" }, resolve)); renderStatus(status);
 }

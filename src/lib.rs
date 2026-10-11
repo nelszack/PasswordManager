@@ -4,6 +4,7 @@ pub mod client;
 pub mod clipboard;
 pub mod config;
 pub mod docs;
+mod duo;
 pub mod encryption;
 pub mod file;
 pub mod native_messaging;

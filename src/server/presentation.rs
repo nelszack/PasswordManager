@@ -81,7 +81,7 @@ pub(super) fn entries(views: &[EntryView<'_>]) -> String {
                 (!urls.is_empty()).then_some(urls),
                 entry.notes,
                 fields,
-                if view.has_totp { " [TOTP]" } else { "" }
+                if view.has_totp { " [OTP]" } else { "" }
             )
         })
         .collect()
@@ -113,7 +113,7 @@ pub(super) fn trash(items: &[TrashView<'_>]) -> String {
                 kind(&item.entry),
                 item.entry.entry.username,
                 metadata(item.deleted).as_str(),
-                if item.entry.has_totp { " [TOTP]" } else { "" }
+                if item.entry.has_totp { " [OTP]" } else { "" }
             )
         })
         .collect()

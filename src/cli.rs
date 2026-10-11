@@ -8,7 +8,7 @@ use std::path::PathBuf;
     name = "pm",
     version,
     about = "Local encrypted password manager",
-    long_about = "Manage an encrypted local vault through a background server. Start the server, create or unlock a vault, then use the entry, recovery, TOTP, backup, import, and audit commands. Run `pm <COMMAND> --help` for command-specific examples and details."
+    long_about = "Manage an encrypted local vault through a background server. Start the server, create or unlock a vault, then use the entry, recovery, TOTP/HOTP, Duo Push, backup, import, and audit commands. Run `pm <COMMAND> --help` for command-specific examples and details."
 )]
 pub struct Cli {
     /// Override the configured loopback port for this invocation.
@@ -198,14 +198,25 @@ pub enum CliCommands {
         /// Privately check password hash prefixes against Pwned Passwords.
         #[arg(long)]
         breaches: bool,
-        /// Report login entries that do not have a TOTP authenticator.
+        /// Report login entries that do not have a TOTP or HOTP authenticator.
         #[arg(long)]
         require_totp: bool,
     },
-    /// Configure, generate, or remove TOTP authenticator codes.
+    /// Configure, generate, or remove TOTP and HOTP authenticator codes.
     Totp {
         #[command(subcommand)]
         command: TotpCommands,
+    },
+    /// Enroll and review Duo Push requests, then explicitly approve or deny them.
+    ///
+    /// Requires an unlocked vault. Push decisions do not advance the HOTP
+    /// passcode counter. Encrypted backups preserve Duo device credentials.
+    #[command(
+        after_help = "Examples:\n  pm duo enroll --entry-name work --replace\n  pm duo watch --entry-name work --notify\n  pm duo approve --entry-name work --request REQUEST_ID\n  pm duo deny --entry-name work --request REQUEST_ID\n\nIn the extension, open Vault manager, select the enrolled item, and use Duo Push.\nApprovals and denials require explicit confirmation. Verified Push requires the\ncode shown on the login page. Polling does not extend the vault unlock timeout."
+    )]
+    Duo {
+        #[command(subcommand)]
+        command: DuoCommands,
     },
     /// Create or restore a complete encrypted vault backup.
     Backup {
@@ -350,9 +361,9 @@ pub enum CliCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Generate shell completion definitions.
+    /// Generate static shell completion definitions.
     #[command(
-        after_help = "Examples:\n  pm completions bash --output ~/.local/share/bash-completion/completions/pm\n  pm completions fish --output ~/.config/fish/completions/pm.fish\n  pm completions powershell --output pm.ps1"
+        after_help = "Examples:\n  pm completions bash --output ~/.local/share/bash-completion/completions/pm\n  pm completions fish --output ~/.config/fish/completions/pm.fish\n  pm completions powershell --output pm.ps1\n\nFor dynamic completion in Bash, add this to ~/.bashrc instead:\n  source <(COMPLETE=bash pm)\nEach Tab completion then queries pm for current commands and options."
     )]
     Completions {
         /// Shell whose completion syntax should be generated.
@@ -682,13 +693,24 @@ pub struct SearchArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum TotpCommands {
-    /// Store a Base32 secret or otpauth URI using a hidden prompt.
+    /// Store a Base32 TOTP secret or TOTP/HOTP otpauth URI using a hidden prompt.
     #[command(after_help = "Examples:\n  pm totp set --id 7\n  pm totp set --entry-name github")]
     Set {
         #[command(flatten)]
         target: EntryArgs,
     },
-    /// Generate the current authentication code.
+    /// Enroll a Duo activation link for passcodes using a hidden prompt.
+    #[command(
+        after_help = "Examples:\n  pm totp duo --id 7\n  pm totp duo --entry-name work --mode totp\n\nUse a fresh enrollment link for a separate device. Enrollment consumes the link.\nHOTP is the default; select TOTP if your organization accepts time-based codes.\nThis command saves passcodes only; use pm duo enroll for Push credentials."
+    )]
+    Duo {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Passcode type accepted by your organization; cannot be inferred from the link.
+        #[arg(long, value_enum, default_value = "hotp")]
+        mode: crate::types::OtpMode,
+    },
+    /// Generate a TOTP code or consume and persist the next HOTP counter.
     #[command(
         after_help = "Examples:\n  pm totp show --id 7\n  pm totp show --entry-name github --copy"
     )]
@@ -703,6 +725,58 @@ pub enum TotpCommands {
         copy_time: Option<u8>,
     },
     /// Remove the authenticator configuration from an entry.
+    Remove {
+        #[command(flatten)]
+        target: EntryArgs,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DuoCommands {
+    /// Enroll a fresh Duo link, keeping push credentials in the encrypted vault.
+    Enroll {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Replace this entry's existing authenticator or Duo enrollment.
+        #[arg(long)]
+        replace: bool,
+        /// Override the passcode mode; by default use Duo's enrollment response.
+        #[arg(long, value_enum)]
+        mode: Option<crate::types::OtpMode>,
+    },
+    /// Fetch pending requests for one enrolled device.
+    Requests {
+        #[command(flatten)]
+        target: EntryArgs,
+    },
+    /// Monitor pending requests; stop when the vault locks or with Ctrl+C.
+    Watch {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Seconds between polls. Polling does not extend the vault unlock timeout.
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(3..=60))]
+        interval: u64,
+        /// Show passive desktop alerts via notify-send if installed.
+        #[arg(long)]
+        notify: bool,
+    },
+    /// Review one request and confirm approval; prompt for a Verified Push code.
+    Approve {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Exact pending request ID printed by requests or watch.
+        #[arg(long)]
+        request: String,
+    },
+    /// Review one request and confirm denial.
+    Deny {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Exact pending request ID printed by requests or watch.
+        #[arg(long)]
+        request: String,
+    },
+    /// Remove local push credentials; remove the device separately in Duo.
     Remove {
         #[command(flatten)]
         target: EntryArgs,

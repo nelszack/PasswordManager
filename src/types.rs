@@ -125,6 +125,7 @@ impl Zeroize for ServerCommand {
                 revision.zeroize();
             }
             Self::Totp(command) => command.zeroize(),
+            Self::Duo(command) => command.zeroize(),
             Self::Backup(request) | Self::RestoreBackup(request) => request.zeroize(),
             Self::Update(update) => update.zeroize(),
             Self::UpdateTyped(update) => update.zeroize(),
@@ -228,6 +229,82 @@ pub enum ServerCommand {
         id: usize,
         timeout: u8,
     },
+    Duo(DuoCommand),
+}
+
+#[derive(
+    Serialize, Deserialize, Clone, Default, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
+pub struct DuoCredentials {
+    pub host: String,
+    pub akey: String,
+    pub pkey: String,
+    pub private_key: String,
+}
+
+impl std::fmt::Debug for DuoCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DuoCredentials(<redacted>)")
+    }
+}
+
+#[derive(Serialize, Deserialize, zeroize::Zeroize)]
+pub enum DuoCommand {
+    Enroll {
+        target: Target,
+        activation: String,
+        mode: Option<OtpMode>,
+        replace: bool,
+    },
+    Requests {
+        target: Target,
+    },
+    Respond {
+        target: Target,
+        request_id: String,
+        fingerprint: String,
+        approve: bool,
+        code: String,
+    },
+    Remove {
+        target: Target,
+    },
+}
+
+impl std::fmt::Debug for DuoCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Enroll { target, .. } => f
+                .debug_struct("DuoEnroll")
+                .field("target", target)
+                .finish_non_exhaustive(),
+            Self::Requests { target } => f
+                .debug_struct("DuoRequests")
+                .field("target", target)
+                .finish(),
+            Self::Respond {
+                target, approve, ..
+            } => f
+                .debug_struct("DuoRespond")
+                .field("target", target)
+                .field("approve", approve)
+                .finish_non_exhaustive(),
+            Self::Remove { target } => f.debug_struct("DuoRemove").field("target", target).finish(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DuoPushRequest {
+    pub id: String,
+    pub application: String,
+    pub username: String,
+    pub location: String,
+    pub summary: String,
+    pub expires_at: u64,
+    pub code_digits: Option<usize>,
+    pub unsupported: Option<String>,
+    pub fingerprint: String,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -494,6 +571,23 @@ pub enum TotpCommand {
     Remove {
         target: Target,
     },
+    Duo {
+        target: Target,
+        activation: String,
+        mode: OtpMode,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OtpMode {
+    Hotp,
+    Totp,
+}
+
+impl Zeroize for OtpMode {
+    fn zeroize(&mut self) {
+        *self = Self::Hotp;
+    }
 }
 
 impl std::fmt::Debug for TotpCommand {
@@ -516,6 +610,12 @@ impl std::fmt::Debug for TotpCommand {
                 .debug_struct("Remove")
                 .field("target", target)
                 .finish(),
+            Self::Duo { target, mode, .. } => formatter
+                .debug_struct("Duo")
+                .field("target", target)
+                .field("mode", mode)
+                .field("activation", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -524,6 +624,9 @@ impl Zeroize for TotpCommand {
     fn zeroize(&mut self) {
         if let Self::Set { configuration, .. } = self {
             configuration.zeroize();
+        }
+        if let Self::Duo { activation, .. } = self {
+            activation.zeroize();
         }
     }
 }
@@ -729,6 +832,16 @@ mod test {
         let totp_debug = format!("{totp:?}");
         assert!(totp_debug.contains("<redacted>"));
         assert!(!totp_debug.contains(totp_secret));
+
+        let activation = "duo://activation-token-that-must-not-leak-encoded-host";
+        let mut duo = TotpCommand::Duo {
+            target: Target::Id(1),
+            activation: activation.into(),
+            mode: OtpMode::Hotp,
+        };
+        assert!(!format!("{duo:?}").contains(activation));
+        duo.zeroize();
+        assert!(matches!(duo, TotpCommand::Duo { activation, .. } if activation.is_empty()));
 
         let item_secret = "typed-item-secret-that-must-not-leak";
         let custom_secret = "custom-field-secret-that-must-not-leak";

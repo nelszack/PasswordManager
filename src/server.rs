@@ -79,6 +79,8 @@ enum CommandEffect {
     None,
     StopServer,
     Audit(crate::vault::AuditSnapshot, bool),
+    Duo(Box<crate::vault::PreparedDuoPoll>),
+    DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
 }
 
 impl Drop for BufferedResponse {
@@ -336,6 +338,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 return;
             };
             let kill_tx = state.kill_tx.clone();
+            let duo_session = Arc::clone(&state.session);
             // Wait for vault ownership asynchronously. Only its current owner
             // occupies a blocking worker; the connection limit bounds the queue.
             let mut session = Arc::clone(&state.session).lock_owned().await;
@@ -350,7 +353,12 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
                 }
             };
             let stop_server = matches!(&outcome.effect, CommandEffect::StopServer);
-            if let CommandEffect::Audit(snapshot, check_breaches) = outcome.effect {
+            let effect = std::mem::take(&mut outcome.effect);
+            if let CommandEffect::Duo(prepared) = effect {
+                finish_duo(*prepared, duo_session, &mut outcome.responses).await;
+            } else if let CommandEffect::DuoEnrollment(prepared) = effect {
+                finish_duo_enrollment(*prepared, duo_session, &mut outcome.responses).await;
+            } else if let CommandEffect::Audit(snapshot, check_breaches) = effect {
                 // Network calls run after releasing the vault session.
                 let audit = snapshot.audit(check_breaches).await;
                 let code = if audit.incomplete {
@@ -372,6 +380,102 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
             }
         })
         .await;
+}
+
+async fn finish_duo_enrollment(
+    prepared: crate::vault::PreparedDuoEnrollment,
+    session: Arc<Mutex<VaultSession>>,
+    responses: &mut Vec<BufferedResponse>,
+) {
+    // Activation is blocking I/O, but no live vault guard or old credentials
+    // leave the preparation worker. Lock and auto-lock remain available.
+    let result = tokio::task::spawn_blocking(move || {
+        let result = prepared.enroll();
+        (prepared, result)
+    })
+    .await;
+    let (prepared, material) = match result {
+        Ok((prepared, Ok(material))) => (prepared, material),
+        Ok((_, Err(error))) => {
+            outcome::respond_domain_error_with_context(
+                &error,
+                &format!("Duo setup failed: {error}"),
+                responses,
+            );
+            return;
+        }
+        Err(_) => {
+            outcome::respond_failure(
+                "Duo enrollment worker failed; check device enrollment before retrying.",
+                responses,
+            );
+            return;
+        }
+    };
+    let mut guard = session.lock_owned().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let (key, vault) = guard.parts_mut();
+        crate::vault::available(vault)
+            .and_then(|v| v.finish_duo_enrollment(&prepared, material, key))
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => outcome::respond_domain_result(Ok(output), responses),
+        Ok(Err(error)) => outcome::respond_failure(
+            &format!(
+                "Duo enrolled but saving reported an error: {error}. Check device enrollment before retrying."
+            ),
+            responses,
+        ),
+        Err(_) => outcome::respond_failure(
+            "Duo enrollment save worker failed; check device enrollment before retrying.",
+            responses,
+        ),
+    }
+}
+
+async fn finish_duo(
+    prepared: crate::vault::PreparedDuoPoll,
+    session: Arc<Mutex<VaultSession>>,
+    responses: &mut Vec<BufferedResponse>,
+) {
+    let crate::vault::PreparedDuoPoll { request, review } = prepared;
+    let body = match request.execute().await {
+        Ok(body) => body,
+        Err(error) => {
+            outcome::respond_domain_error(&error, responses);
+            return;
+        }
+    };
+    let mut guard = Arc::clone(&session).lock_owned().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let (key, vault) = guard.parts_mut();
+        let result =
+            crate::vault::available(vault).and_then(|v| v.finish_duo_poll(&review, &body, key));
+        // Drop the live guard and all response/code material before network I/O.
+        result
+    })
+    .await;
+    match result {
+        Ok(Ok(crate::vault::DuoPollResult::Requests(output))) => {
+            outcome::respond_domain_result(Ok(output), responses)
+        }
+        Ok(Ok(crate::vault::DuoPollResult::Decision(request))) => {
+            let result = (*request)
+                .execute()
+                .await
+                .and_then(|body| crate::duo::acknowledge(&body));
+            outcome::respond_domain_result(
+                result.map(|_| "Duo decision accepted.".into()),
+                responses,
+            );
+        }
+        Ok(Err(error)) => outcome::respond_domain_error(&error, responses),
+        Err(_) => outcome::respond_failure(
+            "Duo request review failed; no decision was sent.",
+            responses,
+        ),
+    }
 }
 
 async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {

@@ -307,6 +307,7 @@ pub(crate) fn create_vault(
         entries: Vec::new(),
         metadata: VaultMetadata {
             filename: fname.clone(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     });
@@ -593,6 +594,7 @@ mod tests {
             }],
             metadata: VaultMetadata {
                 filename: random_vault_filename(),
+                duo_session: None,
             },
             recovery: RecoveryData::default(),
         };
@@ -602,6 +604,42 @@ mod tests {
         };
         write_vault(&vault, &mut info).unwrap();
         (vault, info)
+    }
+
+    #[test]
+    fn hotp_counter_tracks_atomic_commit_even_when_directory_sync_fails() {
+        let (mut vault, mut info) = stored_vault();
+        vault
+            .set_totp(
+                Target::Id(1),
+                "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+                &mut info,
+            )
+            .unwrap();
+        for (fault, expected_counter) in [(1, 0), (2, 1)] {
+            let result = with_write_fault(fault, || vault.current_otp(Target::Id(1), &mut info));
+            let error = result.err().unwrap();
+            assert_eq!(error.committed(), fault == 2);
+            assert!(
+                vault.recovery.totp[0]
+                    .configuration
+                    .ends_with(&format!("counter={expected_counter}"))
+            );
+            let (_, reopened) = lookup_vault_in(
+                &data_dir(),
+                &mut session(42),
+                Some(&vault.metadata.filename),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(reopened.recovery.totp, vault.recovery.totp);
+        }
+        // The committed-but-unreturned code was consumed, so the next request
+        // uses counter 1, rather than repeating counter 0.
+        assert_eq!(
+            *vault.current_otp(Target::Id(1), &mut info).unwrap().code,
+            "287082"
+        );
     }
 
     #[test]
@@ -698,6 +736,7 @@ mod tests {
         let vault = Vault {
             metadata: VaultMetadata {
                 filename: "selected.enc".into(),
+                duo_session: None,
             },
             entries: Vec::new(),
             recovery: RecoveryData::default(),
@@ -831,6 +870,7 @@ mod tests {
                 }],
                 metadata: VaultMetadata {
                     filename: "crash.enc".into(),
+                    duo_session: None,
                 },
                 recovery: RecoveryData::default(),
             };

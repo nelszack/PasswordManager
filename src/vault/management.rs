@@ -12,6 +12,7 @@ struct ManagementItem<'a> {
     has_secret: bool,
     fields: Vec<ManagementField<'a>>,
     has_totp: bool,
+    has_duo: bool,
     created: &'a str,
     modified: &'a str,
 }
@@ -40,6 +41,7 @@ impl Vault {
                     "id": view.entry.id, "name": view.entry.name, "username": view.entry.username,
                     "kind": view.metadata.map_or(ItemKind::Login, |m| m.kind),
                     "urls": view.urls, "has_totp": view.has_totp,
+                    "has_duo": self.recovery.duo.iter().any(|r| r.entry_id == view.entry.id),
                 })
             })
             .collect();
@@ -83,6 +85,7 @@ impl Vault {
             has_secret: !entry.password.is_empty(),
             fields,
             has_totp: self.recovery.totp.iter().any(|t| t.entry_id == id),
+            has_duo: self.recovery.duo.iter().any(|r| r.entry_id == id),
             created: &entry.created,
             modified: &entry.modified,
         })
@@ -150,7 +153,7 @@ mod tests {
                 { "name": "token", "secret": true, "value": null },
                 { "name": "environment", "secret": false, "value": "prod \"blue\" 🔐" },
             ],
-            "has_totp": true, "created": "", "modified": "",
+            "has_totp": true, "has_duo": false, "created": "", "modified": "",
         });
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&details).unwrap(),

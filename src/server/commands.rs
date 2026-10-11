@@ -115,6 +115,7 @@ fn handle_command(
                 | ServerCommand::Unlock(_)
                 | ServerCommand::Status
                 | ServerCommand::StatusData
+                | ServerCommand::Duo(DuoCommand::Requests { .. })
         )
     {
         let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -399,6 +400,31 @@ fn handle_command(
                 *effect = CommandEffect::Audit(audit_snapshot, options.check_breaches);
             }
         }
+        ServerCommand::Duo(command) => {
+            if matches!(
+                &command,
+                DuoCommand::Requests { .. } | DuoCommand::Respond { .. }
+            ) {
+                if let Some(vault) = vlt.as_mut() {
+                    match vault.prepare_duo_poll(command, server_info) {
+                        Ok(prepared) => *effect = CommandEffect::Duo(Box::new(prepared)),
+                        Err(error) => respond_domain_error(&error, responses),
+                    }
+                }
+            } else if matches!(&command, DuoCommand::Enroll { .. }) {
+                if let Some(vault) = vlt.as_mut() {
+                    match vault.prepare_duo_enrollment(command, true, server_info) {
+                        Ok(prepared) => *effect = CommandEffect::DuoEnrollment(Box::new(prepared)),
+                        Err(error) => respond_domain_error(&error, responses),
+                    }
+                }
+            } else {
+                let command = Zeroizing::new(command);
+                if let Some(vault) = vlt.as_mut() {
+                    respond_domain_result(vault.duo_command(&command, server_info), responses);
+                }
+            }
+        }
         ServerCommand::Totp(mut command) => {
             if let Some(vault) = vlt.as_mut() {
                 match command {
@@ -411,15 +437,37 @@ fn handle_command(
                         match result {
                             Ok(Some(bits)) if bits < 128 => respond(
                                 &format!(
-                                    "TOTP authenticator saved. Warning: provider supplied a {bits}-bit secret; RFC 4226 recommends at least 128 bits."
+                                    "Authenticator saved. Warning: provider supplied a {bits}-bit secret; RFC 4226 recommends at least 128 bits."
                                 ),
                                 responses,
                             ),
-                            Ok(Some(_)) => respond("TOTP authenticator saved.", responses),
+                            Ok(Some(_)) => respond("Authenticator saved.", responses),
                             Ok(None) => respond_not_found("Entry not found.", responses),
                             Err(error) => respond_domain_error_with_context(
                                 &error,
-                                &format!("TOTP setup failed: {error}"),
+                                &format!("Authenticator setup failed: {error}"),
+                                responses,
+                            ),
+                        }
+                    }
+                    TotpCommand::Duo {
+                        target,
+                        activation,
+                        mode,
+                    } => {
+                        let command = DuoCommand::Enroll {
+                            target,
+                            activation,
+                            mode: Some(mode),
+                            replace: false,
+                        };
+                        match vault.prepare_duo_enrollment(command, false, server_info) {
+                            Ok(prepared) => {
+                                *effect = CommandEffect::DuoEnrollment(Box::new(prepared))
+                            }
+                            Err(error) => respond_domain_error_with_context(
+                                &error,
+                                &format!("Duo setup failed: {error}"),
                                 responses,
                             ),
                         }
@@ -427,30 +475,41 @@ fn handle_command(
                     TotpCommand::Show {
                         target,
                         copy_timeout,
-                    } => match vault.current_totp(target) {
-                        Ok((mut code, ttl)) => {
-                            respond(&format!("TOTP: {code} ({ttl}s remaining)"), responses);
+                    } => match vault.current_otp(target, server_info) {
+                        Ok(code) => {
+                            let message = Zeroizing::new(if let Some(counter) = code.counter {
+                                format!(
+                                    "HOTP: {} (counter {counter}; next counter saved)",
+                                    *code.code
+                                )
+                            } else {
+                                format!(
+                                    "TOTP: {} ({}s remaining)",
+                                    *code.code,
+                                    code.expires_in.unwrap_or_default()
+                                )
+                            });
+                            respond(&message, responses);
                             if let Some(timeout) = copy_timeout {
-                                copy_in_background(code.clone(), timeout);
+                                copy_in_background(code.code.to_string(), timeout);
                             }
-                            code.zeroize();
                         }
                         Err(error) => respond_domain_error_with_context(
                             &error,
-                            &format!("TOTP unavailable: {error}"),
+                            &format!("Authenticator unavailable: {error}"),
                             responses,
                         ),
                     },
                     TotpCommand::Remove { target } => {
                         match vault.remove_totp(target, server_info) {
-                            Ok(true) => respond("TOTP authenticator removed.", responses),
+                            Ok(true) => respond("Authenticator removed.", responses),
                             Ok(false) => respond_not_found(
-                                "Entry not found or has no TOTP authenticator.",
+                                "Entry not found or has no authenticator.",
                                 responses,
                             ),
                             Err(error) => respond_domain_error_with_context(
                                 &error,
-                                &format!("TOTP removal failed: {error}"),
+                                &format!("Authenticator removal failed: {error}"),
                                 responses,
                             ),
                         }

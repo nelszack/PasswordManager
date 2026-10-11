@@ -26,6 +26,8 @@ struct PortableItemRef<'a> {
     password_changed: Option<&'a str>,
     password_history: Vec<PortableRevisionRef<'a>>,
     totp: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duo: Option<&'a DuoCredentials>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +91,12 @@ impl Vault {
                                 changed: &revision.changed,
                             })
                             .collect(),
+                        duo: self
+                            .recovery
+                            .duo
+                            .iter()
+                            .find(|r| r.entry_id == entry.id)
+                            .map(|r| &r.credentials),
                         totp: totp_by_id
                             .get(&entry.id)
                             .map(|record| record.configuration.as_str()),
