@@ -1,5 +1,5 @@
 use crate::types::{ItemKind, ListOptions, SortField};
-use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -130,7 +130,7 @@ pub enum CliCommands {
         /// Read the vault key from this file instead of prompting for a password.
         ///
         /// Relative paths resolve from the current directory.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         key: Option<String>,
 
         #[command(flatten)]
@@ -230,7 +230,7 @@ pub enum CliCommands {
     #[command(visible_aliases = ["init", "create"])]
     New {
         /// Create a key outside application data; relative paths use the current directory.
-        #[arg(long = "key")]
+        #[arg(long = "key", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
     },
     /// Re-encrypt the unlocked vault with a new master password or key file.
@@ -239,7 +239,7 @@ pub enum CliCommands {
     /// external key files are never overwritten or removed.
     Rekey {
         /// Create a key outside application data; relative paths use the current directory.
-        #[arg(long = "key")]
+        #[arg(long = "key", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
     },
     /// Add a login or another typed secret to the unlocked vault.
@@ -334,13 +334,13 @@ pub enum CliCommands {
     )]
     Import {
         /// Input file to read.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         path: String,
         /// Create and import into a new vault instead of the unlocked vault.
         #[arg(long)]
         new: bool,
         /// Create the new imported vault's external key; requires `--new`.
-        #[arg(long = "key", requires = "new")]
+        #[arg(long = "key", requires = "new", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
         /// Show import counts and conflicts without changing the vault.
         #[arg(long)]
@@ -355,7 +355,7 @@ pub enum CliCommands {
     /// CSV. Both formats contain plaintext secrets and use private permissions.
     Export {
         /// Destination file; `.json` selects portable JSON, otherwise CSV.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         path: String,
         /// Atomically replace an existing plaintext export.
         #[arg(long)]
@@ -370,7 +370,7 @@ pub enum CliCommands {
         #[arg(value_enum)]
         shell: Shell,
         /// Destination file, or `-` to write to standard output.
-        #[arg(long, default_value = "-")]
+        #[arg(long, default_value = "-", value_hint = ValueHint::FilePath)]
         output: PathBuf,
     },
     /// Regenerate the HTML command reference from Clap metadata.
@@ -419,10 +419,10 @@ pub enum BackupCommands {
     )]
     Create {
         /// Destination backup file.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         path: String,
         /// Encrypt with an existing key file instead of a backup password.
-        #[arg(long = "key")]
+        #[arg(long = "key", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
         /// Atomically replace an existing backup file.
         #[arg(long)]
@@ -436,10 +436,10 @@ pub enum BackupCommands {
     )]
     Restore {
         /// Encrypted backup file to restore.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         path: String,
         /// Decrypt with a key file instead of a backup password.
-        #[arg(long = "key")]
+        #[arg(long = "key", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
         /// Replace an existing vault associated with the backup password/key.
         #[arg(long)]
@@ -650,7 +650,7 @@ pub struct DeleteArgs {
     #[arg(long, conflicts_with_all = ["id","entry_name"], required_unless_present_any=["id", "entry_name" ])]
     pub vault: bool,
     /// Key file for deleting a key-based vault; otherwise prompts for its password.
-    #[arg(long, requires = "vault")]
+    #[arg(long, requires = "vault", value_hint = ValueHint::FilePath)]
     pub key: Option<String>,
     /// Preserve the key file after deleting its vault.
     ///

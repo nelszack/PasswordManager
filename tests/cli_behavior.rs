@@ -180,6 +180,65 @@ fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_conf
 }
 
 #[test]
+fn dynamic_completion_suggests_file_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let files = root.path().join("files with spaces");
+    std::fs::create_dir(&files).unwrap();
+    std::fs::write(files.join("vault key.key"), "synthetic test key").unwrap();
+    std::fs::create_dir(files.join("vault keys")).unwrap();
+
+    for args in [
+        vec!["unlock", "--key"],
+        vec!["new", "--key"],
+        vec!["rekey", "--key"],
+        vec!["delete", "--vault", "--key"],
+        vec!["import", "--path"],
+        vec!["import", "--new", "--key"],
+        vec!["export", "--path"],
+        vec!["backup", "create", "--path"],
+        vec!["backup", "create", "--key"],
+        vec!["backup", "restore", "--path"],
+        vec!["backup", "restore", "--key"],
+        vec!["completions", "bash", "--output"],
+    ] {
+        for prefix in [
+            PathBuf::from("files with spaces"),
+            PathBuf::from("~").join("files with spaces"),
+            files.clone(),
+        ] {
+            let partial = prefix.join("vault");
+            let mut words = vec![std::ffi::OsString::from("pm")];
+            words.extend(args.iter().map(std::ffi::OsString::from));
+            words.push(partial.into_os_string());
+            let output = isolated_pm(root.path())
+                .env("USERPROFILE", root.path())
+                .env("COMPLETE", "bash")
+                .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+                .env("_CLAP_IFS", "\n")
+                .args(["--"])
+                .args(&words)
+                .output_timeout("file path completion query");
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            let suggestions = String::from_utf8(output.stdout).unwrap();
+            for expected in [
+                prefix.join("vault key.key"),
+                prefix.join("vault keys").join(""),
+            ] {
+                assert!(
+                    suggestions
+                        .lines()
+                        .any(|line| line == expected.to_string_lossy()),
+                    "{words:?}: missing {expected:?} in {suggestions:?}"
+                );
+            }
+        }
+    }
+    assert!(!root.path().join("config").exists());
+    assert!(!root.path().join("data").exists());
+}
+
+#[test]
 fn disabled_dynamic_completion_preserves_normal_cli_help() {
     let root = tempfile::tempdir().unwrap();
     let baseline = isolated_pm(root.path())
