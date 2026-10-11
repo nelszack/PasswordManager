@@ -20,7 +20,7 @@
         <label>Type<select id="kind"><option value="login">Login</option><option value="secure-note">Secure note</option><option value="payment-card">Payment card</option><option value="identity">Identity</option><option value="wifi">Wi-Fi</option><option value="software-license">Software license</option><option value="ssh-key">SSH key</option><option value="api-secret">API secret</option></select></label>
         <label>Username / owner<input id="username" maxlength="4096" autocomplete="off"></label>
         <label>Primary secret<input id="password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the existing secret" maxlength="65536"></label>
-        <label id="multilineLabel" hidden>Note body / private key (visible while editing)<textarea id="secretMultiline" rows="6" maxlength="65536" autocomplete="off" placeholder="Leave blank to keep the existing secret"></textarea></label>
+        <label id="multilineLabel" hidden>Multiline primary secret (visible while editing)<textarea id="secretMultiline" rows="6" maxlength="65536" autocomplete="off" placeholder="Leave blank to keep the existing secret"></textarea></label>
         <div class="actions"><button id="reveal" type="button">Reveal secrets</button><button id="copy" type="button">Copy secret</button><button id="generateItem" type="button">Generate replacement</button></div>
         <label>URLs (one per line)<textarea id="urls" rows="3"></textarea></label>
         <label>Notes<textarea id="notes" rows="5" maxlength="65536"></textarea></label>

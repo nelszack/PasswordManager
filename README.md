@@ -912,7 +912,8 @@ preserve existing secrets during an edit. Use **Reveal secrets** before changing
 the name or visibility of a hidden field whose value is not currently shown.
 Revealed values clear after 30 seconds; locking or disconnecting clears the editor.
 Copying uses the configured server clipboard timeout and lock cleanup.
-Multiline note bodies and SSH private keys have their own editor.
+Multiline secrets use a dedicated editor. Changing an item's type preserves the
+secret being edited, including line breaks, and retains the reveal timeout.
 
 Lock and status requests use a separate native-host connection from item work
 and Duo polling. Requests that expire while queued are never sent. If a sent
@@ -999,7 +1000,9 @@ actual selection happens in a separate extension-owned window that the webpage
 cannot inspect or restyle. Only secret-free labels enter that window; after the
 user selects one, the extension retrieves that single item from the unlocked
 vault and fills controls in the same form. Locking or losing the native-host
-connection invalidates open pickers. The picker displays the receiving site;
+connection invalidates open pickers, including requests still opening a window.
+Closing, canceling, or expiring a picker releases the original page's pending
+selection immediately. The picker displays the receiving site;
 for an embedded frame from a different origin, it also displays the main page
 and requires explicit confirmation before filling. The extension uses the
 browser's `tabs` permission to read the main page's URL for this destination

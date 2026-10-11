@@ -8,43 +8,70 @@ fn isolated_config() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn test_update_all_config_fields() {
-    let (_directory, config_path) = isolated_config();
-    update(
-        default_test_config(true, &config_path),
-        ConfigArgs {
-            reset: false,
-            genpass_length: Some(100),
-            genpass_stats: Some(false),
-            genpass_copy: Some(true),
-            password_copy: None,
-            clipboard_timeout: Some(12),
-            unlock_timeout: Some(15),
-            password_history_limit: Some(25),
-            trash_retention_days: Some(30),
-            server_port: Some(8787),
-        },
-        &config_path,
-    );
-    assert_eq!(
-        read_config(&config_path),
-        Config {
-            genpass: GeneratorConfig {
-                length: 100,
-                stats: false,
-                copy: true
+fn updates_persist_all_fields_and_boundary_values() {
+    for (label, length, stats, copy, clipboard, unlock, history, retention, port) in [
+        ("custom", 100, false, true, 12, 15, 25, 30, 8787),
+        (
+            "disabled timeouts",
+            12,
+            false,
+            true,
+            0,
+            0,
+            10,
+            0,
+            crate::server::DEFAULT_PORT,
+        ),
+        (
+            "maximum values",
+            u8::MAX,
+            true,
+            false,
+            u8::MAX,
+            u64::MAX,
+            10,
+            0,
+            crate::server::DEFAULT_PORT,
+        ),
+    ] {
+        let (_directory, config_path) = isolated_config();
+        update(
+            default_test_config(true, &config_path),
+            ConfigArgs {
+                genpass_length: Some(length),
+                genpass_stats: Some(stats),
+                genpass_copy: Some(copy),
+                clipboard_timeout: Some(clipboard),
+                unlock_timeout: Some(unlock),
+                password_history_limit: Some(history),
+                trash_retention_days: Some(retention),
+                server_port: Some(port),
+                ..ConfigArgs::default()
             },
-            clipboard: ClipboardConfig { timeout: 12 },
-            unlock: UnlockConfig { timeout: 15 },
-            copy: CopyConfig { passwords: true },
-            recovery: RecoveryConfig {
-                password_history_limit: 25,
-                trash_retention_days: 30,
+            &config_path,
+        );
+        assert_eq!(
+            read_config(&config_path),
+            Config {
+                genpass: GeneratorConfig {
+                    length,
+                    stats,
+                    copy
+                },
+                clipboard: ClipboardConfig { timeout: clipboard },
+                unlock: UnlockConfig { timeout: unlock },
+                copy: CopyConfig { passwords: true },
+                recovery: RecoveryConfig {
+                    password_history_limit: history,
+                    trash_retention_days: retention
+                },
+                server: ServerConfig { port },
             },
-            server: ServerConfig { port: 8787 },
-        }
-    );
+            "{label}"
+        );
+    }
 }
+
 #[test]
 fn test_is_config_exists() {
     let (_directory, config_path) = isolated_config();
@@ -92,43 +119,6 @@ fn test_default_config_values() {
     assert_eq!(read_config(&config_path), config);
 }
 #[test]
-fn test_reset_to_default() {
-    let (_directory, config_path) = isolated_config();
-    update(
-        read_config(&config_path),
-        ConfigArgs {
-            reset: true,
-            genpass_length: Some(100),
-            genpass_stats: Some(true),
-            genpass_copy: Some(false),
-            password_copy: None,
-            clipboard_timeout: Some(30),
-            unlock_timeout: Some(5),
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    );
-    update(
-        read_config(&config_path),
-        ConfigArgs {
-            reset: true,
-            genpass_length: None,
-            genpass_stats: None,
-            genpass_copy: None,
-            password_copy: None,
-            clipboard_timeout: None,
-            unlock_timeout: None,
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    );
-    let conf = read_config(&config_path);
-    assert_eq!(conf.genpass.length, 12);
-    assert!(!conf.genpass.stats);
-    assert!(conf.genpass.copy);
-}
-
-#[test]
 fn test_config_with_alternate_values() {
     let (_directory, config_path) = isolated_config();
     let content = r#"
@@ -158,7 +148,7 @@ passwords = false
 }
 
 #[test]
-fn test_multiple_updates() {
+fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
     let (_directory, config_path) = isolated_config();
     default_test_config(true, &config_path);
 
@@ -198,6 +188,42 @@ fn test_multiple_updates() {
     assert!(!conf.genpass.copy);
     assert_eq!(conf.clipboard.timeout, 45);
     assert_eq!(conf.unlock.timeout, 10);
+
+    // The domain API can reset and apply overrides in one update; the CLI
+    // exposes reset alone. Check both against a previously customized config.
+    update(
+        conf,
+        ConfigArgs {
+            reset: true,
+            genpass_length: Some(100),
+            genpass_stats: Some(true),
+            genpass_copy: Some(false),
+            clipboard_timeout: Some(30),
+            unlock_timeout: Some(5),
+            ..ConfigArgs::default()
+        },
+        &config_path,
+    );
+    let reset_with_overrides = Config {
+        genpass: GeneratorConfig {
+            length: 100,
+            stats: true,
+            copy: false,
+        },
+        clipboard: ClipboardConfig { timeout: 30 },
+        unlock: UnlockConfig { timeout: 5 },
+        ..Config::default()
+    };
+    assert_eq!(read_config(&config_path), reset_with_overrides);
+    update(
+        read_config(&config_path),
+        ConfigArgs {
+            reset: true,
+            ..ConfigArgs::default()
+        },
+        &config_path,
+    );
+    assert_eq!(read_config(&config_path), Config::default());
 }
 
 #[test]
@@ -219,35 +245,6 @@ fn test_config_round_trip() {
         let (_directory, config_path) = isolated_config();
         write_file(&original, &config_path).unwrap();
         assert_eq!(read_config(&config_path), original, "{label}");
-    }
-}
-
-#[test]
-fn test_config_update_boundary_values() {
-    for (length, clipboard_timeout, unlock_timeout, stats, copy) in [
-        (12, 0, 0, false, true),
-        (u8::MAX, u8::MAX, u64::MAX, true, false),
-    ] {
-        let (_directory, config_path) = isolated_config();
-        default_test_config(true, &config_path);
-        update(
-            read_config(&config_path),
-            ConfigArgs {
-                genpass_length: Some(length),
-                genpass_stats: Some(stats),
-                genpass_copy: Some(copy),
-                clipboard_timeout: Some(clipboard_timeout),
-                unlock_timeout: Some(unlock_timeout),
-                ..ConfigArgs::default()
-            },
-            &config_path,
-        );
-        let conf = read_config(&config_path);
-        assert_eq!(conf.genpass.length, length);
-        assert_eq!(conf.genpass.stats, stats);
-        assert_eq!(conf.genpass.copy, copy);
-        assert_eq!(conf.clipboard.timeout, clipboard_timeout);
-        assert_eq!(conf.unlock.timeout, unlock_timeout);
     }
 }
 
@@ -274,8 +271,7 @@ fn invalid_config_is_reported_without_overwriting_the_file() {
 
 #[test]
 fn password_copy_default_is_configurable() {
-    let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("config.toml");
+    let (_directory, config_path) = isolated_config();
     try_update(
         Config::default(),
         ConfigArgs {
@@ -291,8 +287,7 @@ fn password_copy_default_is_configurable() {
 
 #[test]
 fn missing_settings_are_added_with_defaults() {
-    let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("config.toml");
+    let (_directory, config_path) = isolated_config();
     fs::write(
         &config_path,
         r#"[genpass]
@@ -318,8 +313,7 @@ password_history_limit = 4
 
 #[test]
 fn complete_config_is_not_rewritten_during_reads() {
-    let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("config.toml");
+    let (_directory, config_path) = isolated_config();
     let complete = format!(
         r#"# Keep this comment and formatting.
 [genpass]

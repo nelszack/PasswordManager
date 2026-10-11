@@ -355,34 +355,6 @@ mod test {
     fn test_zero_timeout_does_not_panic() {
         assert!(copy_with_timeout("secret", 0).is_ok());
     }
-}
-
-#[cfg(test)]
-mod manager_tests {
-    use super::*;
-
-    #[derive(Default)]
-    struct FakeClipboard {
-        value: String,
-        fail_read: bool,
-    }
-    impl ClipboardAccess for FakeClipboard {
-        fn set_text(&mut self, secret: &str) -> Result<(), String> {
-            self.value = secret.into();
-            Ok(())
-        }
-        fn get_text(&mut self) -> Result<String, String> {
-            if self.fail_read {
-                Err("clipboard temporarily unavailable".into())
-            } else {
-                Ok(self.value.clone())
-            }
-        }
-        fn clear(&mut self) -> Result<(), String> {
-            self.value.clear();
-            Ok(())
-        }
-    }
 
     #[test]
     fn repeated_copies_replace_the_secret_and_reset_the_deadline() {
@@ -403,11 +375,11 @@ mod manager_tests {
         state
             .expire(&mut clipboard, start + Duration::from_secs(5))
             .unwrap();
-        assert_eq!(clipboard.value, "second");
+        assert_eq!(clipboard.value.as_deref(), Some("second"));
         state
             .expire(&mut clipboard, start + Duration::from_secs(14))
             .unwrap();
-        assert!(clipboard.value.is_empty());
+        assert!(clipboard.value.is_none());
         assert!(state.pending.is_none());
     }
 
@@ -425,10 +397,13 @@ mod manager_tests {
                 )
                 .unwrap();
             if replaced {
-                clipboard.value = "user text".into();
+                clipboard.value = Some("user text".into());
             }
             state.clear(&mut clipboard).unwrap();
-            assert_eq!(clipboard.value, if replaced { "user text" } else { "" });
+            assert_eq!(
+                clipboard.value.as_deref(),
+                if replaced { Some("user text") } else { None }
+            );
             assert!(state.pending.is_none());
         }
     }
@@ -445,12 +420,12 @@ mod manager_tests {
                 Instant::now(),
             )
             .unwrap();
-        clipboard.fail_read = true;
+        clipboard.fail_reads = true;
         assert!(state.clear(&mut clipboard).is_err());
         assert!(state.pending.is_some());
-        clipboard.fail_read = false;
+        clipboard.fail_reads = false;
         state.clear(&mut clipboard).unwrap();
         assert!(state.pending.is_none());
-        assert!(clipboard.value.is_empty());
+        assert!(clipboard.value.is_none());
     }
 }

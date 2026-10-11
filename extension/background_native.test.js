@@ -35,7 +35,9 @@ test("lock and status have a control host independent of ordinary work and Duo",
     const env = environment();
     const save = env.bridge.request("managerUpdate", { item: { password: "synthetic" } });
     const duo = env.bridge.request("managerDuoRequests");
+    assert.equal(env.timers.get(2).ms, 60_000);
     const lock = env.bridge.request("lock");
+    assert.equal(env.timers.get(3).ms, 7000);
     assert.equal(env.ports.length, 3);
     env.answer(env.ports[2]); await lock;
     const status = env.bridge.request("status");
@@ -74,23 +76,30 @@ test("a timed-out sent mutation stays ordered before review and never resolves f
     assert.equal(env.timers.size, 0);
 });
 
-test("disconnect distinguishes sent mutations from queued work and leaves control connected", async () => {
-    const env = environment();
-    const save = env.bridge.request("saveCredentials");
-    const read = env.bridge.request("managerList");
-    const status = env.bridge.request("status");
-    const sentRejected = assert.rejects(save, error => error.uncertain === true);
-    const queuedRejected = assert.rejects(read, error => error.uncertain === false);
-    env.ports[0].disconnect();
-    await Promise.all([sentRejected, queuedRejected]);
-    env.answer(env.ports[1]); await status;
-    assert.equal(env.invalidations(), 1);
-    const reconnected = env.bridge.request("managerList");
-    assert.equal(env.ports.length, 3);
-    env.ports[0].disconnect();
-    env.ports[0].receive({ id: env.ports[2].requests[0].id, success: true, data: "stale" });
-    assert.equal(env.invalidations(), 1);
-    env.answer(env.ports[2]); await reconnected;
+test("disconnect isolates item and Duo hosts and distinguishes sent mutations from queued work", async t => {
+    for (const action of ["saveCredentials", "managerDuoRequests"]) {
+        await t.test(action, async () => {
+            const env = environment();
+            const invalidations = action === "saveCredentials" ? 1 : 0;
+            const queuedAction = action === "managerDuoRequests" ? action : "managerList";
+            const active = env.bridge.request(action);
+            const read = env.bridge.request(queuedAction);
+            const status = env.bridge.request("status");
+            const sentRejected = assert.rejects(active, error => error.uncertain === (action === "saveCredentials") && /disconnected/.test(error.message));
+            const queuedRejected = assert.rejects(read, error => error.uncertain === false);
+            env.ports[0].disconnect();
+            await Promise.all([sentRejected, queuedRejected]);
+            env.answer(env.ports[1]); await status;
+            assert.equal(env.invalidations(), invalidations);
+            const reconnected = env.bridge.request(queuedAction);
+            assert.equal(env.ports.length, 3);
+            env.ports[0].disconnect();
+            env.ports[0].receive({ id: env.ports[2].requests[0].id, success: true, data: "stale" });
+            assert.equal(env.invalidations(), invalidations);
+            env.answer(env.ports[2]); await reconnected;
+            assert.equal(env.timers.size, 0);
+        });
+    }
 });
 
 test("malformed and cross-channel replies cannot confirm a mutation", async () => {

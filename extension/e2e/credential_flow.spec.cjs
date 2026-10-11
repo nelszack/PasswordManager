@@ -1,13 +1,7 @@
-const { test, expect, chromium } = require("@playwright/test");
-const fs = require("node:fs");
+const { test, expect } = require("@playwright/test");
 const http = require("node:http");
-const os = require("node:os");
-const path = require("node:path");
 
-const PROJECT_ROOT = path.resolve(__dirname, "../..");
-const EXTENSION_PATH = path.join(PROJECT_ROOT, "extension");
-const NATIVE_HOST = path.join(__dirname, "native_host_mock.cjs");
-const HOST_NAME = "com.myproject.password_manager";
+const { launchExtension, waitForNativeRequest } = require("./harness.cjs");
 
 function pageHtml(step) {
     const fields = {
@@ -49,87 +43,16 @@ function startFixtureServer() {
     });
 }
 
-function installMockNativeHost(testHome, profile, extensionId) {
-    fs.chmodSync(NATIVE_HOST, 0o755);
-    const manifest = JSON.stringify({
-        name: HOST_NAME,
-        description: "Password Manager end-to-end test host",
-        path: NATIVE_HOST,
-        type: "stdio",
-        allowed_origins: [`chrome-extension://${extensionId}/`]
-    }, null, 2);
-    // Playwright may use either its Chromium build or Chrome for Testing.
-    const manifestDirectories = [
-        path.join(profile, "NativeMessagingHosts"),
-        ...["chromium", "google-chrome"].map(browserDirectory => path.join(
-            testHome, ".config", browserDirectory, "NativeMessagingHosts"
-        ))
-    ];
-    for (const manifestDirectory of manifestDirectories) {
-        fs.mkdirSync(manifestDirectory, { recursive: true });
-        fs.writeFileSync(path.join(manifestDirectory, `${HOST_NAME}.json`), manifest);
-    }
-}
-
-async function waitForNativeAction(logPath, action) {
-    await expect.poll(() => {
-        if (!fs.existsSync(logPath)) return null;
-        return fs.readFileSync(logPath, "utf8")
-            .trim()
-            .split("\n")
-            .filter(Boolean)
-            .map(line => JSON.parse(line))
-            .find(request => request.action === action) || null;
-    }).not.toBeNull();
-    return fs.readFileSync(logPath, "utf8")
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map(line => JSON.parse(line))
-        .find(request => request.action === action);
-}
-
 test("adds and updates credentials across username, password, and TOTP pages", async () => {
     test.skip(process.platform !== "linux", "The CI native-host fixture targets Chromium on Linux");
 
     const server = await startFixtureServer();
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
-    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pm-browser-e2e-"));
-    const testExtensionPath = path.join(temporaryRoot, "extension");
-    fs.cpSync(EXTENSION_PATH, testExtensionPath, { recursive: true });
-    const testManifestPath = path.join(testExtensionPath, "manifest.json");
-    const testManifest = JSON.parse(fs.readFileSync(testManifestPath, "utf8"));
-    // Production injection is HTTPS-only; this local HTTP fixture exercises
-    // the credential workflow with an isolated test-manifest override.
-    testManifest.content_scripts[0].matches.push("http://*/*");
-    fs.writeFileSync(testManifestPath, JSON.stringify(testManifest, null, 2));
-    const testHome = path.join(temporaryRoot, "home");
-    const profile = path.join(temporaryRoot, "profile");
-    const nativeLog = path.join(temporaryRoot, "native-messages.jsonl");
-    fs.mkdirSync(testHome, { recursive: true });
-
-    let context = null;
+    let browser;
     try {
-        context = await chromium.launchPersistentContext(profile, {
-            headless: false,
-            env: {
-                ...process.env,
-                HOME: testHome,
-                XDG_CONFIG_HOME: path.join(testHome, ".config"),
-                PM_E2E_NATIVE_LOG: nativeLog
-            },
-            args: [
-                `--disable-extensions-except=${testExtensionPath}`,
-                `--load-extension=${testExtensionPath}`
-            ]
-        });
-
-        let worker = context.serviceWorkers()[0];
-        if (!worker) worker = await context.waitForEvent("serviceworker");
-        const extensionId = new URL(worker.url()).host;
-        installMockNativeHost(testHome, profile, extensionId);
-
+        browser = await launchExtension();
+        const { context, nativeLog } = browser;
         const page = context.pages()[0] || await context.newPage();
         await page.goto(`${origin}/username`);
         await expect(page.locator("#username")).toBeVisible();
@@ -155,7 +78,7 @@ test("adds and updates credentials across username, password, and TOTP pages", a
         await prompt.locator("#add").click();
         await expect.poll(() => prompt.isClosed()).toBe(true);
 
-        const save = await waitForNativeAction(nativeLog, "saveCredentials");
+        const save = await waitForNativeRequest(nativeLog, request => request.action === "saveCredentials");
         expect(save).toMatchObject({
             domain: origin,
             username: "alice@example.com",
@@ -184,7 +107,7 @@ test("adds and updates credentials across username, password, and TOTP pages", a
         await updatePrompt.locator("#update").click();
         await expect.poll(() => updatePrompt.isClosed()).toBe(true);
 
-        const update = await waitForNativeAction(nativeLog, "updateCredentials");
+        const update = await waitForNativeRequest(nativeLog, request => request.action === "updateCredentials");
         expect(update).toMatchObject({
             domain: origin,
             username: "alice@example.com",
@@ -192,8 +115,7 @@ test("adds and updates credentials across username, password, and TOTP pages", a
             entryId: 7
         });
     } finally {
-        if (context) await context.close();
-        await new Promise(resolve => server.close(resolve));
-        fs.rmSync(temporaryRoot, { recursive: true, force: true });
+        try { await browser?.close(); }
+        finally { await new Promise(resolve => server.close(resolve)); }
     }
 });

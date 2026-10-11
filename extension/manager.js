@@ -5,9 +5,21 @@ let fieldRows = [];
 let duoTimer, duoSerial = 0, duoBusy = false, duoRendered = "";
 let mutationPending = false, revealSerial = 0, revealTimer, revealedValues = [];
 let mutationUncertain = false;
-function secretControl() { return ["secure-note", "ssh-key"].includes(byId("kind").value) ? byId("secretMultiline") : byId("password"); }
-function renderSecretControl() {
-    const multiline = secretControl() === byId("secretMultiline");
+function secretControl() { return byId("multilineLabel").hidden ? byId("password") : byId("secretMultiline"); }
+function renderSecretControl(value = secretControl().value) {
+    const previous = secretControl();
+    const multiline = ["secure-note", "ssh-key"].includes(byId("kind").value) || /[\r\n]/.test(value);
+    const control = byId(multiline ? "secretMultiline" : "password");
+    if (control !== previous) {
+        control.value = value; previous.value = "";
+        // Moving an unchanged revealed value must keep its original deadline.
+        for (const record of revealedValues) {
+            if (record.control === previous && record.value === value) {
+                record.control = control; record.value = control.value;
+            }
+        }
+        byId("password").type = "password";
+    } else control.value = value;
     byId("password").parentElement.hidden = multiline; byId("multilineLabel").hidden = !multiline;
 }
 
@@ -141,7 +153,7 @@ byId("new").addEventListener("click", () => {
     byId("delete").hidden = true; byId("copy").disabled = true; byId("reveal").disabled = true;
 });
 byId("cancel").addEventListener("click", () => { epoch++; closeEditor(); });
-byId("kind").addEventListener("change", renderSecretControl);
+byId("kind").addEventListener("change", () => renderSecretControl());
 byId("addField").addEventListener("click", () => addField());
 byId("copy").addEventListener("click", () => run(async () => { message(await send("managerCopy", { entryId: selected })); }));
 byId("reveal").addEventListener("click", () => run(async () => {
@@ -150,8 +162,11 @@ byId("reveal").addEventListener("click", () => run(async () => {
     if (!unlocked || generation !== epoch || selected !== id || serial !== revealSerial) return;
     clearTimeout(revealTimer);
     revealedValues = revealedValues.filter(({ control, value }) => control.isConnected && control.value === value);
-    const primary = secretControl();
-    if (!primary.value) { primary.value = item.password; byId("password").type = "text"; revealedValues.push({ control: primary, value: primary.value }); }
+    if (!secretControl().value) {
+        renderSecretControl(item.password);
+        const primary = secretControl();
+        byId("password").type = "text"; revealedValues.push({ control: primary, value: primary.value });
+    }
     for (const record of fieldRows) {
         const field = item.fields.find(f => f.name === record.original.name);
         if (field?.secret && record.original.value === null && !record.value.value) {
@@ -198,7 +213,7 @@ function generatorSettings() {
         words: Number(byId("genWords").value), separator: byId("genSeparator").value });
 }
 byId("generatorForm").addEventListener("submit", event => { event.preventDefault(); run(() => { byId("generated").value = PasswordManagerGenerator.generate(generatorSettings()); }); });
-byId("generateItem").addEventListener("click", () => run(() => { secretControl().value = PasswordManagerGenerator.generate(generatorSettings()); byId("password").type = "password"; }));
+byId("generateItem").addEventListener("click", () => run(() => { renderSecretControl(PasswordManagerGenerator.generate(generatorSettings())); byId("password").type = "password"; }));
 byId("genSite").addEventListener("input", () => { byId("saveGenerator").textContent = byId("genSite").value ? "Save site settings" : "Save browser defaults"; });
 byId("saveGenerator").addEventListener("click", () => run(async () => {
     const settings = generatorSettings();

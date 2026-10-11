@@ -5,6 +5,7 @@ const PasswordManagerBackgroundPickers = {
         const pickerWindows = new Map();
         const filledLogins = new Map();
         const filledLoginLifetime = 10 * 60_000;
+        let generation = 0;
 
         function filledLoginKey({ tabId, frameId, domain }) {
             return JSON.stringify([tabId, frameId, domain]);
@@ -60,16 +61,26 @@ const PasswordManagerBackgroundPickers = {
             return { items: summaries, summaries };
         }
 
+        function discardPicker(token, closeWindow = true) {
+            const pending = pendingPickers.get(token);
+            if (!pending) return;
+            pendingPickers.delete(token);
+            chrome.tabs.sendMessage(pending.tabId,
+                { action: "securePickerResult", token, payload: null },
+                { documentId: pending.documentId }).catch(() => {});
+            if (!Number.isInteger(pending.windowId)) return;
+            pickerWindows.delete(pending.windowId);
+            if (closeWindow) chrome.windows.remove(pending.windowId, () => void chrome.runtime.lastError);
+        }
+
         function invalidateSecurePickers() {
-            pendingPickers.clear();
+            generation++;
+            for (const token of pendingPickers.keys()) discardPicker(token);
             filledLogins.clear();
-            for (const windowId of pickerWindows.keys()) {
-                chrome.windows.remove(windowId, () => void chrome.runtime.lastError);
-            }
-            pickerWindows.clear();
         }
 
         async function openSecurePicker(request, sender) {
+            const epoch = generation;
             const domain = security.senderOrigin(sender);
             const tabId = sender?.tab?.id;
             const frameId = sender?.frameId;
@@ -81,19 +92,22 @@ const PasswordManagerBackgroundPickers = {
                 throw new Error("Invalid secure picker request");
             }
             const tab = await chrome.tabs.get(tabId);
+            if (epoch !== generation) throw new Error("Secure picker expired");
             const topOrigin = security.senderOrigin({ url: tab.url });
             if (!topOrigin) throw new Error("Invalid top-level page origin");
 
             const token = crypto.randomUUID();
-            pendingPickers.set(token, {
+            const pending = {
                 tabId, frameId, documentId, kind, domain, topOrigin,
                 crossOrigin: domain !== topOrigin,
                 items: [],
                 summaries: [],
                 loading: true,
                 error: null,
-                expiresAt: Date.now() + 60_000
-            });
+                expiresAt: Date.now() + 60_000,
+                windowId: null
+            };
+            pendingPickers.set(token, pending);
 
             return new Promise((resolve, reject) => {
                 chrome.windows.create({
@@ -109,6 +123,13 @@ const PasswordManagerBackgroundPickers = {
                         reject(new Error(error || "Could not open secure picker"));
                         return;
                     }
+                    if (pendingPickers.get(token) !== pending || pending.expiresAt <= Date.now()) {
+                        discardPicker(token);
+                        chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
+                        reject(new Error("Secure picker expired"));
+                        return;
+                    }
+                    pending.windowId = window.id;
                     pickerWindows.set(window.id, token);
                     loadSecurePickerItems(kind, domain)
                         .then(({ items, summaries }) => {
@@ -124,11 +145,7 @@ const PasswordManagerBackgroundPickers = {
                             pending.loading = false;
                             pending.error = loadError.message || "Vault items unavailable";
                         });
-                    setTimeout(() => {
-                        if (!pendingPickers.has(token)) return;
-                        pendingPickers.delete(token);
-                        chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
-                    }, 60_000);
+                    setTimeout(() => discardPicker(token), Math.max(0, pending.expiresAt - Date.now()));
                     resolve({ success: true, token });
                 });
             });
@@ -138,11 +155,11 @@ const PasswordManagerBackgroundPickers = {
             if (!pickerSenderAllowed(sender)) throw new Error("Invalid picker sender");
             const pending = pendingPickers.get(request?.token);
             if (!pending || pending.expiresAt <= Date.now()) {
-                pendingPickers.delete(request?.token);
+                discardPicker(request?.token);
                 throw new Error("Secure picker expired");
             }
             if (request.cancel === true) {
-                pendingPickers.delete(request.token);
+                discardPicker(request.token);
                 return { success: true };
             }
             if (pending.loading) throw new Error("Secure picker is still loading");
@@ -158,6 +175,7 @@ const PasswordManagerBackgroundPickers = {
             if (!selected) throw new Error("Picker selection is unavailable");
 
             pending.completing = true;
+            const epoch = generation;
             // Lock/disconnect invalidation also cancels selections awaiting native I/O.
             let payload;
             let filledLogin;
@@ -188,6 +206,7 @@ const PasswordManagerBackgroundPickers = {
                     throw new Error("Secure picker expired");
                 }
                 pendingPickers.delete(request.token);
+                pickerWindows.delete(pending.windowId);
                 const key = filledLoginKey(pending);
                 if (filledLogin) {
                     // Remember only a fingerprint of the explicitly selected secret,
@@ -203,7 +222,7 @@ const PasswordManagerBackgroundPickers = {
                         { action: "securePickerResult", token: request.token, payload },
                         { documentId: pending.documentId }
                     );
-                    if (filledLogin) onLoginSelected?.({
+                    if (filledLogin && epoch === generation) onLoginSelected?.({
                         sender: { tab: { id: pending.tabId }, url: pending.domain }, accounts: [selected]
                     });
                 } catch (error) {
@@ -227,8 +246,7 @@ const PasswordManagerBackgroundPickers = {
         function windowRemoved(windowId) {
             const token = pickerWindows.get(windowId);
             if (!token) return;
-            pickerWindows.delete(windowId);
-            pendingPickers.delete(token);
+            discardPicker(token, false);
         }
 
         return { open: openSecurePicker, complete: completeSecurePicker, invalidate: invalidateSecurePickers, data, windowRemoved, matchesFilledLogin };

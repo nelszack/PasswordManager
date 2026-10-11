@@ -3,6 +3,7 @@ const PasswordManagerBackgroundPrompts = {
     create({ chrome, security, promptState, pendingCredentials, matchesFilledLogin, nativeRequest, refreshStatus, crypto, setTimeout, onLoginContext }) {
         const pendingCredentialPrompts = new Map();
         const credentialPromptWindows = new Map();
+        let generation = 0;
         function credentialPromptSenderAllowed(sender) {
             return security.securePickerSender(
                 sender,
@@ -24,6 +25,7 @@ const PasswordManagerBackgroundPrompts = {
             const pending = pendingCredentialPrompts.get(token);
             if (!pending) return;
             pendingCredentialPrompts.delete(token);
+            pending.password = "";
             notifyCredentialPrompt(token, pending, action);
             if (!Number.isInteger(pending.windowId)) return;
             credentialPromptWindows.delete(pending.windowId);
@@ -33,12 +35,15 @@ const PasswordManagerBackgroundPrompts = {
         }
 
         function invalidateCredentialPrompts() {
+            generation++;
             for (const [token, pending] of pendingCredentialPrompts) {
+                pending.invalidated = true;
                 if (!pending.completing) discardCredentialPrompt(token, "skipped");
             }
         }
 
         async function openCredentialPrompt(request, sender) {
+            const epoch = generation;
             const domain = security.senderOrigin(sender);
             const tabId = sender?.tab?.id;
             const frameId = sender?.frameId;
@@ -66,10 +71,13 @@ const PasswordManagerBackgroundPrompts = {
             } catch (_) {
                 return { success: true, skipped: true };
             }
-            onLoginContext?.({ sender, accounts: username ? accounts.filter(account => account.username === username) : accounts });
+            if (epoch !== generation) return { success: true, skipped: true };
             // Compare only with a login explicitly released to this tab/frame/origin.
             // Never fetch unselected secrets to test passwords supplied by a page.
-            if (await matchesFilledLogin(sender, username, password)) {
+            const matched = await matchesFilledLogin(sender, username, password);
+            if (epoch !== generation) return { success: true, skipped: true };
+            onLoginContext?.({ sender, accounts: username ? accounts.filter(account => account.username === username) : accounts });
+            if (matched) {
                 return { success: true, skipped: true };
             }
             const token = crypto.randomUUID();
@@ -101,12 +109,19 @@ const PasswordManagerBackgroundPrompts = {
                     const error = chrome.runtime.lastError?.message;
                     if (error || !window?.id) {
                         pendingCredentialPrompts.delete(token);
+                        pending.password = "";
                         reject(new Error(error || "Could not open credential prompt"));
+                        return;
+                    }
+                    if (pendingCredentialPrompts.get(token) !== pending || pending.expiresAt <= Date.now()) {
+                        discardCredentialPrompt(token, "skipped");
+                        chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
+                        resolve({ success: true, skipped: true });
                         return;
                     }
                     pending.windowId = window.id;
                     credentialPromptWindows.set(window.id, token);
-                    setTimeout(() => discardCredentialPrompt(token), 2 * 60_000);
+                    setTimeout(() => discardCredentialPrompt(token), Math.max(0, pending.expiresAt - Date.now()));
                     resolve({ success: true, token });
                 });
             });
@@ -140,7 +155,9 @@ const PasswordManagerBackgroundPrompts = {
                 }
             } catch (error) {
                 pending.completing = false;
-                if (error.uncertain) {
+                if (pending.invalidated || pending.windowId === null) {
+                    discardCredentialPrompt(request.token, "skipped");
+                } else if (error.uncertain) {
                     pending.error = error.message;
                     pending.password = "";
                 }
@@ -154,7 +171,7 @@ const PasswordManagerBackgroundPrompts = {
         function data(request, sender) {
             if (!credentialPromptSenderAllowed(sender)) return { success: false, error: "Invalid credential prompt sender" };
             const pending = pendingCredentialPrompts.get(request.token);
-            return pending && pending.expiresAt > Date.now()
+            return pending && !pending.invalidated && pending.expiresAt > Date.now()
                 ? { success: true, data: pending.data, loading: pending.loading, error: pending.error }
                 : { success: false, error: "Credential prompt expired" };
         }

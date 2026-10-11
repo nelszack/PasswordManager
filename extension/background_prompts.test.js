@@ -7,21 +7,25 @@ const promptState = require("./credential_prompt_state.js");
 function environment() {
     const calls = [], deliveries = [], removed = [], timers = [];
     let saveError, lookupError, windowError, remembered, held, resolveSave, matched = false;
+    let holdLookup, resolveLookup, holdMatch, resolveMatch, holdWindow, createWindow;
     const chrome = { runtime: { id: "abcdefghijklmnopabcdefghijklmnop", getURL: path => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${path}` },
         tabs: { sendMessage(tab, message, options, callback) { deliveries.push(message); callback(); } },
         windows: { create(options, callback) {
+            if (holdWindow) { createWindow = () => callback({ id: 42 }); return; }
             if (windowError) { chrome.runtime.lastError = { message: windowError }; callback(); delete chrome.runtime.lastError; }
             else callback({ id: 42 });
         }, remove(id, callback) { removed.push(id); callback(); } }
     };
     const service = prompts.create({ chrome, security, promptState,
         pendingCredentials: { takeRemembered() { const value = remembered; remembered = null; return value; } },
-        matchesFilledLogin: async () => matched, refreshStatus() {}, crypto: require("node:crypto").webcrypto,
+        matchesFilledLogin: async () => holdMatch ? new Promise(resolve => { resolveMatch = resolve; }) : matched,
+        refreshStatus() {}, crypto: require("node:crypto").webcrypto,
         setTimeout(fn) { timers.push(fn); }, onLoginContext() {},
         async nativeRequest(action, fields) {
             calls.push({ action, fields });
             if (action === "getLoginItems") {
                 if (lookupError) throw new Error(lookupError);
+                if (holdLookup) await new Promise(resolve => { resolveLookup = resolve; });
                 return { success: true, data: '[{"id":7,"name":"Example","username":"alice"}]' };
             }
             if (held) return new Promise(resolve => { resolveSave = resolve; });
@@ -36,7 +40,10 @@ function environment() {
     return { service, sender, popup, calls, deliveries, removed, timers, open, complete,
         failSave(error) { saveError = error; }, failLookup(error) { lookupError = error; },
         failWindow(error) { windowError = error; }, remember(record) { remembered = record; }, match() { matched = true; },
-        hold() { held = true; }, release(response) { resolveSave(response); }
+        hold() { held = true; }, release(response) { resolveSave(response); },
+        holdLookup() { holdLookup = true; }, releaseLookup() { resolveLookup(); },
+        holdMatch() { holdMatch = true; }, releaseMatch() { resolveMatch(false); },
+        holdWindow() { holdWindow = true; }, releaseWindow() { createWindow(); }
     };
 }
 
@@ -50,6 +57,31 @@ test("uncertain saves block retries, retain an error and allow explicit cancella
     assert.equal((await env.complete(token, "cancel")).success, true);
     assert.equal(env.service.data({ token }, env.popup).success, false);
     assert.equal(env.deliveries.at(-1).result.action, "cancel");
+});
+
+test("invalidation while opening a save prompt cancels lookup, comparison, and window creation", async t => {
+    for (const stage of ["Lookup", "Match", "Window"]) {
+        await t.test(stage, async () => {
+            const env = environment(); env[`hold${stage}`]();
+            const opening = env.open();
+            await new Promise(resolve => setImmediate(resolve));
+            env.service.invalidate(); env[`release${stage}`]();
+            assert.equal((await opening).skipped, true);
+            assert.equal(env.timers.length, 0);
+            assert.deepEqual(env.removed, stage === "Window" ? [42] : []);
+        });
+    }
+});
+
+test("a failed save cannot revive a prompt invalidated while the write was pending", async () => {
+    const env = environment(); const { token } = await env.open(); env.hold();
+    const saving = env.complete(token);
+    const rejected = assert.rejects(saving, /Vault locked/);
+    env.service.invalidate();
+    env.release({ success: false, error: "Vault locked" }); await rejected;
+    assert.equal(env.service.data({ token }, env.popup).success, false);
+    await assert.rejects(env.complete(token), /expired/);
+    assert.equal(env.calls.filter(call => call.action === "saveCredentials").length, 1);
 });
 
 test("native transport uncertainty and a definite validation error have different retry behavior", async () => {

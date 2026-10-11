@@ -322,7 +322,7 @@ test("locks and disconnects invalidate pending pickers and save prompts", async 
                     const result = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
                     assert.equal(result.success, false);
                     assert.match(result.error, operation === "lock-before-poll" ? /Vault locked\./ : /expired/);
-                    assert.equal(env.deliveries.length, 0);
+                    assert.equal(env.deliveries.filter(delivery => delivery.message.payload !== null).length, 0);
                 } else {
                     assert.equal(env.deliveries.at(-1).message.result.action, "skipped");
                 }
@@ -362,7 +362,8 @@ test("locking cancels an in-flight selection and duplicate clicks cannot deliver
     const result = await selection;
     assert.equal(result.success, false);
     assert.match(result.error, /expired/);
-    assert.equal(env.deliveries.length, 0);
+    assert.equal(env.deliveries.length, 1);
+    assert.equal(env.deliveries[0].message.payload, null);
 });
 
 test("automatic prompts wait for lookup and open only with an available vault", async t => {

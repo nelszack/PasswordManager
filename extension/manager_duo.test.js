@@ -13,11 +13,17 @@ class Element {
     setAttribute() {}
     reset() {}
     click(trusted = true) { this.listeners.click?.({ preventDefault() {}, isTrusted: trusted }); }
+    get tagName() { return this.tag.toUpperCase(); }
+    get value() { return this._value || ""; }
+    set value(value) { this._value = this.tag === "input" ? String(value).replace(/[\r\n]/g, "") : String(value); }
 }
 function environment() {
     const html = fs.readFileSync(path.join(__dirname, "manager.html"), "utf8");
     const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1], new Element()]));
     elements.password.parentElement = new Element();
+    elements.password.tag = "input"; elements.secretMultiline.tag = "textarea";
+    elements.multilineLabel.hidden = true;
+    elements.editForm.reset = () => { elements.password.value = ""; elements.secretMultiline.value = ""; elements.kind.value = "login"; };
     const calls = [], timers = new Map(), responses = new Map(); let timerId = 0, confirmations = 0, listener;
     let pending = [{ id: "test-request", application: "Example VPN", username: "alice", location: "Boise", summary: "Login", expires_at: Math.floor(Date.now()/1000)+300, code_digits: 3, unsupported: null, fingerprint: "a".repeat(128) }];
     const context = vm.createContext({ document: { getElementById: id => elements[id], createElement: tag => new Element(tag), createTextNode: () => new Element() },
@@ -41,6 +47,46 @@ function environment() {
     return { context, elements, calls, timers, setResponse: (action, value) => value === undefined ? responses.delete(action) : responses.set(action, value), setPending: value => { pending = value; }, lock: () => listener({ action: "statusChanged", status: { native: true, running: true, locked: true } }), confirmations: () => confirmations };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test("changing item types preserves the edited secret and keeps only the visible control populated", async () => {
+    const env = environment(); await flush(); await vm.runInContext("openItem(1);", env.context);
+    env.elements.password.value = "  edited secret  ";
+    env.elements.kind.value = "secure-note"; env.elements.kind.listeners.change();
+    assert.equal(env.elements.secretMultiline.value, "  edited secret  ");
+    assert.equal(env.elements.password.value, "");
+    env.elements.kind.value = "login"; env.elements.kind.listeners.change();
+    assert.equal(env.elements.password.value, "  edited secret  ");
+    assert.equal(env.elements.secretMultiline.value, "");
+    env.elements.kind.value = "ssh-key"; env.elements.kind.listeners.change();
+    env.elements.secretMultiline.value = "first line\nsecond line";
+    env.elements.kind.value = "api-secret"; env.elements.kind.listeners.change();
+    assert.equal(env.elements.multilineLabel.hidden, false);
+    assert.equal(vm.runInContext("secretControl().value", env.context), "first line\nsecond line");
+    env.elements.cancel.click();
+    assert.equal(env.elements.password.value, "");
+    assert.equal(env.elements.secretMultiline.value, "");
+});
+
+test("revealed secrets retain their expiry when moved between editor controls", async () => {
+    const env = environment(); await flush(); await vm.runInContext("openItem(1);", env.context);
+    env.setResponse("managerItem", { success: true, data: { password: "synthetic-secret", fields: [] } });
+    env.elements.reveal.click(); await flush();
+    env.elements.kind.value = "secure-note"; env.elements.kind.listeners.change();
+    assert.equal(env.elements.secretMultiline.value, "synthetic-secret");
+    for (const expire of env.timers.values()) expire();
+    assert.equal(env.elements.secretMultiline.value, "");
+    assert.equal(env.elements.password.value, "");
+});
+
+test("revealing a multiline secret uses a textarea even for a single-line item type", async () => {
+    const env = environment(); await flush(); await vm.runInContext("openItem(1);", env.context);
+    env.setResponse("managerItem", { success: true, data: { password: "line one\nline two", fields: [] } });
+    env.elements.reveal.click(); await flush();
+    assert.equal(env.elements.secretMultiline.value, "line one\nline two");
+    assert.equal(env.elements.multilineLabel.hidden, false);
+    for (const expire of env.timers.values()) expire();
+    assert.equal(env.elements.secretMultiline.value, "");
+});
 
 test("uncertain manager mutations require explicit state review before another write", async () => {
     const env = environment(); await flush();

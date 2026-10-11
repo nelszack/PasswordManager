@@ -168,34 +168,14 @@ fn native_message_round_trip_uses_native_endian_framing() {
 }
 
 #[test]
-fn parses_totp_server_response() {
-    let data = response_data(
-        "getTotp",
-        r#"{"code":"287082","expires_in":19,"counter":null,"mode":"totp"}"#.into(),
-    )
-    .unwrap();
-    assert_eq!(data["code"], "287082");
-    assert_eq!(data["expires_in"], 19);
-}
-
-#[test]
-fn parses_hotp_response_without_a_time_based_expiration() {
-    let data = response_data(
-        "getTotp",
-        r#"{"code":"755224","expires_in":null,"counter":0,"mode":"hotp"}"#.into(),
-    )
-    .unwrap();
-    assert_eq!(data["code"], "755224");
-    assert_eq!(data["counter"], 0);
-    assert_eq!(data["mode"], "hotp");
-    assert!(data["expires_in"].is_null());
-    assert!(
-        response_data(
-            "getTotp",
-            r#"{"code":"755224","expires_in":19,"counter":0,"mode":"hotp"}"#.into()
-        )
-        .is_err()
-    );
+fn authenticator_responses_preserve_codes_and_mode_specific_lifetimes() {
+    for expected in [
+        json!({ "code": "287082", "expires_in": 19, "counter": null, "mode": "totp" }),
+        json!({ "code": "755224", "expires_in": null, "counter": 0, "mode": "hotp" }),
+    ] {
+        let parsed = response_data("getTotp", expected.to_string()).unwrap();
+        assert_eq!(parsed, expected, "mode {}", expected["mode"]);
+    }
 }
 
 #[test]
@@ -205,6 +185,7 @@ fn malformed_authenticator_data_fails_without_exposing_code_material() {
         r#"{"code":"287082","expires_in":null,"counter":null,"mode":"totp"}"#,
         r#"{"code":"755224","expires_in":null,"counter":0,"mode":"unknown"}"#,
         r#"{"code":"755224","expires_in":null,"counter":"0","mode":"hotp"}"#,
+        r#"{"code":"755224","expires_in":19,"counter":0,"mode":"hotp"}"#,
         "TOTP: 287082 (19s remaining)",
     ] {
         let error = response_data("getTotp", payload.into()).unwrap_err();
