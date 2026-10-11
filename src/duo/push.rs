@@ -791,7 +791,22 @@ mod tests {
         let r = request(&value, now(), REVIEW_KEY).unwrap().unwrap();
         assert!(!r.summary.contains('\x1b'));
         assert!(!r.summary.contains('\n'));
-        assert!(!serde_json::to_string(&r).unwrap().contains("999"));
+        // Check the public schema and displayed metadata rather than searching
+        // fingerprints or timestamps, which can contain any digit sequence.
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({
+                "id": "test-id",
+                "application": "Test app",
+                "username": "user",
+                "location": "",
+                "summary": "a\\u{1b}[31m\\nsecret",
+                "expires_at": value["expiration"],
+                "code_digits": 3,
+                "unsupported": null,
+                "fingerprint": r.fingerprint,
+            })
+        );
         value["step_up_code_info"]["num_digits"] = json!(10);
         assert!(
             request(&value, now(), REVIEW_KEY)
