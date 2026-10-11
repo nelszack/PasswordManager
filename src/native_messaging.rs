@@ -4,7 +4,7 @@ use crate::{
     cli::NativeBrowser,
     client::AuthenticatedClient,
     file::data_dir,
-    types::{EntryUpdate, PasswordEntry, ServerCommand, Target, TotpCommand},
+    types::{DuoCommand, EntryUpdate, PasswordEntry, ServerCommand, Target, TotpCommand},
 };
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,14 @@ struct NativeRequest {
     reveal: bool,
     #[serde(default)]
     item: Option<ManagementInput>,
+    #[serde(default, rename = "requestId")]
+    request_id: Option<String>,
+    #[serde(default)]
+    fingerprint: Option<String>,
+    #[serde(default)]
+    approve: Option<bool>,
+    #[serde(default, rename = "verificationCode")]
+    verification_code: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -99,6 +107,10 @@ impl Zeroize for NativeRequest {
         self.key_path.zeroize();
         self.query.zeroize();
         self.item.zeroize();
+        self.request_id.zeroize();
+        self.fingerprint.zeroize();
+        self.verification_code.zeroize();
+        self.approve.zeroize();
         *self = Self::default();
     }
 }
@@ -459,6 +471,42 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             },
             ..Default::default()
         })),
+        "managerDuoRequests" => Ok(ServerCommand::Duo(DuoCommand::Requests {
+            target: Target::Id(management_id(request)?),
+        })),
+        "managerDuoRespond" => {
+            let target = Target::Id(management_id(request)?);
+            let id = request
+                .request_id
+                .take()
+                .ok_or("missing Duo request identifier")?;
+            let fingerprint = request
+                .fingerprint
+                .take()
+                .ok_or("missing Duo review fingerprint")?;
+            let approve = request.approve.ok_or("missing Duo decision")?;
+            let code = Zeroizing::new(request.verification_code.take().unwrap_or_default());
+            if id.is_empty()
+                || id.len() > 256
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                || fingerprint.len() != 128
+                || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+                || code.len() > 6
+                || !code.bytes().all(|b| b.is_ascii_digit())
+                || (!approve && !code.is_empty())
+            {
+                return Err("invalid Duo decision fields".into());
+            }
+            Ok(ServerCommand::Duo(DuoCommand::Respond {
+                target,
+                request_id: id,
+                fingerprint,
+                approve,
+                code: code.to_string(),
+            }))
+        }
         "managerItem" => Ok(ServerCommand::ManagementItem {
             id: management_id(request)?,
             reveal: request.reveal,
@@ -533,7 +581,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
 }
 
 fn response_data(action: &str, mut output: String) -> Result<Value, String> {
-    let result = if matches!(action, "managerList" | "managerItem") {
+    let result = if matches!(action, "managerList" | "managerItem" | "managerDuoRequests") {
         serde_json::from_str(&output).map_err(|_| "invalid management response".to_string())
     } else if action == "status" {
         serde_json::from_str::<crate::protocol::ServerStatus>(&output)
@@ -542,6 +590,18 @@ fn response_data(action: &str, mut output: String) -> Result<Value, String> {
     } else if action == "getTotp" {
         let parse = || {
             let output = output.trim();
+            if let Some(value) = output.strip_prefix("HOTP: ") {
+                let (code, state) = value
+                    .split_once(" (counter ")
+                    .ok_or_else(|| "invalid HOTP response from server".to_string())?;
+                let counter = state
+                    .strip_suffix("; next counter saved)")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| "invalid HOTP counter from server".to_string())?;
+                return Ok(
+                    json!({ "code": code, "expires_in": null, "counter": counter, "mode": "hotp" }),
+                );
+            }
             let value = output
                 .strip_prefix("TOTP: ")
                 .ok_or_else(|| output.to_string())?;

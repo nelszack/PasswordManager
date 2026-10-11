@@ -27,6 +27,12 @@
         <p id="dates"></p><p id="authenticator"></p>
         <div class="actions"><button>Save item</button><button id="delete" type="button">Move to trash</button><button id="cancel" type="button">Close</button></div>
       </form>
+      <section id="duo" hidden aria-labelledby="duoTitle">
+        <h3 id="duoTitle">Duo Push</h3>
+        <p>Review the application, account and location before responding. Approve only a login you started.</p>
+        <div class="actions"><button id="duoCheck" type="button">Check requests</button><label><input id="duoWatch" type="checkbox">Monitor while this item is open</label></div>
+        <p id="duoStatus" role="status" aria-live="polite"></p><div id="duoRequests"></div>
+      </section>
     </section>
   </main>
   <section id="generator">

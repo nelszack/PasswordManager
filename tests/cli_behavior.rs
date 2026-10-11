@@ -84,7 +84,8 @@ fn isolated_pm(root: &Path) -> Command {
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("PM_CONFIG_DIR", root.join("config"))
-        .env("PM_DATA_DIR", root.join("data"));
+        .env("PM_DATA_DIR", root.join("data"))
+        .env_remove("COMPLETE");
     command
 }
 
@@ -101,6 +102,95 @@ fn unused_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+#[test]
+fn dynamic_completion_registration_skips_application_initialization() {
+    let root = tempfile::tempdir().unwrap();
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let output = isolated_pm(root.path())
+            .env("COMPLETE", shell)
+            .output_timeout("dynamic completion registration");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let script = String::from_utf8(output.stdout).unwrap();
+        assert!(script.contains("COMPLETE"));
+        assert!(script.contains("pm"));
+        assert!(output.stderr.is_empty());
+    }
+    assert!(!root.path().join("config").exists());
+    assert!(!root.path().join("data").exists());
+}
+
+#[test]
+fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_config() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    let malformed = "synthetic intentionally invalid TOML [";
+    std::fs::write(config.join("config.toml"), malformed).unwrap();
+    for (words, expected) in [
+        (
+            vec!["pm", "duo", ""],
+            vec!["enroll", "requests", "watch", "approve", "deny", "remove"],
+        ),
+        (
+            vec!["pm", "duo", "watch", "--"],
+            vec!["--interval", "--notify", "--id", "--entry-name"],
+        ),
+        (vec!["pm", "duo", "approve", "--"], vec!["--request"]),
+        (
+            vec!["pm", "duo", "enroll", "--mode", ""],
+            vec!["hotp", "totp"],
+        ),
+        (
+            vec!["pm", "totp", "duo", "--mode", ""],
+            vec!["hotp", "totp"],
+        ),
+    ] {
+        let output = isolated_pm(root.path())
+            .env("COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env("_CLAP_IFS", "\n")
+            .args(["--"])
+            .args(&words)
+            .output_timeout("dynamic completion query");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let suggestions = String::from_utf8(output.stdout).unwrap();
+        for candidate in expected {
+            assert!(
+                suggestions.lines().any(|line| line.trim_end() == candidate),
+                "{candidate}: {suggestions}"
+            );
+        }
+    }
+    assert!(!root.path().join("data").exists());
+    assert_eq!(
+        std::fs::read_to_string(config.join("config.toml")).unwrap(),
+        malformed
+    );
+}
+
+#[test]
+fn disabled_dynamic_completion_preserves_normal_cli_help() {
+    let root = tempfile::tempdir().unwrap();
+    for value in ["", "0"] {
+        let output = isolated_pm(root.path())
+            .env("COMPLETE", value)
+            .args(["duo", "--help"])
+            .output_timeout("ordinary CLI help");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: pm duo"));
+        assert!(!root.path().join("data").exists());
+    }
 }
 
 #[test]
@@ -741,6 +831,9 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         {"name": "recovery-code", "value": "synthetic-custom-secret", "secret": true},
         {"name": "environment", "value": "production", "secret": false}
     ]);
+    portable["items"][0]["totp"] = serde_json::json!(
+        "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0"
+    );
     std::fs::write(&json_export, serde_json::to_vec(&portable).unwrap()).unwrap();
 
     let previewed = isolated_pm(root.path())
@@ -763,6 +856,21 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         .output_timeout("pm import");
     assert!(imported.status.success());
     assert!(String::from_utf8_lossy(&run(root.path(), port, &["view"]).stdout).contains("bob"));
+
+    let hotp = run(
+        root.path(),
+        port,
+        &["totp", "show", "--entry-name", "example"],
+    );
+    assert!(
+        hotp.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hotp.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&hotp.stdout)
+            .contains("HOTP: 755224 (counter 0; next counter saved)")
+    );
 
     assert!(
         run(root.path(), port, &["config", "--clipboard-timeout", "0"])
@@ -859,6 +967,21 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         .output_timeout("pm unlock restored backup");
     assert!(unlocked.status.success());
     assert!(String::from_utf8_lossy(&run(root.path(), port, &["view"]).stdout).contains("example"));
+
+    let hotp = run(
+        root.path(),
+        port,
+        &["totp", "show", "--entry-name", "example"],
+    );
+    assert!(
+        hotp.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hotp.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&hotp.stdout)
+            .contains("HOTP: 287082 (counter 1; next counter saved)")
+    );
 
     assert!(run(root.path(), port, &["kill"]).status.success());
     server.active = false;

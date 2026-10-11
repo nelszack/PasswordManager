@@ -37,8 +37,9 @@ function securityEnvironment() {
             onInstalled: event(), onStartup: event(), onMessage: event(fn => listener = fn),
             sendMessage(_message, callback) { callback?.(); },
             connectNative() {
+                let portListener;
                 return {
-                    onMessage: event(fn => nativeListener = fn),
+                    onMessage: event(fn => { portListener = fn; nativeListener = fn; }),
                     onDisconnect: event(fn => disconnect = fn),
                     postMessage(request) {
                         requests.push(request);
@@ -54,7 +55,7 @@ function securityEnvironment() {
                         if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
                         else if (holdCredentials && request.action === "getLoginItems") heldCredentialResponse = response;
                         else if (holdSave && ["saveCredentials", "updateCredentials"].includes(request.action)) heldSaveResponse = response;
-                        else queueMicrotask(() => nativeListener(response));
+                        else queueMicrotask(() => portListener(response));
                     }
                 };
             }
@@ -116,7 +117,7 @@ test("vault management cannot be called by websites, content scripts, or other e
     const env = securityEnvironment();
     await new Promise(resolve => setImmediate(resolve));
     const manager = { id: "abcdefghijklmnopabcdefghijklmnop", url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/manager.html" };
-    for (const action of ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete"]) {
+    for (const action of ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "managerDuoRequests", "managerDuoRespond"]) {
         for (const sender of [env.sender, env.pickerSender, { ...manager, id: "different" }, { ...manager, url: manager.url + ".evil" }]) {
             const before = env.requests.length;
             assert.equal((await env.message({ action, entryId: 1, password: "synthetic" }, sender)).success, false);

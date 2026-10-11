@@ -175,6 +175,26 @@ fn parses_totp_server_response() {
 }
 
 #[test]
+fn parses_hotp_response_without_a_time_based_expiration() {
+    let data = response_data(
+        "getTotp",
+        "HOTP: 755224 (counter 0; next counter saved)\n".into(),
+    )
+    .unwrap();
+    assert_eq!(data["code"], "755224");
+    assert_eq!(data["counter"], 0);
+    assert_eq!(data["mode"], "hotp");
+    assert!(data["expires_in"].is_null());
+    assert!(
+        response_data(
+            "getTotp",
+            "HOTP: 755224 (counter invalid; next counter saved)".into()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn native_requests_are_whitelisted_and_use_stable_ids() {
     let mut logins = NativeRequest {
         action: "getLoginItems".into(),
@@ -327,4 +347,32 @@ fn native_status_requires_and_preserves_structured_server_state() {
     assert_eq!(parsed["warning"], "Lock failed");
     assert!(response_data("status", "Status: Unlocked".into()).is_err());
     assert!(response_data("status", r#"{"locked":"false","version":"0.1.0"}"#.into()).is_err());
+}
+
+#[test]
+fn duo_decisions_require_exact_identifiers_boolean_and_bounded_code() {
+    let base = json!({"id":1,"action":"managerDuoRespond","entryId":4,"requestId":"test-request","fingerprint":"a".repeat(128),"approve":true,"verificationCode":"012"});
+    let mut request: NativeRequest = serde_json::from_value(base.clone()).unwrap();
+    let command = command_for_request(&mut request).unwrap();
+    assert!(
+        matches!(command,ServerCommand::Duo(DuoCommand::Respond {approve:true,ref code,..}) if code=="012")
+    );
+    assert!(request.verification_code.is_none());
+    for (key, value) in [
+        ("entryId", json!(0)),
+        ("requestId", json!("../escape")),
+        ("fingerprint", json!("short")),
+        ("verificationCode", json!("1234567")),
+        ("verificationCode", json!("12x")),
+        ("approve", Value::Null),
+    ] {
+        let mut invalid = base.clone();
+        invalid[key] = value;
+        let mut request: NativeRequest = serde_json::from_value(invalid).unwrap();
+        assert!(command_for_request(&mut request).is_err(), "{key}");
+    }
+    let mut denied = base;
+    denied["approve"] = json!(false);
+    let mut request: NativeRequest = serde_json::from_value(denied).unwrap();
+    assert!(command_for_request(&mut request).is_err());
 }

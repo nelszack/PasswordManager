@@ -184,7 +184,10 @@ async fn auto_lock_clears_secrets_even_when_the_vault_cannot_be_written() {
                 password: "synthetic-secret".into(),
                 ..VaultEntry::default()
             }],
-            metadata: VaultMetadata { filename },
+            metadata: VaultMetadata {
+                filename,
+                duo_session: None,
+            },
             recovery: RecoveryData::default(),
         }),
     }));
@@ -213,6 +216,7 @@ fn manual_lock_does_not_depend_on_a_writable_vault_destination() {
         }],
         metadata: VaultMetadata {
             filename: "missing-directory/vault.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     });
@@ -253,6 +257,7 @@ async fn auto_lock_completes_while_a_detached_breach_audit_is_slow() {
         }],
         metadata: VaultMetadata {
             filename: "auto-lock-during-audit.vault".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -416,6 +421,7 @@ fn zeroization_clears_entry_fields_and_vault_contents() {
         entries: vec![entry.clone()],
         metadata: VaultMetadata {
             filename: "test.enc".to_string(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -911,6 +917,11 @@ fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
                 target: Target::Id(1),
                 copy_timeout: None,
             }),
+            ServerCommand::Totp(TotpCommand::Duo {
+                target: Target::Id(1),
+                activation: "duo://synthetic-activation".into(),
+                mode: OtpMode::Hotp,
+            }),
             ServerCommand::Export {
                 path: "must-not-be-created.json".into(),
                 force: false,
@@ -939,4 +950,141 @@ fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
         &mut session,
     );
     assert!(matches!(stopped.effect, CommandEffect::StopServer));
+}
+
+#[test]
+fn duo_polling_does_not_extend_auto_lock_and_locked_vaults_cannot_respond() {
+    let state = test_connection_state(VaultSession::default());
+    let mut session = VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Password("synthetic".into())),
+        },
+        vault: Some(Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                ..Default::default()
+            }],
+            metadata: VaultMetadata::default(),
+            recovery: RecoveryData::default(),
+        }),
+    };
+    let outcome = execute_command(
+        state.clone(),
+        ServerCommand::Duo(DuoCommand::Requests {
+            target: Target::Id(1),
+        }),
+        &mut session,
+    );
+    assert_eq!(outcome.responses[0].code, ResponseCode::NotFound);
+    assert_eq!(state.lock_generation.load(Ordering::Acquire), 0);
+    session.credentials.locked = true;
+    for command in [
+        DuoCommand::Requests {
+            target: Target::Id(1),
+        },
+        DuoCommand::Respond {
+            target: Target::Id(1),
+            request_id: "test-id".into(),
+            fingerprint: "a".repeat(128),
+            approve: true,
+            code: "012".into(),
+        },
+    ] {
+        let outcome = execute_command(state.clone(), ServerCommand::Duo(command), &mut session);
+        assert_eq!(outcome.responses[0].code, ResponseCode::Failure);
+        assert_eq!(outcome.responses[0].message, "Vault locked.");
+    }
+    assert_eq!(state.lock_generation.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn a_slow_duo_poll_does_not_block_lock_and_cannot_return_a_stale_review() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        assert!(request.starts_with(b"GET "));
+        started_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        let body = br#"{"stat":"OK","response":{"transactions":[]}}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.write_all(body).await.unwrap();
+    });
+    let private = crate::duo::crypto::new_key().unwrap();
+    let mut session = VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Key("synthetic".into())),
+        },
+        vault: Some(Vault::default()),
+    };
+    let vault = session.vault.as_mut().unwrap();
+    vault.entries.push(VaultEntry {
+        id: 1,
+        ..Default::default()
+    });
+    vault.recovery.duo.push(crate::vault::DuoRecord {
+        entry_id: 1,
+        review_key: None,
+        credentials: crate::types::DuoCredentials {
+            host: "api-test.duosecurity.com".into(),
+            akey: "synthetic".into(),
+            pkey: "synthetic".into(),
+            private_key: crate::duo::crypto::private_pem(&private)
+                .unwrap()
+                .to_string(),
+        },
+    });
+    let mut prepared = vault
+        .prepare_duo_poll(
+            DuoCommand::Requests {
+                target: Target::Id(1),
+            },
+            &session.credentials,
+        )
+        .unwrap();
+    // Only the synthetic transport differs; the production finish path is used.
+    prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
+    let session = Arc::new(Mutex::new(session));
+    let pending_session = Arc::clone(&session);
+    let pending = tokio::spawn(async move {
+        let mut responses = vec![];
+        finish_duo(prepared, pending_session, &mut responses).await;
+        responses
+    });
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut guard = tokio::time::timeout(Duration::from_millis(250), session.lock())
+        .await
+        .expect("Duo network wait must not block vault locking");
+    guard.lock();
+    assert!(guard.is_locked());
+    assert!(guard.vault.is_none());
+    assert!(guard.credentials.keypass.is_none());
+    drop(guard);
+    release_tx.send(()).unwrap();
+    let responses = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].code, ResponseCode::Failure);
+    assert_eq!(responses[0].message, "vault is locked");
+    http.await.unwrap();
 }

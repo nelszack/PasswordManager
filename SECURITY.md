@@ -9,8 +9,9 @@ Report security weaknesses privately through
 [GitHub's vulnerability reporting page](https://github.com/nelszack/PasswordManager/security/advisories/new)
 when private reporting is available. If GitHub does not offer private reporting,
 open an issue requesting a private reporting channel without publishing exploit
-details. Do not put passwords, vault files, key files, session tokens, TOTP
-secrets, or unredacted browser traces in an issue or report.
+details. Do not put passwords, vault files, key files, session tokens, OTP
+secrets, Duo activation links or signing keys, or unredacted browser traces in
+an issue or report.
 
 Include the affected version and platform, the relevant trust boundary, expected
 and observed behavior, and a minimal reproduction using synthetic credentials.
@@ -26,7 +27,8 @@ maintained security-fix branch.
 ### Assets and boundaries
 
 The assets are master passwords, external keys, decrypted entries, password
-history, deleted items, TOTP secrets, and the authenticated local session token.
+history, deleted items, TOTP/HOTP secrets and counters, Duo device signing keys,
+and the authenticated local session token.
 
 The trusted components are the local operating system and user account, the
 `pm` executable, its dependencies, and the installed browser extension and native
@@ -51,8 +53,8 @@ The extension derives site identity from browser sender metadata and requires
 site-scoped selection rather than trusting a domain supplied by page scripts.
 Vault-management requests are separately restricted to the extension's manager
 page using the browser-provided extension ID and page URL. List responses contain
-summaries only; explicit reveal requests fetch one selected item. TOTP seeds are
-never returned by vault-management reads. Management copying uses the server's
+summaries only; explicit reveal requests fetch one selected item. OTP seeds and
+Duo signing keys are never returned by vault-management reads. Management copying uses the server's
 clipboard worker and existing lock cleanup.
 Site matching parses HTTP(S) URLs and compares scheme, normalized hostname,
 and effective port; bare domains default to HTTPS. Ambiguous URLs fail closed.
@@ -65,7 +67,26 @@ New Unix key files are private at creation; Windows key
 writers deny shared data access until the private ACL is installed and the
 writer closes. Terminal presentation escapes controls in imported metadata.
 
+Duo enrollment and Push requests restrict hosts to HTTPS Duo endpoints, validate
+certificates, disable redirects, and bound response sizes and network timeouts.
+Push uses RSA-SHA512 signatures through AWS-LC. Device credentials stay inside
+the encrypted vault; network waits carry signed requests without the private key.
+Review tokens use an ephemeral MAC key that is omitted from serialization and
+cleared on lock. Decisions re-fetch and validate the exact request and unlock
+session before signing. The CLI requires interactive confirmation, and extension
+decision buttons require trusted clicks and confirmation. Verified Push requires
+the code shown on the login page; codes from the Push payload are never supplied.
+Unknown Push modes and unsupported device requirements block approval.
+Duo network waits release the vault mutex, and the extension routes lock/status
+separately from Push requests. Enrollment commits require the original unlock
+session and unchanged target item.
+
 ### What these controls protect
+
+Dynamic shell completion runs before asynchronous runtime and application
+initialization. Completion queries use CLI metadata and filesystem path hints,
+without reading vault contents or configuration, unlocking a vault, or sending
+commands to the server. Native-host invocations bypass completion activation.
 
 Copying a locked encrypted vault without its password or external key does not
 provide plaintext access. Ciphertext or authenticated-header modification causes
@@ -118,7 +139,15 @@ verify which credential opens the file after an interrupted operation.
   with their original credentials after rekeying. Rekeying does not securely
   erase storage blocks or detect rollback to an older authenticated vault.
 - CSV and portable JSON exports contain plaintext secrets. Protect their storage
-  and handle them separately from encrypted backups.
+  and handle them separately from encrypted backups. Portable JSON and encrypted
+  backups include Duo Push credentials; CSV omits OTP and Duo credentials.
+- A restored Duo enrollment uses the same device identity. Push decisions do not
+  advance the local HOTP counter, but HOTP generation on separate vault copies
+  has independent counters that are not synchronized.
+- Duo mobile endpoints are undocumented and may change or reject this client.
+  This client cannot provide mobile hardware attestation. Locking cannot recall
+  an already-sent decision; a failed decision response can have an unknown outcome.
+  Enrollment can consume an activation link even if the result cannot be saved.
 - Encrypted-header resource limits bound individual KDF requests, but availability
   under hostile local files or authenticated clients is not guaranteed.
 

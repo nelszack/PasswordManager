@@ -13,3 +13,6 @@ button:disabled { cursor: default; opacity: .5; }
 .custom-field { padding: 12px; border: 1px solid #8886; border-radius: 5px; margin: 10px 0; }
 [hidden] { display: none !important; }
 @media (max-width: 700px) { main { display: block; } body { padding: 12px; } }
+
+.duo-request { border: 1px solid #8886; border-radius: 5px; padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.duo-request p { margin: 6px 0; }

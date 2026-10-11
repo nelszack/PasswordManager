@@ -20,7 +20,7 @@ A secure, local-first password manager with a CLI interface and browser extensio
 - **Sorting and Rich Filters**: Sort listings and filter by type, TOTP, or weakness
 - **Custom Fields**: Searchable fields and privately prompted secret fields
 - **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
-- **TOTP Authenticator**: Encrypted per-entry authenticator secrets with current-code generation
+- **OTP Authenticator**: Encrypted per-entry TOTP/HOTP secrets, persistent HOTP counters, and Duo passcode / manual Push enrollment
 - **Browser Extension**: Login, payment-card, identity, and TOTP autofill with save/update prompts
 - **Browser Vault Manager**: Extension-owned unlock, search, add/edit, reveal/copy, and delete-to-trash controls
 - **In-page Password Generation**: Fill new-password and confirmation fields securely
@@ -46,9 +46,9 @@ Add that directory to your `PATH`, or use the full executable path in the
 commands below. Release archives include a prebuilt binary and the extension;
 keep the binary at a stable path before registering the browser native host.
 
-Building does not change shell completions or browser native-host registrations.
-Use `pm completions` to generate a completion file as described in
-[Shell Completions](#shell-completions), and register the native host once with
+Building does not change shell setup or browser native-host registrations.
+Enable dynamic completions as described in [Shell Completions](#shell-completions),
+and register the native host once with
 `pm native-host install` as described in [Browser Extension](#browser-extension).
 
 After upgrading, run the intended executable explicitly to update an existing
@@ -60,8 +60,9 @@ native host while preserving browser manifests and approved extension IDs:
 
 Unix hosts link to that executable. Windows copies it to the registered host;
 fully close the browser, including background processes, before updating.
-Restart the server and reload the extension after upgrading. Regenerate any
-installed shell completions with `pm completions` to pick up new commands.
+Restart the server and reload the extension after upgrading. Open a new shell to
+refresh dynamic completion registration. If using static completion files,
+regenerate them with `pm completions` to pick up new commands.
 
 If a Windows build fails with `failed to remove file ...\\target\\release\\pm.exe`,
 a running process is holding the build executable open. Older native-host
@@ -360,9 +361,9 @@ breach findings, identify entries with unchecked breach status, and return a
 failure exit status to indicate an incomplete audit. Up to eight requests run
 concurrently with a 15-second request timeout and a four-minute overall deadline.
 
-### TOTP Authenticator
+### TOTP and HOTP Authenticators
 
-Paste either a Base32 authenticator secret or a complete `otpauth://totp/...`
+Paste either a Base32 TOTP secret or a complete `otpauth://totp/...` or `otpauth://hotp/...`
 URI into the hidden setup prompt:
 
 ```bash
@@ -372,11 +373,152 @@ pm totp show --id 3 --copy --copy-time 20
 pm totp remove --id 3
 ```
 
-The output includes the current code and its remaining validity. Raw Base32
+TOTP output includes the current code and its remaining validity. Raw Base32
 secrets use the standard SHA-1, six-digit, 30-second configuration; OTPAuth
 URIs can specify their algorithm, digits, and period. Correct system time is
 required for valid codes. Entry and trash listings mark configured accounts
-with `[TOTP]` without revealing their authenticator secrets.
+with an authenticator indicator without revealing their secrets. The existing
+`--totp`, `--no-totp`, and `--require-totp` options include HOTP authenticators too.
+
+HOTP URIs must include an unsigned `counter` parameter, for example
+`otpauth://hotp/Example?secret=BASE32_SECRET&counter=0`. HOTP supports SHA-1,
+SHA-256, or SHA-512 and six to eight digits. Each `pm totp show` or browser
+authenticator selection generates the code at the saved counter and atomically
+saves the next counter in the encrypted vault **before returning the code**.
+HOTP output shows the consumed counter rather than a countdown. Request codes
+when you intend to use them: repeatedly generating unused codes can move beyond
+the provider's acceptance window. Restoring an older backup or importing an old
+export also restores its counter and may require provider resynchronization.
+
+#### Duo passcode enrollment
+
+Use a fresh Duo enrollment link for a separate device, then paste either the
+`https://m-….duosecurity.com/activate/…` setup link or its `duo://…` activation
+link into the hidden prompt:
+
+```bash
+pm totp duo --entry-name "work"
+pm totp show --entry-name "work" --copy
+```
+
+Duo enrollment defaults to **HOTP**. If your organization accepts time-based
+codes, select TOTP explicitly with `pm totp duo --entry-name "work" --mode totp`.
+The link does not identify which passcode type your organization accepts; there
+is no automatic fallback. The command saves the authenticator without generating
+or consuming its first HOTP code. Enrollment refuses to overwrite an existing
+authenticator; remove it explicitly first if replacing it.
+
+This is experimental compatibility with Duo's undocumented mobile activation
+endpoint, based on the [duo-hotp protocol implementation](https://github.com/WillForan/duo-hotp).
+It enrolls for **passcode generation only**. Push credentials are discarded;
+use `pm duo enroll` below for push support. Keep an official Duo Mobile device
+as a fallback while testing this experimental client. Organizational settings can reject this enrollment
+or its passcodes. Activation links are consumed by enrollment and can expire;
+an already-used link does not export an existing phone's secret or HOTP counter.
+If enrollment succeeds but saving fails, or the request times out, check your
+Duo device enrollment before trying again with a fresh link.
+
+At sign-in, Duo may automatically send a push for an enrolled device. Choose
+**Other options → Duo Mobile passcode** for the device enrolled through `pm`,
+then enter the code from `pm totp show --entry-name "work"`. Available sign-in
+methods are controlled by your organization's [Duo authentication policy](https://duo.com/docs/policy#authentication-methods).
+If the passcode method is missing, an administrator must check whether it is
+allowed for your account and application. Enrollment through `pm` cannot change
+those policies.
+
+The importer restricts setup and activation requests to HTTPS Duo hosts, bounds
+responses, and keeps links and returned secrets out of diagnostics. The passcode-only command stores the OTP configuration in the encrypted vault;
+no plaintext secret files are created.
+
+Enrollment failures identify the setup-page or activation step and show the HTTP
+status and Duo error code when available. Known rejection reasons, parameter
+names, and fixed topic hints from error messages are displayed, while arbitrary
+response text stays private. Topic hints report what Duo's response mentions;
+they do not establish the rejection's cause. If reporting
+a failure, share this error message rather than the activation link or response
+body. Restart the server after rebuilding to load updated enrollment behavior.
+Activation fields are sent as a URL-encoded POST form with the matching content
+type; only `customer_protocol=1` is sent in the query string.
+HTTP 403 / Duo code 40301 during mobile activation does not identify the root
+cause by itself. The compatibility profile uses the form fields and version
+metadata inspected in the [official Android 4.123.0 app](https://dl.duosecurity.com/DuoMobile-latest.apk),
+with a header that also identifies PasswordManager and its lack of Duo certificate
+pinning. HTTPS certificate validation remains enabled. Mobile security measurements
+and hardware attestation are not available and are not fabricated; an organization
+requiring them may reject enrollment. Client compatibility and enrollment
+restrictions both need to be considered. Switching
+between HOTP and TOTP cannot resolve a failure before Duo returns the OTP secret.
+
+#### Duo Push
+
+Use a **fresh activation link** for push enrollment. The earlier `pm totp duo`
+command discarded the private signing key, so its device cannot be upgraded in
+place. Enroll a new device in Duo and replace the local authenticator:
+
+```bash
+pm duo enroll --entry-name "work" --replace
+pm duo requests --entry-name "work"
+pm duo watch --entry-name "work" --notify
+# In another terminal, use the exact request ID printed by requests/watch:
+pm duo approve --entry-name "work" --request REQUEST_ID
+pm duo deny --entry-name "work" --request REQUEST_ID
+```
+
+The enrollment prompt hides the activation link. Push credentials (the Duo host,
+account and device identifiers, and RSA signing key) are stored inside the
+**encrypted vault**, alongside the passcode authenticator. Push enrollment uses
+Duo's `use_totp` response when present, otherwise HOTP; `--mode` overrides this.
+`--replace` replaces the local OTP and push enrollment after the new activation
+succeeds. It does not remove the old device from Duo. An error after activation
+may have consumed the link; check device enrollment before retrying.
+
+Select this device at login, then check or monitor requests. In the browser
+extension, open **Vault manager**, select the enrolled item and use its **Duo
+Push** panel. Reload the extension after updating. Monitoring polls while this
+item is open; CLI monitoring runs until Ctrl+C, an error, or vault lock. It does
+not register with Android/iOS notification services. `--notify` provides passive
+desktop alerts using `notify-send`, if available. Polling does not reset auto-lock.
+
+Each approval or denial requires an explicit confirmation after reviewing the
+application, account, location, expiry and request ID. Approve only a login you
+started. Verified Push requires you to type the code shown on the **login page**;
+no code is extracted from the push payload or automatically supplied. Immediately
+before responding, the server fetches the exact request again and checks that
+its context and requirements have not changed. Expired or changed requests cannot
+be answered using an earlier review. Review tokens are keyed and valid only for
+the current unlock session; locking and reopening the vault requires a new review.
+Duo network waits do not hold the vault lock. An enrollment that finishes after
+locking, switching vaults, or changing its item is not saved; the activation link
+may already have been consumed. A decision timeout has an unknown outcome;
+check the login before retrying. Requests that require device biometrics, GPS,
+proximity, passwordless device authentication or key rotation cannot be approved
+by this client. Unknown verification requirements also block approval. Denial
+remains available for supported pending-request shapes.
+
+Duo Push uses an undocumented mobile API and may be rejected by organization
+policy or future server changes. HTTPS validation is enabled, and requests use
+RSA-SHA512 signatures through the AWS-LC backend also used by rustls. This client
+cannot provide mobile hardware attestation.
+An administrator must permit a compatible authentication method; enrollment does
+not change organization policy.
+
+`pm duo remove --entry-name "work"` removes local push credentials and retains
+passcodes; remove the device separately in Duo. Push credentials follow trash,
+restore and purge operations. Encrypted backups and **plaintext portable JSON
+exports** include them; CSV exports omit them, just as they omit OTP secrets.
+
+Restoring an encrypted backup on another computer preserves the same Duo device
+identity. Both copies should be able to fetch the same pending Push requests when
+their vaults are unlocked and monitoring is enabled. Responding on either copy
+resolves that request; it does not create a second enrolled device. Simultaneous
+use on two computers has not been tested against live Duo.
+
+Approving or denying a Push request does **not** advance the local HOTP counter.
+The Verified Push number from the login page is separate from HOTP. Generating
+an HOTP passcode advances only that vault copy's counter, and backup/restore does
+not synchronize later changes between computers. Use one active copy for HOTP
+passcode generation. Use fresh links for separate enrollments, and avoid
+simultaneous enrollments for the same item.
 
 RFC 4226 specifies a 128-bit minimum secret and recommends 160 bits. Some
 providers, including GitHub, issue 80-bit secrets for compatibility. Provider
@@ -469,8 +611,9 @@ Exports and backups must be saved outside the application's data and configurati
 directories. `--force` cannot override this protection.
 
 For a complete backup that preserves entries, stable IDs, item types, additional
-URLs, custom fields, password-age metadata, password history, trash, and TOTP
-configurations, use the encrypted backup commands:
+URLs, custom fields, password-age metadata, password history, trash, TOTP/HOTP
+configurations and counters, and Duo Push credentials, use the encrypted backup
+commands:
 
 ```bash
 # Prompts for and confirms an independent backup password
@@ -649,8 +792,44 @@ pm get --id 3 --password-only
 
 ### Shell Completions
 
-Generate or replace a completion file explicitly using the intended installed
-executable. Use a separate file for the chosen shell:
+Dynamic completions query the installed `pm` for current commands, flags and
+value choices on each Tab press. They run before application initialization,
+without loading configuration, unlocking a vault, or contacting the server.
+Add the line for your shell to its startup configuration:
+
+```bash
+# Bash: add to ~/.bashrc
+source <(COMPLETE=bash pm)
+
+# Zsh: add to ~/.zshrc
+source <(COMPLETE=zsh pm)
+```
+
+```fish
+# Fish: add to ~/.config/fish/completions/pm.fish
+COMPLETE=fish pm | source
+```
+
+```elvish
+# Elvish: add to ~/.elvish/rc.elv
+eval (E:COMPLETE=elvish pm | slurp)
+```
+
+```powershell
+# PowerShell: add to $PROFILE
+$env:COMPLETE = 'powershell'
+try { pm | Out-String | Invoke-Expression } finally { Remove-Item Env:\COMPLETE }
+```
+
+Replace any existing `pm` completion registration or source line with the dynamic
+line, then open a new shell. Ensure the intended `pm` executable is on `PATH`
+before that line runs. The dynamic interface uses Clap's `unstable-dynamic`
+feature; generate registration at shell startup so it follows library upgrades.
+In Bash, `complete -p pm` should name `_clap_complete_pm`. Refresh an existing
+session with `source <(COMPLETE=bash pm)`.
+
+Static completions remain available. Generate or replace a separate file for the
+chosen shell using the intended installed executable:
 
 ```bash
 # Bash: bash-completion can load this standard user location
@@ -675,10 +854,10 @@ pm completions powershell --output "$HOME/pm-completions.ps1"
 . "$HOME/pm-completions.ps1"
 ```
 
-Supported shells are `bash`, `zsh`, `fish`, `elvish`, and `powershell`. Omitting
-`--output` or using `--output -` writes to standard output. Reload your shell after
-setup. If Bash still completes filenames, check `complete -p pm` and source the
-file from `~/.bashrc`:
+These static files support `bash`, `zsh`, `fish`, `elvish`, and `powershell`.
+Omitting `--output` or using `--output -` writes to standard output. Reload your
+shell after setup. If a static Bash setup still completes filenames, check
+`complete -p pm` and source the file from `~/.bashrc`:
 
 ```bash
 source ~/.local/share/bash-completion/completions/pm
@@ -696,6 +875,10 @@ the name or visibility of a hidden field whose value is not currently shown.
 Revealed values clear after 30 seconds; locking or disconnecting clears the editor.
 Copying uses the configured server clipboard timeout and lock cleanup.
 Multiline note bodies and SSH private keys have their own editor.
+
+Items enrolled with `pm duo enroll` show a **Duo Push** panel with request checks,
+monitoring, and explicit **Approve login** / **Deny login** controls. See
+[Duo Push](#duo-push) for enrollment, verification codes, and backup behavior.
 
 The manager also contains browser generator settings: password length,
 uppercase/lowercase/digits, a custom symbol set, ambiguous-character exclusion,
@@ -758,11 +941,12 @@ password locally with the browser's cryptographic random-number generator and
 fills matching new/confirmation fields. The generated value is not sent across
 the extension bridge unless the user submits and chooses to save it.
 
-For entries configured with TOTP, the extension also places an authenticator
+For entries configured with TOTP or HOTP, the extension also places an authenticator
 button beside fields marked `autocomplete="one-time-code"` or clearly labelled
 as OTP/2FA verification fields. Choose the account to fetch and fill a current
 code. Only the generated code and its remaining lifetime are returned to the
-extension; the encrypted TOTP secret never leaves the vault server.
+extension; the encrypted OTP secret never leaves the vault server. Selecting an
+HOTP authenticator consumes one counter, just like `pm totp show`.
 
 Payment-card and identity fields also receive contextual picker buttons. The
 actual selection happens in a separate extension-owned window that the webpage
@@ -975,12 +1159,16 @@ publish them.
 
 ## Development
 
-Vault logic lives in `src/vault/`, grouped by entries, queries, recovery, TOTP,
+Vault logic lives in `src/vault/`, grouped by entries, queries, recovery, OTP, Duo,
 imports, exports, backups, and persistence. Read operations return domain records;
 `src/server/presentation.rs` renders CLI output, and `src/server/response.rs`
-handles encrypted protocol delivery. Commands execute synchronously on a blocking
-worker and return explicit responses and effects through `src/server/outcome.rs`,
-which maps domain errors to response codes. Audit calculations return secret-free
+handles encrypted protocol delivery. Command handlers run on a blocking worker
+and return explicit responses and effects through `src/server/outcome.rs`, which
+maps domain errors to response codes. Duo network waits and breach checks run
+after releasing the live vault mutex. Push I/O carries already signed requests
+without the RSA private key; decisions recheck the live unlock session after
+fetching current requests. Enrollment saves also check the session and item state.
+Audit calculations return secret-free
 structured findings; presentation renders their CLI output. Native clients
 use structured server status; the CLI retains its human-readable status output.
 

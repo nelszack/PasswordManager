@@ -8,9 +8,9 @@ use crate::{
         data_dir, file_exists, key_file_path, new_key_file_path, set_private_perms, sync_parent,
     },
     types::{
-        AuditOptions, ConflictPolicy, CustomField, EntryChanges, EntryUpdate, ItemKind,
-        ListOptions, PasswordEntry, PasswordType, SearchFilter, SortField, Target, TypedEntry,
-        TypedUpdate,
+        AuditOptions, ConflictPolicy, CustomField, DuoCredentials, EntryChanges, EntryUpdate,
+        ItemKind, ListOptions, PasswordEntry, PasswordType, SearchFilter, SortField, Target,
+        TypedEntry, TypedUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,11 @@ pub(crate) use session::available;
 pub use session::{VaultCredentials, VaultSession};
 mod error;
 pub use error::VaultError;
+mod duo;
+pub(crate) use duo::{DuoPollResult, PreparedDuoEnrollment, PreparedDuoPoll};
 mod recovery;
 mod totp;
+pub use totp::AuthenticatorCode;
 
 mod browser;
 mod management;
@@ -223,6 +226,22 @@ impl std::fmt::Debug for TotpRecord {
     }
 }
 
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone, zeroize::Zeroize)]
+pub struct DuoRecord {
+    pub entry_id: usize,
+    pub credentials: DuoCredentials,
+    /// Ephemeral review MAC key, discarded when the vault locks; never exported.
+    #[serde(skip)]
+    pub(crate) review_key: Option<[u8; 32]>,
+}
+impl std::fmt::Debug for DuoRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DuoRecord")
+            .field("entry_id", &self.entry_id)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct RecoveryData {
     pub password_history: Vec<PasswordRevision>,
@@ -230,6 +249,8 @@ pub struct RecoveryData {
     pub next_entry_id: usize,
     pub totp: Vec<TotpRecord>,
     pub entry_metadata: Vec<EntryMetadata>,
+    #[serde(default)]
+    pub duo: Vec<DuoRecord>,
 }
 
 impl Zeroize for PasswordRevision {
@@ -265,6 +286,7 @@ impl Zeroize for RecoveryData {
         self.next_entry_id.zeroize();
         self.totp.zeroize();
         self.entry_metadata.zeroize();
+        self.duo.zeroize();
         *self = Self::default();
     }
 }
@@ -278,13 +300,24 @@ impl Zeroize for EntryMetadata {
         *self = Self::default();
     }
 }
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct VaultMetadata {
     pub filename: String,
+    /// Ephemeral enrollment review key; never saved, exported, or logged.
+    #[serde(skip)]
+    pub(crate) duo_session: Option<[u8; 32]>,
+}
+impl std::fmt::Debug for VaultMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultMetadata")
+            .field("filename", &self.filename)
+            .finish_non_exhaustive()
+    }
 }
 impl Zeroize for VaultMetadata {
     fn zeroize(&mut self) {
         self.filename.zeroize();
+        self.duo_session.zeroize();
         *self = Self::default();
     }
 }
@@ -367,6 +400,8 @@ struct PortableItem {
     password_changed: Option<String>,
     password_history: Vec<PortableRevision>,
     totp: Option<String>,
+    #[serde(default)]
+    duo: Option<DuoCredentials>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -397,6 +432,7 @@ impl Zeroize for PortableItem {
         self.password_changed.zeroize();
         self.password_history.zeroize();
         self.totp.zeroize();
+        self.duo.zeroize();
     }
 }
 
@@ -418,6 +454,7 @@ struct ImportedItem {
     password_changed: Option<String>,
     password_history: Vec<PortableRevision>,
     totp: Option<String>,
+    duo: Option<DuoCredentials>,
 }
 
 impl Zeroize for ImportedItem {
@@ -429,6 +466,7 @@ impl Zeroize for ImportedItem {
         self.password_changed.zeroize();
         self.password_history.zeroize();
         self.totp.zeroize();
+        self.duo.zeroize();
     }
 }
 
@@ -449,6 +487,7 @@ impl ImportedItem {
             password_changed: None,
             password_history: Vec::new(),
             totp: None,
+            duo: None,
         }
     }
 }

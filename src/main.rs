@@ -9,9 +9,18 @@ use password_manager::{
 use std::fs;
 mod app;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let invoked_as_native_host = native_messaging::invoked_directly();
+    if !invoked_as_native_host {
+        // CompleteEnv modifies its activation environment. Run it while the
+        // process is single-threaded, before Tokio or vault/config startup.
+        clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+    }
+    run(invoked_as_native_host);
+}
+
+#[tokio::main]
+async fn run(invoked_as_native_host: bool) {
     let cli = (!invoked_as_native_host).then(cli_parse);
     if let Some(CliCommands::ClipboardHelper { timeout }) =
         cli.as_ref().and_then(|cli| cli.command.as_ref())

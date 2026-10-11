@@ -1,5 +1,6 @@
 use password_manager::{cli::CliCommands, client, config, server::is_running};
 
+mod duo;
 mod local;
 mod remote;
 

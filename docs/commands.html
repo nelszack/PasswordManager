@@ -209,26 +209,36 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <dl class="flags">
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Report passwords at least this many days old</dd>
         <dt><code>--breaches</code></dt><dd>Privately check password hash prefixes against Pwned Passwords</dd>
-        <dt><code>--require-totp</code></dt><dd>Report login entries that do not have a TOTP authenticator</dd>
+        <dt><code>--require-totp</code></dt><dd>Report login entries that do not have a TOTP or HOTP authenticator</dd>
       </dl>
     </section>
     <section class="command" id="pm-totp">
       <h2><code>pm totp</code></h2>
-      <p>Configure, generate, or remove TOTP authenticator codes</p>
+      <p>Configure, generate, or remove TOTP and HOTP authenticator codes</p>
       <pre><code>Usage: pm totp &lt;COMMAND&gt;</code></pre>
     </section>
     <section class="command" id="pm-totp-set">
       <h2><code>pm totp set</code></h2>
-      <p>Store a Base32 secret or otpauth URI using a hidden prompt</p>
+      <p>Store a Base32 TOTP secret or TOTP/HOTP otpauth URI using a hidden prompt</p>
       <pre><code>Usage: pm totp set &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
       </dl>
     </section>
+    <section class="command" id="pm-totp-duo">
+      <h2><code>pm totp duo</code></h2>
+      <p>Enroll a Duo activation link for passcodes using a hidden prompt</p>
+      <pre><code>Usage: pm totp duo [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>--mode &lt;MODE&gt;</code></dt><dd>Passcode type accepted by your organization; cannot be inferred from the link Default: <code>hotp</code>.</dd>
+      </dl>
+    </section>
     <section class="command" id="pm-totp-show">
       <h2><code>pm totp show</code></h2>
-      <p>Generate the current authentication code</p>
+      <p>Generate a TOTP code or consume and persist the next HOTP counter</p>
       <pre><code>Usage: pm totp show [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
@@ -241,6 +251,73 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <h2><code>pm totp remove</code></h2>
       <p>Remove the authenticator configuration from an entry</p>
       <pre><code>Usage: pm totp remove &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-duo">
+      <h2><code>pm duo</code></h2>
+      <p>Enroll and review Duo Push requests, then explicitly approve or deny them.
+
+Requires an unlocked vault. Push decisions do not advance the HOTP passcode counter. Encrypted backups preserve Duo device credentials.</p>
+      <pre><code>Usage: pm duo &lt;COMMAND&gt;</code></pre>
+    </section>
+    <section class="command" id="pm-duo-enroll">
+      <h2><code>pm duo enroll</code></h2>
+      <p>Enroll a fresh Duo link, keeping push credentials in the encrypted vault</p>
+      <pre><code>Usage: pm duo enroll [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>--replace</code></dt><dd>Replace this entry&#39;s existing authenticator or Duo enrollment</dd>
+        <dt><code>--mode &lt;MODE&gt;</code></dt><dd>Override the passcode mode; by default use Duo&#39;s enrollment response</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-duo-requests">
+      <h2><code>pm duo requests</code></h2>
+      <p>Fetch pending requests for one enrolled device</p>
+      <pre><code>Usage: pm duo requests &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-duo-watch">
+      <h2><code>pm duo watch</code></h2>
+      <p>Monitor pending requests; stop when the vault locks or with Ctrl+C</p>
+      <pre><code>Usage: pm duo watch [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>--interval &lt;INTERVAL&gt;</code></dt><dd>Seconds between polls. Polling does not extend the vault unlock timeout Default: <code>5</code>.</dd>
+        <dt><code>--notify</code></dt><dd>Show passive desktop alerts via notify-send if installed</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-duo-approve">
+      <h2><code>pm duo approve</code></h2>
+      <p>Review one request and confirm approval; prompt for a Verified Push code</p>
+      <pre><code>Usage: pm duo approve --request &lt;REQUEST&gt; &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID printed by requests or watch</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-duo-deny">
+      <h2><code>pm duo deny</code></h2>
+      <p>Review one request and confirm denial</p>
+      <pre><code>Usage: pm duo deny --request &lt;REQUEST&gt; &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID printed by requests or watch</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-duo-remove">
+      <h2><code>pm duo remove</code></h2>
+      <p>Remove local push credentials; remove the device separately in Duo</p>
+      <pre><code>Usage: pm duo remove &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
@@ -410,7 +487,7 @@ A `.json` destination preserves rich metadata; other extensions use CSV. Both fo
     </section>
     <section class="command" id="pm-completions">
       <h2><code>pm completions</code></h2>
-      <p>Generate shell completion definitions</p>
+      <p>Generate static shell completion definitions</p>
       <pre><code>Usage: pm completions [OPTIONS] &lt;SHELL&gt;</code></pre>
       <dl class="flags">
         <dt><code>SHELL &lt;SHELL&gt;</code></dt><dd>Shell whose completion syntax should be generated</dd>

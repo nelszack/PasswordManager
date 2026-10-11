@@ -11,7 +11,7 @@ use password_manager::{
     vault,
 };
 
-fn target_type(target: EntryArgs) -> Target {
+pub(super) fn target_type(target: EntryArgs) -> Target {
     if let Some(id) = target.id {
         Target::Id(id)
     } else if let Some(name) = target.entry_name {
@@ -91,7 +91,11 @@ pub(super) fn run(
     conf: &config::Config,
     client: &client::AuthenticatedClient,
 ) {
-    client.send_command(prepare_command(command, conf));
+    if let CliCommands::Duo { command } = command {
+        super::duo::run(command, client);
+    } else {
+        client.send_command(prepare_command(command, conf));
+    }
 }
 
 fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand {
@@ -237,13 +241,26 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
         }),
         CliCommands::Totp { command } => match command {
             TotpCommands::Set { target } => {
-                match rpassword::prompt_password("TOTP Base32 secret or otpauth URI: ") {
+                match rpassword::prompt_password("Base32 TOTP secret or TOTP/HOTP otpauth URI: ") {
                     Ok(configuration) => ServerCommand::Totp(TotpCommand::Set {
                         target: target_type(target),
                         configuration,
                     }),
                     Err(error) => client::exit_error(
                         &format!("could not read TOTP configuration: {error}"),
+                        1,
+                    ),
+                }
+            }
+            TotpCommands::Duo { target, mode } => {
+                match rpassword::prompt_password("Duo activation link (HTTPS or duo://): ") {
+                    Ok(activation) => ServerCommand::Totp(TotpCommand::Duo {
+                        target: target_type(target),
+                        activation,
+                        mode,
+                    }),
+                    Err(error) => client::exit_error(
+                        &format!("could not read Duo activation link: {error}"),
                         1,
                     ),
                 }

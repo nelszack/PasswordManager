@@ -391,6 +391,41 @@ fn test_totp_commands_parse() {
 }
 
 #[test]
+fn duo_enrollment_defaults_to_hotp_and_accepts_explicit_totp() {
+    let default = Cli::try_parse_from(["pm", "totp", "duo", "--id", "7"]).unwrap();
+    assert!(matches!(
+        default.command,
+        Some(CliCommands::Totp {
+            command: TotpCommands::Duo {
+                mode: crate::types::OtpMode::Hotp,
+                ..
+            }
+        })
+    ));
+    let totp = Cli::try_parse_from([
+        "pm",
+        "totp",
+        "duo",
+        "--entry-name",
+        "work",
+        "--mode",
+        "totp",
+    ])
+    .unwrap();
+    assert!(matches!(
+        totp.command,
+        Some(CliCommands::Totp {
+            command: TotpCommands::Duo {
+                mode: crate::types::OtpMode::Totp,
+                ..
+            }
+        })
+    ));
+    assert!(Cli::try_parse_from(["pm", "totp", "duo", "--id", "7", "--mode", "push"]).is_err());
+    assert!(Cli::try_parse_from(["pm", "totp", "duo"]).is_err());
+}
+
+#[test]
 fn get_output_options_require_explicit_secret_disclosure() {
     let scripted =
         Cli::try_parse_from(["pm", "--json", "get", "--id", "2", "--password-only"]).unwrap();
@@ -440,4 +475,41 @@ fn get_output_options_require_explicit_secret_disclosure() {
             .collect();
         assert!(Cli::try_parse_from(args).is_err());
     }
+}
+
+#[test]
+fn push_cli_requires_selected_entry_and_exact_decision_with_bounded_polling() {
+    use crate::cli::DuoCommands;
+    let cli = Cli::try_parse_from(["pm", "duo", "enroll", "--id", "1", "--replace"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(CliCommands::Duo {
+            command: DuoCommands::Enroll {
+                replace: true,
+                mode: None,
+                ..
+            }
+        })
+    ));
+    for args in [
+        vec!["pm", "duo", "approve", "--id", "1"],
+        vec!["pm", "duo", "requests"],
+        vec!["pm", "duo", "watch", "--id", "1", "--interval", "1"],
+        vec!["pm", "duo", "watch", "--id", "1", "--interval", "61"],
+        vec![
+            "pm",
+            "duo",
+            "approve",
+            "--id",
+            "1",
+            "--request",
+            "x",
+            "--yes",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    assert!(
+        Cli::try_parse_from(["pm", "duo", "watch", "--entry-name", "work", "--notify"]).is_ok()
+    );
 }

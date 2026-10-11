@@ -105,6 +105,15 @@ pub(super) fn validate_backup_vault(vault: &mut Vault) -> Result<(), VaultError>
     {
         return Err(("backup contains duplicate TOTP records".to_string()).into());
     }
+    let mut duo_ids = HashSet::new();
+    for record in &vault.recovery.duo {
+        if !ids.contains(&record.entry_id) || !duo_ids.insert(record.entry_id) {
+            return Err(VaultError::Validation(
+                "backup contains invalid or duplicate Duo records".into(),
+            ));
+        }
+        crate::duo::validate_credentials(&record.credentials)?;
+    }
     let mut metadata_ids = HashSet::new();
     if vault
         .recovery

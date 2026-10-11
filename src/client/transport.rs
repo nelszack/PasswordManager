@@ -66,6 +66,11 @@ impl AuthenticatedClient {
             })
         ) {
             self.breach_timeout
+        } else if matches!(
+            &*command,
+            ServerCommand::Duo(_) | ServerCommand::Totp(TotpCommand::Duo { .. })
+        ) {
+            Duration::from_secs(60)
         } else {
             self.io_timeout
         };

@@ -108,6 +108,7 @@ fn misspelled_entries_field_is_rejected() {
         }],
         metadata: VaultMetadata {
             filename: "invalid.enc".to_string(),
+            duo_session: None,
         },
     };
     let encoded = rmp_serde::to_vec(&invalid).unwrap();
@@ -363,6 +364,7 @@ fn test_delete_entry_returns_false_when_not_found() {
         }],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -398,6 +400,7 @@ fn test_update_entry_returns_false_when_not_found() {
         }],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -472,6 +475,7 @@ fn test_add_entry() {
             }],
             metadata: VaultMetadata {
                 filename: "test.enc".into(),
+                duo_session: None,
             },
             recovery: RecoveryData {
                 next_entry_id: 2,
@@ -499,6 +503,7 @@ fn test_delete_entry_by_id_or_name() {
             }],
             metadata: VaultMetadata {
                 filename: "test.enc".into(),
+                duo_session: None,
             },
             recovery: RecoveryData::default(),
         };
@@ -535,6 +540,7 @@ fn test_update_entry_by_id_or_name() {
             }],
             metadata: VaultMetadata {
                 filename: "test.enc".into(),
+                duo_session: None,
             },
             recovery: RecoveryData::default(),
         };
@@ -572,6 +578,7 @@ fn test_update_entry_by_id_or_name() {
             }],
             metadata: VaultMetadata {
                 filename: "test.enc".into(),
+                duo_session: None,
             },
             recovery: RecoveryData::default(),
         };
@@ -925,6 +932,7 @@ fn test_lock_unlock_with_key_or_password() {
             }],
             metadata: VaultMetadata {
                 filename: filename.clone(),
+                duo_session: None,
             },
             recovery: RecoveryData::default(),
         };
@@ -982,7 +990,8 @@ fn test_create_vault_with_key_or_password() {
                     Some(Vault {
                         entries: Vec::new(),
                         metadata: VaultMetadata {
-                            filename: filename.clone()
+                            filename: filename.clone(),
+                            duo_session: None,
                         },
                         recovery: RecoveryData::default(),
                     }),
@@ -1087,6 +1096,7 @@ fn test_add_duplicate_entry_name() {
         entries: vec![],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -1150,6 +1160,7 @@ fn test_add_multiple_entries_ids_sequential() {
         entries: vec![],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -1183,6 +1194,7 @@ fn test_delete_entry_preserves_other_ids() {
         entries: vec![],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -1248,6 +1260,7 @@ fn test_delete_name_with_only_first_match() {
         ],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -1376,6 +1389,7 @@ fn test_update_no_changes() {
         }],
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     };
@@ -1409,6 +1423,7 @@ fn recovery_test_vault(entries: Vec<VaultEntry>) -> Vault {
         entries,
         metadata: VaultMetadata {
             filename: "test.enc".into(),
+            duo_session: None,
         },
         recovery: RecoveryData::default(),
     }
@@ -2105,7 +2120,7 @@ fn totp_accepts_github_compatible_80_bit_secrets() {
 }
 
 #[test]
-fn totp_follows_trash_restore_and_is_erased_on_purge() {
+fn totp_and_duo_follow_trash_restore_and_are_erased_on_purge() {
     let mut vault =
         recovery_test_vault(vec![recovery_test_entry(7, "service", "alice", "password")]);
     let mut server_info = ServerInfo::default();
@@ -2118,16 +2133,28 @@ fn totp_follows_trash_restore_and_is_erased_on_purge() {
         Some(160)
     );
     assert_eq!(vault.totp_at(&Target::Id(7), 59).unwrap().0, "287082");
+    vault.recovery.duo.push(DuoRecord {
+        review_key: None,
+        entry_id: 7,
+        credentials: DuoCredentials {
+            private_key: "synthetic".into(),
+            host: String::new(),
+            akey: String::new(),
+            pkey: String::new(),
+        },
+    });
 
     vault.delete_entry(Target::Id(7), &mut server_info).unwrap();
     assert!(vault.totp_at(&Target::Id(7), 59).is_err());
     assert_eq!(vault.recovery.totp[0].entry_id, 7);
+    assert_eq!(vault.recovery.duo[0].entry_id, 7);
     vault.restore_trashed(1, &mut server_info).unwrap();
     assert_eq!(vault.totp_at(&Target::Id(7), 59).unwrap().0, "287082");
 
     vault.delete_entry(Target::Id(7), &mut server_info).unwrap();
     vault.purge_trash(None, &mut server_info).unwrap();
     assert!(vault.recovery.totp.is_empty());
+    assert!(vault.recovery.duo.is_empty());
 }
 
 #[test]

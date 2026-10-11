@@ -14,6 +14,7 @@ struct Snapshot {
     history: Vec<(usize, PasswordRevision)>,
     trash: Vec<(usize, TrashedEntry)>,
     totp: Vec<(usize, TotpRecord)>,
+    duo: Vec<(usize, DuoRecord)>,
     metadata: Vec<(usize, EntryMetadata)>,
     next_entry_id: usize,
     all_entries: bool,
@@ -61,6 +62,7 @@ impl Snapshot {
             history: indexed(&vault.recovery.password_history, |r| matches(r.entry_id)),
             trash: indexed(&vault.recovery.trash, |r| matches(r.entry.id)),
             totp: indexed(&vault.recovery.totp, |r| matches(r.entry_id)),
+            duo: indexed(&vault.recovery.duo, |r| matches(r.entry_id)),
             metadata: indexed(&vault.recovery.entry_metadata, |r| matches(r.entry_id)),
             next_entry_id: vault.recovery.next_entry_id,
             all_entries,
@@ -86,6 +88,9 @@ impl Snapshot {
         restore(&mut vault.recovery.totp, &mut self.totp, |r| {
             matches(r.entry_id)
         });
+        restore(&mut vault.recovery.duo, &mut self.duo, |r| {
+            matches(r.entry_id)
+        });
         restore(
             &mut vault.recovery.entry_metadata,
             &mut self.metadata,
@@ -107,6 +112,9 @@ impl Drop for Snapshot {
             record.zeroize();
         }
         for (_, record) in &mut self.totp {
+            record.zeroize();
+        }
+        for (_, record) in &mut self.duo {
             record.zeroize();
         }
         for (_, record) in &mut self.metadata {
@@ -205,6 +213,14 @@ impl Vault {
                     true
                 }
             });
+            vault.recovery.duo.retain_mut(|r| {
+                if ids.contains(&r.entry_id) {
+                    r.zeroize();
+                    false
+                } else {
+                    true
+                }
+            });
             vault.recovery.entry_metadata.retain_mut(|r| {
                 if ids.contains(&r.entry_id) {
                     r.zeroize();
@@ -246,6 +262,16 @@ mod tests {
             entry_id: 1,
             configuration: "authenticator".into(),
         });
+        vault.recovery.duo.push(DuoRecord {
+            review_key: None,
+            entry_id: 1,
+            credentials: DuoCredentials {
+                private_key: "synthetic signing key".into(),
+                host: String::new(),
+                akey: String::new(),
+                pkey: String::new(),
+            },
+        });
         let before = vault.clone();
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _: Result<(), VaultError> = vault.transaction(
@@ -255,6 +281,7 @@ mod tests {
                     vault.entries.remove(0).zeroize();
                     vault.recovery.password_history.clear();
                     vault.recovery.totp.clear();
+                    vault.recovery.duo.clear();
                     vault.recovery.next_entry_id = 500;
                     panic!("abort mutation");
                 },
