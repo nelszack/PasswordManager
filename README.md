@@ -566,7 +566,9 @@ The server also locks on operating-system screen-lock and suspend/resume events,
 even when the inactivity timeout is zero. Linux listens to logind lock hints and
 sleep signals, plus GNOME/KDE/freedesktop screensaver notifications. It holds a
 logind delay inhibitor while preparing for suspend, releasing it after vault
-cleanup. Standalone `hyprlock`, `swaylock`, `i3lock`, and `xsecurelock` processes
+cleanup. When launched in a systemd user scope outside a login session, it uses
+logind's automatic lookup of the user's display session to monitor lock hints.
+Standalone `hyprlock`, `swaylock`, `i3lock`, and `xsecurelock` processes
 owned by the same user are also checked every 250 ms, covering lockers that do
 not publish a D-Bus hint. Windows uses session and power notifications; macOS uses
 workspace sleep/session notifications and the distributed screen-lock notification.

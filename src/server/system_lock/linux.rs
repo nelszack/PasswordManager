@@ -73,6 +73,23 @@ fn inhibitor(manager: &Proxy<'_>) -> zbus::Result<OwnedFd> {
     )
 }
 
+fn resolve_session(
+    by_pid: zbus::Result<OwnedObjectPath>,
+    auto: impl FnOnce() -> zbus::Result<OwnedObjectPath>,
+) -> zbus::Result<OwnedObjectPath> {
+    match by_pid {
+        // Apps launched in systemd user scopes are outside the login session.
+        // Let logind resolve the calling user's display session, returning its
+        // concrete object path so the signal filtering below still works.
+        Err(zbus::Error::MethodError(ref name, _, _))
+            if name.as_str() == "org.freedesktop.login1.NoSessionForPID" =>
+        {
+            auto()
+        }
+        result => result,
+    }
+}
+
 fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
     let connection = Connection::system()?;
     let manager = Proxy::new(
@@ -81,17 +98,19 @@ fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
         "/org/freedesktop/login1",
         "org.freedesktop.login1.Manager",
     )?;
-    let session: Option<OwnedObjectPath> =
-        match manager.call("GetSessionByPID", &(std::process::id(),)) {
-            Ok(path) => {
-                watch.ready("session");
-                Some(path)
-            }
-            Err(error) => {
-                watch.warning("session", error);
-                None
-            }
-        };
+    let session: Option<OwnedObjectPath> = match resolve_session(
+        manager.call("GetSessionByPID", &(std::process::id(),)),
+        || manager.call("GetSession", &("auto",)),
+    ) {
+        Ok(path) => {
+            watch.ready("session");
+            Some(path)
+        }
+        Err(error) => {
+            watch.warning("session", error);
+            None
+        }
+    };
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
         .sender("org.freedesktop.login1")?
@@ -228,4 +247,56 @@ fn desktop(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn method_error(name: &str) -> zbus::Error {
+        let call = zbus::Message::method_call("/org/freedesktop/login1", "GetSessionByPID")
+            .unwrap()
+            .build(&(123_u32,))
+            .unwrap();
+        let reply = zbus::Message::error(&call.header(), name)
+            .unwrap()
+            .build(&())
+            .unwrap();
+        zbus::Error::MethodError(name.try_into().unwrap(), None, reply)
+    }
+
+    #[test]
+    fn process_session_takes_precedence_over_display_session() {
+        let path = OwnedObjectPath::try_from("/org/freedesktop/login1/session/_32").unwrap();
+        let result = resolve_session(Ok(path.clone()), || panic!("unneeded fallback"));
+        assert_eq!(result.unwrap(), path);
+    }
+
+    #[test]
+    fn user_scope_process_resolves_concrete_display_session_path() {
+        let path = OwnedObjectPath::try_from("/org/freedesktop/login1/session/_32").unwrap();
+        let result = resolve_session(
+            Err(method_error("org.freedesktop.login1.NoSessionForPID")),
+            || Ok(path.clone()),
+        );
+        assert_eq!(result.unwrap(), path);
+    }
+
+    #[test]
+    fn other_lookup_errors_are_preserved_without_fallback() {
+        let result = resolve_session(
+            Err(method_error("org.freedesktop.DBus.Error.AccessDenied")),
+            || panic!("must not hide an unrelated failure"),
+        );
+        assert!(result.unwrap_err().to_string().contains("AccessDenied"));
+    }
+
+    #[test]
+    fn missing_display_session_still_reports_an_error() {
+        let result = resolve_session(
+            Err(method_error("org.freedesktop.login1.NoSessionForPID")),
+            || Err(method_error("org.freedesktop.login1.NoSuchSession")),
+        );
+        assert!(result.unwrap_err().to_string().contains("NoSuchSession"));
+    }
 }
