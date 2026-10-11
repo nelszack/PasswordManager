@@ -1,6 +1,6 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundPickers = {
-    create({ chrome, security, protocol, nativeRequest, crypto, setTimeout }) {
+    create({ chrome, security, protocol, nativeRequest, crypto, setTimeout, onLoginSelected }) {
         const pendingPickers = new Map();
         const pickerWindows = new Map();
         const filledLogins = new Map();
@@ -54,7 +54,8 @@ const PasswordManagerBackgroundPickers = {
                 id: item.id,
                 name: String(item.name || ""),
                 username: String(item.username || ""),
-                kind
+                kind,
+                has_duo: item.has_duo === true
             })).filter(item => Number.isSafeInteger(item.id) && item.id > 0);
             return { items: summaries, summaries };
         }
@@ -202,6 +203,9 @@ const PasswordManagerBackgroundPickers = {
                         { action: "securePickerResult", token: request.token, payload },
                         { documentId: pending.documentId }
                     );
+                    if (filledLogin) onLoginSelected?.({
+                        sender: { tab: { id: pending.tabId }, url: pending.domain }, accounts: [selected]
+                    });
                 } catch (error) {
                     if (filledLogin && filledLogins.get(key) === filledLogin) filledLogins.delete(key);
                     throw error;

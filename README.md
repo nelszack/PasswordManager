@@ -457,12 +457,25 @@ place. Enroll a new device in Duo and replace the local authenticator:
 
 ```bash
 pm duo enroll --entry-name "work" --replace
+pm duo watch --entry-name "work" --interactive
+# Or decide once, without copying an ID when exactly one request is pending:
+pm duo approve --entry-name "work"
+pm duo deny --entry-name "work"
+# With multiple requests, select the exact ID printed by requests/watch:
 pm duo requests --entry-name "work"
-pm duo watch --entry-name "work" --notify
-# In another terminal, use the exact request ID printed by requests/watch:
-pm duo approve --entry-name "work" --request REQUEST_ID
 pm duo deny --entry-name "work" --request REQUEST_ID
 ```
+
+Interactive watch displays each request and prompts in the same terminal: type
+`a` then Enter to approve, `d` then Enter to deny, Enter to skip, or `q` then Enter
+to quit. This choice confirms the displayed request; no second confirmation is
+needed. A skipped request is not prompted again unless its context changes or it
+disappears and returns. Verified Push asks for the login-page code after `a`;
+Enter at the code prompt cancels the decision and ends monitoring. Use
+`pm duo watch --entry-name "work" --notify` for passive monitoring instead.
+One-shot `approve`/`deny` still display the request and ask you to type the action
+to confirm. Omitting `--request` with multiple pending requests fails without
+answering any of them.
 
 The enrollment prompt hides the activation link. Push credentials (the Duo host,
 account and device identifiers, and RSA signing key) are stored inside the
@@ -473,13 +486,32 @@ succeeds. It does not remove the old device from Duo. An error after activation
 may have consumed the link; check device enrollment before retrying.
 
 Select this device at login, then check or monitor requests. In the browser
-extension, open **Vault manager**, select the enrolled item and use its **Duo
-Push** panel. Reload the extension after updating. Monitoring polls while this
+extension, a detected Duo challenge opens a separate **Duo Push** window when a
+pending request is available. Review the application, account and location, then
+click **Approve** or **Deny** once. Verified Push requires typing the code from
+the login page into the window; the extension never extracts or supplies that code.
+**Dismiss** closes the window without answering and suppresses that same request
+on the current page. Closing the login page, navigating away, locking the vault
+or disconnecting the native host invalidates the window.
+
+Attach Duo enrollment to the saved login whose URL matches the sign-in site.
+Embedded Duo frames use the parent site's matching logins. A login selected in
+the credential chooser, or recognized during credential submission, is remembered
+for five minutes in the same tab to handle redirects to HTTPS Duo-hosted pages.
+Automatic detection polls about every five seconds while the challenge is visible,
+for up to five minutes. Detection uses visible challenge text; unusual or localized
+pages may need the manual **Vault manager → Duo Push** panel instead. Requests and
+decisions stay inside the extension; the website receives no request details.
+Rebuild and restart the server, update the native host, and reload the extension
+after updating, so login summaries include Duo enrollment availability.
+
+In **Vault manager**, select the enrolled item and use its **Duo Push** panel for
+manual request checks or monitoring. Monitoring polls while this
 item is open; CLI monitoring runs until Ctrl+C, an error, or vault lock. It does
 not register with Android/iOS notification services. `--notify` provides passive
 desktop alerts using `notify-send`, if available. Polling does not reset auto-lock.
 
-Each approval or denial requires an explicit confirmation after reviewing the
+Each approval or denial requires an explicit choice after reviewing the
 application, account, location, expiry and request ID. Approve only a login you
 started. Verified Push requires you to type the code shown on the **login page**;
 no code is extracted from the push payload or automatically supplied. Immediately

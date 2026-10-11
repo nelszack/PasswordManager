@@ -49,12 +49,26 @@ fn browser_login_summaries_are_secret_free_and_selection_is_site_scoped() {
         entry_id: 1,
         configuration: "totp-secret".into(),
     });
+    vault.recovery.duo.push(DuoRecord {
+        entry_id: 1,
+        credentials: crate::types::DuoCredentials {
+            host: "api-test.duosecurity.com".into(),
+            akey: "account-secret".into(),
+            pkey: "device-secret".into(),
+            private_key: "signing-secret".into(),
+        },
+        review_key: None,
+    });
     let summaries = vault.browser_logins_json("https://example.com");
     assert!(!summaries.contains("secret"));
     assert!(!summaries.contains("password"));
     let summaries: serde_json::Value = serde_json::from_str(&summaries).unwrap();
     assert_eq!(summaries.as_array().unwrap().len(), 1);
     assert_eq!(summaries[0]["has_totp"], true);
+    assert_eq!(summaries[0]["has_duo"], true);
+    let other: serde_json::Value =
+        serde_json::from_str(&vault.browser_logins_json("https://other.example")).unwrap();
+    assert_eq!(other[0]["has_duo"], false);
     let selected = vault.browser_login_json("https://example.com", 1).unwrap();
     assert!(selected.contains("first-secret"));
     assert!(!selected.contains("other-secret"));

@@ -17,6 +17,12 @@ impl Vault {
             .iter()
             .map(|record| record.entry_id)
             .collect();
+        let duo_ids: HashSet<_> = self
+            .recovery
+            .duo
+            .iter()
+            .map(|record| record.entry_id)
+            .collect();
         let items = self
             .entries
             .iter()
@@ -29,6 +35,7 @@ impl Vault {
                     "name": entry.name,
                     "username": entry.username,
                     "has_totp": totp_ids.contains(&entry.id),
+                    "has_duo": duo_ids.contains(&entry.id),
                 })
             })
             .collect::<Vec<_>>();

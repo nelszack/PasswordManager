@@ -212,7 +212,7 @@ pub enum CliCommands {
     /// Requires an unlocked vault. Push decisions do not advance the HOTP
     /// passcode counter. Encrypted backups preserve Duo device credentials.
     #[command(
-        after_help = "Examples:\n  pm duo enroll --entry-name work --replace\n  pm duo watch --entry-name work --notify\n  pm duo approve --entry-name work --request REQUEST_ID\n  pm duo deny --entry-name work --request REQUEST_ID\n\nIn the extension, open Vault manager, select the enrolled item, and use Duo Push.\nApprovals and denials require explicit confirmation. Verified Push requires the\ncode shown on the login page. Polling does not extend the vault unlock timeout."
+        after_help = "Examples:\n  pm duo enroll --entry-name work --replace\n  pm duo watch --entry-name work --interactive\n  pm duo approve --entry-name work\n  pm duo deny --entry-name work --request REQUEST_ID\n\nInteractive watch lets you approve or deny in the same terminal after review.\nWithout --request, approve/deny require exactly one pending request.\nIn the extension, open Vault manager, select the enrolled item, and use Duo Push.\nVerified Push requires the code shown on the login page. Polling does not extend\nthe vault unlock timeout."
     )]
     Duo {
         #[command(subcommand)]
@@ -759,22 +759,25 @@ pub enum DuoCommands {
         /// Show passive desktop alerts via notify-send if installed.
         #[arg(long)]
         notify: bool,
+        /// Review and approve/deny in this terminal with a/d, Enter to skip, or q to quit.
+        #[arg(long)]
+        interactive: bool,
     },
     /// Review one request and confirm approval; prompt for a Verified Push code.
     Approve {
         #[command(flatten)]
         target: EntryArgs,
-        /// Exact pending request ID printed by requests or watch.
+        /// Exact pending request ID; omit when exactly one request is pending.
         #[arg(long)]
-        request: String,
+        request: Option<String>,
     },
     /// Review one request and confirm denial.
     Deny {
         #[command(flatten)]
         target: EntryArgs,
-        /// Exact pending request ID printed by requests or watch.
+        /// Exact pending request ID; omit when exactly one request is pending.
         #[arg(long)]
-        request: String,
+        request: Option<String>,
     },
     /// Remove local push credentials; remove the device separately in Duo.
     Remove {

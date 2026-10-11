@@ -1,6 +1,6 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundPrompts = {
-    create({ chrome, security, promptState, pendingCredentials, matchesFilledLogin, nativeRequest, refreshStatus, crypto, setTimeout }) {
+    create({ chrome, security, promptState, pendingCredentials, matchesFilledLogin, nativeRequest, refreshStatus, crypto, setTimeout, onLoginContext }) {
         const pendingCredentialPrompts = new Map();
         const credentialPromptWindows = new Map();
         function credentialPromptSenderAllowed(sender) {
@@ -66,6 +66,7 @@ const PasswordManagerBackgroundPrompts = {
             } catch (_) {
                 return { success: true, skipped: true };
             }
+            onLoginContext?.({ sender, accounts: username ? accounts.filter(account => account.username === username) : accounts });
             // Compare only with a login explicitly released to this tab/frame/origin.
             // Never fetch unselected secrets to test passwords supplied by a page.
             if (await matchesFilledLogin(sender, username, password)) {

@@ -105,6 +105,61 @@ fn unused_port() -> u16 {
 }
 
 #[test]
+fn duo_interaction_requires_a_terminal_and_visible_request_review() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    for flag in ["--json", "--quiet"] {
+        let output = run(
+            root.path(),
+            port,
+            &[flag, "duo", "watch", "--id", "1", "--interactive"],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        let message = if flag == "--json" {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            value["error"].as_str().unwrap().to_owned()
+        } else {
+            String::from_utf8(output.stderr).unwrap()
+        };
+        assert!(
+            message.contains("request details must be visible"),
+            "{message}"
+        );
+    }
+    let started = run(root.path(), port, &["start"]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let _server = ServerGuard {
+        root: root.path().to_path_buf(),
+        port,
+        active: true,
+    };
+    let mut ready = false;
+    for _ in 0..100 {
+        if run(root.path(), port, &["status"]).status.success() {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(ready, "server did not become ready");
+    for args in [
+        vec!["duo", "watch", "--id", "1", "--interactive"],
+        vec!["duo", "approve", "--id", "1"],
+        vec!["duo", "deny", "--id", "1"],
+    ] {
+        let output = run(root.path(), port, &args);
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("terminal"), "{error}");
+        assert!(!error.contains("connect"), "{error}");
+    }
+}
+
+#[test]
 fn dynamic_completion_registration_skips_application_initialization() {
     let root = tempfile::tempdir().unwrap();
     for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
@@ -139,7 +194,13 @@ fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_conf
         ),
         (
             vec!["pm", "duo", "watch", "--"],
-            vec!["--interval", "--notify", "--id", "--entry-name"],
+            vec![
+                "--interval",
+                "--notify",
+                "--interactive",
+                "--id",
+                "--entry-name",
+            ],
         ),
         (vec!["pm", "duo", "approve", "--"], vec!["--request"]),
         (

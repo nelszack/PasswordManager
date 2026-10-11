@@ -19,6 +19,8 @@ process.stderr.write(result.stderr);
 if (result.status !== 0) process.exit(result.status || 1);
 
 const thresholds = {
+    "background_duo.js": [90, 75],
+    "duo_detection.js": [95, 75],
     "background_security.js": [95, 90],
     "background_state.js": [100, 95],
     "content_detection.js": [80, 70],

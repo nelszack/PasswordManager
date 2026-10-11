@@ -73,8 +73,15 @@ Push uses RSA-SHA512 signatures through AWS-LC. Device credentials stay inside
 the encrypted vault; network waits carry signed requests without the private key.
 Review tokens use an ephemeral MAC key that is omitted from serialization and
 cleared on lock. Decisions re-fetch and validate the exact request and unlock
-session before signing. The CLI requires interactive confirmation, and extension
-decision buttons require trusted clicks and confirmation. Verified Push requires
+session before signing. The CLI requires interactive confirmation (an a/d choice
+after review in interactive watch). Extension decision buttons require trusted
+clicks and confirmation. The automatic Duo window uses browser-derived login
+origins and matching login summaries, or a recent same-tab login for Duo-hosted
+redirects. Its tokens and request data are never returned to content scripts.
+A trusted Approve/Deny click confirms the displayed request without another
+dialog. Decisions bind to the reviewed request, active originating document,
+and unlock session; navigation, dismissal and lock invalidate the window.
+Verified Push requires
 the code shown on the login page; codes from the Push payload are never supplied.
 Unknown Push modes and unsupported device requirements block approval.
 Duo network waits release the vault mutex, and the extension routes lock/status

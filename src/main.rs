@@ -1,6 +1,6 @@
 use clap::CommandFactory;
 use password_manager::{
-    cli::{Cli, CliCommands, cli_parse},
+    cli::{Cli, CliCommands, DuoCommands, cli_parse},
     client, clipboard,
     config::try_read_config,
     file::{config_dir, data_dir},
@@ -57,6 +57,22 @@ async fn run(invoked_as_native_host: bool) {
     }
     let cli = cli.expect("native host returned before CLI dispatch");
     client::configure_output(cli.json, cli.quiet);
+    if (cli.json || cli.quiet)
+        && matches!(
+            &cli.command,
+            Some(CliCommands::Duo {
+                command: DuoCommands::Watch {
+                    interactive: true,
+                    ..
+                }
+            })
+        )
+    {
+        client::exit_error(
+            "Interactive Duo watch cannot use --json or --quiet; request details must be visible",
+            2,
+        );
+    }
     let conf = match try_read_config(&config_file) {
         Ok(config) => config,
         Err(error) => client::exit_error(&error, 1),

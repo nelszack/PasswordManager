@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Duo Push · Password Manager</title>
+  <link rel="stylesheet" href="picker.css">
+  <link rel="stylesheet" href="duo_prompt.css">
+</head>
+<body>
+  <main>
+    <h1>Duo Push</h1>
+    <p id="destination"></p>
+    <p class="hint">Approve only a login you started. Check the application, account and location below.</p>
+    <p id="status" role="status" aria-live="polite">Checking requests…</p>
+    <div id="requests"></div>
+    <button id="cancel" type="button">Dismiss</button>
+  </main>
+  <script src="duo_prompt.js"></script>
+</body>
+</html>

@@ -478,7 +478,7 @@ fn get_output_options_require_explicit_secret_disclosure() {
 }
 
 #[test]
-fn push_cli_requires_selected_entry_and_exact_decision_with_bounded_polling() {
+fn push_cli_requires_selected_entry_and_bounded_polling() {
     use crate::cli::DuoCommands;
     let cli = Cli::try_parse_from(["pm", "duo", "enroll", "--id", "1", "--replace"]).unwrap();
     assert!(matches!(
@@ -492,8 +492,10 @@ fn push_cli_requires_selected_entry_and_exact_decision_with_bounded_polling() {
         })
     ));
     for args in [
-        vec!["pm", "duo", "approve", "--id", "1"],
         vec!["pm", "duo", "requests"],
+        vec!["pm", "duo", "approve"],
+        vec!["pm", "duo", "deny"],
+        vec!["pm", "duo", "watch", "--interactive"],
         vec!["pm", "duo", "watch", "--id", "1", "--interval", "1"],
         vec!["pm", "duo", "watch", "--id", "1", "--interval", "61"],
         vec![
@@ -512,4 +514,39 @@ fn push_cli_requires_selected_entry_and_exact_decision_with_bounded_polling() {
     assert!(
         Cli::try_parse_from(["pm", "duo", "watch", "--entry-name", "work", "--notify"]).is_ok()
     );
+    let cli = Cli::try_parse_from([
+        "pm",
+        "duo",
+        "watch",
+        "--id",
+        "1",
+        "--interactive",
+        "--notify",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(CliCommands::Duo {
+            command: DuoCommands::Watch {
+                interactive: true,
+                notify: true,
+                ..
+            }
+        })
+    ));
+    for action in ["approve", "deny"] {
+        let cli = Cli::try_parse_from(["pm", "duo", action, "--id", "1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommands::Duo {
+                command: DuoCommands::Approve { request: None, .. }
+                    | DuoCommands::Deny { request: None, .. }
+            })
+        ));
+        let cli =
+            Cli::try_parse_from(["pm", "duo", action, "--id", "1", "--request", "chosen"]).unwrap();
+        assert!(matches!(cli.command, Some(CliCommands::Duo {
+            command: DuoCommands::Approve { request: Some(id), .. } | DuoCommands::Deny { request: Some(id), .. }
+        }) if id == "chosen"));
+    }
 }

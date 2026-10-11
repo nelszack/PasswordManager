@@ -1,6 +1,6 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundRouter = {
-    create({ chrome, security, relay, nativeRequest, refreshStatus, pickers, prompts, pendingCredentials }) {
+    create({ chrome, security, relay, nativeRequest, refreshStatus, pickers, prompts, pendingCredentials, duo }) {
         const pendingRelays = new Map();
         function sendAction(action, fields, sendResponse, refreshAfter = false) {
             nativeRequest(action, fields)
@@ -17,6 +17,12 @@ const PasswordManagerBackgroundRouter = {
         }
 
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+            const duoActions = { observeDuoChallenge: "observe", getDuoPromptData: "data", completeDuoPrompt: "complete" };
+            if (Object.hasOwn(duoActions, request.action)) {
+                duo[duoActions[request.action]](request, sender).then(sendResponse)
+                    .catch(error => sendResponse({ success: false, error: error.message }));
+                return true;
+            }
             if (typeof request.action === "string" && request.action.startsWith("manager")) {
                 const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("manager.html"));
                 const allowed = ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "managerDuoRequests", "managerDuoRespond"];
@@ -142,6 +148,7 @@ const PasswordManagerBackgroundRouter = {
             }
             if (request.action === "lockVault") {
                 pickers.invalidate();
+                duo.invalidate();
                 sendAction("lock", {}, sendResponse, true);
                 return true;
             }

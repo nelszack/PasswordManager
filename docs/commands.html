@@ -292,26 +292,27 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
         <dt><code>--interval &lt;INTERVAL&gt;</code></dt><dd>Seconds between polls. Polling does not extend the vault unlock timeout Default: <code>5</code>.</dd>
         <dt><code>--notify</code></dt><dd>Show passive desktop alerts via notify-send if installed</dd>
+        <dt><code>--interactive</code></dt><dd>Review and approve/deny in this terminal with a/d, Enter to skip, or q to quit</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-approve">
       <h2><code>pm duo approve</code></h2>
       <p>Review one request and confirm approval; prompt for a Verified Push code</p>
-      <pre><code>Usage: pm duo approve --request &lt;REQUEST&gt; &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo approve [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
-        <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID printed by requests or watch</dd>
+        <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID; omit when exactly one request is pending</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-deny">
       <h2><code>pm duo deny</code></h2>
       <p>Review one request and confirm denial</p>
-      <pre><code>Usage: pm duo deny --request &lt;REQUEST&gt; &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo deny [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
-        <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID printed by requests or watch</dd>
+        <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID; omit when exactly one request is pending</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-remove">

@@ -4,9 +4,11 @@ const fs = require("node:fs");
 
 const logPath = process.env.PM_E2E_NATIVE_LOG;
 const mode = process.env.PM_E2E_NATIVE_MODE || "normal";
+let locked = mode === "locked";
 let buffered = Buffer.alloc(0);
 let accounts = JSON.parse(process.env.PM_E2E_NATIVE_ACCOUNTS || "[]");
 const autofillItems = JSON.parse(process.env.PM_E2E_NATIVE_AUTOFILL_ITEMS || "[]");
+let duoRequests = JSON.parse(process.env.PM_E2E_NATIVE_DUO_REQUESTS || "[]");
 
 function write(response) {
     const payload = Buffer.from(JSON.stringify(response));
@@ -24,11 +26,11 @@ function handle(request) {
             id: request.id,
             success: true,
             nativeVersion: "0.1.0",
-            data: "Status: unlocked\nVersion: 0.1.0"
+            data: `Status: ${locked ? "locked" : "unlocked"}\nVersion: 0.1.0`
         });
     } else if (["getCredentials", "getLoginItems", "getLoginItem"].includes(request.action)) {
         if (mode === "timeout") return;
-        if (mode === "locked") {
+        if (locked) {
             write({ id: request.id, success: false, error: "Vault is locked" });
             return;
         }
@@ -48,6 +50,18 @@ function handle(request) {
         } else {
             write({ id: request.id, success: true, data: JSON.stringify(request.action === "getLoginItem" ? matches[0] : matches) });
         }
+    } else if (request.action === "lock") {
+        locked = true;
+        write({ id: request.id, success: true, data: "Locked" });
+    } else if (request.action === "managerDuoRequests") {
+        write({ id: request.id, success: true, data: duoRequests.filter(r => r.entryId === request.entryId) });
+    } else if (request.action === "managerDuoRespond") {
+        if (process.env.PM_E2E_NATIVE_DUO_ERROR) {
+            write({ id: request.id, success: false, error: process.env.PM_E2E_NATIVE_DUO_ERROR });
+            return;
+        }
+        duoRequests = duoRequests.filter(r => r.id !== request.requestId || r.entryId !== request.entryId);
+        write({ id: request.id, success: true, data: request.approve ? "Approved" : "Denied" });
     } else if (request.action === "getAutofillItems") {
         write({ id: request.id, success: true, data: JSON.stringify(
             autofillItems.map(({ id, name, kind, username }) => ({ id, name, kind, username }))
