@@ -28,7 +28,7 @@ function handle(request) {
             nativeVersion: "0.1.0",
             data: `Status: ${locked ? "locked" : "unlocked"}\nVersion: 0.1.0`
         });
-    } else if (["getCredentials", "getLoginItems", "getLoginItem"].includes(request.action)) {
+    } else if (["getCredentials", "getLoginItems", "getLoginItem", "getDuoItems"].includes(request.action)) {
         if (mode === "timeout") return;
         if (locked) {
             write({ id: request.id, success: false, error: "Vault is locked" });
@@ -42,7 +42,10 @@ function handle(request) {
             write({ id: request.id, success: true, data: "not-json" });
             return;
         }
-        let matches = accounts.filter(account => !account.domain || account.domain === request.domain);
+        let matches = request.action === "getDuoItems"
+            ? accounts.filter(account => account.has_duo === true && account.duo_origin === request.domain)
+                .map(({ id, name }) => ({ id, name, has_duo: true }))
+            : accounts.filter(account => !account.domain || account.domain === request.domain);
         if (request.action === "getLoginItems") matches = matches.map(({ password, ...summary }) => summary);
         if (request.action === "getLoginItem") matches = matches.filter(account => account.id === request.entryId);
         if (matches.length === 0) {

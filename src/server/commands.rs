@@ -115,6 +115,7 @@ fn handle_command(
                 | ServerCommand::Unlock(_)
                 | ServerCommand::Status
                 | ServerCommand::StatusData
+                | ServerCommand::BrowserDuoItems(_)
                 | ServerCommand::Duo(DuoCommand::Requests { .. })
         )
     {
@@ -582,6 +583,13 @@ fn handle_command(
             if let Some(vault) = vlt.as_ref() {
                 let items = zeroize::Zeroizing::new(vault.browser_autofill_json());
                 respond(&items, responses);
+            }
+        }
+        ServerCommand::BrowserDuoItems(origin) => {
+            if let Some(vault) = vlt.as_ref().filter(|_| !server_info.locked) {
+                respond(&vault.browser_duo_items_json(&origin), responses);
+            } else {
+                respond_failure("Vault locked.", responses);
             }
         }
         ServerCommand::BrowserLogins(domain) => {

@@ -12,6 +12,65 @@ use std::fs;
 const HISTORY_LIMIT: usize = 10;
 
 #[test]
+fn browser_duo_summaries_match_only_the_exact_https_issuer_and_reveal_no_credentials() {
+    let mut vault = Vault::default();
+    for (id, host) in [
+        (1, "api-test.duosecurity.com"),
+        (2, "api-other.duosecurity.com"),
+    ] {
+        vault.entries.push(VaultEntry {
+            id,
+            name: format!("Account {id}"),
+            username: Some("private-username".into()),
+            password: "login-secret".into(),
+            ..Default::default()
+        });
+        vault.recovery.duo.push(DuoRecord {
+            entry_id: id,
+            credentials: DuoCredentials {
+                host: host.into(),
+                akey: "account-secret".into(),
+                pkey: "device-secret".into(),
+                private_key: "signing-secret".into(),
+            },
+            review_key: None,
+        });
+    }
+    let summaries = vault.browser_duo_items_json("https://api-test.duosecurity.com/frame/prompt");
+    assert!(!summaries.contains("secret"));
+    assert!(!summaries.contains("private-username"));
+    assert!(!summaries.contains("duosecurity.com"));
+    let summaries: serde_json::Value = serde_json::from_str(&summaries).unwrap();
+    assert_eq!(
+        summaries,
+        serde_json::json!([{"id": 1, "name": "Account 1", "has_duo": true}])
+    );
+    for origin in [
+        "https://API-TEST.duosecurity.com",
+        "https://api-test.duosecurity.com:443",
+    ] {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&vault.browser_duo_items_json(origin))
+                .unwrap(),
+            summaries
+        );
+    }
+    for origin in [
+        "http://api-test.duosecurity.com",
+        "https://api-test.duosecurity.com:8443",
+        "https://api-test.duosecurity.com.evil.example",
+        "https://api-test.duosecurity.com./",
+        "https://user@api-test.duosecurity.com",
+        "https://api-missing.duosecurity.com",
+        "https://duosecurity.com",
+        "https://m-test.duosecurity.com",
+        "invalid",
+    ] {
+        assert_eq!(vault.browser_duo_items_json(origin), "[]", "{origin}");
+    }
+}
+
+#[test]
 fn browser_login_summaries_are_secret_free_and_selection_is_site_scoped() {
     let mut vault = Vault {
         entries: vec![

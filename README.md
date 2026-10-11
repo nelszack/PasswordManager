@@ -498,6 +498,9 @@ Attach Duo enrollment to the saved login whose URL matches the sign-in site.
 Embedded Duo frames use the parent site's matching logins. A login selected in
 the credential chooser, or recognized during credential submission, is remembered
 for five minutes in the same tab to handle redirects to HTTPS Duo-hosted pages.
+A Duo-hosted challenge can also find enrollments for its exact HTTPS Duo server,
+including when SSO used a different saved login. Enrollment credentials and
+account summaries stay in the background; this lookup does not release passwords.
 Automatic detection polls about every five seconds while the challenge is visible,
 for up to five minutes. Detection uses visible challenge text; unusual or localized
 pages may need the manual **Vault manager → Duo Push** panel instead. Requests and

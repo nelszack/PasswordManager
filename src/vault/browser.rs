@@ -1,6 +1,39 @@
 use super::*;
 
 impl Vault {
+    pub(crate) fn browser_duo_items_json(&self, origin: &str) -> String {
+        let Ok(url) = url::Url::parse(origin) else {
+            return "[]".into();
+        };
+        let Some(host) = url.host_str() else {
+            return "[]".into();
+        };
+        if url.scheme() != "https"
+            || url.port_or_known_default() != Some(443)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !crate::duo::valid_host(host, "api-")
+        {
+            return "[]".into();
+        }
+        // A Duo-hosted challenge may follow an SSO login with a different saved
+        // account. Match its exact issuer without releasing device credentials.
+        let ids: HashSet<_> = self
+            .recovery
+            .duo
+            .iter()
+            .filter(|record| record.credentials.host.eq_ignore_ascii_case(host))
+            .map(|record| record.entry_id)
+            .collect();
+        let items: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| ids.contains(&entry.id))
+            .map(|entry| json!({"id": entry.id, "name": entry.name, "has_duo": true}))
+            .collect();
+        serde_json::to_string(&items).expect("Duo summaries are serializable")
+    }
+
     pub(crate) fn browser_logins_json(&self, domain: &str) -> String {
         let Some(requested) = parse_site(domain, false) else {
             return "[]".into();

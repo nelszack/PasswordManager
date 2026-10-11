@@ -716,6 +716,18 @@ async fn tcp_protocol_authenticates_before_commands_and_rejects_invalid_messages
 async fn browser_login_commands_check_lock_state_and_site_at_selection() {
     for (command, locked, expected_code, expected_secret) in [
         (
+            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
+            false,
+            ResponseCode::Success,
+            false,
+        ),
+        (
+            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+        (
             ServerCommand::BrowserLogins("https://example.com".into()),
             false,
             ResponseCode::Success,
@@ -1001,6 +1013,7 @@ fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
                 id: 1,
             },
             ServerCommand::BrowserAutofill,
+            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
             ServerCommand::BrowserAutofillItem(1),
             ServerCommand::GetField {
                 target: Target::Id(1),
@@ -1074,6 +1087,12 @@ fn duo_polling_does_not_extend_auto_lock_and_locked_vaults_cannot_respond() {
         &mut session,
     );
     assert_eq!(outcome.responses[0].code, ResponseCode::NotFound);
+    let outcome = execute_command(
+        state.clone(),
+        ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
+        &mut session,
+    );
+    assert_eq!(outcome.responses[0].code, ResponseCode::Success);
     assert_eq!(state.lock_generation.load(Ordering::Acquire), 0);
     session.credentials.locked = true;
     for command in [

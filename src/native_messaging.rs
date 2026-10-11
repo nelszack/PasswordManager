@@ -578,6 +578,11 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             "domain",
             2048,
         )?)),
+        "getDuoItems" => Ok(ServerCommand::BrowserDuoItems(required(
+            request.domain.take(),
+            "domain",
+            2048,
+        )?)),
         "getLoginItem" => Ok(ServerCommand::BrowserLogin {
             domain: required(request.domain.take(), "domain", 2048)?,
             id: request

@@ -3,19 +3,21 @@ const fs = require("node:fs");
 const { launchExtension, waitForNativeRequest } = require("./harness.cjs");
 const origin = "https://login.example";
 const challenge = "<!doctype html><html><body><h1>Duo Push</h1><p>Push sent. Check your phone.</p></body></html>";
+const universalChallenge = '<!doctype html><html><body><h1>Check for a Duo Push</h1><p>Verify it\'s you by approving the notification...</p><p>Sent to "Password Manager"</p><button>Other options</button><p>Need help? Secured by Duo</p></body></html>';
 const pending = options => ({ entryId: 7, id: "synthetic-request", application: "Example VPN", username: "alice@example.com",
     location: "Boise", summary: "Login", expires_at: Math.floor(Date.now() / 1000) + 300,
     fingerprint: "a".repeat(128), code_digits: null, unsupported: null, ...options });
 
 async function setup(options = {}) {
     const browser = await launchExtension({ allowHttp: false, mode: options.mode, accounts: [
-        { id: 7, name: "Work", username: "alice@example.com", password: "saved-secret", has_duo: true, domain: origin }
+        { id: 7, name: "Work", username: "alice@example.com", password: "saved-secret", has_duo: true, domain: origin,
+            duo_origin: options.issuer ? "https://api-test.duosecurity.com" : undefined }
     ], env: { PM_E2E_NATIVE_DUO_REQUESTS: JSON.stringify(options.noRequest ? [] : [pending(options.request)]),
         ...(options.error ? { PM_E2E_NATIVE_DUO_ERROR: options.error } : {}) } });
     await browser.context.route(`${origin}/**`, route => route.fulfill({ contentType: "text/html", body:
         new URL(route.request().url()).pathname === "/login"
             ? '<!doctype html><html><body><form><input id="username" autocomplete="username"><input id="password" type="password" autocomplete="current-password"></form></body></html>'
-            : challenge }));
+            : options.universal ? universalChallenge : challenge }));
     const page = browser.context.pages()[0] || await browser.context.newPage();
     return { browser, page };
 }
@@ -30,14 +32,14 @@ async function withBrowser(options, run) {
     try { await run(env); }
     finally { await env.browser.close(); }
 }
-async function openDuoWindow(browser, page, url = `${origin}/duo`) {
+async function openDuoWindow(browser, page, url = `${origin}/duo`, sourceOrigin = origin) {
     const opened = browser.context.waitForEvent("page", p => p.url().includes("duo_prompt.html"));
     await page.goto(url);
     const popup = await opened;
     await expect(popup.getByRole("heading", { name: "Duo Push" })).toBeVisible();
     await expect(popup.locator("#requests")).toContainText("Example VPN");
     await expect(popup.locator("#requests")).toContainText("alice@example.com");
-    await expect(popup.locator("#destination")).toContainText(origin);
+    await expect(popup.locator("#destination")).toContainText(sourceOrigin);
     expect(decisions(browser)).toEqual([]);
     return popup;
 }
@@ -46,6 +48,7 @@ test("Duo decisions require one explicit click and the appropriate verification"
     test.setTimeout(120_000);
     for (const scenario of [
         { name: "ordinary approval", approve: true },
+        { name: "BYU–Idaho Universal Prompt approval", approve: true, universal: true },
         { name: "ordinary denial", approve: false },
         { name: "verified approval", approve: true, request: { code_digits: 3 } },
         { name: "unsupported approval leaves denial available", approve: false, request: { unsupported: "Requires proximity verification" } }
@@ -105,15 +108,18 @@ test("navigation and locking close Duo windows and remove typed codes", async ()
 });
 
 test("embedded challenges and Duo redirects retain the original login site", async () => {
-    test.setTimeout(60_000);
-    for (const scenario of ["embedded frame", "selected-login redirect"]) await test.step(scenario,
-        () => withBrowser({}, async ({ browser, page }) => {
+    test.setTimeout(120_000);
+    for (const scenario of ["embedded frame", "selected-login redirect", "Universal Prompt redirect", "Universal Prompt without remembered login"]) await test.step(scenario,
+        () => withBrowser({ issuer: scenario === "Universal Prompt without remembered login" }, async ({ browser, page }) => {
         await browser.context.route("https://api-test.duosecurity.com/**", route => route.fulfill({ contentType: "text/html",
-            body: '<!doctype html><html><body><h1>Check your device</h1></body></html>' }));
+            body: scenario.startsWith("Universal Prompt") ? universalChallenge
+                : '<!doctype html><html><body><h1>Check your device</h1></body></html>' }));
         let url = `${origin}/embedded`;
         if (scenario === "embedded frame") {
             await browser.context.route(url, route => route.fulfill({ contentType: "text/html",
                 body: '<!doctype html><html><body><iframe src="https://api-test.duosecurity.com/push"></iframe></body></html>' }));
+        } else if (scenario === "Universal Prompt without remembered login") {
+            url = "https://api-test.duosecurity.com/push";
         } else {
             await page.goto(`${origin}/login`);
             const picking = browser.context.waitForEvent("page", p => p.url().includes("picker.html"));
@@ -123,7 +129,8 @@ test("embedded challenges and Duo redirects retain the original login site", asy
             await expect(page.locator("#password")).toHaveValue("saved-secret");
             url = "https://api-test.duosecurity.com/push";
         }
-        const popup = await openDuoWindow(browser, page, url);
+        const sourceOrigin = scenario === "Universal Prompt without remembered login" ? "https://api-test.duosecurity.com" : origin;
+        const popup = await openDuoWindow(browser, page, url, sourceOrigin);
         await expect(popup.locator("#destination")).toContainText("https://api-test.duosecurity.com");
         await popup.getByRole("button", { name: "Dismiss" }).click();
     }));

@@ -148,7 +148,9 @@ impl Zeroize for ServerCommand {
                 filter.url.zeroize();
                 filter.notes.zeroize();
             }
-            Self::BrowserLogins(domain) | Self::BrowserLogin { domain, .. } => domain.zeroize(),
+            Self::BrowserLogins(domain)
+            | Self::BrowserDuoItems(domain)
+            | Self::BrowserLogin { domain, .. } => domain.zeroize(),
             Self::ManagementList(filter) => filter.query.zeroize(),
             Self::ManagementItem { .. } | Self::ManagementCopy { .. } => {}
             Self::Kill
@@ -242,6 +244,7 @@ pub enum ServerCommand {
         name: String,
     },
     AuthenticatorData(Target),
+    BrowserDuoItems(String),
 }
 
 #[derive(

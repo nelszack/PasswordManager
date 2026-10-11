@@ -43,8 +43,8 @@ const PasswordManagerBackgroundDuo = {
                     && security.senderOrigin({ url: tab.url }) === session.topOrigin && state?.active === true;
             } catch (_) { return false; }
         }
-        async function lookup(origin) {
-            const response = await nativeRequest("getLoginItems", { domain: origin });
+        async function lookup(origin, action = "getLoginItems") {
+            const response = await nativeRequest(action, { domain: origin });
             if (!response.success && /not found/i.test(response.error)) return [];
             return protocol.parseItems(response).filter(item => item.has_duo === true && Number.isSafeInteger(item.id) && item.id > 0)
                 .map(({ id, name }) => ({ id, name: String(name || "") }));
@@ -98,6 +98,9 @@ const PasswordManagerBackgroundDuo = {
                     if (!await current(session)) throw new Error("Duo login page is no longer active");
                     session.items = await lookup(topOrigin);
                     if (!session.items.length && origin !== topOrigin) session.items = await lookup(origin);
+                    if (!session.items.length && detection.duoOrigin(origin)) {
+                        session.items = await lookup(origin, "getDuoItems");
+                    }
                     const recent = recentLogins.get(sender.tab.id);
                     if (!session.items.length && detection.duoOrigin(origin) && recent?.expiresAt > Date.now()) {
                         session.items = recent.items; session.sourceOrigin = recent.origin;

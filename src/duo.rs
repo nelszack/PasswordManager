@@ -50,7 +50,7 @@ fn invalid(message: &str) -> VaultError {
     VaultError::InvalidInput(message.into())
 }
 
-fn valid_host(host: &str, prefix: &str) -> bool {
+pub(crate) fn valid_host(host: &str, prefix: &str) -> bool {
     host.strip_suffix(".duosecurity.com")
         .and_then(|label| label.strip_prefix(prefix))
         .is_some_and(|id| {

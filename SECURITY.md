@@ -82,7 +82,10 @@ session before signing. The CLI requires interactive confirmation (an a/d choice
 after review in interactive watch). Extension decision buttons require trusted
 clicks and confirmation. The automatic Duo window uses browser-derived login
 origins and matching login summaries, or a recent same-tab login for Duo-hosted
-redirects. Its tokens and request data are never returned to content scripts.
+redirects. Duo-hosted challenges can also match the exact HTTPS api- issuer to
+stored device enrollments, without exposing device credentials or allowing a
+different Duo server to match. Its tokens and request data are never returned to
+content scripts.
 A trusted Approve/Deny click confirms the displayed request without another
 dialog. Decisions bind to the reviewed request, active originating document,
 and unlock session; navigation, dismissal and lock invalidate the window.

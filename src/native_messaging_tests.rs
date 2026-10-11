@@ -195,6 +195,14 @@ fn malformed_authenticator_data_fails_without_exposing_code_material() {
 
 #[test]
 fn native_requests_are_whitelisted_and_use_stable_ids() {
+    let mut duo = NativeRequest {
+        action: "getDuoItems".into(),
+        domain: Some("https://api-test.duosecurity.com".into()),
+        ..NativeRequest::default()
+    };
+    assert!(
+        matches!(command_for_request(&mut duo).unwrap(), ServerCommand::BrowserDuoItems(domain) if domain == "https://api-test.duosecurity.com")
+    );
     let mut logins = NativeRequest {
         action: "getLoginItems".into(),
         domain: Some("https://example.com".into()),
