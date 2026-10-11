@@ -182,13 +182,22 @@ fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_conf
 #[test]
 fn disabled_dynamic_completion_preserves_normal_cli_help() {
     let root = tempfile::tempdir().unwrap();
+    let baseline = isolated_pm(root.path())
+        .args(["duo", "--help"])
+        .output_timeout("CLI help without completion activation");
+    assert!(baseline.status.success());
+    assert!(String::from_utf8_lossy(&baseline.stdout).contains("Usage:"));
+    assert!(baseline.stderr.is_empty());
     for value in ["", "0"] {
         let output = isolated_pm(root.path())
             .env("COMPLETE", value)
             .args(["duo", "--help"])
             .output_timeout("ordinary CLI help");
         assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: pm duo"));
+        // Clap uses the executable's actual name, including .exe on Windows.
+        // Disabled completion must preserve the ordinary help on each platform.
+        assert_eq!(output.stdout, baseline.stdout);
+        assert_eq!(output.stderr, baseline.stderr);
         assert!(!root.path().join("data").exists());
     }
 }
