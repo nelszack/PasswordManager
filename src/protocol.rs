@@ -6,6 +6,9 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 const RESPONSE_MAGIC: &[u8; 4] = b"PMR1";
+// Data frames preserve every byte, including empty secrets and whitespace.
+// Only newly appended commands use these frames; legacy commands retain PMR1.
+const DATA_RESPONSE_MAGIC: &[u8; 4] = b"PMD1";
 const RESPONSE_HEADER_LEN: usize = 9;
 
 pub const SECURE_PREFACE: &[u8; 4] = b"PMS2";
@@ -149,6 +152,7 @@ pub enum ResponseCode {
 pub struct ProtocolResponse {
     pub code: i32,
     pub message: String,
+    pub data: bool,
 }
 
 impl std::fmt::Debug for ProtocolResponse {
@@ -162,8 +166,16 @@ impl std::fmt::Debug for ProtocolResponse {
 }
 
 pub fn encode_response(code: ResponseCode, message: &str) -> Vec<u8> {
+    encode_frame(RESPONSE_MAGIC, code, message)
+}
+
+pub fn encode_data_response(message: &str) -> Vec<u8> {
+    encode_frame(DATA_RESPONSE_MAGIC, ResponseCode::Success, message)
+}
+
+fn encode_frame(magic: &[u8; 4], code: ResponseCode, message: &str) -> Vec<u8> {
     let mut frame = Vec::with_capacity(RESPONSE_HEADER_LEN + message.len());
-    frame.extend_from_slice(RESPONSE_MAGIC);
+    frame.extend_from_slice(magic);
     frame.push(code as u8);
     frame.extend_from_slice(&(message.len() as u32).to_be_bytes());
     frame.extend_from_slice(message.as_bytes());
@@ -173,12 +185,22 @@ pub fn encode_response(code: ResponseCode, message: &str) -> Vec<u8> {
 pub fn decode_responses(mut bytes: &[u8]) -> Result<ProtocolResponse, String> {
     let mut message = String::new();
     let mut code = ResponseCode::Success as i32;
+    let mut frames = 0;
+    let mut data = false;
     while !bytes.is_empty() {
-        if bytes.len() < RESPONSE_HEADER_LEN || &bytes[..4] != RESPONSE_MAGIC {
+        if bytes.len() < RESPONSE_HEADER_LEN
+            || (&bytes[..4] != RESPONSE_MAGIC && &bytes[..4] != DATA_RESPONSE_MAGIC)
+        {
             return Err("server returned an invalid response frame".to_string());
         }
+        let frame_data = &bytes[..4] == DATA_RESPONSE_MAGIC;
+        if frames > 0 && (data || frame_data) {
+            return Err("server returned multiple or mixed data responses".to_string());
+        }
+        data = frame_data;
+        frames += 1;
         let frame_code = bytes[4] as i32;
-        if frame_code > ResponseCode::Conflict as i32 {
+        if frame_code > ResponseCode::Conflict as i32 || (data && frame_code != 0) {
             return Err("server returned an unknown response code".to_string());
         }
         let length = u32::from_be_bytes(
@@ -193,16 +215,20 @@ pub fn decode_responses(mut bytes: &[u8]) -> Result<ProtocolResponse, String> {
         let text = std::str::from_utf8(&bytes[..length])
             .map_err(|_| "server returned invalid UTF-8".to_string())?;
         message.push_str(text);
-        if !text.ends_with('\n') {
+        if !data && !text.ends_with('\n') {
             message.push('\n');
         }
         code = code.max(frame_code);
         bytes = &bytes[length..];
     }
-    if message.is_empty() {
+    if frames == 0 {
         return Err("server returned an empty response".to_string());
     }
-    Ok(ProtocolResponse { code, message })
+    Ok(ProtocolResponse {
+        code,
+        message,
+        data,
+    })
 }
 
 #[cfg(test)]
@@ -211,6 +237,13 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn data_frames_preserve_every_utf8_byte(message in ".{0,2048}") {
+            let response = decode_responses(&encode_data_response(&message)).unwrap();
+            prop_assert!(response.data);
+            prop_assert_eq!(response.code, 0);
+            prop_assert_eq!(response.message, message);
+        }
         #[test]
         fn arbitrary_input_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
             let _ = decode_responses(&bytes);
@@ -222,6 +255,24 @@ mod tests {
             prop_assert_eq!(response.code, ResponseCode::Success as i32);
             let expected = if message.ends_with('\n') { message } else { format!("{message}\n") };
             prop_assert_eq!(response.message, expected);
+        }
+    }
+
+    #[test]
+    fn data_frames_preserve_empty_secrets_and_reject_ambiguous_payloads() {
+        for secret in ["", "  padded  ", "\n", "private key\n\n", "\0\t 🔐\r\n"] {
+            let response = decode_responses(&encode_data_response(secret)).unwrap();
+            assert_eq!(response.message, secret);
+            assert!(response.data);
+        }
+        let data = encode_data_response("value");
+        let display = encode_response(ResponseCode::Success, "label");
+        for frames in [
+            [data.clone(), data.clone()],
+            [data.clone(), display.clone()],
+            [display, data],
+        ] {
+            assert!(decode_responses(&frames.concat()).is_err());
         }
     }
 
@@ -350,5 +401,27 @@ impl ServerStatus {
             version: env!("CARGO_PKG_VERSION").into(),
             warning,
         }
+    }
+}
+
+/// Authenticator data is independent of human-readable CLI wording.
+#[derive(serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatorResponse {
+    pub code: String,
+    pub expires_in: Option<u64>,
+    pub counter: Option<u64>,
+    pub mode: String,
+}
+
+impl AuthenticatorResponse {
+    pub fn valid(&self) -> bool {
+        (6..=8).contains(&self.code.len())
+            && self.code.bytes().all(|byte| byte.is_ascii_digit())
+            && match self.mode.as_str() {
+                "hotp" => self.counter.is_some() && self.expires_in.is_none(),
+                "totp" => self.counter.is_none() && self.expires_in.is_some(),
+                _ => false,
+            }
     }
 }

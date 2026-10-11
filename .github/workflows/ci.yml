@@ -28,34 +28,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Verify generated command reference
-        run: cargo run --locked -- generate-command-reference --check
-      - name: Validate browser extension sources
-        run: |
-          node --check extension/background.js
-          node --check extension/background_security.js
-          node --check extension/background_state.js
-          node --check extension/credential_prompt.js
-          node --check extension/credential_prompt_state.js
-          node --check extension/content_detection.js
-          node --check extension/form_submission.js
-          node --check extension/native_protocol.js
-          node --check extension/pending_credentials.js
-          node --check extension/relay.js
-          node -e "for (const script of require('./extension/manifest.json').content_scripts.flatMap(entry => entry.js)) require('node:child_process').execFileSync(process.execPath, ['--check', 'extension/' + script])"
-          node --check extension/popup.js
-          node --check extension/manager.js
-          node --check extension/duo_prompt.js
-          node --check extension/background_duo.js
-          node --check extension/password_generator.js
-          node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
-          node --test extension/*.test.js
-      - name: Run tests
-        run: cargo test --locked --all-features
-      - name: Lint all targets
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Validate release sources
+        run: npm run validate
 
   mac-architectures:
     name: Build macOS (${{ matrix.target }})
@@ -110,7 +89,7 @@ jobs:
           if-no-files-found: ignore
 
   coverage:
-    name: Coverage baseline
+    name: Rust coverage baseline
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -119,16 +98,8 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          # --test-coverage-include-all requires Node 26.7 or newer.
-          node-version: 26
-          cache: npm
-      - run: npm ci
       - name: Measure Rust coverage
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path rust-lcov.info --fail-under-lines 65
-      - name: Measure extension unit coverage
-        run: npm run test:extension:coverage
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-reports

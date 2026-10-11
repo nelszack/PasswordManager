@@ -4,7 +4,7 @@ use crate::{
     cli::NativeBrowser,
     client::AuthenticatedClient,
     file::data_dir,
-    types::{DuoCommand, EntryUpdate, PasswordEntry, ServerCommand, Target, TotpCommand},
+    types::{DuoCommand, EntryUpdate, PasswordEntry, ServerCommand, Target},
 };
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,8 @@ struct NativeResponse {
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    uncertain: bool,
 }
 
 impl Zeroize for NativeResponse {
@@ -137,6 +139,7 @@ impl Zeroize for NativeResponse {
         self.data = None;
         self.error.zeroize();
         self.success.zeroize();
+        self.uncertain.zeroize();
     }
 }
 
@@ -158,6 +161,7 @@ impl NativeResponse {
             native_version: env!("CARGO_PKG_VERSION").to_string(),
             data: Some(data),
             error: None,
+            uncertain: false,
         }
     }
 
@@ -168,6 +172,7 @@ impl NativeResponse {
             native_version: env!("CARGO_PKG_VERSION").to_string(),
             data: None,
             error: Some(error.into()),
+            uncertain: false,
         }
     }
 }
@@ -420,19 +425,60 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
 
 fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> NativeResponse {
     let id = request.id;
+    let mut uncertain = false;
     let result = if request.action == "managerVaults" {
         crate::vault::list_vaults()
             .map(|vaults| json!(vaults))
             .map_err(|e| e.to_string())
     } else {
         command_for_request(&mut request)
-            .and_then(|command| client.request(command))
+            .and_then(|command| {
+                client
+                    .request_response_tracked(command)
+                    .map_err(|error| {
+                        uncertain = error.sent
+                            && matches!(
+                                request.action.as_str(),
+                                "managerUnlock"
+                                    | "managerAdd"
+                                    | "managerUpdate"
+                                    | "managerDelete"
+                                    | "managerCopy"
+                                    | "saveCredentials"
+                                    | "updateCredentials"
+                                    | "getTotp"
+                                    | "managerDuoRespond"
+                                    | "lock"
+                            );
+                        error.message
+                    })
+                    .and_then(|response| {
+                        if response.code == crate::protocol::ResponseCode::Success as i32 {
+                            Ok(response.message)
+                        } else {
+                            Err(response.message.trim_end().to_string())
+                        }
+                    })
+            })
             .and_then(|output| response_data(&request.action, output))
     };
     request.zeroize();
     match result {
         Ok(data) => NativeResponse::success(id, data),
-        Err(error) => NativeResponse::error(id, error),
+        Err(error) => {
+            let mut response = NativeResponse::error(
+                id,
+                if uncertain {
+                    format!(
+                        "{error}. The operation may still complete. Review the vault before retrying."
+                    )
+                } else {
+                    error
+                },
+            );
+            response.uncertain = uncertain;
+            response
+        }
     }
 }
 
@@ -544,14 +590,11 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
         )),
-        "getTotp" => Ok(ServerCommand::Totp(TotpCommand::Show {
-            target: Target::Id(
-                request
-                    .entry_id
-                    .ok_or_else(|| "missing entry ID".to_string())?,
-            ),
-            copy_timeout: None,
-        })),
+        "getTotp" => Ok(ServerCommand::AuthenticatorData(Target::Id(
+            request
+                .entry_id
+                .ok_or_else(|| "missing entry ID".to_string())?,
+        ))),
         "saveCredentials" => Ok(ServerCommand::Add(PasswordEntry {
             name: required(request.name.take(), "name", 4096)?,
             username: Some(optional_text(request.username.take(), "username", 4096)?),
@@ -588,33 +631,15 @@ fn response_data(action: &str, mut output: String) -> Result<Value, String> {
             .map(|status| json!(status))
             .map_err(|error| format!("invalid server status response: {error}"))
     } else if action == "getTotp" {
-        let parse = || {
-            let output = output.trim();
-            if let Some(value) = output.strip_prefix("HOTP: ") {
-                let (code, state) = value
-                    .split_once(" (counter ")
-                    .ok_or_else(|| "invalid HOTP response from server".to_string())?;
-                let counter = state
-                    .strip_suffix("; next counter saved)")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .ok_or_else(|| "invalid HOTP counter from server".to_string())?;
-                return Ok(
-                    json!({ "code": code, "expires_in": null, "counter": counter, "mode": "hotp" }),
-                );
-            }
-            let value = output
-                .strip_prefix("TOTP: ")
-                .ok_or_else(|| output.to_string())?;
-            let (code, lifetime) = value
-                .split_once(" (")
-                .ok_or_else(|| "invalid TOTP response from server".to_string())?;
-            let expires_in = lifetime
-                .strip_suffix("s remaining)")
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| "invalid TOTP lifetime from server".to_string())?;
-            Ok(json!({ "code": code, "expires_in": expires_in }))
-        };
-        parse()
+        serde_json::from_str::<crate::protocol::AuthenticatorResponse>(&output)
+            .map_err(|_| "invalid authenticator response from server".to_string())
+            .and_then(|data| {
+                if data.valid() {
+                    Ok(json!(&data))
+                } else {
+                    Err("invalid authenticator response from server".to_string())
+                }
+            })
     } else {
         Ok(Value::String(output.trim().to_string()))
     };

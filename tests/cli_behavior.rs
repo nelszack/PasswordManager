@@ -718,7 +718,7 @@ fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() 
     }
     let result = run(root.path(), port, &["get", "--id", "1", "--password-only"]);
     assert!(result.status.success());
-    assert_eq!(result.stdout, format!("{secret}\n").as_bytes());
+    assert_eq!(result.stdout, secret.as_bytes());
     let export = root.path().join("export.csv");
     assert!(
         run(
@@ -837,6 +837,73 @@ fn config_and_completion_commands_persist_in_an_isolated_home() {
         .unwrap();
     assert!(generated.status.success());
     assert!(std::fs::read_to_string(completion).unwrap().contains("_pm"));
+}
+
+#[test]
+fn machine_readable_secrets_preserve_whitespace_empty_values_and_unicode() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    let key = root.path().join("vault.key");
+    assert!(run(root.path(), port, &["start"]).status.success());
+    let _server = ServerGuard {
+        root: root.path().into(),
+        port,
+        active: true,
+    };
+    for command in ["new", "unlock"] {
+        let output = run(
+            root.path(),
+            port,
+            &[command, "--key", key.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let secrets = ["  padded  ", "", "\n\n", "private key\r\n\r\n", "🔐\t\0 "];
+    let items = secrets
+        .iter()
+        .enumerate()
+        .map(|(index, secret)| {
+            serde_json::json!({
+                "name": format!("Exact {index}"), "password": secret,
+                "fields": [{ "name": "payload", "value": secret, "secret": true }]
+            })
+        })
+        .collect::<Vec<_>>();
+    let input = root.path().join("secrets.json");
+    std::fs::write(&input, serde_json::to_vec(&items).unwrap()).unwrap();
+    let imported = run(
+        root.path(),
+        port,
+        &["import", "--path", input.to_str().unwrap()],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    for (index, secret) in secrets.iter().enumerate() {
+        let id = (index + 1).to_string();
+        for selector in [vec!["--password-only"], vec!["--field", "payload"]] {
+            let mut args = vec!["get", "--id", &id];
+            args.extend(selector);
+            let raw = run(root.path(), port, &args);
+            assert!(
+                raw.status.success(),
+                "{}",
+                String::from_utf8_lossy(&raw.stderr)
+            );
+            assert_eq!(raw.stdout, secret.as_bytes());
+            args.insert(0, "--json");
+            let structured = run(root.path(), port, &args);
+            assert!(structured.status.success());
+            let data: serde_json::Value = serde_json::from_slice(&structured.stdout).unwrap();
+            assert_eq!(data["output"], *secret);
+        }
+    }
 }
 
 #[test]

@@ -56,6 +56,11 @@ page using the browser-provided extension ID and page URL. List responses contai
 summaries only; explicit reveal requests fetch one selected item. OTP seeds and
 Duo signing keys are never returned by vault-management reads. Management copying uses the server's
 clipboard worker and existing lock cleanup.
+Native OTP responses carry structured code, lifetime and counter data rather
+than parsed terminal output. Secret and custom-field data responses preserve
+the stored bytes, including whitespace and empty values.
+Pending navigation records are consumed once and removed on expiration or tab
+closure; periodic cleanup removes expired session records after worker restarts.
 Site matching parses HTTP(S) URLs and compares scheme, normalized hostname,
 and effective port; bare domains default to HTTPS. Ambiguous URLs fail closed.
 Save prompts request summaries and never delay or replay form submissions based

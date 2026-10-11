@@ -66,6 +66,97 @@ fn test_connection_state(session: VaultSession) -> ConnectionState {
     }
 }
 
+#[test]
+fn structured_authenticator_requests_preserve_hotp_counters_and_totp_lifetimes() {
+    init_test_data_dir();
+    let directory = tempfile::tempdir().unwrap();
+    let key_path = directory
+        .path()
+        .join("otp.key")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut session = VaultSession::default();
+    let state = test_connection_state(VaultSession::default());
+    let setup = [
+        ServerCommand::New(PasswordType::Key(key_path.clone())),
+        ServerCommand::Unlock(UnlockInfo {
+            key: PasswordType::Key(key_path),
+            timeout: 0,
+            vault_file: None,
+        }),
+        ServerCommand::Add(PasswordEntry {
+            name: "OTP".into(),
+            username: None,
+            password: "synthetic".into(),
+            url: None,
+            notes: None,
+            copy: false,
+        }),
+        ServerCommand::Totp(TotpCommand::Set {
+            target: Target::Id(1),
+            configuration:
+                "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0".into(),
+        }),
+    ];
+    for command in setup {
+        let outcome = execute_command(state.clone(), command, &mut session);
+        assert_eq!(
+            outcome.responses[0].code,
+            ResponseCode::Success,
+            "{}",
+            outcome.responses[0].message
+        );
+    }
+    for (counter, code) in [(0, "755224"), (1, "287082")] {
+        let outcome = execute_command(
+            state.clone(),
+            ServerCommand::AuthenticatorData(Target::Id(1)),
+            &mut session,
+        );
+        assert!(outcome.responses[0].data);
+        let payload: crate::protocol::AuthenticatorResponse =
+            serde_json::from_str(&outcome.responses[0].message).unwrap();
+        assert!(payload.valid());
+        assert_eq!(payload.code, code);
+        assert_eq!(payload.counter, Some(counter));
+        assert_eq!(payload.expires_in, None);
+    }
+    let legacy = execute_command(
+        state.clone(),
+        ServerCommand::Totp(TotpCommand::Show {
+            target: Target::Id(1),
+            copy_timeout: None,
+        }),
+        &mut session,
+    );
+    assert!(!legacy.responses[0].data);
+    assert!(
+        legacy.responses[0]
+            .message
+            .contains("HOTP: 359152 (counter 2; next counter saved)")
+    );
+    let totp = execute_command(
+        state.clone(),
+        ServerCommand::Totp(TotpCommand::Set {
+            target: Target::Id(1),
+            configuration: "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into(),
+        }),
+        &mut session,
+    );
+    assert_eq!(totp.responses[0].code, ResponseCode::Success);
+    let outcome = execute_command(
+        state,
+        ServerCommand::AuthenticatorData(Target::Id(1)),
+        &mut session,
+    );
+    let payload: crate::protocol::AuthenticatorResponse =
+        serde_json::from_str(&outcome.responses[0].message).unwrap();
+    assert!(payload.valid());
+    assert_eq!(payload.counter, None);
+    assert!(payload.expires_in.unwrap() <= 30);
+}
+
 async fn dispatch_test_command(
     vault: Vault,
     command: ServerCommand,
@@ -897,6 +988,12 @@ fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
         for command in [
             ServerCommand::Get(Target::Id(1)),
             ServerCommand::GetSecret(Target::Id(1)),
+            ServerCommand::GetSecretData(Target::Id(1)),
+            ServerCommand::AuthenticatorData(Target::Id(1)),
+            ServerCommand::GetFieldData {
+                target: Target::Id(1),
+                name: "private".into(),
+            },
             ServerCommand::View(ListOptions::default()),
             ServerCommand::BrowserLogins("https://example.com".into()),
             ServerCommand::BrowserLogin {

@@ -824,6 +824,10 @@ pm --quiet lock
 pm get --id 3 --password-only
 ```
 
+Password-only and custom-field retrieval preserve the stored value exactly in
+JSON output and when standard output is redirected, including trailing spaces,
+newlines, and empty values. Redirected secret output has no added newline.
+
 ### Shell Completions
 
 Dynamic completions query the installed `pm` for current commands, flags and
@@ -909,6 +913,14 @@ the name or visibility of a hidden field whose value is not currently shown.
 Revealed values clear after 30 seconds; locking or disconnecting clears the editor.
 Copying uses the configured server clipboard timeout and lock cleanup.
 Multiline note bodies and SSH private keys have their own editor.
+
+Lock and status requests use a separate native-host connection from item work
+and Duo polling. Requests that expire while queued are never sent. If a sent
+save loses its response, it may still complete: the manager clears its editor
+and requires **Review vault state** before another change. Review the refreshed
+items before retrying. A save prompt with an uncertain outcome disables saving;
+dismiss it and inspect the vault manager. Closing a native connection cannot
+cancel a mutation already accepted by the server.
 
 Items enrolled with `pm duo enroll` show a **Duo Push** panel with request checks,
 monitoring, and explicit **Approve login** / **Deny login** controls. See
@@ -1104,8 +1116,19 @@ npm run test:extension
 npm run test:extension:coverage
 ```
 
-The extension coverage command requires Node.js 26.7 or newer. CI uses Node 26
-for coverage and Node 22 for browser end-to-end tests.
+The shared validation command used by both CI and release packaging runs the
+checks above, verifies the generated command reference, and checks every
+extension script's syntax:
+
+```bash
+npm ci
+npm run validate
+```
+
+The extension coverage and shared validation commands require Node.js 26.7 or
+newer. CI and release validation use Node 26; browser end-to-end tests use Node 22.
+Extension unit coverage enforces individual thresholds for the background
+services, including native request and pending-credential lifecycles.
 
 Browser tests launch headed Chromium and require a graphical session. The
 real native-host/server integration test runs on Linux and requires the binary
@@ -1148,6 +1171,12 @@ plaintext import/export compatibility. GitHub Actions runs the full test and
 strict-lint suite on Linux, macOS, and Windows for pushes to `main` and pull
 requests. Browser end-to-end and coverage jobs run separately on Linux.
 
+Fixed MessagePack fixtures in `tests/fixtures/server_commands.json` guard
+command indices and positional fields for installed clients. New data commands
+are appended to the protocol and preserve exact secret payloads; the native
+host receives structured OTP codes, counters, and lifetimes independently of
+CLI wording. Existing commands retain their response format.
+
 Dependency changes are scanned against the RustSec advisory database and
 reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
 weekly, including npm browser-test dependencies and the fuzz harness. Scheduled
@@ -1180,7 +1209,8 @@ checks. The manifest's numeric `version` remains an independent extension-packag
 revision because browser stores require monotonically increasing revisions.
 
 Then open the **Release** workflow in GitHub Actions, choose **Run workflow**,
-and enter that existing tag. The pipeline reruns tests and strict linting, then
+and enter that existing tag. The pipeline runs the shared validation command,
+including extension version synchronization and coverage, then
 creates a **draft** release with archives for Linux x86-64, Windows x86-64,
 macOS Apple Silicon, and macOS Intel. Review the draft and publish it manually
 from GitHub's Releases page.
@@ -1224,6 +1254,13 @@ status monitoring, pending credential storage, pickers, save prompts, and messag
 routing. Each service owns its lifecycle state and receives explicit dependencies.
 Picker cancellation on locking/disconnect remains distinct from save operations
 that are already completing.
+
+Native requests queue in the worker, with independent control, item, and Duo
+hosts. A timed-out sent request keeps its position until the host replies or
+disconnects, so a queued review cannot overtake it. Pending navigation records
+serialize storage operations per tab, are consumed once, and are removed on
+expiration or tab closure. Alarm cleanup removes expired session records after
+a worker restart.
 
 The extension's `content.js` initializes the page integration. The manifest loads
 separate scripts for messaging, controls, password generation, typed autofill,

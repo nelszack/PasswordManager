@@ -2,6 +2,7 @@
   "name": "password-manager-browser-tests",
   "private": true,
   "scripts": {
+    "validate": "node scripts/validate.cjs",
     "test:extension": "node --test extension/*.test.js",
     "test:extension:coverage": "node extension/check_unit_coverage.cjs",
     "test:e2e": "playwright test",

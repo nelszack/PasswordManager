@@ -146,3 +146,22 @@ test("credential prompt runtime renders metadata and submits only trusted action
     assert.equal(env.context.closed, true);
     assert.equal(env.messages.at(-1).selection.action, "update");
 });
+
+test("credential prompt disables writes after an uncertain save and still allows dismissal", async () => {
+    const responses = {
+        getCredentialPromptData: { success: true, data: { site: "https://example.com", message: "Save?", suggestedName: "Example", username: "alice", hasAccounts: true } },
+        completeCredentialPrompt: { success: false, error: "Save may still complete. Review the vault.", uncertain: true }
+    };
+    const env = environment(["credentials", "site", "status", "name", "username", "usernameLabel", "add", "update", "cancel"], responses, "?token=prompt-token");
+    execute("credential_prompt.js", env.context); await new Promise(resolve => setImmediate(resolve));
+    env.elements.credentials.dispatch("submit", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(env.elements.add.disabled, true);
+    assert.equal(env.elements.update.disabled, true);
+    assert.match(env.elements.status.textContent, /may still complete/);
+    env.elements.update.dispatch("click", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(env.messages.filter(message => message.action === "completeCredentialPrompt").length, 1);
+    responses.completeCredentialPrompt = { success: true };
+    env.elements.cancel.dispatch("click", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(env.messages.at(-1).selection.action, "cancel");
+    assert.equal(env.context.closed, true);
+});

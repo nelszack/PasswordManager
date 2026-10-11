@@ -16,11 +16,11 @@ test("Duo network requests cannot queue lock/status behind their native host", a
     const { bridge, ports, timers, answer } = environment();
     const poll = bridge.request("managerDuoRequests", { entryId: 1 });
     assert.equal(timers.at(-1).ms, 60000);
-    const lock = bridge.request("lockVault");
+    const lock = bridge.request("lock");
     assert.equal(timers.at(-1).ms, 7000);
     assert.equal(ports.length, 2);
     assert.equal(ports[0].requests[0].action, "managerDuoRequests");
-    assert.equal(ports[1].requests[0].action, "lockVault");
+    assert.equal(ports[1].requests[0].action, "lock");
     answer(ports[1]); await lock;
     const status = bridge.request("status");
     assert.equal(ports.length, 2); answer(ports[1]); await status;
@@ -29,7 +29,7 @@ test("Duo network requests cannot queue lock/status behind their native host", a
 test("a failed Duo connection does not disconnect lock/status", async () => {
     const { bridge, ports, answer } = environment();
     const poll = bridge.request("managerDuoRequests");
-    const rejected = assert.rejects(poll, /Duo native messaging host disconnected/);
+    const rejected = assert.rejects(poll, /Native messaging host disconnected/);
     const status = bridge.request("status");
     ports[0].disconnect(); await rejected;
     answer(ports[1]); await status;

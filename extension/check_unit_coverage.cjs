@@ -5,7 +5,7 @@ const result = spawnSync(process.execPath, [
     "--test",
     "--test-coverage-include=extension/*.js",
     "--test-coverage-include-all",
-    "--test-coverage-lines=31",
+    "--test-coverage-lines=58",
     "--test-coverage-branches=78",
     "extension/*.test.js"
 ], {
@@ -19,6 +19,12 @@ process.stderr.write(result.stderr);
 if (result.status !== 0) process.exit(result.status || 1);
 
 const thresholds = {
+    "background_native.js": [95, 85],
+    "background_pending.js": [95, 85],
+    "background_pickers.js": [85, 70],
+    "background_prompts.js": [90, 65],
+    "background_router.js": [70, 80],
+    "background_status.js": [80, 75],
     "background_duo.js": [90, 75],
     "duo_detection.js": [95, 75],
     "background_security.js": [95, 90],

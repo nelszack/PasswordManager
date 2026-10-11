@@ -5,17 +5,21 @@ pub async fn respond(message: &str, stream: &mut TcpStream) {
 }
 
 pub async fn respond_with_code(code: ResponseCode, message: &str, stream: &mut TcpStream) {
-    write_response(code, message, stream).await;
+    write_response(code, message, false, stream).await;
 }
 
 pub(super) async fn deliver_responses(responses: Vec<BufferedResponse>, stream: &mut TcpStream) {
     for response in responses {
-        write_response(response.code, &response.message, stream).await;
+        write_response(response.code, &response.message, response.data, stream).await;
     }
 }
 
-async fn write_response(code: ResponseCode, message: &str, stream: &mut TcpStream) {
-    let frame = Zeroizing::new(encode_response(code, message));
+async fn write_response(code: ResponseCode, message: &str, data: bool, stream: &mut TcpStream) {
+    let frame = Zeroizing::new(if data {
+        encode_data_response(message)
+    } else {
+        encode_response(code, message)
+    });
     let transport = TRANSPORT_RESPONSE_KEY.try_with(|key| {
         key.borrow()
             .as_deref()

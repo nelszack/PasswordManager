@@ -54,6 +54,8 @@ impl AuthenticatedClient {
         let raw_secret = matches!(
             &command,
             ServerCommand::GetSecret(_)
+                | ServerCommand::GetSecretData(_)
+                | ServerCommand::GetFieldData { .. }
                 | ServerCommand::GetField {
                     copy_timeout: None,
                     ..
@@ -66,7 +68,11 @@ impl AuthenticatedClient {
                     if exit_code == 0 {
                         println!(
                             "{}",
-                            serde_json::json!({ "ok": true, "output": response.message.trim_end() })
+                            serde_json::json!({ "ok": true, "output": if response.data {
+                                response.message.as_str()
+                            } else {
+                                response.message.trim_end()
+                            } })
                         );
                     } else {
                         println!(
@@ -80,6 +86,9 @@ impl AuthenticatedClient {
                             print!("{}", response.message);
                         } else {
                             print!("{}", crate::terminal::output(&response.message).as_str());
+                            if !response.message.ends_with('\n') {
+                                println!();
+                            }
                         }
                     } else {
                         eprint!("{}", crate::terminal::output(&response.message).as_str());

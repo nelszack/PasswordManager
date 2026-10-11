@@ -28,7 +28,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Verify tag matches Cargo version
         shell: bash
@@ -43,10 +43,13 @@ jobs:
             echo "Tag $RELEASE_TAG does not match Cargo.toml version $cargo_version" >&2
             exit 1
           fi
-      - name: Run release tests
-        run: cargo test --locked --all-features
-      - name: Run strict lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Validate release sources
+        run: npm run validate
       - name: Generate shell completions
         shell: bash
         run: |

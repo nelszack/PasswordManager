@@ -2,8 +2,8 @@ use crate::{
     clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, set_private_perms, sync_parent},
     protocol::{
-        ResponseCode, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record, encode_response,
-        encrypt_record, server_hello,
+        ResponseCode, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record,
+        encode_data_response, encode_response, encrypt_record, server_hello,
     },
     types::*,
     vault::{Vault, VaultSession, create_vault, delete_vault, restore_encrypted_backup},
@@ -71,6 +71,7 @@ fn reserve_request_memory(
 struct BufferedResponse {
     code: ResponseCode,
     message: String,
+    data: bool,
 }
 
 #[derive(Default)]

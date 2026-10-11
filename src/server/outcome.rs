@@ -14,6 +14,14 @@ pub(super) fn respond_with_code(
     responses.push(BufferedResponse {
         code,
         message: message.to_owned(),
+        data: false,
+    });
+}
+pub(super) fn respond_data(message: &str, responses: &mut Vec<BufferedResponse>) {
+    responses.push(BufferedResponse {
+        code: ResponseCode::Success,
+        message: message.to_owned(),
+        data: true,
     });
 }
 pub(super) fn respond(message: &str, responses: &mut Vec<BufferedResponse>) {

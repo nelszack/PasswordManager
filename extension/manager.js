@@ -4,6 +4,7 @@ let unlocked = false, selected = null, original = null, epoch = 0, searchTimer;
 let fieldRows = [];
 let duoTimer, duoSerial = 0, duoBusy = false, duoRendered = "";
 let mutationPending = false, revealSerial = 0, revealTimer, revealedValues = [];
+let mutationUncertain = false;
 function secretControl() { return ["secure-note", "ssh-key"].includes(byId("kind").value) ? byId("secretMultiline") : byId("password"); }
 function renderSecretControl() {
     const multiline = secretControl() === byId("secretMultiline");
@@ -14,7 +15,11 @@ function send(action, fields = {}) {
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage({ action, ...fields }, response => {
             const error = chrome.runtime.lastError;
-            if (error || !response?.success) reject(new Error(error?.message || response?.error || "Native host unavailable"));
+            if (error || !response?.success) {
+                const failure = new Error(error?.message || response?.error || "Native host unavailable");
+                failure.uncertain = Boolean(response?.uncertain);
+                reject(failure);
+            }
             else resolve(response.data);
         });
     });
@@ -23,9 +28,33 @@ function message(text) { byId("message").textContent = text; }
 function run(operation) { Promise.resolve().then(operation).catch(error => message(error.message)); }
 function runMutation(operation) {
     if (mutationPending) return;
+    if (mutationUncertain) { message("Review the vault state before making another change."); return; }
     mutationPending = true;
-    run(async () => { try { await operation(); } finally { mutationPending = false; } });
+    run(async () => {
+        try { await operation(); }
+        catch (error) {
+            if (error.uncertain) {
+                mutationUncertain = true;
+                byId("reviewOutcome").hidden = false;
+                epoch++; clearSecrets();
+            }
+            throw error;
+        } finally { mutationPending = false; }
+    });
 }
+byId("reviewOutcome").addEventListener("click", () => run(async () => {
+    byId("reviewOutcome").disabled = true;
+    try {
+        // This read is ordered after any in-flight operation on the work host.
+        await send("managerVaults");
+        await refresh();
+        if (unlocked && !await loadItems()) throw new Error("Vault state changed during review. Review it again.");
+        mutationUncertain = false;
+        byId("reviewOutcome").hidden = true;
+        message(unlocked ? "Vault refreshed. Check whether your change completed before trying it again."
+            : "Vault is locked. Unlock it and check whether your change completed before trying it again.");
+    } finally { byId("reviewOutcome").disabled = false; }
+}));
 function closeEditor() {
     stopDuo(); byId("duo").hidden = true; byId("duoRequests").replaceChildren(); duoRendered = "";
     clearTimeout(revealTimer); revealedValues = [];
@@ -63,12 +92,13 @@ async function loadVaults() {
 async function loadItems() {
     const generation = ++epoch;
     const result = await send("managerList", { query: byId("search").value });
-    if (!unlocked || generation !== epoch) return;
+    if (!unlocked || generation !== epoch) return false;
     byId("count").textContent = `${result.total} items${result.total > result.items.length ? " — showing the first 100; narrow your search" : ""}`;
     byId("items").replaceChildren(...result.items.map(item => {
         const button = document.createElement("button"); button.textContent = `${item.name} · ${item.username || item.kind}`;
         button.addEventListener("click", () => run(() => openItem(item.id))); return button;
     }));
+    return true;
 }
 function addField(field = { name: "", value: "", secret: false }) {
     const row = document.createElement("div"); row.className = "custom-field";

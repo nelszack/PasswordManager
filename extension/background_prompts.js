@@ -119,23 +119,31 @@ const PasswordManagerBackgroundPrompts = {
                 discardCredentialPrompt(request?.token);
                 throw new Error("Credential prompt expired");
             }
-            if (pending.loading) throw new Error("Credential prompt is still loading");
-            if (pending.error) throw new Error(pending.error);
             if (pending.completing) throw new Error("Credential operation is already in progress");
-            const operation = promptState.operation(pending, request.selection);
-            if (operation.action === "cancel") {
+            if (request.selection?.action === "cancel") {
                 discardCredentialPrompt(request.token, "cancel", false);
                 return { success: true };
             }
+            if (pending.loading) throw new Error("Credential prompt is still loading");
+            if (pending.error) throw new Error(pending.error);
+            const operation = promptState.operation(pending, request.selection);
 
             const nativeAction = operation.action === "update" ? "updateCredentials" : "saveCredentials";
             pending.completing = true;
             let response;
             try {
                 response = await nativeRequest(nativeAction, operation.fields);
-                if (!response.success) throw new Error(response.error || "Could not save credentials");
+                if (!response.success) {
+                    const error = new Error(response.error || "Could not save credentials");
+                    error.uncertain = Boolean(response.uncertain);
+                    throw error;
+                }
             } catch (error) {
                 pending.completing = false;
+                if (error.uncertain) {
+                    pending.error = error.message;
+                    pending.password = "";
+                }
                 throw error;
             }
             discardCredentialPrompt(request.token, operation.action, false);

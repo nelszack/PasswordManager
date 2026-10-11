@@ -7,7 +7,9 @@
 
     function validateResponse(response) {
         if (!response || !Number.isSafeInteger(response.id) || response.id <= 0
-            || typeof response.success !== "boolean") {
+            || typeof response.success !== "boolean"
+            || ("uncertain" in response && typeof response.uncertain !== "boolean")
+            || (response.success && response.uncertain)) {
             throw new Error("Invalid native host response");
         }
         if (response.success) {

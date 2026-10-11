@@ -16,6 +16,12 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// A sent request may have committed even when its reply was lost.
+pub struct RequestFailure {
+    pub message: String,
+    pub sent: bool,
+}
+
 /// An authenticated local connection with explicit resource and timeout limits.
 #[derive(Clone, Debug)]
 pub struct AuthenticatedClient {
@@ -57,9 +63,27 @@ impl AuthenticatedClient {
     }
 
     pub fn request_response(&self, command: ServerCommand) -> Result<ProtocolResponse, String> {
+        self.request_response_tracked(command)
+            .map_err(|error| error.message)
+    }
+
+    pub fn request_response_tracked(
+        &self,
+        command: ServerCommand,
+    ) -> Result<ProtocolResponse, RequestFailure> {
         let command = Zeroizing::new(command);
+        let mut sent = false;
+        self.exchange_response(&command, &mut sent)
+            .map_err(|message| RequestFailure { message, sent })
+    }
+
+    fn exchange_response(
+        &self,
+        command: &ServerCommand,
+        sent: &mut bool,
+    ) -> Result<ProtocolResponse, String> {
         let read_timeout = if matches!(
-            &*command,
+            command,
             ServerCommand::Audit(AuditOptions {
                 check_breaches: true,
                 ..
@@ -67,7 +91,7 @@ impl AuthenticatedClient {
         ) {
             self.breach_timeout
         } else if matches!(
-            &*command,
+            command,
             ServerCommand::Duo(_) | ServerCommand::Totp(TotpCommand::Duo { .. })
         ) {
             Duration::from_secs(60)
@@ -95,10 +119,11 @@ impl AuthenticatedClient {
         let keys = verify_server_hello(&token, &hello)
             .ok_or_else(|| "password manager server authentication failed".to_string())?;
         let data = Zeroizing::new(
-            rmp_serde::to_vec(&*command).map_err(|e| format!("could not encode command: {e}"))?,
+            rmp_serde::to_vec(command).map_err(|e| format!("could not encode command: {e}"))?,
         );
         let mut encrypted_request = encrypt_record(&keys.request, &data)
             .ok_or_else(|| "could not encrypt command".to_string())?;
+        *sent = true;
         let send_result = connection
             .write_all(&encrypted_request)
             .and_then(|_| connection.flush())
@@ -256,8 +281,12 @@ mod tests {
             let (port, worker) = fixture(server_token, ResponseCode::Success, "bounded", tamper);
             first.port = port;
             first.max_response = limit;
-            let error = first.request(ServerCommand::StatusData).unwrap_err();
-            assert!(error.contains(expected), "{error}");
+            let error = first
+                .request_response_tracked(ServerCommand::StatusData)
+                .err()
+                .unwrap();
+            assert!(error.message.contains(expected), "{}", error.message);
+            assert_eq!(error.sent, server_token == token);
             worker.join().unwrap();
         }
     }

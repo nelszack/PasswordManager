@@ -169,7 +169,11 @@ fn native_message_round_trip_uses_native_endian_framing() {
 
 #[test]
 fn parses_totp_server_response() {
-    let data = response_data("getTotp", "TOTP: 287082 (19s remaining)\n".into()).unwrap();
+    let data = response_data(
+        "getTotp",
+        r#"{"code":"287082","expires_in":19,"counter":null,"mode":"totp"}"#.into(),
+    )
+    .unwrap();
     assert_eq!(data["code"], "287082");
     assert_eq!(data["expires_in"], 19);
 }
@@ -178,7 +182,7 @@ fn parses_totp_server_response() {
 fn parses_hotp_response_without_a_time_based_expiration() {
     let data = response_data(
         "getTotp",
-        "HOTP: 755224 (counter 0; next counter saved)\n".into(),
+        r#"{"code":"755224","expires_in":null,"counter":0,"mode":"hotp"}"#.into(),
     )
     .unwrap();
     assert_eq!(data["code"], "755224");
@@ -188,10 +192,24 @@ fn parses_hotp_response_without_a_time_based_expiration() {
     assert!(
         response_data(
             "getTotp",
-            "HOTP: 755224 (counter invalid; next counter saved)".into()
+            r#"{"code":"755224","expires_in":19,"counter":0,"mode":"hotp"}"#.into()
         )
         .is_err()
     );
+}
+
+#[test]
+fn malformed_authenticator_data_fails_without_exposing_code_material() {
+    for payload in [
+        r#"{"code":"secret","expires_in":19,"counter":null,"mode":"totp"}"#,
+        r#"{"code":"287082","expires_in":null,"counter":null,"mode":"totp"}"#,
+        r#"{"code":"755224","expires_in":null,"counter":0,"mode":"unknown"}"#,
+        r#"{"code":"755224","expires_in":null,"counter":"0","mode":"hotp"}"#,
+        "TOTP: 287082 (19s remaining)",
+    ] {
+        let error = response_data("getTotp", payload.into()).unwrap_err();
+        assert_eq!(error, "invalid authenticator response from server");
+    }
 }
 
 #[test]
@@ -248,10 +266,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
     };
     assert!(matches!(
         command_for_request(&mut request).unwrap(),
-        ServerCommand::Totp(TotpCommand::Show {
-            target: Target::Id(17),
-            copy_timeout: None
-        })
+        ServerCommand::AuthenticatorData(Target::Id(17))
     ));
 
     let mut unsupported = NativeRequest {

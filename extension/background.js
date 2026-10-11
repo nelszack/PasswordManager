@@ -33,7 +33,7 @@ const status = PasswordManagerBackgroundStatus.create({
     chrome, nativeRequest: native.request, state: PasswordManagerBackgroundState,
     version: manifest.version_name || manifest.version, setInterval,
     invalidate: () => { pickers.invalidate(); prompts.invalidate(); duo.invalidate(); },
-    cleanupExpired: () => router.cleanupExpired()
+    cleanupExpired: () => { router.cleanupExpired(); pendingCredentials.cleanup().catch(() => {}); }
 });
 const router = PasswordManagerBackgroundRouter.create({
     chrome, security: PasswordManagerSecurity, relay: PasswordManagerRelay,

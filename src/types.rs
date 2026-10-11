@@ -93,6 +93,8 @@ impl Zeroize for ServerCommand {
             Self::AddTyped(entry) | Self::AddTypedWithOptions { entry, .. } => entry.zeroize(),
             Self::Get(target)
             | Self::GetSecret(target)
+            | Self::GetSecretData(target)
+            | Self::AuthenticatorData(target)
             | Self::Delete(target)
             | Self::History(target) => target.zeroize(),
             Self::GetWithOptions {
@@ -119,6 +121,10 @@ impl Zeroize for ServerCommand {
                 target.zeroize();
                 name.zeroize();
                 copy_timeout.zeroize();
+            }
+            Self::GetFieldData { target, name } => {
+                target.zeroize();
+                name.zeroize();
             }
             Self::RestorePassword { target, revision } => {
                 target.zeroize();
@@ -230,6 +236,12 @@ pub enum ServerCommand {
         timeout: u8,
     },
     Duo(DuoCommand),
+    GetSecretData(Target),
+    GetFieldData {
+        target: Target,
+        name: String,
+    },
+    AuthenticatorData(Target),
 }
 
 #[derive(

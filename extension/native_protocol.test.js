@@ -10,6 +10,10 @@ test("native response envelopes reject malformed or ambiguous values", () => {
     assert.throws(() => protocol.validateResponse({ id: 7, success: "yes", data: "ok" }));
     assert.throws(() => protocol.validateResponse({ id: 7, success: true }));
     assert.throws(() => protocol.validateResponse({ id: 7, success: false, error: "" }));
+    assert.throws(() => protocol.validateResponse({ id: 7, success: false, error: "failed", uncertain: "yes" }));
+    assert.throws(() => protocol.validateResponse({ id: 7, success: true, data: {}, uncertain: true }));
+    const uncertain = { id: 7, success: false, error: "Review the vault", uncertain: true };
+    assert.equal(protocol.validateResponse(uncertain), uncertain);
 });
 
 test("native item payloads require a successful JSON array response", () => {

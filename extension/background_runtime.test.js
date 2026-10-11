@@ -24,7 +24,8 @@ function securityEnvironment() {
     let credentialResponse = { success: true, data: JSON.stringify([
         { id: 1, name: "Personal", username: "alice", has_totp: true }
     ]) };
-    const requests = [], deliveries = [], removed = [], created = [], badge = [];
+    const requests = [], deliveries = [], removed = [], created = [], badge = [], responses = new Map();
+    const sessionData = {};
     const event = capture => ({ addListener(fn) { capture?.(fn); } });
     const origin = "https://shop.example";
     const chrome = {
@@ -52,6 +53,7 @@ function securityEnvironment() {
                         ]);
                         else if (request.action === "getAutofillItem") response.data = JSON.stringify({ id: 2, primary_secret: "synthetic-card" });
                         else response.data = JSON.stringify({ id: 1, username: "alice", password: "synthetic-secret" });
+                        if (responses.has(request.action)) Object.assign(response, responses.get(request.action));
                         if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
                         else if (holdCredentials && request.action === "getLoginItems") heldCredentialResponse = response;
                         else if (holdSave && ["saveCredentials", "updateCredentials"].includes(request.action)) heldSaveResponse = response;
@@ -60,7 +62,11 @@ function securityEnvironment() {
                 };
             }
         },
-        storage: { local: { set() {} } },
+        storage: { local: { set() {} }, session: {
+            get(key, callback) { callback(key === null ? { ...sessionData } : { [key]: sessionData[key] }); },
+            set(value, callback) { Object.assign(sessionData, value); callback(); },
+            remove(key, callback) { delete sessionData[key]; callback(); }
+        } },
         tabs: {
             get: async () => ({ url: origin }),
             sendMessage: async (tab, message, options) => {
@@ -94,6 +100,7 @@ function securityEnvironment() {
         advanceTime(milliseconds) { now += milliseconds; },
         failDelivery(error) { deliveryError = error; },
         setCredentialResponse(response) { credentialResponse = response; },
+        setNativeResponse(action, response) { responses.set(action, response); },
         holdSave() { holdSave = true; },
         releaseSave() { nativeListener(heldSaveResponse); },
         windowRemoved(id) { removedWindowListener(id); },
@@ -142,6 +149,32 @@ test("background worker starts, publishes status, and rejects untrusted credenti
     assert.equal(response.success, false);
     assert.equal(response.error, "Invalid page origin");
     assert.equal(env.requests.length, before);
+});
+
+test("pending navigation records use trusted origins and can be consumed only once through the router", async () => {
+    const env = securityEnvironment();
+    const stored = await env.message({ action: "setPendingCredentials", pending: { username: "alice", password: "synthetic" } });
+    assert.equal(stored.success, true);
+    const consumed = await env.message({ action: "consumePendingCredentials" });
+    assert.equal(consumed.pending.domain, "https://shop.example");
+    assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
+    await env.message({ action: "setPendingCredentials", pending: { username: "alice", password: "synthetic" } });
+    assert.equal((await env.message({ action: "clearPendingCredentials" })).success, true);
+    assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
+});
+
+test("page saves use browser sender metadata and expose uncertain outcomes without claiming success", async () => {
+    const env = securityEnvironment();
+    for (const action of ["saveCredentials", "updateCredentials"]) {
+        const invalid = await env.message({ action }, { tab: { id: 7 }, url: "file:///tmp/untrusted" });
+        assert.equal(invalid.success, false);
+        env.setNativeResponse(action, { success: false, error: "Response lost. Review the vault.", uncertain: true });
+        const result = await env.message({ action, domain: "https://forged.example", username: "alice", password: "synthetic", id: 7 });
+        assert.equal(result.success, false);
+        assert.equal(result.uncertain, true);
+        const request = env.requests.findLast(request => request.action === action);
+        assert.equal(request.domain, "https://shop.example");
+    }
 });
 
 test("credential relays enforce tab, frame, token, origin, and single-use writes", async () => {

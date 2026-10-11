@@ -1,6 +1,6 @@
 use super::outcome::{
-    respond, respond_conflict, respond_domain_error, respond_domain_error_with_context,
-    respond_domain_result, respond_failure, respond_not_found,
+    respond, respond_conflict, respond_data, respond_domain_error,
+    respond_domain_error_with_context, respond_domain_result, respond_failure, respond_not_found,
 };
 use super::*;
 use crate::vault::{available, unlock_selected_vault};
@@ -681,6 +681,49 @@ fn handle_command(
                     }
                     Err(error) => respond_domain_error(&error, responses),
                 }
+            }
+        }
+        ServerCommand::GetFieldData { target, name } => {
+            match vlt
+                .as_ref()
+                .ok_or(crate::vault::VaultError::Locked)
+                .and_then(|vault| vault.get_custom_field(&target, &name))
+            {
+                Ok(value) => respond_data(&value, responses),
+                Err(error) => respond_domain_error(&error, responses),
+            }
+        }
+        ServerCommand::AuthenticatorData(target) => {
+            match available(vlt).and_then(|vault| vault.current_otp(target, server_info)) {
+                Ok(code) => {
+                    let payload = crate::protocol::AuthenticatorResponse {
+                        code: code.code.to_string(),
+                        expires_in: code.expires_in,
+                        counter: code.counter,
+                        mode: if code.counter.is_some() {
+                            "hotp"
+                        } else {
+                            "totp"
+                        }
+                        .into(),
+                    };
+                    let encoded = Zeroizing::new(
+                        serde_json::to_string(&payload)
+                            .expect("authenticator data is serializable"),
+                    );
+                    respond_data(&encoded, responses);
+                }
+                Err(error) => respond_domain_error(&error, responses),
+            }
+        }
+        ServerCommand::GetSecretData(target) => {
+            match vlt
+                .as_ref()
+                .ok_or(crate::vault::VaultError::Locked)
+                .and_then(|vault| vault.get_secret(&target))
+            {
+                Ok(secret) => respond_data(&secret, responses),
+                Err(error) => respond_domain_error(&error, responses),
             }
         }
         ServerCommand::GetSecret(target) => {

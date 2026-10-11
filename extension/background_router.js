@@ -7,11 +7,11 @@ const PasswordManagerBackgroundRouter = {
                 .then(response => {
                     sendResponse(response.success
                         ? { success: true, data: response.data }
-                        : { success: false, error: response.error });
+                        : { success: false, error: response.error, uncertain: Boolean(response.uncertain) });
                     if (refreshAfter) refreshStatus();
                 })
                 .catch(error => {
-                    sendResponse({ success: false, error: error.message });
+                    sendResponse({ success: false, error: error.message, uncertain: Boolean(error.uncertain) });
                     if (refreshAfter) refreshStatus();
                 });
         }
@@ -48,7 +48,7 @@ const PasswordManagerBackgroundRouter = {
             if (request.action === "completeCredentialPrompt") {
                 prompts.complete(request, sender)
                     .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
+                    .catch(error => sendResponse({ success: false, error: error.message, uncertain: Boolean(error.uncertain) }));
                 return true;
             }
             if (request.action === "openSecurePicker") {

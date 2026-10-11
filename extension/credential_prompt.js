@@ -7,6 +7,7 @@ const usernameInput = document.getElementById("username");
 const usernameLabel = document.getElementById("usernameLabel");
 const updateButton = document.getElementById("update");
 let completing = false;
+let uncertain = false;
 
 function send(message) {
     return new Promise(resolve => chrome.runtime.sendMessage(message, resolve));
@@ -19,6 +20,7 @@ function showError(error) {
 
 async function complete(action) {
     if (completing) return;
+    if (uncertain && action !== "cancel") return;
     if (action !== "cancel" && !form.reportValidity()) return;
     completing = true;
     const response = await send({
@@ -31,7 +33,14 @@ async function complete(action) {
         }
     });
     if (response?.success) window.close();
-    else showError(new Error(response?.error || "Could not save credentials"));
+    else {
+        uncertain = Boolean(response?.uncertain);
+        if (uncertain) {
+            updateButton.disabled = true;
+            document.getElementById("add").disabled = true;
+        }
+        showError(new Error(response?.error || "Could not save credentials"));
+    }
 }
 
 async function load() {

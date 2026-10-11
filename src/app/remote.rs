@@ -362,13 +362,20 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             copy,
         } => {
             if let Some(name) = field {
-                ServerCommand::GetField {
-                    target: target_type(target),
-                    name,
-                    copy_timeout: copy.then_some(conf.clipboard.timeout),
+                if copy {
+                    ServerCommand::GetField {
+                        target: target_type(target),
+                        name,
+                        copy_timeout: Some(conf.clipboard.timeout),
+                    }
+                } else {
+                    ServerCommand::GetFieldData {
+                        target: target_type(target),
+                        name,
+                    }
                 }
             } else if password_only {
-                ServerCommand::GetSecret(target_type(target))
+                ServerCommand::GetSecretData(target_type(target))
             } else {
                 ServerCommand::GetDetails {
                     target: target_type(target),

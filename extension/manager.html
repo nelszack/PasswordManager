@@ -4,6 +4,7 @@
 <body>
   <header><h1>Vault manager</h1><span id="connection">Checking connection…</span><button id="lock" disabled>Lock vault</button></header>
   <p id="message" role="status" aria-live="polite"></p>
+  <button id="reviewOutcome" type="button" hidden>Review vault state</button>
   <section id="locked" hidden>
     <h2>Unlock vault</h2><p id="setup">Start the server with <code>pm start</code>. Enter a master password or an absolute key-file path.</p>
     <form id="unlockForm"><label>Vault<select id="vault" required></select></label>
