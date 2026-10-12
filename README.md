@@ -58,8 +58,10 @@ native host while preserving browser manifests and approved extension IDs:
 ./target/release/pm native-host update
 ```
 
-Unix hosts link to that executable. Windows copies it to the registered host;
-fully close the browser, including background processes, before updating.
+Unix hosts link to that executable. Windows copies it to the registered host.
+On Windows, recompile or replace `pm.exe` **before** running `native-host update`
+with that new executable. Rebuilding afterward does not refresh the copied host.
+Fully close the browser, including background processes, before updating the host.
 Restart the server and reload the extension after upgrading. Open a new shell to
 refresh dynamic completion registration. If using static completion files,
 regenerate them with `pm completions` to pick up new commands.
@@ -1136,7 +1138,8 @@ newer. CI and release validation use Node 26; browser end-to-end tests use Node 
 Extension unit coverage enforces individual thresholds for the background
 services, including native request and pending-credential lifecycles.
 
-Browser tests launch headed Chromium and require a graphical session. The
+Browser tests run headlessly by default, so they do not open desktop windows or
+take focus and do not require a graphical session. The
 real native-host/server integration test runs on Linux and requires the binary
 at `target/debug/pm`; it is skipped if the binary is missing. Set up and run on
 Linux with:
@@ -1145,8 +1148,8 @@ Linux with:
 cargo build --locked
 npx playwright install --with-deps chromium
 npm run test:e2e:coverage
-# On Linux without a graphical session (requires Xvfb):
-xvfb-run --auto-servernum npm run test:e2e:coverage
+# To watch the browser while debugging (requires a graphical session):
+PM_E2E_HEADED=1 npm run test:e2e
 ```
 
 The coverage command writes reports under `test-results/e2e-coverage`; use

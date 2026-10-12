@@ -70,7 +70,7 @@ jobs:
       - name: Build native host and server
         run: cargo build --locked
       - name: Run browser end-to-end tests
-        run: xvfb-run --auto-servernum npm run test:e2e:coverage
+        run: npm run test:e2e:coverage
       - name: Upload browser coverage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

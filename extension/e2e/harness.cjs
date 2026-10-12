@@ -47,7 +47,10 @@ async function launchExtension(options = {}) {
     const nativeLog = path.join(temporaryRoot, "native-messages.jsonl");
     fs.mkdirSync(testHome, { recursive: true });
     const context = await chromium.launchPersistentContext(profile, {
-        headless: false,
+        // The Chromium channel supports extensions in headless mode, keeping
+        // test windows and focus changes off the user's desktop.
+        channel: "chromium",
+        headless: process.env.PM_E2E_HEADED !== "1",
         env: {
             ...process.env,
             HOME: testHome,
