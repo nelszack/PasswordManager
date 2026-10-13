@@ -369,7 +369,16 @@ fn run_with_io(
         payload.zeroize();
         let response = Zeroizing::new(match request {
             Ok(request) => handle_request(client, request),
-            Err(error) => NativeResponse::error(0, format!("invalid request: {error}")),
+            // Deserialization errors can contain rejected string values. Keep
+            // credential material out of errors returned to the browser.
+            Err(error) => NativeResponse::error(
+                0,
+                format!(
+                    "invalid request at line {}, column {}",
+                    error.line(),
+                    error.column()
+                ),
+            ),
         });
         write_message(writer, &response)?;
     }
@@ -426,6 +435,7 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
 fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> NativeResponse {
     let id = request.id;
     let mut uncertain = false;
+    let mut committed = false;
     let result = if request.action == "managerVaults" {
         crate::vault::list_vaults()
             .map(|vaults| json!(vaults))
@@ -436,26 +446,16 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
                 client
                     .request_response_tracked(command)
                     .map_err(|error| {
-                        uncertain = error.sent
-                            && matches!(
-                                request.action.as_str(),
-                                "managerUnlock"
-                                    | "managerAdd"
-                                    | "managerUpdate"
-                                    | "managerDelete"
-                                    | "managerCopy"
-                                    | "saveCredentials"
-                                    | "updateCredentials"
-                                    | "getTotp"
-                                    | "managerDuoRespond"
-                                    | "lock"
-                            );
+                        uncertain = error.sent && mutating_action(&request.action);
                         error.message
                     })
                     .and_then(|response| {
                         if response.code == crate::protocol::ResponseCode::Success as i32 {
                             Ok(response.message)
                         } else {
+                            committed =
+                                response.code == crate::protocol::ResponseCode::Durability as i32;
+                            uncertain = committed && mutating_action(&request.action);
                             Err(response.message.trim_end().to_string())
                         }
                     })
@@ -468,7 +468,9 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
         Err(error) => {
             let mut response = NativeResponse::error(
                 id,
-                if uncertain {
+                if uncertain && committed {
+                    format!("{error}. The operation committed. Review the vault before retrying.")
+                } else if uncertain {
                     format!(
                         "{error}. The operation may still complete. Review the vault before retrying."
                     )
@@ -480,6 +482,22 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
             response
         }
     }
+}
+
+fn mutating_action(action: &str) -> bool {
+    matches!(
+        action,
+        "managerUnlock"
+            | "managerAdd"
+            | "managerUpdate"
+            | "managerDelete"
+            | "managerCopy"
+            | "saveCredentials"
+            | "updateCredentials"
+            | "getTotp"
+            | "managerDuoRespond"
+            | "lock"
+    )
 }
 
 fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, String> {

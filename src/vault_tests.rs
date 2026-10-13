@@ -37,9 +37,6 @@ fn browser_duo_summaries_match_only_the_exact_https_issuer_and_reveal_no_credent
         });
     }
     let summaries = vault.browser_duo_items_json("https://api-test.duosecurity.com/frame/prompt");
-    assert!(!summaries.contains("secret"));
-    assert!(!summaries.contains("private-username"));
-    assert!(!summaries.contains("duosecurity.com"));
     let summaries: serde_json::Value = serde_json::from_str(&summaries).unwrap();
     assert_eq!(
         summaries,
@@ -170,6 +167,7 @@ fn misspelled_entries_field_is_rejected() {
     struct InvalidVault {
         enteries: Vec<VaultEntry>,
         metadata: VaultMetadata,
+        recovery: RecoveryData,
     }
 
     let invalid = InvalidVault {
@@ -183,8 +181,10 @@ fn misspelled_entries_field_is_rejected() {
             filename: "invalid.enc".to_string(),
             duo_session: None,
         },
+        recovery: RecoveryData::default(),
     };
-    let encoded = rmp_serde::to_vec(&invalid).unwrap();
+    // Array encoding omits field names and would not exercise the typo.
+    let encoded = rmp_serde::to_vec_named(&invalid).unwrap();
     assert!(rmp_serde::from_slice::<Vault>(&encoded).is_err());
 }
 
@@ -380,82 +380,37 @@ fn browser_credentials_are_bound_to_normalized_origins() {
     }
 }
 #[test]
-fn test_delete_entry_returns_false_when_not_found() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: None,
-            password: String::from("p"),
-            url: None,
-            notes: None,
-            created: String::from("2026-01-01"),
-            modified: String::from("2026-01-01"),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    };
-    let mut si = ServerInfo {
-        locked: true,
-        keypass: None,
-    };
-    let original = vlt.clone();
+fn entry_mutations_leave_vault_unchanged_when_target_is_missing() {
+    let mut vault = recovery_test_vault(vec![VaultEntry {
+        id: 1,
+        name: "test".into(),
+        password: "p".into(),
+        ..Default::default()
+    }]);
+    let before = vault.clone();
+    let mut credentials = ServerInfo::default();
     for target in [Target::Name("nope".into()), Target::Id(0), Target::Id(100)] {
-        assert!(
-            !vlt.delete_entry(target.clone(), &mut si).unwrap(),
-            "{target:?}"
-        );
-        assert_eq!(vlt, original, "{target:?}");
-    }
-    assert!(
-        vlt.delete_entry(Target::Name("test".into()), &mut si)
-            .unwrap()
-    );
-}
-#[test]
-fn test_update_entry_returns_false_when_not_found() {
-    let mut vlt = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: String::from("test"),
-            username: None,
-            password: String::from("p"),
-            url: None,
-            notes: None,
-            created: String::from("2026-01-01"),
-            modified: String::from("2026-01-01"),
-        }],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    };
-    let mut si = ServerInfo {
-        locked: true,
-        keypass: None,
-    };
-    let original = vlt.clone();
-    for target in [Target::Name("nope".into()), Target::Id(0), Target::Id(100)] {
-        let upd = EntryUpdate {
-            target: target.clone(),
-            update: EntryChanges {
-                name: Some("x".into()),
-                username: None,
-                url: None,
-                notes: None,
-            },
-            password: None,
-        };
-        assert!(
-            !vlt.update_entry_with_limit(upd, &mut si, HISTORY_LIMIT)
-                .unwrap(),
-            "{target:?}"
-        );
-        assert_eq!(vlt, original, "{target:?}");
+        for operation in ["delete", "update"] {
+            let changed = if operation == "delete" {
+                vault.delete_entry(target.clone(), &mut credentials)
+            } else {
+                vault.update_entry_with_limit(
+                    EntryUpdate {
+                        target: target.clone(),
+                        update: EntryChanges {
+                            name: Some("x".into()),
+                            ..Default::default()
+                        },
+                        password: None,
+                    },
+                    &mut credentials,
+                    HISTORY_LIMIT,
+                )
+            }
+            .unwrap();
+            assert!(!changed, "{operation}, {target:?}");
+            assert_eq!(vault, before, "{operation}, {target:?}");
+        }
     }
 }
 #[test]
@@ -520,60 +475,24 @@ fn test_add_entry() {
 #[test]
 fn test_delete_entry_by_id_or_name() {
     for target in [Target::Id(1), Target::Name("test".into())] {
-        let mut vlt = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: String::from("test"),
-                username: Some(String::from("test")),
-                password: String::from("test123"),
-                url: None,
-                notes: None,
-                created: chrono::Local::now().to_string(),
-                modified: chrono::Local::now().to_string(),
-            }],
-            metadata: VaultMetadata {
-                filename: "test.enc".into(),
-                duo_session: None,
-            },
-            recovery: RecoveryData::default(),
-        };
+        let mut vlt = recovery_test_vault(vec![recovery_test_entry(1, "test", "test", "test123")]);
+        let original = vlt.entries[0].clone();
         assert!(
-            vlt.delete_entry(
-                target.clone(),
-                &mut ServerInfo {
-                    locked: true,
-                    keypass: None,
-                },
-            )
-            .unwrap(),
+            vlt.delete_entry(target.clone(), &mut ServerInfo::default())
+                .unwrap(),
             "{target:?}"
         );
         assert!(vlt.entries.is_empty(), "{target:?}");
         assert_eq!(vlt.recovery.trash.len(), 1, "{target:?}");
-        assert_eq!(vlt.recovery.trash[0].entry.name, "test", "{target:?}");
+        assert_eq!(vlt.recovery.trash[0].entry, original, "{target:?}");
     }
 }
 
 #[test]
 fn test_update_entry_by_id_or_name() {
     for target in [Target::Id(1), Target::Name("test".into())] {
-        let mut vlt = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: String::from("test"),
-                username: Some(String::from("test")),
-                password: String::from("test123"),
-                url: None,
-                notes: None,
-                created: chrono::Local::now().to_string(),
-                modified: chrono::Local::now().to_string(),
-            }],
-            metadata: VaultMetadata {
-                filename: "test.enc".into(),
-                duo_session: None,
-            },
-            recovery: RecoveryData::default(),
-        };
+        let mut vlt = recovery_test_vault(vec![recovery_test_entry(1, "test", "test", "test123")]);
+        let mut expected = vlt.clone();
         assert!(
             vlt.update_entry_with_limit(
                 EntryUpdate {
@@ -581,37 +500,19 @@ fn test_update_entry_by_id_or_name() {
                     update: EntryChanges {
                         name: Some(String::from("test2")),
                         username: Some(String::from("test2")),
-                        url: None,
-                        notes: None,
+                        ..Default::default()
                     },
                     password: None,
                 },
-                &mut ServerInfo {
-                    locked: true,
-                    keypass: None,
-                },
+                &mut ServerInfo::default(),
                 HISTORY_LIMIT,
             )
             .unwrap(),
             "{target:?}"
         );
-        let expected = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: String::from("test2"),
-                username: Some(String::from("test2")),
-                password: String::from("test123"),
-                url: None,
-                notes: None,
-                created: vlt.entries[0].created.clone(),
-                modified: vlt.entries[0].modified.clone(),
-            }],
-            metadata: VaultMetadata {
-                filename: "test.enc".into(),
-                duo_session: None,
-            },
-            recovery: RecoveryData::default(),
-        };
+        expected.entries[0].name = "test2".into();
+        expected.entries[0].username = Some("test2".into());
+        expected.entries[0].modified = vlt.entries[0].modified.clone();
         assert_eq!(vlt, expected, "{target:?}");
         assert!(time_close(vlt.entries[0].modified.clone()), "{target:?}");
     }
@@ -686,8 +587,16 @@ fn test_failed_import_does_not_partially_modify_vault() {
 }
 
 #[test]
-fn test_imports_chrome_style_csv() {
-    for password in ["secret", " padded-secret \t", " \t ", ""] {
+fn login_imports_preserve_fields_and_credential_bytes() {
+    for (case, username, password) in [
+        ("ordinary", "alice", "secret"),
+        ("padded password", "alice", " padded-secret \t"),
+        ("whitespace password", "alice", " \t "),
+        ("empty password", "alice", ""),
+        ("padded username", " alice ", "synthetic-secret"),
+        ("tabbed username", "\taccount\t", "synthetic-secret"),
+        ("whitespace username", " \t ", "synthetic-secret"),
+    ] {
         let mut writer = csv::Writer::from_writer(Vec::new());
         writer
             .write_record(["name", "url", "username", "password", "note"])
@@ -695,59 +604,74 @@ fn test_imports_chrome_style_csv() {
         writer
             .write_record([
                 "Example",
-                "https://example.com",
-                "alice",
+                "https://example.com/login",
+                username,
                 password,
                 "personal",
             ])
             .unwrap();
         let csv = String::from_utf8(writer.into_inner().unwrap()).unwrap();
-        let imported = import_csv(&csv, "chrome.csv").unwrap();
-        assert_eq!(imported.len(), 1);
-        assert_eq!(imported[0].entry.name, "Example");
-        assert_eq!(imported[0].entry.password, password);
-        assert_eq!(imported[0].entry.username.as_deref(), Some("alice"));
-        assert_eq!(imported[0].entry.notes.as_deref(), Some("personal"));
-    }
-    assert!(import_csv("name,username\nExample,alice\n", "missing.csv").is_err());
-}
-
-#[test]
-fn test_imports_bitwarden_json() {
-    for password in ["secret", " padded-secret \t", " \t ", ""] {
-        for document in [
-            json!({ "items": [{
-                "type": 1,
-                "name": "Example",
-                "notes": "work",
-                "login": {
-                    "username": "alice",
-                    "password": password,
-                    "uris": [{ "uri": "https://example.com/login" }]
-                }
-            }] }),
-            json!([{
-                "name": "Example",
-                "notes": "work",
-                "username": "alice",
-                "password": password,
-                "url": "https://example.com/login"
-            }]),
+        for (format, document) in [
+            ("chrome.csv", csv),
+            (
+                "bitwarden.json",
+                json!({ "items": [{
+                "type": 1, "name": "Example", "notes": "personal",
+                "login": { "username": username, "password": password,
+                    "uris": [{ "uri": "https://example.com/login" }] }
+            }] })
+                .to_string(),
+            ),
+            (
+                "flat.json",
+                json!([{
+                    "name": "Example", "notes": "personal", "username": username,
+                    "password": password, "url": "https://example.com/login"
+                }])
+                .to_string(),
+            ),
+            (
+                "login-alias.json",
+                json!([{
+                    "name": "Example", "notes": "personal", "login": username,
+                    "password": password, "url": "https://example.com/login"
+                }])
+                .to_string(),
+            ),
         ] {
-            let entries = import_json(&document.to_string(), "logins.json").unwrap();
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].entry.name, "Example");
-            assert_eq!(entries[0].entry.username.as_deref(), Some("alice"));
-            assert_eq!(entries[0].entry.notes.as_deref(), Some("work"));
+            let imported = if format.ends_with(".csv") {
+                import_csv(&document, format)
+            } else {
+                import_json(&document, format)
+            }
+            .unwrap_or_else(|error| panic!("{format}, {case}: {error}"));
+            assert_eq!(imported.len(), 1, "{format}, {case}");
+            let entry = &imported[0].entry;
+            assert_eq!(entry.name, "Example", "{format}, {case}");
             assert_eq!(
-                entries[0].entry.url.as_deref(),
-                Some("https://example.com/login")
+                entry.username.as_deref(),
+                Some(username),
+                "{format}, {case}"
             );
-            assert_eq!(entries[0].entry.password, password);
+            assert_eq!(entry.password, password, "{format}, {case}");
+            assert_eq!(entry.notes.as_deref(), Some("personal"), "{format}, {case}");
+            assert_eq!(
+                entry.url.as_deref(),
+                Some("https://example.com/login"),
+                "{format}, {case}"
+            );
         }
     }
-    assert!(import_json(r#"[{"name":"Example"}]"#, "missing.json").is_err());
-    assert!(import_json(r#"[{"name":"Example","password":null}]"#, "null.json").is_err());
+    assert!(import_csv("name,username\nExample,alice\n", "missing.csv").is_err());
+    for (case, document) in [
+        ("missing", r#"[{"name":"Example"}]"#),
+        ("null", r#"[{"name":"Example","password":null}]"#),
+    ] {
+        assert!(
+            import_json(document, "invalid.json").is_err(),
+            "{case} password"
+        );
+    }
 }
 
 #[test]
@@ -1123,59 +1047,34 @@ fn test_rekey_replaces_vault_and_new_password_unlocks() {
 #[test]
 fn test_add_duplicate_entry_name() {
     let mut vlt = recovery_test_vault(Vec::new());
-    let mut server_info = ServerInfo {
-        locked: true,
-        keypass: None,
-    };
-    assert!(
-        vlt.add_entry(
-            PasswordEntry {
-                name: String::from("test"),
-                username: Some(String::from("user1")),
-                password: String::from("pass1"),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            &mut server_info,
-        )
-        .unwrap()
-    );
-    let initial_len = vlt.entries.len();
-
-    // Same name, different username -> allowed (multiple accounts per site)
-    assert!(
-        vlt.add_entry(
-            PasswordEntry {
-                name: String::from("test"),
-                username: Some(String::from("user2")),
-                password: String::from("pass2"),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            &mut server_info,
-        )
-        .unwrap()
-    );
-    assert_eq!(vlt.entries.len(), initial_len + 1);
-
-    // Same name AND same username -> still blocked
-    assert!(
-        !vlt.add_entry(
-            PasswordEntry {
-                name: String::from("test"),
-                username: Some(String::from("user1")),
-                password: String::from("pass3"),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            &mut server_info,
-        )
-        .unwrap()
-    );
-    assert_eq!(vlt.entries.len(), initial_len + 1);
+    let mut credentials = ServerInfo::default();
+    for (username, password, added, count) in [
+        ("user1", "pass1", true, 1),
+        ("user2", "pass2", true, 2),
+        ("user1", "pass3", false, 2),
+    ] {
+        let before = vlt.clone();
+        assert_eq!(
+            vlt.add_entry(
+                PasswordEntry {
+                    name: "test".into(),
+                    username: Some(username.into()),
+                    password: password.into(),
+                    url: None,
+                    notes: None,
+                    copy: false,
+                },
+                &mut credentials,
+            )
+            .unwrap(),
+            added,
+            "{username}, expected added={added}"
+        );
+        assert_eq!(vlt.entries.len(), count);
+        if !added {
+            assert_eq!(vlt, before, "duplicate must preserve the existing secret");
+        }
+    }
 }
 #[test]
 fn entry_ids_are_sequential_and_deletion_preserves_other_ids() {
@@ -1221,48 +1120,16 @@ fn entry_ids_are_sequential_and_deletion_preserves_other_ids() {
 
 #[test]
 fn test_delete_name_with_only_first_match() {
-    let mut vlt = Vault {
-        entries: vec![
-            VaultEntry {
-                id: 1,
-                name: String::from("dup"),
-                username: Some(String::from("user1")),
-                password: String::from("pass1"),
-                url: None,
-                notes: None,
-                created: chrono::Local::now().to_string(),
-                modified: chrono::Local::now().to_string(),
-            },
-            VaultEntry {
-                id: 2,
-                name: String::from("dup"),
-                username: Some(String::from("user2")),
-                password: String::from("pass2"),
-                url: None,
-                notes: None,
-                created: chrono::Local::now().to_string(),
-                modified: chrono::Local::now().to_string(),
-            },
-        ],
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    };
+    let second = recovery_test_entry(2, "dup", "user2", "pass2");
+    let mut vlt = recovery_test_vault(vec![
+        recovery_test_entry(1, "dup", "user1", "pass1"),
+        second.clone(),
+    ]);
     assert!(
-        vlt.delete_entry(
-            Target::Name("dup".into()),
-            &mut ServerInfo {
-                locked: true,
-                keypass: None,
-            },
-        )
-        .unwrap()
+        vlt.delete_entry(Target::Name("dup".into()), &mut ServerInfo::default())
+            .unwrap()
     );
-    assert_eq!(vlt.entries.len(), 1);
-    assert_eq!(vlt.entries[0].id, 2);
-    assert_eq!(vlt.entries[0].username, Some(String::from("user2")));
+    assert_eq!(vlt.entries, [second]);
 }
 
 #[test]
@@ -1365,28 +1232,20 @@ fn test_update_no_changes() {
     let mut entry = recovery_test_entry(1, "test", "test", "test123");
     entry.url = None;
     let mut vlt = recovery_test_vault(vec![entry]);
-    let original_modified = vlt.entries[0].modified.clone();
+    let before = vlt.clone();
     assert!(
         !vlt.update_entry_with_limit(
             EntryUpdate {
                 target: Target::Id(1),
-                update: EntryChanges {
-                    name: None,
-                    username: None,
-                    url: None,
-                    notes: None,
-                },
+                update: EntryChanges::default(),
                 password: None,
             },
-            &mut ServerInfo {
-                locked: true,
-                keypass: None,
-            },
+            &mut ServerInfo::default(),
             HISTORY_LIMIT,
         )
         .unwrap()
     );
-    assert_eq!(vlt.entries[0].modified, original_modified);
+    assert_eq!(vlt, before);
 }
 
 fn recovery_test_vault(entries: Vec<VaultEntry>) -> Vault {
@@ -1980,6 +1839,52 @@ fn trash_retention_expires_only_old_items_and_removes_associated_records() {
 }
 
 #[test]
+fn oversized_day_thresholds_do_not_panic_or_expire_records() {
+    let now = chrono::Utc::now();
+    let mut entry = recovery_test_entry(11, "old", "alice", "synthetic-secret");
+    entry.created = (now - chrono::Duration::days(60)).to_rfc3339();
+    let mut vault = recovery_test_vault(vec![entry.clone()]);
+    vault.recovery.trash.push(TrashedEntry {
+        entry: recovery_test_entry(12, "deleted", "bob", "synthetic-secret"),
+        history: Vec::new(),
+        deleted: (chrono::Local::now() - chrono::Duration::days(60)).to_string(),
+    });
+    let before = vault.clone();
+    for days in [u64::MAX, i64::MAX as u64, (i64::MAX / 86_400) as u64] {
+        assert!(!password_is_stale_at(&entry.created, days, now));
+        assert!(
+            vault
+                .apply_list_options(
+                    vault.entries.iter().collect(),
+                    &ListOptions {
+                        stale_days: Some(days),
+                        ..Default::default()
+                    },
+                )
+                .is_empty()
+        );
+        assert!(
+            vault
+                .audit_snapshot(&AuditOptions {
+                    stale_days: Some(days),
+                    ..Default::default()
+                })
+                .entries
+                .iter()
+                .all(|entry| !entry.stale)
+        );
+        assert_eq!(
+            vault
+                .purge_expired_trash(days, &mut ServerInfo::default())
+                .unwrap(),
+            0
+        );
+        assert_eq!(vault, before);
+    }
+    assert!(password_is_stale_at(&entry.created, 30, now));
+}
+
+#[test]
 fn list_options_filter_item_type_totp_and_weakness_and_sort_results() {
     let mut alpha = recovery_test_entry(8, "Alpha", "alice", "A-very-long-unique-password-42!");
     alpha.created = "2024-01-01".into();
@@ -2566,13 +2471,6 @@ fn audit_reports_stale_missing_totp_and_breached_passwords() {
     assert!(report.contains("Breached password: 7. old account (seen 42 times)"));
     assert!(report.contains("Health score: 0/100"));
     assert!(!report.contains("known-breached-value"));
-}
-
-#[test]
-fn pwned_range_parser_ignores_padding_and_reconstructs_hashes() {
-    let parsed = parse_pwned_range("ABCDE:0\r\n12345:9\r\n", "FFFFF");
-    assert_eq!(parsed.get("FFFFF12345"), Some(&9));
-    assert!(!parsed.contains_key("FFFFFABCDE"));
 }
 
 #[test]

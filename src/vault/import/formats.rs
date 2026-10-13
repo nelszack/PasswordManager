@@ -100,7 +100,10 @@ pub(super) fn external_json(
                 },
             }
         };
-        let login = value.get("login").unwrap_or(value);
+        let login = value
+            .get("login")
+            .filter(|login| login.is_object())
+            .unwrap_or(value);
         let mut urls = Vec::new();
         if let Some(url) = json_text(value, &["url", "website"]) {
             urls.push(url);
@@ -154,7 +157,9 @@ pub(super) fn external_json(
         let mut item = ImportedItem::login(VaultEntry {
             id: 0,
             name,
-            username: json_text(login, &["username", "login"]).or_else(|| raw(value, "username")),
+            username: raw(login, "username")
+                .or_else(|| raw(login, "login"))
+                .or_else(|| raw(value, "username")),
             password,
             url: urls.first().cloned(),
             notes: raw(value, "notes").or_else(|| raw(value, "note")),
@@ -579,7 +584,14 @@ pub(super) fn csv_with_losses(
             id: 0,
             name,
             password,
-            username: csv_field(&headers, &row, &["username", "loginusername", "login"]),
+            username: headers
+                .iter()
+                .position(|header| {
+                    ["username", "loginusername", "login"].contains(&header.as_str())
+                })
+                .and_then(|column| row.get(column))
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             url: csv_field(
                 &headers,
                 &row,

@@ -43,6 +43,17 @@ function runPm(environment, ...args) {
     });
 }
 
+async function captureRevealExpirations(manager) {
+    await manager.evaluate(() => {
+        window.revealExpirations = [];
+        const schedule = window.setTimeout;
+        window.setTimeout = (callback, delay, ...args) => {
+            if (delay === 30_000) { window.revealExpirations.push(callback); return 0; }
+            return schedule(callback, delay, ...args);
+        };
+    });
+}
+
 // Each test gets an isolated browser, native registration, server, and key vault.
 // Teardown also runs if setup or an assertion fails.
 const test = base.extend({
@@ -187,14 +198,7 @@ test("vault manager edits a real vault, preserves hidden fields, and configures 
     expect(exported.items[0].url).toBe("https://replacement.example");
     expect(exported.items[0].additional_urls).toEqual([]);
     await manager.locator("#items button").click();
-    await manager.evaluate(() => {
-        window.revealExpirations = [];
-        const schedule = window.setTimeout;
-        window.setTimeout = (callback, delay, ...args) => {
-            if (delay === 30_000) { window.revealExpirations.push(callback); return 0; }
-            return schedule(callback, delay, ...args);
-        };
-    });
+    await captureRevealExpirations(manager);
     await manager.locator("#reveal").click();
     await expect(manager.locator("#password")).toHaveValue("synthetic-manager-password");
     await expect(manager.getByLabel("Field value", { exact: true })).toHaveValue("synthetic-recovery");
@@ -278,4 +282,70 @@ test("vault manager edits a real vault, preserves hidden fields, and configures 
     runPm(environment, "lock");
     await expect(manager.locator("#locked")).toBeVisible();
     await expect(manager.locator("#secretMultiline")).toHaveValue("");
+});
+
+test("manager preserves CRLF primary and custom fields across hidden and revealed edits", async ({ realVault }) => {
+    test.setTimeout(90_000);
+    const { browser, keyPath } = realVault;
+    const manager = await browser.context.newPage();
+    await manager.goto(`chrome-extension://${browser.extensionId}/manager.html`);
+    await manager.locator("#keyPath").fill(keyPath);
+    await manager.locator("#unlockForm button").click();
+    await expect(manager.locator("#unlocked")).toBeVisible();
+    const primary = "primary first\r\nprimary second\rlast";
+    const plain = "public first\r\npublic second\rlast";
+    const secret = "private first\r\nprivate second\rlast";
+    await manager.evaluate(async ({ primary, plain, secret }) => {
+        await send("managerAdd", { item: { name: "Multiline fields", kind: "secure-note", username: "", password: primary,
+            notes: "stored notes\r\nsecond line", urls: [], fields: [{ name: "public", value: plain, secret: false }, { name: "private\r\nfield", value: secret, secret: true }] } });
+        await loadItems();
+    }, { primary, plain, secret });
+    const open = async () => {
+        await manager.locator("#items button").click();
+        await expect(manager.locator("#editor")).toBeVisible();
+    };
+    const fields = manager.getByLabel("Field value", { exact: true });
+    const save = async () => {
+        await manager.locator("#editForm button:not([type='button'])").click();
+        await expect(manager.locator("#editor")).toBeHidden();
+    };
+    const read = () => manager.evaluate(() => send("managerItem", { entryId: selected, reveal: true }));
+    const assertStored = async () => {
+        const item = await read();
+        expect(item.password).toBe(primary);
+        expect(item.fields.find(field => field.name === "public").value).toBe(plain);
+        expect(item.fields.find(field => field.name === "private\r\nfield").value).toBe(secret);
+    };
+    await open();
+    await expect(fields.nth(0)).toHaveValue("public first\npublic second\nlast");
+    await expect(fields.nth(1)).toHaveValue("");
+    await expect(manager.locator("#secretMultiline")).toHaveValue("");
+    await expect(manager.locator("#notes")).toHaveValue("stored notes\nsecond line");
+    await manager.locator("#name").fill("Renamed multiline fields");
+    await save(); await open(); await assertStored();
+    expect((await read()).notes).toBe("stored notes\r\nsecond line");
+
+    await captureRevealExpirations(manager);
+    await manager.locator("#reveal").click();
+    await expect(fields.nth(1)).toHaveValue("private first\nprivate second\nlast");
+    await expect(manager.locator("#secretMultiline")).toHaveValue("primary first\nprimary second\nlast");
+    // The checkbox changes storage classification; textarea.type is read-only.
+    await manager.locator(".custom-field input[type=checkbox]").nth(1).uncheck();
+    await manager.locator(".custom-field input[type=checkbox]").nth(1).check();
+    await manager.locator("#kind").selectOption("api-secret");
+    await manager.locator("#notes").fill("Revealed values retain their stored line endings");
+    await save(); await open(); await assertStored();
+    await manager.locator("#reveal").click();
+    await expect(fields.nth(1)).toHaveValue("private first\nprivate second\nlast");
+    await manager.evaluate(() => window.revealExpirations.at(-1)());
+    await expect(fields.nth(1)).toHaveValue("");
+    await expect(manager.locator("#secretMultiline")).toHaveValue("");
+    await manager.locator("#notes").fill("Expired reveals preserve hidden secrets");
+    await save(); await open(); await assertStored();
+    await manager.locator("#reveal").click();
+    await expect(fields.nth(1)).toHaveValue("private first\nprivate second\nlast");
+    await fields.nth(1).fill("edited\ncustom value");
+    await save(); await open();
+    const edited = await read();
+    expect(edited.fields.find(field => field.name === "private\r\nfield").value).toBe("edited\ncustom value");
 });

@@ -32,16 +32,19 @@ test("credential lookups distinguish missing sites from native and malformed err
 });
 
 
-test("credential prompt metadata selects a matching username for updates", () => {
-    const data = prompt.describe([
-        { id: 7, name: "Personal", username: "alice" },
-        { id: 8, name: "Work", username: "bob" }
-    ], "bob", "https://login.example.com");
-
-    assert.equal(data.hasAccounts, true);
-    assert.deepEqual(data.updateTarget, { id: 8, name: "Work" });
-    assert.equal(data.suggestedName, "Work");
-    assert.equal(data.askForUsername, false);
+test("matching usernames, including literal None, select their own update target", () => {
+    for (const [label, username, name] of [["ordinary username", "bob", "Work"], ["literal None", "None", "None account"]]) {
+        const data = prompt.describe([
+            { id: 7, name: "Other account", username: "alice" },
+            { id: 8, name, username }
+        ], username, "https://login.example.com");
+        assert.equal(data.hasAccounts, true, label);
+        assert.deepEqual(data.updateTarget, { id: 8, name }, label);
+        assert.equal(data.suggestedName, name, label);
+        assert.equal(data.askForUsername, false, label);
+        assert.match(data.message, /already exists/, label);
+    }
+    assert.equal(prompt.accountUsername({ username: null }), "");
 });
 
 test("new-site metadata suggests the captured hostname and requests a username", () => {

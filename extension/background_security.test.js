@@ -46,35 +46,18 @@ test("TOTP IDs must belong to a matching site credential", () => {
 
 test("secure picker messages only come from the extension picker page", () => {
     const picker = "chrome-extension://abcdefghijklmnop/picker.html";
-    assert.equal(security.securePickerSender({
-        id: "abcdefghijklmnop",
-        url: `${picker}?token=secret`
-    }, "abcdefghijklmnop", picker), true);
-    assert.equal(security.securePickerSender({
-        id: "abcdefghijklmnop",
-        url: "chrome-extension://abcdefghijklmnop/popup.html"
-    }, "abcdefghijklmnop", picker), false);
-    assert.equal(security.securePickerSender({
-        id: "different",
-        url: `${picker}?token=secret`
-    }, "abcdefghijklmnop", picker), false);
-    assert.equal(security.securePickerSender({
-        id: "abcdefghijklmnop",
-        url: "https://example.com/picker.html"
-    }, "abcdefghijklmnop", picker), false);
-    assert.equal(security.securePickerSender({
-        id: "abcdefghijklmnop",
-        url: "chrome-extension://abcdefghijklmnop/picker.html.evil"
-    }, "abcdefghijklmnop", picker), false);
-    assert.equal(security.securePickerSender(null, "abcdefghijklmnop", picker), false);
-
     const credentialPrompt = "chrome-extension://abcdefghijklmnop/credential_prompt.html";
-    assert.equal(security.securePickerSender({
-        id: "abcdefghijklmnop",
-        url: `${credentialPrompt}?token=secret`
-    }, "abcdefghijklmnop", credentialPrompt), true);
-    assert.equal(security.securePickerSender({
-        id: "abcdefghijklmnop",
-        url: picker
-    }, "abcdefghijklmnop", credentialPrompt), false);
+    const sender = { id: "abcdefghijklmnop", url: `${picker}?token=secret` };
+    for (const [label, source, page, allowed] of [
+        ["picker query token", sender, picker, true],
+        ["wrong extension page", { ...sender, url: "chrome-extension://abcdefghijklmnop/popup.html" }, picker, false],
+        ["wrong extension ID", { ...sender, id: "different" }, picker, false],
+        ["website origin", { ...sender, url: "https://example.com/picker.html" }, picker, false],
+        ["path suffix", { ...sender, url: `${picker}.evil` }, picker, false],
+        ["missing sender", null, picker, false],
+        ["prompt query token", { ...sender, url: `${credentialPrompt}?token=secret` }, credentialPrompt, true],
+        ["picker cannot impersonate prompt", { ...sender, url: picker }, credentialPrompt, false]
+    ]) {
+        assert.equal(security.securePickerSender(source, sender.id, page), allowed, label);
+    }
 });

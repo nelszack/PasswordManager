@@ -149,5 +149,5 @@ function createSecureTypedButton(input, kind) {
 }
 
 function accountUsername(account) {
-    return account.username && account.username !== "None" ? account.username : "";
+    return account.username || "";
 }

@@ -146,6 +146,8 @@ pub enum ResponseCode {
     InvalidInput = 2,
     NotFound = 3,
     Conflict = 4,
+    /// The mutation committed, but its durability could not be confirmed.
+    Durability = 5,
 }
 
 #[derive(PartialEq, Eq)]
@@ -200,7 +202,7 @@ pub fn decode_responses(mut bytes: &[u8]) -> Result<ProtocolResponse, String> {
         data = frame_data;
         frames += 1;
         let frame_code = bytes[4] as i32;
-        if frame_code > ResponseCode::Conflict as i32 || (data && frame_code != 0) {
+        if frame_code > ResponseCode::Durability as i32 || (data && frame_code != 0) {
             return Err("server returned an unknown response code".to_string());
         }
         let length = u32::from_be_bytes(
@@ -278,6 +280,9 @@ mod tests {
 
     #[test]
     fn structured_frames_preserve_codes_utf8_and_newlines() {
+        // Append new response codes without changing installed clients' values.
+        assert_eq!(ResponseCode::Conflict as u8, 4);
+        assert_eq!(ResponseCode::Durability as u8, 5);
         for (label, messages, expected_code, expected_message) in [
             (
                 "highest error code",
@@ -293,6 +298,15 @@ mod tests {
                 vec![(ResponseCode::Conflict, "wording may change freely")],
                 ResponseCode::Conflict,
                 "wording may change freely\n",
+            ),
+            (
+                "committed durability error",
+                vec![(
+                    ResponseCode::Durability,
+                    "replacement committed; review before retrying",
+                )],
+                ResponseCode::Durability,
+                "replacement committed; review before retrying\n",
             ),
             (
                 "secret response",

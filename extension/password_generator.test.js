@@ -8,9 +8,9 @@ test("configured generation honors exact lengths, enabled sets, and ambiguity fi
         assert.equal(password.length, 37);
         assert.match(password, /^[A-HJ-NP-Za-km-np-z2-9]+$/);
         assert.match(password, /[A-Z]/); assert.match(password, /[a-z]/); assert.match(password, /[2-9]/);
-        assert.equal(generator.generate({ length: 1 }).length, 1);
-        assert.match(generator.generate({ uppercase: false, lowercase: false, digits: false, symbolSet: "?!", length: 12 }), /^[?!]{12}$/);
     }
+    assert.equal(generator.generate({ length: 1 }).length, 1);
+    assert.match(generator.generate({ uppercase: false, lowercase: false, digits: false, symbolSet: "?!", length: 12 }), /^[?!]{12}$/);
     assert.throws(() => generator.generate({ uppercase: false, lowercase: false, digits: false, symbols: false }), /Enable/);
     for (const options of [{ length: 0 }, { length: 256 }, { length: 1.5 }, { words: 0 }, { symbolSet: "é" }, { separator: "\n" }, { digits: "yes" }]) {
         assert.throws(() => generator.validate(options), /Invalid/);

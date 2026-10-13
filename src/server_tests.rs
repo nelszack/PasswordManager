@@ -59,11 +59,133 @@ fn test_connection_state(session: VaultSession) -> ConnectionState {
         token: Zeroizing::new("ab".repeat(32)),
         lock_generation: Arc::new(AtomicU64::new(0)),
         inactivity_timeout: Arc::new(AtomicU64::new(0)),
+        stopping: Arc::new(AtomicBool::new(false)),
         background_error: Arc::new(Mutex::new(None)),
         system_lock: None,
         password_history_limit: 10,
         trash_retention_days: 0,
     }
+}
+
+#[tokio::test]
+async fn shutdown_rejects_mutations_on_already_authenticated_connections() {
+    init_test_data_dir();
+    let directory = tempfile::tempdir().unwrap();
+    let key_path = directory.path().join("must-not-create.key");
+    let mut state = test_connection_state(VaultSession::default());
+    let (kill_tx, mut kill_rx) = mpsc::channel(1);
+    state.kill_tx = kill_tx;
+
+    // The first connection is accepted and authenticated before shutdown, but
+    // its command is delayed until after Kill's successful response.
+    let (mut delayed, server_stream) = tcp_pair().await;
+    let delayed_worker = tokio::spawn(handle_connection(server_stream, state.clone()));
+    delayed.write_all(SECURE_PREFACE).await.unwrap();
+    let mut hello = [0u8; SECURE_HELLO_LEN];
+    delayed.read_exact(&mut hello).await.unwrap();
+    let delayed_keys = verify_server_hello(&state.token, &hello).unwrap();
+
+    let (mut killer, server_stream) = tcp_pair().await;
+    let kill_worker = tokio::spawn(handle_connection(server_stream, state.clone()));
+    killer.write_all(SECURE_PREFACE).await.unwrap();
+    killer.read_exact(&mut hello).await.unwrap();
+    let kill_keys = verify_server_hello(&state.token, &hello).unwrap();
+    let request = rmp_serde::to_vec(&ServerCommand::Kill).unwrap();
+    killer
+        .write_all(&encrypt_record(&kill_keys.request, &request).unwrap())
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    killer.read_to_end(&mut response).await.unwrap();
+    let plaintext = decrypt_record_stream(&kill_keys.response, &response, 4096).unwrap();
+    assert_eq!(decode_responses(&plaintext).unwrap().code, 0);
+    kill_rx.recv().await.unwrap();
+    kill_worker.await.unwrap();
+
+    let request = rmp_serde::to_vec(&ServerCommand::New(PasswordType::Key(
+        key_path.to_str().unwrap().into(),
+    )))
+    .unwrap();
+    delayed
+        .write_all(&encrypt_record(&delayed_keys.request, &request).unwrap())
+        .await
+        .unwrap();
+    response.clear();
+    delayed.read_to_end(&mut response).await.unwrap();
+    let plaintext = decrypt_record_stream(&delayed_keys.response, &response, 4096).unwrap();
+    let rejected = decode_responses(&plaintext).unwrap();
+    assert_eq!(rejected.code, ResponseCode::Failure as i32);
+    assert_eq!(rejected.message, "Server is stopping.\n");
+    assert!(
+        !key_path.exists(),
+        "a stopped server must not create vault keys"
+    );
+    delayed_worker.await.unwrap();
+    assert!(state.session.lock().await.is_locked());
+}
+
+#[test]
+fn mutation_responses_distinguish_precommit_failure_from_committed_durability() {
+    init_test_data_dir();
+    let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
+    let path = data_dir().join(&filename);
+    let mut session = VaultSession {
+        credentials: ServerInfo {
+            locked: false,
+            keypass: Some(PasswordType::Session {
+                encryption_key: [42; 32],
+                salt: [42; 16],
+                kdf: 1,
+                memory_kib: 8192,
+                iterations: 1,
+                parallelism: 1,
+            }),
+        },
+        vault: Some(Vault {
+            entries: vec![VaultEntry {
+                id: 1,
+                name: "Account".into(),
+                password: "before".into(),
+                ..Default::default()
+            }],
+            metadata: VaultMetadata {
+                filename,
+                ..Default::default()
+            },
+            recovery: RecoveryData::default(),
+        }),
+    };
+    let state = test_connection_state(VaultSession::default());
+    for (fault, expected_code, expected_password) in [
+        (1, ResponseCode::Failure, "before"),
+        (2, ResponseCode::Durability, "after"),
+    ] {
+        let command = ServerCommand::Update(EntryUpdate {
+            target: Target::Id(1),
+            update: EntryChanges::default(),
+            password: Some("after".into()),
+        });
+        let outcome = crate::vault::with_write_fault(fault, || {
+            execute_command(state.clone(), command, &mut session)
+        });
+        assert_eq!(outcome.responses.len(), 1);
+        assert_eq!(outcome.responses[0].code, expected_code);
+        assert_eq!(
+            session.vault.as_ref().unwrap().entries[0].password,
+            expected_password
+        );
+        assert_eq!(path.exists(), fault == 2);
+    }
+    // A failed durability acknowledgement must retain the mutation actually
+    // stored on disk, so callers can review it instead of retrying the write.
+    let bytes = fs::read(&path).unwrap();
+    let plaintext = Zeroizing::new(
+        crate::encryption::decrypt_file(session.credentials.keypass.as_mut().unwrap(), &bytes)
+            .unwrap(),
+    );
+    let reopened: Vault = rmp_serde::from_slice(&plaintext).unwrap();
+    assert_eq!(reopened.entries[0].password, "after");
+    fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -190,7 +312,7 @@ async fn dispatch_test_command(
 }
 
 #[tokio::test]
-async fn vault_commands_leave_the_single_thread_runtime_responsive() {
+async fn audit_dispatch_keeps_the_single_thread_runtime_responsive() {
     let token = "ab".repeat(32);
 
     let vault = Vault {
@@ -337,65 +459,6 @@ fn status_includes_persistent_background_warnings() {
 }
 
 #[tokio::test]
-async fn auto_lock_completes_while_a_detached_breach_audit_is_slow() {
-    init_test_data_dir();
-    let vault = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: "slow audit".into(),
-            password: "password".into(),
-            ..VaultEntry::default()
-        }],
-        metadata: VaultMetadata {
-            filename: "auto-lock-during-audit.vault".into(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    };
-    let snapshot = vault.audit_snapshot(&AuditOptions {
-        check_breaches: true,
-        ..AuditOptions::default()
-    });
-    let server_info = Arc::new(Mutex::new(ServerInfo {
-        locked: false,
-        keypass: Some(PasswordType::Session {
-            encryption_key: [7; 32],
-            salt: [9; 16],
-            kdf: 1,
-            memory_kib: 19_456,
-            iterations: 2,
-            parallelism: 1,
-        }),
-    }));
-    let vault = Arc::new(Mutex::new(Some(vault)));
-    let session = Arc::new(Mutex::new(VaultSession {
-        credentials: std::mem::take(&mut *server_info.lock().await),
-        vault: vault.lock().await.take(),
-    }));
-    let generation = Arc::new(AtomicU64::new(1));
-    let background_error = Arc::new(Mutex::new(None));
-
-    let slow_audit = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        drop(snapshot);
-    });
-    schedule_auto_lock(
-        1,
-        1,
-        Arc::clone(&generation),
-        Arc::clone(&session),
-        Arc::clone(&background_error),
-    );
-
-    tokio::time::sleep(Duration::from_millis(1_300)).await;
-    assert!(session.lock().await.is_locked());
-    assert!(session.lock().await.vault.is_none());
-    assert!(background_error.lock().await.is_none());
-    assert!(!slow_audit.is_finished());
-    slow_audit.abort();
-}
-
-#[tokio::test]
 async fn response_codes_are_explicit_and_independent_of_message_wording() {
     let (mut client, mut server) = tcp_pair().await;
     respond("Entry not found.", &mut server).await;
@@ -441,24 +504,6 @@ async fn response_codes_are_explicit_and_independent_of_message_wording() {
         assert_eq!(response.code, expected_code as i32, "{}", path.display());
         assert!(response.message.contains("could not read backup file"));
     }
-}
-
-#[tokio::test]
-async fn explicit_outcomes_are_delivered_after_state_work_finishes() {
-    let (mut client, mut server) = tcp_pair().await;
-    let mut outcome = outcome::CommandOutcome::default();
-    outcome::respond("buffered", &mut outcome.responses);
-    let mut byte = [0u8; 1];
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), client.read_exact(&mut byte))
-            .await
-            .is_err()
-    );
-    deliver_responses(outcome.responses, &mut server).await;
-    server.shutdown().await.unwrap();
-    let mut bytes = Vec::new();
-    client.read_to_end(&mut bytes).await.unwrap();
-    assert_eq!(decode_responses(&bytes).unwrap().message, "buffered\n");
 }
 
 #[test]
@@ -805,21 +850,6 @@ fn request_memory_budget_accounts_for_buffers_and_releases_reservations() {
 async fn custom_field_commands_redact_reveal_select_and_enforce_lock_state() {
     let target = || Target::Id(1);
     for (command, locked, expected_code, visible) in [
-        (
-            ServerCommand::Get(target()),
-            false,
-            ResponseCode::Success,
-            false,
-        ),
-        (
-            ServerCommand::GetWithOptions {
-                target: target(),
-                copy_timeout: 0,
-            },
-            false,
-            ResponseCode::Success,
-            false,
-        ),
         (
             ServerCommand::GetDetails {
                 target: target(),

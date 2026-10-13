@@ -209,23 +209,6 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
 }
 
 #[test]
-fn test_decrypt_invalid_and_unversioned_data_returns_none() {
-    let mut pass = PasswordType::Password("test123".into());
-    let result = decrypt_file(&mut pass, b"short");
-    assert!(result.is_none());
-    let mut pass = PasswordType::Password("test123".into());
-    assert!(decrypt_file(&mut pass, &[0; 64]).is_none());
-}
-#[test]
-fn test_decrypt_wrong_password_returns_none() {
-    let plaintext = "secret data".as_bytes();
-    let mut pass1 = PasswordType::Password("password1".into());
-    let encrypt = encrypt_file(&mut pass1, plaintext);
-    let mut pass2 = PasswordType::Password("password2".into());
-    let result = decrypt_file(&mut pass2, &encrypt);
-    assert!(result.is_none());
-}
-#[test]
 fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     let expected = b"plaintext kept in the original allocation";
     let mut plaintext = Vec::with_capacity(expected.len() + HEADER_LEN + 16);
@@ -257,9 +240,24 @@ fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
 }
 
 #[test]
-fn authenticated_vault_rejects_header_ciphertext_tampering_and_truncation() {
+fn decryption_rejects_wrong_credentials_invalid_headers_and_modified_ciphertext() {
     let mut pass = PasswordType::Password("test123".into());
     let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
+    assert!(
+        decrypt_file(
+            &mut PasswordType::Password("wrong-password".into()),
+            &encrypted
+        )
+        .is_none(),
+        "wrong password"
+    );
+    for (label, invalid) in [
+        ("truncated header", b"short".as_slice()),
+        ("unversioned data", &[0; HEADER_LEN + 16]),
+    ] {
+        let mut uncached = PasswordType::Password("test123".into());
+        assert!(decrypt_file(&mut uncached, invalid).is_none(), "{label}");
+    }
     for offset in [8, 9, 10, 22, HEADER_LEN - 1] {
         let mut tampered = encrypted.clone();
         tampered[offset] ^= 1;
@@ -268,21 +266,22 @@ fn authenticated_vault_rejects_header_ciphertext_tampering_and_truncation() {
             "tampered header byte {offset} was accepted"
         );
     }
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
     let mut tampered = encrypted.clone();
     *tampered.last_mut().unwrap() ^= 1;
-    assert!(decrypt_file(&mut pass, &tampered).is_none());
-    assert!(decrypt_file(&mut pass, &encrypted[..encrypted.len() - 1]).is_none());
-}
-
-#[test]
-fn hostile_kdf_parameters_are_rejected_before_derivation() {
-    let mut pass = PasswordType::Password("test123".into());
-    let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
+    assert!(
+        decrypt_file(&mut pass, &tampered).is_none(),
+        "modified authentication tag"
+    );
+    assert!(
+        decrypt_file(&mut pass, &encrypted[..encrypted.len() - 1]).is_none(),
+        "truncated ciphertext"
+    );
     for memory_kib in [0, 1024 * 1024 + 1] {
         let mut hostile = encrypted.clone();
         hostile[10..14].copy_from_slice(&(memory_kib as u32).to_be_bytes());
-        assert!(decrypt_file(&mut pass, &hostile).is_none());
+        assert!(
+            decrypt_file(&mut pass, &hostile).is_none(),
+            "unsafe memory limit {memory_kib}"
+        );
     }
 }

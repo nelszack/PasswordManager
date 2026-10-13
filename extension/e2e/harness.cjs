@@ -111,12 +111,16 @@ async function launchExtension(options = {}) {
     };
 }
 
+function readNativeRequests(logPath) {
+    if (!fs.existsSync(logPath)) return [];
+    return fs.readFileSync(logPath, "utf8").trim().split("\n")
+        .filter(Boolean).map(line => JSON.parse(line));
+}
+
 async function waitForNativeRequest(logPath, predicate) {
     let match = null;
     await expect.poll(() => {
-        if (!fs.existsSync(logPath)) return null;
-        match = fs.readFileSync(logPath, "utf8").trim().split("\n")
-            .filter(Boolean).map(line => JSON.parse(line)).find(predicate) || null;
+        match = readNativeRequests(logPath).find(predicate) || null;
         return match;
     }).not.toBeNull();
     return match;
@@ -127,5 +131,6 @@ module.exports = {
     HOST_NAME,
     installNativeManifest,
     launchExtension,
+    readNativeRequests,
     waitForNativeRequest
 };
