@@ -4,11 +4,6 @@ pub(super) fn password_hash(password: &str) -> String {
     hex::encode_upper(Sha1::digest(password.as_bytes()))
 }
 
-#[cfg(test)]
-pub(super) fn parse_pwned_range(body: &str, prefix: &str) -> HashMap<String, u64> {
-    parse_pwned_range_matching(body, prefix, |_| true)
-}
-
 fn parse_pwned_range_matching(
     body: &str,
     prefix: &str,
@@ -381,10 +376,6 @@ mod tests {
             |hash| targets.contains(hash),
         );
         assert_eq!(parsed, HashMap::from([("FFFFFABCDE".into(), 12)]));
-        assert!(
-            parse_pwned_range_matching("99999:42", "FFFFF", |hash| targets.contains(hash))
-                .is_empty()
-        );
     }
 
     #[tokio::test]

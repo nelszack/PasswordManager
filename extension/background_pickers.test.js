@@ -5,7 +5,7 @@ const security = require("./background_security.js");
 const protocol = require("./native_protocol.js");
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function environment() {
+function environment(username = "alice") {
     const deliveries = [], removed = [], timers = [], calls = [], logins = [];
     let heldTab, releaseTab, heldWindow, releaseWindow, heldDelivery, releaseDelivery;
     let delivered;
@@ -31,7 +31,7 @@ function environment() {
         async nativeRequest(action) {
             calls.push(action);
             return { success: true, data: action === "getLoginItem"
-                ? '{"username":"alice","password":"synthetic-secret"}' : '[{"id":1,"name":"Example"}]' };
+                ? JSON.stringify({ username, password: "synthetic-secret" }) : '[{"id":1,"name":"Example"}]' };
         }
     });
     const sender = { tab: { id: 1 }, frameId: 3, documentId: "original-document", url: "https://example.com" };
@@ -54,6 +54,18 @@ test("invalidation while opening a picker cancels tab lookup and delayed window 
             assert.equal(env.calls.length, 0);
             assert.equal(env.timers.length, 0);
             assert.deepEqual(env.removed, stage === "Window" ? [42] : []);
+        });
+    }
+});
+
+test("structured usernames remain eligible for filled-login prompt suppression", async t => {
+    for (const username of ["None", null, ""]) {
+        await t.test(JSON.stringify(username), async () => {
+            const env = environment(username); const { token } = await env.open(); await flush();
+            await env.service.complete({ token, id: 1 }, env.popup);
+            assert.equal(env.deliveries[0].message.payload.username, username);
+            assert.equal(await env.service.matchesFilledLogin(env.sender, username || "", "synthetic-secret"), true);
+            assert.equal(await env.service.matchesFilledLogin(env.sender, "", "synthetic-secret"), true);
         });
     }
 });

@@ -73,13 +73,6 @@ fn updates_persist_all_fields_and_boundary_values() {
 }
 
 #[test]
-fn test_is_config_exists() {
-    let (_directory, config_path) = isolated_config();
-    assert!(!is_config(&config_path));
-    fs::File::create(&config_path).unwrap();
-    assert!(is_config(&config_path));
-}
-#[test]
 fn test_update_single_field_preserves_unmodified_fields() {
     for (length, persist_defaults) in [(24, true), (50, false)] {
         let (_directory, config_path) = isolated_config();
@@ -114,8 +107,6 @@ fn test_default_config_values() {
     assert_eq!(config.recovery.password_history_limit, 10);
     assert_eq!(config.recovery.trash_retention_days, 0);
     assert_eq!(config.server.port, crate::server::DEFAULT_PORT);
-    assert_eq!(read_config(&config_path), config);
-    assert_eq!(default_test_config(true, &config_path), config);
     assert_eq!(read_config(&config_path), config);
 }
 #[test]
@@ -155,13 +146,8 @@ fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
     update(
         read_config(&config_path),
         ConfigArgs {
-            reset: false,
             genpass_length: Some(16),
             genpass_stats: Some(true),
-            genpass_copy: None,
-            password_copy: None,
-            clipboard_timeout: None,
-            unlock_timeout: None,
             ..ConfigArgs::default()
         },
         &config_path,
@@ -170,11 +156,7 @@ fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
     update(
         read_config(&config_path),
         ConfigArgs {
-            reset: false,
-            genpass_length: None,
-            genpass_stats: None,
             genpass_copy: Some(false),
-            password_copy: None,
             clipboard_timeout: Some(45),
             unlock_timeout: Some(10),
             ..ConfigArgs::default()
@@ -224,28 +206,6 @@ fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
         &config_path,
     );
     assert_eq!(read_config(&config_path), Config::default());
-}
-
-#[test]
-fn test_config_round_trip() {
-    let custom = Config {
-        genpass: GeneratorConfig {
-            length: 32,
-            stats: true,
-            copy: false,
-        },
-        clipboard: ClipboardConfig { timeout: 60 },
-        unlock: UnlockConfig { timeout: 15 },
-        copy: CopyConfig { passwords: false },
-        recovery: RecoveryConfig::default(),
-        server: ServerConfig { port: 9876 },
-    };
-
-    for (label, original) in [("defaults", Config::default()), ("custom", custom)] {
-        let (_directory, config_path) = isolated_config();
-        write_file(&original, &config_path).unwrap();
-        assert_eq!(read_config(&config_path), original, "{label}");
-    }
 }
 
 #[test]

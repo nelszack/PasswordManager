@@ -925,29 +925,30 @@ mod tests {
 
     #[test]
     fn known_rejections_have_specific_reasons_and_unknown_messages_remain_private() {
-        let unsupported = rejection_error(
-            RequestPhase::Activation,
-            Some(reqwest::StatusCode::BAD_REQUEST),
-            br#"{"stat":"FAIL","code":40002,"message":"Unsupported platform"}"#,
-        )
-        .to_string();
-        assert!(unsupported.contains("unsupported platform"));
-        let unknown_code = rejection_error(
-            RequestPhase::Activation,
-            Some(reqwest::StatusCode::NOT_FOUND),
-            br#"{"stat":"FAIL","code":40403,"message_detail":"sensitive-token"}"#,
-        )
-        .to_string();
-        assert!(unknown_code.contains("unknown activation code"));
-        assert!(!unknown_code.contains("sensitive-token"));
-        let forbidden = rejection_error(
-            RequestPhase::SetupPage,
-            Some(reqwest::StatusCode::FORBIDDEN),
-            b"<html>sensitive-token and credentials</html>",
-        )
-        .to_string();
-        assert!(forbidden.contains("Duo setup page rejected (HTTP 403)"));
-        assert!(!forbidden.contains("sensitive-token"));
+        for (phase, status, body, expected) in [
+            (
+                RequestPhase::Activation,
+                reqwest::StatusCode::BAD_REQUEST,
+                br#"{"stat":"FAIL","code":40002,"message":"Unsupported platform"}"#.as_slice(),
+                "unsupported platform",
+            ),
+            (
+                RequestPhase::Activation,
+                reqwest::StatusCode::NOT_FOUND,
+                br#"{"stat":"FAIL","code":40403,"message_detail":"sensitive-token"}"#,
+                "unknown activation code",
+            ),
+            (
+                RequestPhase::SetupPage,
+                reqwest::StatusCode::FORBIDDEN,
+                b"<html>sensitive-token and credentials</html>",
+                "Duo setup page rejected (HTTP 403)",
+            ),
+        ] {
+            let message = rejection_error(phase, Some(status), body).to_string();
+            assert!(message.contains(expected), "{expected}: {message}");
+            assert!(!message.contains("sensitive-token"), "{expected}");
+        }
     }
 
     #[test]

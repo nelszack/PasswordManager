@@ -108,14 +108,15 @@ fn unused_port() -> u16 {
 fn duo_interaction_requires_a_terminal_and_visible_request_review() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
-    for flag in ["--json", "--quiet"] {
-        let output = run(
-            root.path(),
-            port,
-            &[flag, "duo", "watch", "--id", "1", "--interactive"],
-        );
-        assert_eq!(output.status.code(), Some(2));
-        let message = if flag == "--json" {
+    for args in [
+        &["--json", "duo", "watch", "--id", "1", "--interactive"][..],
+        &["--quiet", "duo", "watch", "--id", "1", "--interactive"][..],
+        &["--quiet", "duo", "approve", "--id", "1"][..],
+        &["--quiet", "duo", "deny", "--id", "1"][..],
+    ] {
+        let output = run(root.path(), port, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let message = if args[0] == "--json" {
             let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             value["error"].as_str().unwrap().to_owned()
         } else {
@@ -123,7 +124,7 @@ fn duo_interaction_requires_a_terminal_and_visible_request_review() {
         };
         assert!(
             message.contains("request details must be visible"),
-            "{message}"
+            "{args:?}: {message}"
         );
     }
     let started = run(root.path(), port, &["start"]);
@@ -137,26 +138,32 @@ fn duo_interaction_requires_a_terminal_and_visible_request_review() {
         port,
         active: true,
     };
-    let mut ready = false;
-    for _ in 0..100 {
-        if run(root.path(), port, &["status"]).status.success() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    assert!(ready, "server did not become ready");
+    // A successful start already verifies the authenticated server is ready.
     for args in [
         vec!["duo", "watch", "--id", "1", "--interactive"],
         vec!["duo", "approve", "--id", "1"],
         vec!["duo", "deny", "--id", "1"],
+        vec!["--json", "duo", "approve", "--id", "1"],
+        vec!["--json", "duo", "deny", "--id", "1"],
     ] {
         let output = run(root.path(), port, &args);
-        assert!(!output.status.success());
-        let error = String::from_utf8(output.stderr).unwrap();
-        assert!(error.contains("terminal"), "{error}");
-        assert!(!error.contains("connect"), "{error}");
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = if args[0] == "--json" {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            value["error"].as_str().unwrap().to_owned()
+        } else {
+            String::from_utf8(output.stderr).unwrap()
+        };
+        assert!(error.contains("terminal"), "{args:?}: {error}");
+        assert!(!error.contains("connect"), "{args:?}: {error}");
     }
+    let requests = run(
+        root.path(),
+        port,
+        &["--quiet", "duo", "requests", "--id", "1"],
+    );
+    assert_eq!(requests.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&requests.stderr).contains("Vault locked"));
 }
 
 #[test]
@@ -248,6 +255,35 @@ fn dynamic_completion_suggests_file_paths() {
     std::fs::write(files.join("vault key.key"), "synthetic test key").unwrap();
     std::fs::create_dir(files.join("vault keys")).unwrap();
 
+    let check = |args: &[&str], prefix: &Path| {
+        let partial = prefix.join("vault");
+        let mut words = vec![std::ffi::OsString::from("pm")];
+        words.extend(args.iter().map(std::ffi::OsString::from));
+        words.push(partial.into_os_string());
+        let output = isolated_pm(root.path())
+            .env("USERPROFILE", root.path())
+            .env("COMPLETE", "bash")
+            .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
+            .env("_CLAP_IFS", "\n")
+            .args(["--"])
+            .args(&words)
+            .output_timeout(&format!("file path completion query: {words:?}"));
+        assert!(output.status.success(), "{words:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{words:?}: {output:?}");
+        let suggestions = String::from_utf8(output.stdout).unwrap();
+        for expected in [
+            prefix.join("vault key.key"),
+            prefix.join("vault keys").join(""),
+        ] {
+            assert!(
+                suggestions
+                    .lines()
+                    .any(|line| line == expected.to_string_lossy()),
+                "{words:?}: missing {expected:?} in {suggestions:?}"
+            );
+        }
+    };
+
     for args in [
         vec!["unlock", "--key"],
         vec!["new", "--key"],
@@ -262,38 +298,12 @@ fn dynamic_completion_suggests_file_paths() {
         vec!["backup", "restore", "--key"],
         vec!["completions", "bash", "--output"],
     ] {
-        for prefix in [
-            PathBuf::from("files with spaces"),
-            PathBuf::from("~").join("files with spaces"),
-            files.clone(),
-        ] {
-            let partial = prefix.join("vault");
-            let mut words = vec![std::ffi::OsString::from("pm")];
-            words.extend(args.iter().map(std::ffi::OsString::from));
-            words.push(partial.into_os_string());
-            let output = isolated_pm(root.path())
-                .env("USERPROFILE", root.path())
-                .env("COMPLETE", "bash")
-                .env("_CLAP_COMPLETE_INDEX", (words.len() - 1).to_string())
-                .env("_CLAP_IFS", "\n")
-                .args(["--"])
-                .args(&words)
-                .output_timeout("file path completion query");
-            assert!(output.status.success());
-            assert!(output.stderr.is_empty());
-            let suggestions = String::from_utf8(output.stdout).unwrap();
-            for expected in [
-                prefix.join("vault key.key"),
-                prefix.join("vault keys").join(""),
-            ] {
-                assert!(
-                    suggestions
-                        .lines()
-                        .any(|line| line == expected.to_string_lossy()),
-                    "{words:?}: missing {expected:?} in {suggestions:?}"
-                );
-            }
-        }
+        check(&args, Path::new("files with spaces"));
+    }
+    // All flags use the same FilePath completer; exercise prefix expansion
+    // once rather than repeating the generic prefix matrix for every flag.
+    for prefix in [Path::new("~").join("files with spaces"), files] {
+        check(&["unlock", "--key"], &prefix);
     }
     assert!(!root.path().join("config").exists());
     assert!(!root.path().join("data").exists());
@@ -923,16 +933,6 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         port,
         active: true,
     };
-
-    let mut ready = false;
-    for _ in 0..100 {
-        if run(root.path(), port, &["status"]).status.success() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    assert!(ready, "server did not become ready");
 
     let created = isolated_pm(root.path())
         .args(["--port", &port.to_string(), "new", "--key"])

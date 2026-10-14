@@ -10,11 +10,6 @@ fn kind(view: &EntryView<'_>) -> ItemKind {
         .map_or(ItemKind::Login, |metadata| metadata.kind)
 }
 
-#[cfg(test)]
-pub(super) fn entry_details(view: &EntryView<'_>) -> Zeroizing<String> {
-    entry_details_with_secrets(view, false)
-}
-
 pub(super) fn entry_details_with_secrets(
     view: &EntryView<'_>,
     reveal_secrets: bool,
@@ -242,18 +237,24 @@ mod tests {
             urls: vec![],
         };
         let outputs = [
-            entry_details(&view()).to_string(),
-            entries(&[view()]),
-            history(&[attack]),
-            trash(&[TrashView {
-                entry: view(),
-                deleted: attack,
-            }]),
+            (
+                "details",
+                entry_details_with_secrets(&view(), false).to_string(),
+            ),
+            ("list", entries(&[view()])),
+            ("history", history(&[attack])),
+            (
+                "trash",
+                trash(&[TrashView {
+                    entry: view(),
+                    deleted: attack,
+                }]),
+            ),
         ];
-        for text in outputs {
-            assert!(!text.contains(['\x1b', '\x07']));
-            assert!(text.contains("\\nFake row"));
-            assert!(!text.contains("must-stay-redacted"));
+        for (label, text) in outputs {
+            assert!(!text.contains(['\x1b', '\x07']), "{label}");
+            assert!(text.contains("\\nFake row"), "{label}");
+            assert!(!text.contains("must-stay-redacted"), "{label}");
         }
     }
 }

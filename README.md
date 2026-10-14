@@ -124,6 +124,12 @@ removes the token file. Before any command is sent, the server proves possession
 of that token with a fresh challenge. Commands and responses are then protected
 with direction-specific XChaCha20-Poly1305 session keys.
 
+Committed mutations with uncertain durability return response code `5`; the
+native bridge marks these outcomes as uncertain so browser controls require
+review before retrying. Existing response codes and framing are unchanged.
+Older clients reject code `5` as an unknown error instead of reporting success;
+upgrade the CLI and native host together with the server.
+
 Check the server with `pm status`; stop it with `pm kill`. The server holds one
 unlocked vault at a time. Lock it before unlocking a different vault.
 Only one server can own an application data directory, including when different

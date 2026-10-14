@@ -18,7 +18,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -262,6 +262,7 @@ pub async fn server(
     let session = Arc::new(Mutex::new(VaultSession::default()));
     let lock_generation = Arc::new(AtomicU64::new(0));
     let inactivity_timeout = Arc::new(AtomicU64::new(0));
+    let stopping = Arc::new(AtomicBool::new(false));
     let background_error = Arc::new(Mutex::new(None));
     let system_lock = system_lock::Monitor::start(system_lock_handler(
         Arc::downgrade(&session),
@@ -289,6 +290,7 @@ pub async fn server(
                     token: token.clone(),
                     lock_generation: Arc::clone(&lock_generation),
                     inactivity_timeout: Arc::clone(&inactivity_timeout),
+                    stopping: Arc::clone(&stopping),
                     background_error: Arc::clone(&background_error),
                     system_lock: Some(Arc::clone(&system_lock)),
                     password_history_limit,
@@ -323,6 +325,7 @@ struct ConnectionState {
     token: Zeroizing<String>,
     lock_generation: Arc<AtomicU64>,
     inactivity_timeout: Arc<AtomicU64>,
+    stopping: Arc<AtomicBool>,
     background_error: Arc<Mutex<Option<String>>>,
     system_lock: Option<Arc<system_lock::Monitor>>,
     password_history_limit: usize,
@@ -422,7 +425,8 @@ async fn finish_duo_enrollment(
     .await;
     match result {
         Ok(Ok(output)) => outcome::respond_domain_result(Ok(output), responses),
-        Ok(Err(error)) => outcome::respond_failure(
+        Ok(Err(error)) => outcome::respond_domain_error_with_context(
+            &error,
             &format!(
                 "Duo enrolled but saving reported an error: {error}. Check device enrollment before retrying."
             ),
