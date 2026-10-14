@@ -38,9 +38,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 subtle = "2"
 totp-rs = { version = "6", default-features = false, features = ["otpauth", "zeroize"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "form"] }
-base64 = "0.22"
+base64 = "0.23"
 aws-lc-rs = "1.18"
-pem-rfc7468 = { version = "0.7", features = ["alloc"] }
+pem-rfc7468 = { version = "1.0", features = ["alloc"] }
 html-escape = "0.2"
 
 [dev-dependencies]

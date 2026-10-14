@@ -26,6 +26,14 @@ fn handle_command(
     session: &mut crate::vault::VaultSession,
     effect: &mut CommandEffect,
 ) {
+    // Kill marks shutdown while owning the session. Requests accepted before
+    // the listener stops must not mutate files or unlock the vault afterward.
+    if state.stopping.load(Ordering::Acquire) {
+        let mut msg = msg;
+        msg.zeroize();
+        respond_failure("Server is stopping.", responses);
+        return;
+    }
     let mut add_label = "Item";
     let mut update_label = "Item";
     let mut update_missing = "Item not found or unchanged.";
@@ -83,6 +91,7 @@ fn handle_command(
         token: _,
         lock_generation,
         inactivity_timeout,
+        stopping,
         background_error,
         system_lock,
         password_history_limit,
@@ -146,6 +155,7 @@ fn handle_command(
                 );
                 return;
             }
+            stopping.store(true, Ordering::Release);
             respond("Server stopped.", responses);
             *effect = CommandEffect::StopServer;
         }

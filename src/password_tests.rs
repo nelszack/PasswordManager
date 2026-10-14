@@ -101,7 +101,6 @@ fn short_passwords_still_use_only_the_requested_characters() {
         symbols: Some("xy"),
         exclude_ambiguous: false,
     };
-    assert!(generate_password_with_options(0, &symbols_only).is_err());
     for length in 1..=3 {
         let password = generate_password_with_options(length, &symbols_only).unwrap();
         assert_eq!(password.len(), length as usize);

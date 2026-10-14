@@ -53,6 +53,8 @@ mod export;
 
 mod persistence;
 pub(crate) use persistence::unlock_selected_vault;
+#[cfg(test)]
+pub(crate) use persistence::with_write_fault;
 pub(crate) use persistence::{create_vault, delete_vault};
 #[cfg(test)]
 use persistence::{find_vault, unlock_vault};
@@ -120,8 +122,6 @@ impl AuditEntrySnapshot {
 }
 
 mod audit;
-#[cfg(test)]
-use audit::parse_pwned_range;
 
 mod import;
 
@@ -553,8 +553,14 @@ fn password_is_stale_at(changed: &str, days: u64, now: chrono::DateTime<chrono::
     let Some(changed) = parse_entry_timestamp(changed) else {
         return false;
     };
-    now.signed_duration_since(changed)
-        >= chrono::Duration::days(i64::try_from(days).unwrap_or(i64::MAX))
+    let Some(threshold) = i64::try_from(days)
+        .ok()
+        .and_then(chrono::Duration::try_days)
+    else {
+        // Such a threshold exceeds every representable timestamp's age.
+        return false;
+    };
+    now.signed_duration_since(changed) >= threshold
 }
 
 #[derive(Serialize)]

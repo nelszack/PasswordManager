@@ -253,7 +253,7 @@ fn sync_vault_parent(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-fn with_write_fault<T>(fault: u8, operation: impl FnOnce() -> T) -> T {
+pub(crate) fn with_write_fault<T>(fault: u8, operation: impl FnOnce() -> T) -> T {
     struct Reset(u8);
     impl Drop for Reset {
         fn drop(&mut self) {

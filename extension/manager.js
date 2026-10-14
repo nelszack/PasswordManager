@@ -5,21 +5,33 @@ let fieldRows = [];
 let duoTimer, duoSerial = 0, duoBusy = false, duoRendered = "";
 let mutationPending = false, revealSerial = 0, revealTimer, revealedValues = [];
 let mutationUncertain = false;
+const renderedValues = new WeakMap();
+function setStoredValue(control, value) {
+    control.value = value;
+    // Textareas normalize CRLF/CR to LF. Preserve stored bytes when the user
+    // saves an unrelated edit without changing the displayed value.
+    renderedValues.set(control, { stored: value, displayed: control.value });
+}
+function controlValue(control) {
+    const rendered = renderedValues.get(control);
+    return rendered && control.value === rendered.displayed ? rendered.stored : control.value;
+}
 function secretControl() { return byId("multilineLabel").hidden ? byId("password") : byId("secretMultiline"); }
-function renderSecretControl(value = secretControl().value) {
+function renderSecretControl(value = controlValue(secretControl())) {
     const previous = secretControl();
     const multiline = ["secure-note", "ssh-key"].includes(byId("kind").value) || /[\r\n]/.test(value);
     const control = byId(multiline ? "secretMultiline" : "password");
     if (control !== previous) {
-        control.value = value; previous.value = "";
+        const previousDisplayed = previous.value;
+        setStoredValue(control, value); previous.value = ""; renderedValues.delete(previous);
         // Moving an unchanged revealed value must keep its original deadline.
         for (const record of revealedValues) {
-            if (record.control === previous && record.value === value) {
+            if (record.control === previous && record.value === previousDisplayed) {
                 record.control = control; record.value = control.value;
             }
         }
         byId("password").type = "password";
-    } else control.value = value;
+    } else setStoredValue(control, value);
     byId("password").parentElement.hidden = multiline; byId("multilineLabel").hidden = !multiline;
 }
 
@@ -71,6 +83,7 @@ function closeEditor() {
     stopDuo(); byId("duo").hidden = true; byId("duoRequests").replaceChildren(); duoRendered = "";
     clearTimeout(revealTimer); revealedValues = [];
     revealSerial++;
+    for (const control of ["password", "secretMultiline", "name", "kind", "username", "notes"].map(byId).concat(fieldRows.flatMap(field => [field.name, field.value]))) renderedValues.delete(control);
     selected = null; original = null; fieldRows = [];
     byId("editForm").reset(); byId("fields").replaceChildren(); byId("editor").hidden = true;
     byId("password").type = "password";
@@ -114,14 +127,15 @@ async function loadItems() {
 }
 function addField(field = { name: "", value: "", secret: false }) {
     const row = document.createElement("div"); row.className = "custom-field";
-    const name = document.createElement("input"); name.value = field.name; name.required = true; name.maxLength = 4096; name.setAttribute("aria-label", "Field name");
-    const value = document.createElement("input"); value.value = field.value ?? ""; value.maxLength = 65536;
+    const name = document.createElement("input"); setStoredValue(name, field.name); name.required = true; name.maxLength = 4096; name.setAttribute("aria-label", "Field name");
+    const value = document.createElement(/[\r\n]/.test(field.value || "") ? "textarea" : "input"); setStoredValue(value, field.value ?? ""); value.maxLength = 65536;
     value.placeholder = field.value === null ? "Leave blank to keep the stored secret" : "Field value"; value.setAttribute("aria-label", "Field value");
     const label = document.createElement("label"), secret = document.createElement("input"); secret.type = "checkbox"; secret.checked = field.secret;
-    value.type = secret.checked ? "password" : "text"; secret.addEventListener("change", () => { value.type = secret.checked ? "password" : "text"; });
+    if (value.tagName === "INPUT") value.type = secret.checked ? "password" : "text";
     label.append(secret, document.createTextNode(" Secret"));
     const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove field";
     const record = { row, name, value, secret, original: field }; fieldRows.push(record);
+    secret.addEventListener("change", () => { if (record.value.tagName === "INPUT") record.value.type = secret.checked ? "password" : "text"; });
     remove.addEventListener("click", () => { fieldRows = fieldRows.filter(f => f !== record); row.remove(); });
     row.append(name, value, label, remove); byId("fields").append(row);
 }
@@ -131,7 +145,7 @@ async function openItem(id) {
     if (!unlocked || generation !== epoch) return;
     closeEditor(); selected = id; original = item;
     byId("editorTitle").textContent = item.name;
-    for (const key of ["name", "kind", "username", "notes"]) byId(key).value = item[key] || "";
+    for (const key of ["name", "kind", "username", "notes"]) setStoredValue(byId(key), item[key] || "");
     renderSecretControl();
     byId("urls").value = item.urls.join("\n"); item.fields.forEach(addField);
     byId("dates").textContent = `Created: ${item.created} · Modified: ${item.modified}`;
@@ -170,7 +184,13 @@ byId("reveal").addEventListener("click", () => run(async () => {
     for (const record of fieldRows) {
         const field = item.fields.find(f => f.name === record.original.name);
         if (field?.secret && record.original.value === null && !record.value.value) {
-            record.value.value = field.value; record.value.type = "text";
+            if (/[\r\n]/.test(field.value) && record.value.tagName !== "TEXTAREA") {
+                const multiline = document.createElement("textarea");
+                multiline.maxLength = record.value.maxLength; multiline.placeholder = record.value.placeholder;
+                multiline.setAttribute("aria-label", "Field value");
+                record.value.replaceWith(multiline); renderedValues.delete(record.value); record.value = multiline;
+            }
+            setStoredValue(record.value, field.value); if (record.value.tagName === "INPUT") record.value.type = "text";
             revealedValues.push({ control: record.value, value: record.value.value });
         }
     }
@@ -178,6 +198,7 @@ byId("reveal").addEventListener("click", () => run(async () => {
         if (selected !== id || serial !== revealSerial) return;
         for (const { control, value } of revealedValues) {
             if (control.value === value) { control.value = ""; if (control.tagName === "INPUT") control.type = "password"; }
+            renderedValues.delete(control);
         }
         revealedValues = [];
     }, 30_000);
@@ -185,13 +206,13 @@ byId("reveal").addEventListener("click", () => run(async () => {
 byId("editForm").addEventListener("submit", event => {
     event.preventDefault();
     runMutation(async () => {
-        const fields = fieldRows.filter(f => !(f.original.value === null && !f.value.value && f.name.value === f.original.name && f.secret.checked)).map(f => ({ name: f.name.value, value: f.value.value, secret: f.secret.checked }));
-        if (fieldRows.some(f => f.original.value === null && !f.value.value && (f.name.value !== f.original.name || !f.secret.checked))) throw new Error("Reveal or enter a value before renaming or changing a stored secret field.");
+        const fields = fieldRows.filter(f => !(f.original.value === null && !f.value.value && controlValue(f.name) === f.original.name && f.secret.checked)).map(f => ({ name: controlValue(f.name), value: controlValue(f.value), secret: f.secret.checked }));
+        if (fieldRows.some(f => f.original.value === null && !f.value.value && (controlValue(f.name) !== f.original.name || !f.secret.checked))) throw new Error("Reveal or enter a value before renaming or changing a stored secret field.");
         const urls = byId("urls").value.split("\n").map(v => v.trim()).filter(Boolean);
-        const item = { name: byId("name").value, kind: byId("kind").value, username: byId("username").value,
-            password: secretControl().value || null, notes: byId("notes").value, urls, fields,
+        const item = { name: controlValue(byId("name")), kind: byId("kind").value, username: controlValue(byId("username")),
+            password: controlValue(secretControl()) || null, notes: controlValue(byId("notes")), urls, fields,
             removeUrls: (original?.urls || []).filter(url => !urls.includes(url)),
-            removeFields: (original?.fields || []).filter(field => !fieldRows.some(f => f.name.value === field.name)).map(f => f.name) };
+            removeFields: (original?.fields || []).filter(field => !fieldRows.some(f => controlValue(f.name) === field.name)).map(f => f.name) };
         const id = selected, generation = epoch; await send(id ? "managerUpdate" : "managerAdd", { entryId: id, item });
         if (!unlocked) return;
         if (generation === epoch && selected === id) closeEditor();

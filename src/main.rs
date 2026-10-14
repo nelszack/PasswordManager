@@ -19,6 +19,24 @@ fn main() {
     run(invoked_as_native_host);
 }
 
+fn output_error(cli: &Cli) -> Option<&'static str> {
+    match &cli.command {
+        Some(CliCommands::Duo {
+            command: DuoCommands::Watch {
+                interactive: true, ..
+            },
+        }) if cli.json || cli.quiet => Some(
+            "Interactive Duo watch cannot use --json or --quiet; request details must be visible",
+        ),
+        Some(CliCommands::Duo {
+            command: DuoCommands::Approve { .. } | DuoCommands::Deny { .. },
+        }) if cli.quiet => Some(
+            "Duo decisions cannot use --quiet; request details must be visible before confirmation",
+        ),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn run(invoked_as_native_host: bool) {
     let cli = (!invoked_as_native_host).then(cli_parse);
@@ -57,21 +75,8 @@ async fn run(invoked_as_native_host: bool) {
     }
     let cli = cli.expect("native host returned before CLI dispatch");
     client::configure_output(cli.json, cli.quiet);
-    if (cli.json || cli.quiet)
-        && matches!(
-            &cli.command,
-            Some(CliCommands::Duo {
-                command: DuoCommands::Watch {
-                    interactive: true,
-                    ..
-                }
-            })
-        )
-    {
-        client::exit_error(
-            "Interactive Duo watch cannot use --json or --quiet; request details must be visible",
-            2,
-        );
+    if let Some(error) = output_error(&cli) {
+        client::exit_error(error, 2);
     }
     let conf = match try_read_config(&config_file) {
         Ok(config) => config,

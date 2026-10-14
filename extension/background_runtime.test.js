@@ -81,15 +81,9 @@ function securityEnvironment() {
         }
     };
     const context = vm.createContext({
-        chrome, importScripts() {}, URL, TextEncoder, crypto: require("node:crypto").webcrypto,
+        chrome, URL, TextEncoder, crypto: require("node:crypto").webcrypto,
         Date: class extends Date { static now() { return now; } },
-        setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, queueMicrotask,
-        PasswordManagerRelay: require("./relay.js"),
-        PasswordManagerSecurity: require("./background_security.js"),
-        PasswordManagerCredentialPrompt: require("./credential_prompt_state.js"),
-        PasswordManagerBackgroundState: require("./background_state.js"),
-        PasswordManagerNativeProtocol: require("./native_protocol.js"),
-        PasswordManagerPendingCredentials: require("./pending_credentials.js")
+        setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, queueMicrotask
     });
     loadWorker(context);
     const sender = { url: origin, tab: { id: 7, url: origin }, frameId: 0, documentId: "original-document" };

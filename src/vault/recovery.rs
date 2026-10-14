@@ -189,13 +189,14 @@ impl Vault {
         if retention_days == 0 || self.recovery.trash.is_empty() {
             return Ok(0);
         }
-        let max_days = i64::MAX / 86_400;
-        let days = i64::try_from(retention_days)
-            .unwrap_or(max_days)
-            .min(max_days);
-        let cutoff = chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::days(days))
-            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+        let Some(cutoff) = i64::try_from(retention_days)
+            .ok()
+            .and_then(chrono::Duration::try_days)
+            .and_then(|duration| chrono::Utc::now().checked_sub_signed(duration))
+        else {
+            // No stored timestamp can be old enough for this retention period.
+            return Ok(0);
+        };
         let removed_ids = self
             .recovery
             .trash

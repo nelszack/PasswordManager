@@ -1,7 +1,6 @@
 const { test, expect } = require("@playwright/test");
-const fs = require("node:fs");
 const http = require("node:http");
-const { launchExtension, waitForNativeRequest } = require("./harness.cjs");
+const { launchExtension, readNativeRequests, waitForNativeRequest } = require("./harness.cjs");
 
 function html(body, script = "") {
     return `<!doctype html><html><head><meta charset="utf-8"></head><body>${body}<script>${script}</script></body></html>`;
@@ -231,8 +230,7 @@ test.describe("extended credential flows", () => {
                 awaitPromise: true,
                 timeout: 10_000
             });
-            const readLookups = () => fs.readFileSync(browser.nativeLog, "utf8").trim().split("\n")
-                .filter(Boolean).map(line => JSON.parse(line))
+            const readLookups = () => readNativeRequests(browser.nativeLog)
                 .filter(request => request.action !== "status");
             const before = readLookups().length;
             const submitGuess = guess => {

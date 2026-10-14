@@ -155,16 +155,8 @@ fn native_message_round_trip_uses_native_endian_framing() {
     assert_eq!(decoded["nativeVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(decoded["data"]["ok"], true);
 
-    let mut input = Cursor::new(encoded[4..].to_vec());
-    let mut framed = (length as u32).to_ne_bytes().to_vec();
-    framed.extend(input.get_mut().iter());
-    assert_eq!(
-        read_message(&mut Cursor::new(framed))
-            .unwrap()
-            .unwrap()
-            .len(),
-        length
-    );
+    let payload = read_message(&mut Cursor::new(&encoded)).unwrap().unwrap();
+    assert_eq!(payload.as_slice(), &encoded[4..]);
 }
 
 #[test]
@@ -312,33 +304,145 @@ fn native_bridge_rejects_control_characters_and_oversized_fields() {
 }
 
 #[test]
-fn native_bridge_does_not_echo_rejected_credentials() {
+fn native_bridge_does_not_echo_validation_or_deserialization_inputs() {
     let secret = "never-echo-this-password";
-    let request = json!({
-        "id": 91,
-        "action": "saveCredentials",
-        "domain": "https://example.com\ninvalid",
-        "username": "alice",
-        "password": secret,
-        "name": "example"
-    });
-    let payload = serde_json::to_vec(&request).unwrap();
-    let mut framed = (payload.len() as u32).to_ne_bytes().to_vec();
-    framed.extend_from_slice(&payload);
-    let mut output = Vec::new();
+    for (label, request, expected_id) in [
+        (
+            "command validation",
+            json!({
+                "id": 91, "action": "saveCredentials", "domain": "https://example.com\ninvalid",
+                "username": "alice", "password": secret, "name": "example"
+            }),
+            91,
+        ),
+        (
+            "invalid ID type",
+            json!({ "id": secret, "action": "status" }),
+            0,
+        ),
+        (
+            "invalid decision type",
+            json!({ "id": 1, "action": "managerDuoRespond", "approve": secret }),
+            0,
+        ),
+        (
+            "invalid item kind",
+            json!({ "id": 1, "action": "managerAdd", "item": { "name": "test", "kind": secret } }),
+            0,
+        ),
+    ] {
+        let payload = serde_json::to_vec(&request).unwrap();
+        let mut framed = (payload.len() as u32).to_ne_bytes().to_vec();
+        framed.extend_from_slice(&payload);
+        let mut output = Vec::new();
+        run_with_io(
+            &AuthenticatedClient::new(crate::server::DEFAULT_PORT),
+            &mut Cursor::new(framed),
+            &mut output,
+        )
+        .unwrap();
+        let length = u32::from_ne_bytes(output[..4].try_into().unwrap()) as usize;
+        let response: Value = serde_json::from_slice(&output[4..4 + length]).unwrap();
+        assert_eq!(response["id"], expected_id, "{label}");
+        assert_eq!(response["success"], false, "{label}");
+        if expected_id == 0 {
+            assert!(
+                response["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("invalid request at line "),
+                "{label}"
+            );
+        }
+        assert!(
+            !String::from_utf8_lossy(&output).contains(secret),
+            "{label}"
+        );
+    }
+}
 
-    run_with_io(
-        &AuthenticatedClient::new(crate::server::DEFAULT_PORT),
-        &mut Cursor::new(framed),
-        &mut output,
-    )
-    .unwrap();
+#[test]
+fn native_mutations_report_committed_durability_as_uncertain() {
+    use crate::protocol::{
+        ResponseCode, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record, encode_response,
+        encrypt_record, server_hello,
+    };
+    use std::{net::TcpListener, thread, time::Duration};
 
-    let length = u32::from_ne_bytes(output[..4].try_into().unwrap()) as usize;
-    let response: Value = serde_json::from_slice(&output[4..4 + length]).unwrap();
-    assert_eq!(response["id"], 91);
-    assert_eq!(response["success"], false);
-    assert!(!String::from_utf8_lossy(&output).contains(secret));
+    let directory = tempfile::tempdir().unwrap();
+    let token_path = directory.path().join("token");
+    let token = "ab".repeat(32);
+    fs::write(&token_path, &token).unwrap();
+    for code in [ResponseCode::Failure, ResponseCode::Durability] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = AuthenticatedClient::new(listener.local_addr().unwrap().port());
+        client.token_path = token_path.clone();
+        let token = token.clone();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut preface = [0; SECURE_PREFACE.len()];
+            stream.read_exact(&mut preface).unwrap();
+            assert_eq!(&preface, SECURE_PREFACE);
+            let (hello, keys) = server_hello(&token).unwrap();
+            stream.write_all(&hello).unwrap();
+            let mut header = [0; SECURE_RECORD_HEADER_LEN];
+            stream.read_exact(&mut header).unwrap();
+            let length = u32::from_be_bytes(header[24..].try_into().unwrap()) as usize;
+            let mut ciphertext = vec![0; length];
+            stream.read_exact(&mut ciphertext).unwrap();
+            let request = decrypt_record(&keys.request, &header[..24], &ciphertext).unwrap();
+            assert!(matches!(
+                rmp_serde::from_slice::<ServerCommand>(&request).unwrap(),
+                ServerCommand::Delete(Target::Id(7))
+            ));
+            // Identical wording proves uncertainty follows the authenticated
+            // error code, rather than parsing a human-readable error.
+            let response = encrypt_record(
+                &keys.response,
+                &encode_response(code, "synthetic persistence failure"),
+            )
+            .unwrap();
+            stream.write_all(&response).unwrap();
+        });
+        let response = Zeroizing::new(handle_request(
+            &client,
+            NativeRequest {
+                id: 77,
+                action: "managerDelete".into(),
+                entry_id: Some(7),
+                ..Default::default()
+            },
+        ));
+        assert!(!response.success);
+        assert_eq!(response.id, 77);
+        assert_eq!(response.uncertain, code == ResponseCode::Durability);
+        let mut output = Vec::new();
+        write_message(&mut output, &response).unwrap();
+        let payload: Value = serde_json::from_slice(&output[4..]).unwrap();
+        if code == ResponseCode::Durability {
+            assert_eq!(payload["uncertain"], true);
+            assert!(
+                response
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .contains("operation committed")
+            );
+            assert!(
+                !response
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .contains("may still complete")
+            );
+        } else {
+            assert!(payload.get("uncertain").is_none());
+        }
+        worker.join().unwrap();
+    }
 }
 
 #[test]
