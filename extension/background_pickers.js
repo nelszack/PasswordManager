@@ -186,8 +186,7 @@ const PasswordManagerBackgroundPickers = {
                     });
                     if (!response.success) throw new Error(response.error || "Login unavailable");
                     payload = JSON.parse(response.data);
-                    const username = payload.username && payload.username !== "None"
-                        ? String(payload.username).trim() : "";
+                    const username = payload.username ? String(payload.username).trim() : "";
                     filledLogin = {
                         username,
                         fingerprint: await loginFingerprint(username, payload.password),
