@@ -1,6 +1,6 @@
 const { test, expect } = require("@playwright/test");
 const fs = require("node:fs");
-const { launchExtension, waitForNativeRequest } = require("./harness.cjs");
+const { launchExtension, readNativeRequests, waitForNativeRequest } = require("./harness.cjs");
 const origin = "https://login.example";
 const challenge = "<!doctype html><html><body><h1>Duo Push</h1><p>Push sent. Check your phone.</p></body></html>";
 const universalChallenge = '<!doctype html><html><body><h1>Check for a Duo Push</h1><p>Verify it\'s you by approving the notification...</p><p>Sent to "Password Manager"</p><button>Other options</button><p>Need help? Secured by Duo</p></body></html>';
@@ -22,9 +22,7 @@ async function setup(options = {}) {
     return { browser, page };
 }
 function decisions(browser) {
-    if (!fs.existsSync(browser.nativeLog)) return [];
-    return fs.readFileSync(browser.nativeLog, "utf8").trim().split("\n").filter(Boolean)
-        .map(line => JSON.parse(line)).filter(r => r.action === "managerDuoRespond");
+    return readNativeRequests(browser.nativeLog).filter(r => r.action === "managerDuoRespond");
 }
 
 async function withBrowser(options, run) {

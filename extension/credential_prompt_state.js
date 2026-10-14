@@ -6,7 +6,7 @@
     "use strict";
 
     function accountUsername(account) {
-        return account?.username && account.username !== "None" ? String(account.username) : "";
+        return account?.username ? String(account.username) : "";
     }
 
     function accountsFromLookup(response) {

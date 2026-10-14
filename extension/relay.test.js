@@ -7,42 +7,22 @@ const {
 const token = "01234567-89ab-4cde-8fab-0123456789ab";
 
 test("credential relay routes valid iframe requests and rejects invalid senders and payloads", () => {
-    // valid iframe credentials route only to the top frame
-    {
-        const data = { token, domain: "https://login.example.com", username: "alice", password: "secret" };
-        const route = requestRoute(data, {
-            tab: { id: 42 },
-            frameId: 7,
-            url: "https://login.example.com/session"
-        });
-
-        assert.deepEqual(route, {
-            tabId: 42,
-            frameId: 0,
-            message: { action: "relayedLogin", sourceFrameId: 7, data }
-        });
-    }
-    // credential relay rejects top frames, mismatched origins, and malformed tokens
-    {
-        const data = { token, domain: "https://login.example.com", username: "alice", password: "secret" };
-        assert.equal(requestRoute(data, {
-            tab: { id: 42 }, frameId: 0, url: "https://login.example.com"
-        }), null);
-        assert.equal(requestRoute(data, {
-            tab: { id: 42 }, frameId: 7, url: "https://attacker.example"
-        }), null);
-        assert.equal(requestRoute({ ...data, token: "predictable" }, {
-            tab: { id: 42 }, frameId: 7, url: "https://login.example.com"
-        }), null);
-        assert.equal(requestRoute({ ...data, username: null }, {
-            tab: { id: 42 }, frameId: 7, url: "https://login.example.com"
-        }), null);
-        assert.equal(requestRoute(data, {
-            tab: { id: 42 }, frameId: 7, url: "file:///tmp/login.html"
-        }), null);
-        assert.equal(requestRoute(data, {
-            tab: {}, frameId: 7, url: "https://login.example.com"
-        }), null);
+    const data = { token, domain: "https://login.example.com", username: "alice", password: "secret" };
+    const sender = { tab: { id: 42 }, frameId: 7, url: "https://login.example.com/session" };
+    assert.deepEqual(requestRoute(data, sender), {
+        tabId: 42,
+        frameId: 0,
+        message: { action: "relayedLogin", sourceFrameId: 7, data }
+    });
+    for (const [label, payload, source] of [
+        ["top frame", data, { ...sender, frameId: 0 }],
+        ["origin mismatch", data, { ...sender, url: "https://attacker.example" }],
+        ["malformed token", { ...data, token: "predictable" }, sender],
+        ["non-string username", { ...data, username: null }, sender],
+        ["file origin", data, { ...sender, url: "file:///tmp/login.html" }],
+        ["missing tab", data, { ...sender, tab: {} }]
+    ]) {
+        assert.equal(requestRoute(payload, source), null, label);
     }
 });
 

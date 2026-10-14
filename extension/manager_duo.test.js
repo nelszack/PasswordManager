@@ -7,21 +7,25 @@ const vm = require("node:vm");
 class Element {
     constructor(tag = "div") { this.tag = tag; this.children = []; this.listeners = {}; this.value = ""; this.hidden = false; this.disabled = false; this.checked = false; this.textContent = ""; this.isConnected = true; }
     addEventListener(type, handler) { this.listeners[type] = handler; }
-    append(...children) { this.children.push(...children); }
+    append(...children) { this.children.push(...children); for (const child of children) child.parentElement = this; }
+    replaceWith(replacement) { const siblings = this.parentElement.children; siblings[siblings.indexOf(this)] = replacement; replacement.parentElement = this.parentElement; this.isConnected = false; }
     replaceChildren(...children) { for (const child of this.children) child.isConnected = false; this.children = children; }
     querySelectorAll(selectors) { return this.children.flatMap(child => [ ...(selectors.split(",").includes(child.tag) ? [child] : []), ...child.querySelectorAll(selectors) ]); }
     setAttribute() {}
     reset() {}
     click(trusted = true) { this.listeners.click?.({ preventDefault() {}, isTrusted: trusted }); }
     get tagName() { return this.tag.toUpperCase(); }
+    get type() { return this.tag === "textarea" ? "textarea" : this._type; }
+    set type(value) { if (this.tag === "textarea") throw new TypeError("Textarea type is read-only"); this._type = value; }
     get value() { return this._value || ""; }
-    set value(value) { this._value = this.tag === "input" ? String(value).replace(/[\r\n]/g, "") : String(value); }
+    set value(value) { this._value = this.tag === "input" ? String(value).replace(/[\r\n]/g, "") : this.tag === "textarea" ? String(value).replace(/\r\n?/g, "\n") : String(value); }
 }
 function environment() {
     const html = fs.readFileSync(path.join(__dirname, "manager.html"), "utf8");
     const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1], new Element()]));
     elements.password.parentElement = new Element();
     elements.password.tag = "input"; elements.secretMultiline.tag = "textarea";
+    elements.name.tag = "input"; elements.username.tag = "input"; elements.notes.tag = "textarea";
     elements.multilineLabel.hidden = true;
     elements.editForm.reset = () => { elements.password.value = ""; elements.secretMultiline.value = ""; elements.kind.value = "login"; };
     const calls = [], timers = new Map(), responses = new Map(); let timerId = 0, confirmations = 0, listener;
@@ -86,6 +90,59 @@ test("revealing a multiline secret uses a textarea even for a single-line item t
     assert.equal(env.elements.multilineLabel.hidden, false);
     for (const expire of env.timers.values()) expire();
     assert.equal(env.elements.secretMultiline.value, "");
+});
+
+test("manager preserves multiline custom fields and revealed primary bytes on unrelated saves", async () => {
+    const env = environment(); await flush();
+    const plain = "public first\r\npublic second\rlast";
+    const secret = "private first\r\nprivate second\rlast";
+    env.setResponse("managerItem", { success: true, data: { id: 1, name: "work", kind: "login", notes: "notes\r\nsecond line", username: "  alice  ", urls: [], fields: [
+        { name: "public\r\nfield", value: plain, secret: false }, { name: "private\r\nfield", value: null, secret: true }
+    ] } });
+    await vm.runInContext("openItem(1);", env.context);
+    assert.equal(env.elements.fields.querySelectorAll("textarea")[0].value, "public first\npublic second\nlast");
+    env.elements.editForm.listeners.submit({ preventDefault() {} }); await flush();
+    let write = env.calls.find(call => call.action === "managerUpdate");
+    assert.equal(write.item.fields[0].value, plain);
+    assert.equal(write.item.fields[0].name, "public\r\nfield");
+    assert.equal(write.item.removeFields.length, 0);
+    assert.equal(write.item.fields.length, 1);
+    assert.equal(write.item.notes, "notes\r\nsecond line");
+    assert.equal(write.item.username, "  alice  ");
+
+    await vm.runInContext("openItem(1);", env.context);
+    env.setResponse("managerItem", { success: true, data: { password: secret, fields: [{ name: "private\r\nfield", value: secret, secret: true }] } });
+    env.elements.reveal.click(); await flush();
+    const privateControl = env.elements.fields.querySelectorAll("textarea")[1];
+    assert.equal(privateControl.value, "private first\nprivate second\nlast");
+    assert.equal(env.elements.secretMultiline.value, "private first\nprivate second\nlast");
+    env.calls.length = 0;
+    env.elements.editForm.listeners.submit({ preventDefault() {} }); await flush();
+    write = env.calls.find(call => call.action === "managerUpdate");
+    assert.equal(write.item.password, secret);
+    assert.equal(write.item.fields[1].value, secret);
+    assert.equal(write.item.fields[1].name, "private\r\nfield");
+});
+
+test("revealed multiline custom values expire while user edits survive", async () => {
+    const env = environment(); await flush();
+    env.setResponse("managerItem", { success: true, data: { id: 1, name: "work", kind: "login", urls: [], fields: [
+        { name: "private", value: null, secret: true }
+    ] } });
+    await vm.runInContext("openItem(1);", env.context);
+    env.setResponse("managerItem", { success: true, data: { password: "", fields: [{ name: "private", value: "first\r\nsecond", secret: true }] } });
+    env.elements.reveal.click(); await flush();
+    const control = env.elements.fields.querySelectorAll("textarea")[0];
+    for (const expire of env.timers.values()) expire();
+    assert.equal(control.value, "");
+    assert.equal(vm.runInContext("controlValue(fieldRows[0].value)", env.context), "");
+    env.elements.reveal.click(); await flush();
+    control.value = "edited\nvalue";
+    for (const expire of env.timers.values()) expire();
+    assert.equal(control.value, "edited\nvalue");
+    assert.equal(vm.runInContext("renderedValues.has(fieldRows[0].value)", env.context), false);
+    env.elements.editForm.listeners.submit({ preventDefault() {} }); await flush();
+    assert.equal(env.calls.find(call => call.action === "managerUpdate").item.fields[0].value, "edited\nvalue");
 });
 
 test("uncertain manager mutations require explicit state review before another write", async () => {

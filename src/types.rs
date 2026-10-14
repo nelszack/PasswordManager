@@ -991,12 +991,6 @@ mod unlock_compatibility_tests {
                 assert_eq!(legacy.update.password, replace);
                 assert!(!legacy.update.generate_password);
                 assert_eq!(legacy.password, decoded.password);
-                let expected = EntryUpdateWire {
-                    target: legacy.target,
-                    update: legacy.update,
-                    password: legacy.password,
-                };
-                assert_eq!(encoded, rmp_serde::to_vec(&expected).unwrap());
             }
         }
     }

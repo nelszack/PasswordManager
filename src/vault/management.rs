@@ -143,8 +143,6 @@ mod tests {
             assert!(!summaries.contains(secret));
         }
         let details = vault.management_item_json(4, false).unwrap();
-        assert!(!details.contains("synthetic-password"));
-        assert!(!details.contains("secret-token"));
         let mut expected = json!({
             "id": 4, "name": "Example", "username": null, "kind": "login",
             "urls": ["https://example.com", "https://accounts.example.com"],
@@ -160,9 +158,6 @@ mod tests {
             expected
         );
         let revealed = vault.management_item_json(4, true).unwrap();
-        assert!(revealed.contains("synthetic-password"));
-        assert!(revealed.contains("secret-token"));
-        assert!(!revealed.contains("authenticator-seed"));
         expected["password"] = json!("synthetic-password");
         expected["fields"][0]["value"] = json!("secret-token");
         assert_eq!(

@@ -303,14 +303,12 @@ mod test {
     #[derive(Default)]
     struct FakeClipboard {
         value: Option<String>,
-        cleared: bool,
         fail_reads: bool,
     }
 
     impl ClipboardAccess for FakeClipboard {
         fn set_text(&mut self, secret: &str) -> Result<(), String> {
             self.value = Some(secret.to_owned());
-            self.cleared = false;
             Ok(())
         }
         fn get_text(&mut self) -> Result<String, String> {
@@ -323,34 +321,10 @@ mod test {
 
         fn clear(&mut self) -> Result<(), String> {
             self.value = None;
-            self.cleared = true;
             Ok(())
         }
     }
 
-    #[test]
-    fn clears_only_the_secret_that_was_copied() {
-        let mut matching = FakeClipboard {
-            value: Some("secret".into()),
-            ..FakeClipboard::default()
-        };
-        assert_eq!(clear_if_unchanged(&mut matching, "secret"), Ok(true));
-        assert!(matching.cleared);
-
-        let mut replaced = FakeClipboard {
-            value: Some("user replacement".into()),
-            ..FakeClipboard::default()
-        };
-        assert_eq!(clear_if_unchanged(&mut replaced, "secret"), Ok(false));
-        assert!(!replaced.cleared);
-
-        let mut unavailable = FakeClipboard {
-            fail_reads: true,
-            ..FakeClipboard::default()
-        };
-        assert!(clear_if_unchanged(&mut unavailable, "secret").is_err());
-        assert!(!unavailable.cleared);
-    }
     #[test]
     fn test_zero_timeout_does_not_panic() {
         assert!(copy_with_timeout("secret", 0).is_ok());

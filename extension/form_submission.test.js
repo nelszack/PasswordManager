@@ -40,16 +40,17 @@ test("trusted script-driven submits without user activation do not request vault
     }
 });
 
-test("matched, unmatched, and failed lookups never affect the site's submit event", async () => {
-    for (const outcome of ["matched", "unmatched", "error"]) {
-        const context = setup({ handle: async () => {
-            if (outcome === "error") throw new Error("bridge failed");
-            return { action: outcome };
-        } });
-        if (outcome === "error") await assert.rejects(context.coordinator.onSubmit(context.event), /bridge failed/);
-        else await context.coordinator.onSubmit(context.event);
-        assert.deepEqual(context.calls, [], outcome);
-    }
+test("a failed prompt handler leaves submission untouched and allows a later attempt", async () => {
+    let fail = true;
+    const context = setup({ handle: async () => {
+        context.calls.push("handle");
+        if (fail) throw new Error("bridge failed");
+    } });
+    await assert.rejects(context.coordinator.onSubmit(context.event), /bridge failed/);
+    assert.deepEqual(context.calls, ["handle"]);
+    fail = false;
+    await context.coordinator.onSubmit(context.event);
+    assert.deepEqual(context.calls, ["handle", "handle"]);
 });
 
 test("later user attempts are handled without replaying a submission", async () => {
