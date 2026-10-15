@@ -1,6 +1,14 @@
 name: Security fuzzing
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'fuzz/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/fuzz.yml'
   pull_request:
     paths:
       - 'src/**'
@@ -35,8 +43,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: fuzz -> target
-          cache-directories: fuzz/corpus
-          key: fuzz-${{ matrix.target }}
+          # All targets use the same instrumented dependencies. One main job
+          # populates the cache; PRs and the other targets only restore it.
+          shared-key: fuzz-dependencies
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.target == 'encrypted_headers' }}
+      - name: Restore fuzz corpus
+        id: corpus
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          # Fresh keys retain new inputs on main and within each isolated PR.
+          key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-v1-${{ matrix.target }}-
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Verify fuzz dependency lockfile
@@ -53,8 +71,13 @@ jobs:
           FUZZ_EVENT: ${{ github.event_name }}
         run: |
           seconds=60
-          if [ "$FUZZ_EVENT" != pull_request ]; then seconds=600; fi
+          if [ "$FUZZ_EVENT" = schedule ] || [ "$FUZZ_EVENT" = workflow_dispatch ]; then seconds=600; fi
           cargo fuzz run "$FUZZ_TARGET" -- -max_total_time="$seconds" -max_len=65536 -rss_limit_mb=2048
+      - name: Save fuzz corpus
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: ${{ steps.corpus.outputs.cache-primary-key }}
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

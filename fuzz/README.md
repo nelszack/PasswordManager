@@ -33,9 +33,14 @@ cargo +nightly fuzz run imports -- -max_total_time=600 -max_len=65536
   secret-bearing records after parsing.
 
 The security-fuzz workflow runs bounded checks on relevant pull requests and
-longer weekly or manually triggered sessions (60 seconds per target on pull
-requests and 600 seconds otherwise). It caches discovered corpus entries per
-target and uploads crash artifacts on failure. Fuzzer findings fail CI; timeout completion is normal.
+pushes to `main` (60 seconds per target), plus longer weekly or manually triggered
+sessions (600 seconds per target). The targets share a dependency cache populated
+on `main`, which pull requests can restore.
+Corpus caches are separate for each target and successful runs save newly
+discovered inputs under fresh keys. Pull requests can restore main's corpora
+and retain their own discoveries in GitHub's isolated PR cache scope.
+Crash artifacts are uploaded on failure.
+Fuzzer findings fail CI; timeout completion is normal.
 Sanitizers and coverage instrumentation require nightly Rust. Stable builds can
 run a basic parser smoke check without coverage guidance:
 

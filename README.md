@@ -1132,7 +1132,8 @@ npm run test:extension:coverage
 
 The shared validation command used by both CI and release packaging runs the
 checks above, verifies the generated command reference, and checks every
-extension script's syntax:
+extension script's syntax. The command-reference check reuses the all-features
+executable built for the Rust integration tests:
 
 ```bash
 npm ci
@@ -1185,6 +1186,9 @@ secret redaction, vault recovery state, TOTP vectors, URL matching, and
 plaintext import/export compatibility. GitHub Actions runs the full test and
 strict-lint suite on Linux, macOS, and Windows for pushes to `main` and pull
 requests. Browser end-to-end and coverage jobs run separately on Linux.
+Rust build caches are saved on `main` and restored by pull requests, reducing
+duplicate cache storage without skipping checks. Default-feature builds remain
+covered by the browser integration and release jobs.
 
 Fixed MessagePack fixtures in `tests/fixtures/server_commands.json` guard
 command indices and positional fields for installed clients. New data commands
