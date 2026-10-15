@@ -2285,10 +2285,27 @@ fn encrypted_backup_rejects_invalid_files_tampering_and_invalid_vault_state() {
     vault
         .encrypted_backup(tampered_path.display().to_string(), &mut key, false)
         .unwrap();
-    let length = fs::metadata(&tampered_path).unwrap().len();
+    // RFC 3339's automatic fractional precision can change between writes.
+    // Size the successful write for the longest timestamp representation;
+    // persistence's size-limit tests separately cover the exact byte boundary.
+    let envelope = BackupEnvelopeRef {
+        version: BACKUP_VERSION,
+        created: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
+        vault: &vault,
+    };
+    let max_length = (rmp_serde::to_vec(&envelope).unwrap().len()
+        + BACKUP_MAGIC.len()
+        + 1
+        + crate::encryption::ENCRYPTED_FILE_OVERHEAD) as u64;
     vault
-        .encrypted_backup_with_limit(tampered_path.display().to_string(), &mut key, true, length)
+        .encrypted_backup_with_limit(
+            tampered_path.display().to_string(),
+            &mut key,
+            true,
+            max_length,
+        )
         .unwrap();
+    assert!(fs::metadata(&tampered_path).unwrap().len() <= max_length);
     let mut tampered = fs::read(&tampered_path).unwrap();
     *tampered.last_mut().unwrap() ^= 1;
     fs::write(&tampered_path, tampered).unwrap();
