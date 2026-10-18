@@ -377,6 +377,7 @@ URI into the hidden setup prompt:
 ```bash
 pm totp set --entry-name "github.com"
 pm totp show --entry-name "github.com"
+pm totp show --entry-name "github.com" --watch
 pm totp show --id 3 --copy --copy-time 20
 pm totp remove --id 3
 ```
@@ -387,6 +388,20 @@ URIs can specify their algorithm, digits, and period. Correct system time is
 required for valid codes. Entry and trash listings mark configured accounts
 with an authenticator indicator without revealing their secrets. The existing
 `--totp`, `--no-totp`, and `--require-totp` options include HOTP authenticators too.
+
+Use `pm totp show --watch` with an entry selector to keep the code and countdown
+updated until Ctrl+C or the vault locks. Add `--copy` to copy each new code once;
+`--copy-time` still controls clipboard clearing. Watching does not extend the
+vault's auto-lock deadline. In a terminal the countdown updates in place; redirected
+output and `--json` emit one line per update. HOTP cannot be watched and attempting
+to do so does not consume a counter.
+
+The countdown follows the configured period's Unix-time boundaries (normally
+every 30 seconds). Duo Mobile may start its displayed 30-second countdown when
+you reveal a passcode, so its refresh can appear 10–20 seconds later even with
+the same secret and synchronized clocks. See [Duo's explanation of its countdown](https://community.cisco.com/t5/duo-mobile-app/delay-in-authenticator-code/td-p/4884436).
+If the actual codes are consistently shifted, check automatic time on both devices
+and that both authenticators use the same secret, algorithm, digits, and period.
 
 HOTP URIs must include an unsigned `counter` parameter, for example
 `otpauth://hotp/Example?secret=BASE32_SECRET&counter=0`. HOTP supports SHA-1,

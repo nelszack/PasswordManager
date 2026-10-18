@@ -126,6 +126,7 @@ fn handle_command(
                 | ServerCommand::StatusData
                 | ServerCommand::BrowserDuoItems(_)
                 | ServerCommand::Duo(DuoCommand::Requests { .. })
+                | ServerCommand::Totp(TotpCommand::Watch { .. })
         )
     {
         let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -439,6 +440,34 @@ fn handle_command(
         ServerCommand::Totp(mut command) => {
             if let Some(vault) = vlt.as_mut() {
                 match command {
+                    TotpCommand::Watch {
+                        target,
+                        copy_timeout,
+                    } => match vault.current_totp(target) {
+                        Ok((code, ttl)) => {
+                            let payload = crate::protocol::AuthenticatorResponse {
+                                code,
+                                expires_in: Some(ttl),
+                                counter: None,
+                                mode: "totp".into(),
+                            };
+                            let encoded = Zeroizing::new(
+                                serde_json::to_string(&payload)
+                                    .expect("authenticator data is serializable"),
+                            );
+                            respond_data(&encoded, responses);
+                            if let Some(timeout) = copy_timeout {
+                                copy_in_background(payload.code.clone(), timeout);
+                            }
+                        }
+                        Err(error) => respond_domain_error_with_context(
+                            &error,
+                            &format!(
+                                "TOTP watch unavailable (requires a time-based authenticator): {error}"
+                            ),
+                            responses,
+                        ),
+                    },
                     TotpCommand::Set {
                         target,
                         mut configuration,

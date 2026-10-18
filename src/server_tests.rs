@@ -230,6 +230,19 @@ fn structured_authenticator_requests_preserve_hotp_counters_and_totp_lifetimes()
             outcome.responses[0].message
         );
     }
+    let before = session.vault.clone();
+    let generation = state.lock_generation.load(Ordering::Acquire);
+    let rejected = execute_command(
+        state.clone(),
+        ServerCommand::Totp(TotpCommand::Watch {
+            target: Target::Id(1),
+            copy_timeout: None,
+        }),
+        &mut session,
+    );
+    assert_ne!(rejected.responses[0].code, ResponseCode::Success);
+    assert_eq!(session.vault, before);
+    assert_eq!(state.lock_generation.load(Ordering::Acquire), generation);
     for (counter, code) in [(0, "755224"), (1, "287082")] {
         let outcome = execute_command(
             state.clone(),
@@ -267,6 +280,24 @@ fn structured_authenticator_requests_preserve_hotp_counters_and_totp_lifetimes()
         &mut session,
     );
     assert_eq!(totp.responses[0].code, ResponseCode::Success);
+    let before = session.vault.clone();
+    let generation = state.lock_generation.load(Ordering::Acquire);
+    let watched = execute_command(
+        state.clone(),
+        ServerCommand::Totp(TotpCommand::Watch {
+            target: Target::Id(1),
+            copy_timeout: None,
+        }),
+        &mut session,
+    );
+    assert_eq!(watched.responses[0].code, ResponseCode::Success);
+    assert!(watched.responses[0].data);
+    let payload: crate::protocol::AuthenticatorResponse =
+        serde_json::from_str(&watched.responses[0].message).unwrap();
+    assert!(payload.valid());
+    assert_eq!(payload.mode, "totp");
+    assert_eq!(session.vault, before);
+    assert_eq!(state.lock_generation.load(Ordering::Acquire), generation);
     let outcome = execute_command(
         state,
         ServerCommand::AuthenticatorData(Target::Id(1)),
@@ -1054,6 +1085,10 @@ fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
             ServerCommand::Trash,
             ServerCommand::Audit(AuditOptions::default()),
             ServerCommand::Totp(TotpCommand::Show {
+                target: Target::Id(1),
+                copy_timeout: None,
+            }),
+            ServerCommand::Totp(TotpCommand::Watch {
                 target: Target::Id(1),
                 copy_timeout: None,
             }),

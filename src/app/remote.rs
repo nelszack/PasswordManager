@@ -86,15 +86,34 @@ fn resolved_file(path: String) -> String {
         .unwrap_or_else(|error| client::exit_error(&error, 2))
 }
 
-pub(super) fn run(
+pub(super) async fn run(
     command: CliCommands,
     conf: &config::Config,
     client: &client::AuthenticatedClient,
 ) {
-    if let CliCommands::Duo { command } = command {
-        super::duo::run(command, client);
-    } else {
-        client.send_command(prepare_command(command, conf));
+    match command {
+        CliCommands::Duo { command } => super::duo::run(command, client),
+        CliCommands::Totp {
+            command:
+                TotpCommands::Show {
+                    target,
+                    copy,
+                    copy_time,
+                    watch: true,
+                },
+        } => {
+            let result = super::totp::watch(
+                client,
+                target_type(target),
+                copy.then_some(copy_time.unwrap_or(conf.clipboard.timeout)),
+            )
+            .await;
+            client::finish_watch();
+            if let Err(error) = result {
+                client::exit_error(&error, 1);
+            }
+        }
+        command => client.send_command(prepare_command(command, conf)),
     }
 }
 
@@ -269,6 +288,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                 target,
                 copy,
                 copy_time,
+                watch: _,
             } => ServerCommand::Totp(TotpCommand::Show {
                 target: target_type(target),
                 copy_timeout: copy.then_some(copy_time.unwrap_or(conf.clipboard.timeout)),

@@ -3,6 +3,7 @@ use password_manager::{cli::CliCommands, client, config, server::is_running};
 mod duo;
 mod local;
 mod remote;
+mod totp;
 
 pub async fn run(
     command: CliCommands,
@@ -30,6 +31,6 @@ pub async fn run(
         if !server_running {
             client::exit_error("Server is not running. Start it with `pm start`.", 1);
         }
-        remote::run(command, &conf, &client);
+        remote::run(command, &conf, &client).await;
     }
 }

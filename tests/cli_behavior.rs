@@ -218,6 +218,10 @@ fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_conf
             vec!["pm", "totp", "duo", "--mode", ""],
             vec!["hotp", "totp"],
         ),
+        (
+            vec!["pm", "totp", "show", "--"],
+            vec!["--watch", "--copy", "--copy-time", "--id", "--entry-name"],
+        ),
     ] {
         let output = isolated_pm(root.path())
             .env("COMPLETE", "bash")
@@ -917,6 +921,141 @@ fn machine_readable_secrets_preserve_whitespace_empty_values_and_unicode() {
 }
 
 #[test]
+fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    let key = root.path().join("vault.key");
+    assert!(run(root.path(), port, &["start"]).status.success());
+    let _server = ServerGuard {
+        root: root.path().into(),
+        port,
+        active: true,
+    };
+    for command in ["new", "unlock"] {
+        assert!(
+            run(
+                root.path(),
+                port,
+                &[command, "--key", key.to_str().unwrap()]
+            )
+            .status
+            .success()
+        );
+    }
+    let input = root.path().join("otp.json");
+    std::fs::write(
+        &input,
+        serde_json::to_vec(&serde_json::json!([{
+            "name": "watch",
+            "password": "synthetic",
+            "totp": "otpauth://totp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&period=2"
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["import", "--path", input.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+
+    for json in [false, true] {
+        if json {
+            assert!(
+                run(
+                    root.path(),
+                    port,
+                    &["unlock", "--key", key.to_str().unwrap()]
+                )
+                .status
+                .success()
+            );
+        }
+        let stdout_file = tempfile::NamedTempFile::new().unwrap();
+        let mut stdout = stdout_file.reopen().unwrap();
+        let mut stderr = tempfile::tempfile().unwrap();
+        let mut command = isolated_pm(root.path());
+        command.args(["--port", &port.to_string()]);
+        if json {
+            command.arg("--json");
+        }
+        let mut watcher = command
+            .args(["totp", "show", "--entry-name", "watch", "--watch"])
+            .stdout(Stdio::from(stdout_file.reopen().unwrap()))
+            .stderr(Stdio::from(stderr.try_clone().unwrap()))
+            .spawn_timeout("TOTP watch");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut output = String::new();
+        loop {
+            output.clear();
+            stdout.rewind().unwrap();
+            stdout.read_to_string(&mut output).unwrap();
+            if output.lines().count() >= 4
+                || watcher.try_wait().unwrap().is_some()
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let locked = run(root.path(), port, &["lock"]);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let stopped = loop {
+            if let Some(status) = watcher.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                watcher.kill().unwrap();
+                watcher.wait().unwrap();
+                break None;
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        assert!(locked.status.success());
+        assert!(!stopped.expect("watch did not stop after locking").success());
+        assert!(output.lines().count() >= 4, "watch output: {output}");
+        let updates: Vec<String> = output
+            .lines()
+            .map(|line| {
+                if json {
+                    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(value["ok"], true);
+                    value["output"].as_str().unwrap().to_string()
+                } else {
+                    assert!(!line.contains('\x1b'));
+                    line.to_string()
+                }
+            })
+            .collect();
+        assert!(updates.iter().all(|line| line.starts_with("TOTP: ")
+            && (line.ends_with("(1s remaining)") || line.ends_with("(2s remaining)"))));
+        assert!(
+            updates
+                .windows(2)
+                .any(|pair| pair[0][6..12] != pair[1][6..12])
+        );
+        stdout.rewind().unwrap();
+        output.clear();
+        stdout.read_to_string(&mut output).unwrap();
+        if json {
+            let last: serde_json::Value =
+                serde_json::from_str(output.lines().last().unwrap()).unwrap();
+            assert_eq!(last["ok"], false);
+            assert!(last["error"].as_str().unwrap().contains("Vault locked"));
+        } else {
+            stderr.rewind().unwrap();
+            let mut error = String::new();
+            stderr.read_to_string(&mut error).unwrap();
+            assert!(error.contains("Vault locked"));
+        }
+    }
+}
+
+#[test]
 fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
@@ -1053,6 +1192,13 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert!(imported.status.success());
     assert!(String::from_utf8_lossy(&run(root.path(), port, &["view"]).stdout).contains("bob"));
 
+    let hotp_watch = run(
+        root.path(),
+        port,
+        &["totp", "show", "--entry-name", "example", "--watch"],
+    );
+    assert!(!hotp_watch.status.success());
+    assert!(String::from_utf8_lossy(&hotp_watch.stderr).contains("time-based authenticator"));
     let hotp = run(
         root.path(),
         port,

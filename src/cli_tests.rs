@@ -388,6 +388,27 @@ fn test_totp_commands_parse() {
     ));
 
     assert!(Cli::try_parse_from(["pm", "totp", "show", "--id", "7", "--copy-time", "20"]).is_err());
+    for selector in [["--id", "7"], ["--entry-name", "work"]] {
+        let watch =
+            Cli::try_parse_from(["pm", "totp", "show"].into_iter().chain(selector).chain([
+                "--watch",
+                "--copy",
+                "--copy-time",
+                "20",
+            ]))
+            .unwrap();
+        assert!(matches!(
+            watch.command,
+            Some(CliCommands::Totp {
+                command: TotpCommands::Show {
+                    watch: true,
+                    copy: true,
+                    copy_time: Some(20),
+                    ..
+                }
+            })
+        ));
+    }
 }
 
 #[test]

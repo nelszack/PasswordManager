@@ -390,6 +390,31 @@ mod tests {
     }
 
     #[test]
+    fn totp_code_and_countdown_roll_over_at_unix_time_boundaries() {
+        let (mut vault, _) = fixture();
+        for period in [30, 60] {
+            vault.recovery.totp = vec![TotpRecord {
+                entry_id: 7,
+                configuration: format!("otpauth://totp/Test?secret={SECRET}&period={period}"),
+            }];
+            // RFC 4226 moving factors 0, 1, and 2. Starting a display partway
+            // through a period must not reset its lifetime to a full period.
+            for (timestamp, expected_code, expected_ttl) in [
+                (0, "755224", period),
+                (period - 1, "755224", 1),
+                (period, "287082", period),
+                (period + 10, "287082", period - 10),
+                (period * 2 - 1, "287082", 1),
+                (period * 2, "359152", period),
+            ] {
+                let (code, ttl) = vault.totp_at(&Target::Id(7), timestamp).unwrap();
+                assert_eq!(code, expected_code);
+                assert_eq!(ttl, expected_ttl);
+            }
+        }
+    }
+
+    #[test]
     fn hotp_matches_all_rfc_4226_vectors_and_consumes_one_counter_per_request() {
         let (mut vault, _) = fixture();
         let mut key = VaultCredentials::default();

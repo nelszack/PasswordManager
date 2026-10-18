@@ -23,19 +23,51 @@ pub fn print_error(error: &str) {
 }
 
 pub fn print_success(output: &str) {
-    let rendered = if JSON_OUTPUT.load(Ordering::Relaxed) {
+    let Some(rendered) = success_output(output) else {
+        return;
+    };
+    let _ = io::stdout().write_all(rendered.as_bytes());
+}
+
+fn success_output(output: &str) -> Option<String> {
+    Some(if JSON_OUTPUT.load(Ordering::Relaxed) {
         format!(
             "{}\n",
             serde_json::json!({ "ok": true, "output": output.trim_end() })
         )
     } else if QUIET_OUTPUT.load(Ordering::Relaxed) {
-        return;
+        return None;
     } else if output.ends_with('\n') {
         crate::terminal::output(output).to_string()
     } else {
         format!("{}\n", crate::terminal::output(output).as_str())
-    };
-    let _ = io::stdout().write_all(rendered.as_bytes());
+    })
+}
+
+fn watch_in_place() -> bool {
+    !JSON_OUTPUT.load(Ordering::Relaxed)
+        && !QUIET_OUTPUT.load(Ordering::Relaxed)
+        && io::stdout().is_terminal()
+}
+
+pub fn print_watch(output: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if watch_in_place() {
+        write!(
+            stdout,
+            "\r{}\x1b[K",
+            crate::terminal::output(output).as_str()
+        )?;
+    } else if let Some(rendered) = success_output(output) {
+        stdout.write_all(rendered.as_bytes())?;
+    }
+    stdout.flush()
+}
+
+pub fn finish_watch() {
+    if watch_in_place() {
+        let _ = writeln!(io::stdout());
+    }
 }
 
 pub fn print_warning(warning: &str) {

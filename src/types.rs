@@ -591,6 +591,10 @@ pub enum TotpCommand {
         activation: String,
         mode: OtpMode,
     },
+    Watch {
+        target: Target,
+        copy_timeout: Option<u8>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -618,6 +622,14 @@ impl std::fmt::Debug for TotpCommand {
                 copy_timeout,
             } => formatter
                 .debug_struct("Show")
+                .field("target", target)
+                .field("copy_timeout", copy_timeout)
+                .finish(),
+            Self::Watch {
+                target,
+                copy_timeout,
+            } => formatter
+                .debug_struct("Watch")
                 .field("target", target)
                 .field("copy_timeout", copy_timeout)
                 .finish(),

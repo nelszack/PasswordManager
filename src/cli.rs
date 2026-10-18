@@ -712,7 +712,7 @@ pub enum TotpCommands {
     },
     /// Generate a TOTP code or consume and persist the next HOTP counter.
     #[command(
-        after_help = "Examples:\n  pm totp show --id 7\n  pm totp show --entry-name github --copy"
+        after_help = "Examples:\n  pm totp show --id 7\n  pm totp show --entry-name github --copy\n  pm totp show --entry-name github --watch\n\nWatch refreshes TOTP codes and their countdown until Ctrl+C or the vault locks.\nWith --copy, each new code is copied once. HOTP cannot be watched."
     )]
     Show {
         #[command(flatten)]
@@ -723,6 +723,9 @@ pub enum TotpCommands {
         /// Seconds before clearing the copied code; defaults to clipboard configuration.
         #[arg(long, requires = "copy")]
         copy_time: Option<u8>,
+        /// Keep displaying the current TOTP code and countdown until Ctrl+C.
+        #[arg(long)]
+        watch: bool,
     },
     /// Remove the authenticator configuration from an entry.
     Remove {
