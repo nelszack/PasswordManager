@@ -3,13 +3,14 @@ const assert = require("node:assert/strict");
 const generator = require("./password_generator.js");
 
 test("configured generation honors exact lengths, enabled sets, and ambiguity filtering", () => {
-    for (let i = 0; i < 50; i++) {
-        const password = generator.generate({ length: 37, symbols: false });
-        assert.equal(password.length, 37);
+    for (const length of [1, 2, 3, 37, 255]) {
+        const password = generator.generate({ length, symbols: false });
+        assert.equal(password.length, length);
         assert.match(password, /^[A-HJ-NP-Za-km-np-z2-9]+$/);
-        assert.match(password, /[A-Z]/); assert.match(password, /[a-z]/); assert.match(password, /[2-9]/);
+        if (length >= 3) {
+            assert.match(password, /[A-Z]/); assert.match(password, /[a-z]/); assert.match(password, /[2-9]/);
+        }
     }
-    assert.equal(generator.generate({ length: 1 }).length, 1);
     assert.match(generator.generate({ uppercase: false, lowercase: false, digits: false, symbolSet: "?!", length: 12 }), /^[?!]{12}$/);
     assert.throws(() => generator.generate({ uppercase: false, lowercase: false, digits: false, symbols: false }), /Enable/);
     for (const options of [{ length: 0 }, { length: 256 }, { length: 1.5 }, { words: 0 }, { symbolSet: "é" }, { separator: "\n" }, { digits: "yes" }]) {

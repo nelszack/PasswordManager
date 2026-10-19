@@ -54,26 +54,29 @@ test("adds and updates credentials across username, password, and TOTP pages", a
         browser = await launchExtension();
         const { context, nativeLog } = browser;
         const page = context.pages()[0] || await context.newPage();
-        await page.goto(`${origin}/username`);
-        await expect(page.locator("#username")).toBeVisible();
-        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
-        await page.locator("#username").fill("alice@example.com");
-        await Promise.all([
-            page.waitForURL(`${origin}/password`),
-            page.locator("#next").click()
-        ]);
-        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
-        await page.locator("#password").fill("new-secret-password");
-        const promptPromise = context.waitForEvent("page", candidate =>
-            candidate.url().includes("credential_prompt.html")
-        );
-        await page.locator("#next").click();
+        async function submitCredentials(password) {
+            await page.goto(`${origin}/username`);
+            await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
+            await page.locator("#username").fill("alice@example.com");
+            await Promise.all([
+                page.waitForURL(`${origin}/password`),
+                page.locator("#next").click()
+            ]);
+            await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
+            await page.locator("#password").fill(password);
+            const opened = context.waitForEvent("page", candidate =>
+                candidate.url().includes("credential_prompt.html")
+            );
+            await page.locator("#next").click();
+            const prompt = await opened;
+            await expect(page).toHaveURL(`${origin}/totp`);
+            await expect(page.locator("#totp")).toBeVisible();
+            await expect(prompt.locator("#credentials")).toBeVisible();
+            await expect(prompt.locator("#username")).toHaveValue("alice@example.com");
+            return prompt;
+        }
 
-        const prompt = await promptPromise;
-        await expect(page).toHaveURL(`${origin}/totp`);
-        await expect(page.locator("#totp")).toBeVisible();
-        await expect(prompt.locator("#credentials")).toBeVisible();
-        await expect(prompt.locator("#username")).toHaveValue("alice@example.com");
+        const prompt = await submitCredentials("new-secret-password");
         await prompt.locator("#name").fill("End-to-end account");
         await prompt.locator("#add").click();
         await expect.poll(() => prompt.isClosed()).toBe(true);
@@ -86,23 +89,7 @@ test("adds and updates credentials across username, password, and TOTP pages", a
             name: "End-to-end account"
         });
 
-        await page.goto(`${origin}/username`);
-        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
-        await page.locator("#username").fill("alice@example.com");
-        await Promise.all([
-            page.waitForURL(`${origin}/password`),
-            page.locator("#next").click()
-        ]);
-        await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
-        await page.locator("#password").fill("changed-secret-password");
-        const updatePromptPromise = context.waitForEvent("page", candidate =>
-            candidate.url().includes("credential_prompt.html")
-        );
-        await page.locator("#next").click();
-
-        const updatePrompt = await updatePromptPromise;
-        await expect(updatePrompt.locator("#credentials")).toBeVisible();
-        await expect(updatePrompt.locator("#username")).toHaveValue("alice@example.com");
+        const updatePrompt = await submitCredentials("changed-secret-password");
         await expect(updatePrompt.locator("#update")).toHaveText("Update End-to-end account");
         await updatePrompt.locator("#update").click();
         await expect.poll(() => updatePrompt.isClosed()).toBe(true);
