@@ -41,7 +41,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "b
 base64 = "0.23"
 aws-lc-rs = "1.18"
 pem-rfc7468 = { version = "1.0", features = ["alloc"] }
-html-escape = "0.2"
+html-escape = "0.3"
 
 [dev-dependencies]
 proptest = "1"
