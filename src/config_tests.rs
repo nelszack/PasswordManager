@@ -51,12 +51,13 @@ fn default_vault_selection_is_validated_and_resettable() {
 
 #[test]
 fn updates_persist_all_fields_and_boundary_values() {
-    for (label, length, stats, copy, clipboard, unlock, history, retention, port) in [
-        ("custom", 100, false, true, 12, 15, 25, 30, 8787),
+    for (label, length, stats, copy, password_copy, clipboard, unlock, history, retention, port) in [
+        ("custom", 100, false, true, false, 12, 15, 25, 30, 8787),
         (
             "disabled timeouts",
             12,
             false,
+            true,
             true,
             0,
             0,
@@ -68,6 +69,7 @@ fn updates_persist_all_fields_and_boundary_values() {
             "maximum values",
             u8::MAX,
             true,
+            false,
             false,
             u8::MAX,
             u64::MAX,
@@ -83,6 +85,7 @@ fn updates_persist_all_fields_and_boundary_values() {
                 genpass_length: Some(length),
                 genpass_stats: Some(stats),
                 genpass_copy: Some(copy),
+                password_copy: Some(password_copy),
                 clipboard_timeout: Some(clipboard),
                 unlock_timeout: Some(unlock),
                 password_history_limit: Some(history),
@@ -105,7 +108,9 @@ fn updates_persist_all_fields_and_boundary_values() {
                     timeout: unlock,
                     vault_id: None
                 },
-                copy: CopyConfig { passwords: true },
+                copy: CopyConfig {
+                    passwords: password_copy,
+                },
                 recovery: RecoveryConfig {
                     password_history_limit: history,
                     trash_retention_days: retention
@@ -275,22 +280,6 @@ fn invalid_config_is_reported_without_overwriting_the_file() {
         assert!(error.contains(expected_error), "{invalid:?}: {error}");
         assert_eq!(fs::read_to_string(&config_path).unwrap(), invalid);
     }
-}
-
-#[test]
-fn password_copy_default_is_configurable() {
-    let (_directory, config_path) = isolated_config();
-    try_update(
-        Config::default(),
-        ConfigArgs {
-            password_copy: Some(false),
-            ..ConfigArgs::default()
-        },
-        &config_path,
-    )
-    .unwrap();
-
-    assert!(!try_read_config(&config_path).unwrap().copy.passwords);
 }
 
 #[test]

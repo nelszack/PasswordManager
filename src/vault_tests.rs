@@ -584,22 +584,49 @@ fn invalid_import_and_validation_errors_leave_live_state_unchanged() {
     assert_eq!(vault, before);
 }
 #[test]
-fn export_files_refuse_clobber_and_preserve_exact_credentials() {
+fn json_and_csv_exports_refuse_clobber_and_round_trip_exact_credentials() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("export.json");
     let mut vault = memory();
     vault.item_mut(1).unwrap().entry.password = " \nexact\t ".into();
-    vault.export(path.display().to_string(), false).unwrap();
-    assert!(vault.export(path.display().to_string(), false).is_err());
-    let json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(json["items"][0]["password"], " \nexact\t ");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+    vault.item_mut(1).unwrap().entry.notes = Some("multiline\nnotes".into());
+    for format in ["json", "csv"] {
+        let path = directory.path().join(format!("export.{format}"));
+        vault.export(path.display().to_string(), false).unwrap();
+        assert!(vault.export(path.display().to_string(), false).is_err());
+        if format == "json" {
+            let json: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["items"][0]["password"], " \nexact\t ");
+        }
+        let mut target = Vault::memory();
+        target
+            .import_with_options(
+                path.display().to_string(),
+                ConflictPolicy::Skip,
+                false,
+                10,
+                &mut VaultCredentials::default(),
+            )
+            .unwrap();
         assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
+            target.item(1).unwrap().entry.password,
+            vault.item(1).unwrap().entry.password,
+            "{format}"
         );
+        assert_eq!(
+            target.item(1).unwrap().entry.notes,
+            vault.item(1).unwrap().entry.notes,
+            "{format}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{format}"
+            );
+        }
     }
 }
 #[test]
@@ -979,33 +1006,6 @@ fn typed_totp_has_correct_lifetime_without_mutating_any_revision() {
         }
         assert_eq!(vault, before);
     }
-}
-#[test]
-fn csv_round_trip_preserves_exact_password_and_private_notes() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("export.csv");
-    let mut source = memory();
-    source.item_mut(1).unwrap().entry.password = " \nexact\t ".into();
-    source.item_mut(1).unwrap().entry.notes = Some("multiline\nnotes".into());
-    source.export(path.display().to_string(), false).unwrap();
-    let mut target = Vault::memory();
-    target
-        .import_with_options(
-            path.display().to_string(),
-            ConflictPolicy::Skip,
-            false,
-            10,
-            &mut VaultCredentials::default(),
-        )
-        .unwrap();
-    assert_eq!(
-        target.item(1).unwrap().entry.password,
-        source.item(1).unwrap().entry.password
-    );
-    assert_eq!(
-        target.item(1).unwrap().entry.notes,
-        source.item(1).unwrap().entry.notes
-    );
 }
 #[test]
 fn oversize_import_is_rejected_before_parsing_or_mutation() {
