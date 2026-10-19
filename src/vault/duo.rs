@@ -6,7 +6,7 @@ pub(crate) struct PreparedDuoEnrollment {
     push: bool,
     entry_id: usize,
     session: [u8; 32],
-    state: [u8; 32],
+    revision: u64,
 }
 pub(crate) enum DuoEnrollmentMaterial {
     Push(crate::duo::PushEnrollment),
@@ -28,42 +28,17 @@ impl PreparedDuoEnrollment {
         }
     }
 }
-
 impl Vault {
-    fn duo_enrollment_state(&self, id: usize) -> Result<[u8; 32], VaultError> {
-        let index = self
-            .entry_index(&Target::Id(id))
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        // The temporary serialization is erased, and only its keyed review token
-        // crosses the vault lock. No existing vault or device keys are retained.
-        let bytes = Zeroizing::new(
-            serde_json::to_vec(&(
-                &self.entries[index],
-                self.recovery.totp.iter().find(|r| r.entry_id == id),
-                self.recovery.duo.iter().find(|r| r.entry_id == id),
-            ))
-            .map_err(|_| VaultError::Validation("could not bind Duo enrollment to item".into()))?,
-        );
-        let review_key = self
-            .metadata
-            .duo_session
-            .as_ref()
-            .ok_or_else(|| VaultError::Conflict("Duo enrollment session changed".into()))?;
-        let mut hash = Zeroizing::new(blake3::Hasher::new_keyed(review_key));
-        hash.update(b"password-manager.duo-enrollment.v1\0");
-        hash.update(&bytes);
-        Ok(*hash.finalize().as_bytes())
-    }
     pub(crate) fn prepare_duo_enrollment(
         &mut self,
         command: DuoCommand,
         push: bool,
         key: &mut VaultCredentials,
     ) -> Result<PreparedDuoEnrollment, VaultError> {
-        let command = Zeroizing::new(command);
         if key.locked || key.keypass.is_none() {
             return Err(VaultError::Locked);
         }
+        let command = Zeroizing::new(command);
         let DuoCommand::Enroll {
             target, replace, ..
         } = &*command
@@ -72,27 +47,25 @@ impl Vault {
                 "invalid Duo enrollment operation".into(),
             ));
         };
-        let index = self
-            .entry_index(target)
+        let id = self
+            .entry_id(target)
             .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let entry_id = self.entries[index].id;
-        if !replace
-            && (self.recovery.totp.iter().any(|r| r.entry_id == entry_id)
-                || (push && self.recovery.duo.iter().any(|r| r.entry_id == entry_id)))
-        {
-            return Err(VaultError::Conflict("entry already has an authenticator; remove it or use --replace before enrolling Duo".into()));
+        let item = self.item(id).unwrap();
+        if !replace && (item.authenticator.is_some() || (push && item.duo.is_some())) {
+            return Err(VaultError::Conflict(
+                "item already has an authenticator; use --replace".into(),
+            ));
         }
-        // Check persistence before consuming the single-use activation link.
+        let revision = item.revision;
         write_vault(self, key)?;
         let review_key = self.metadata.duo_session.get_or_insert_with(rand::random);
         let session = *blake3::hash(review_key).as_bytes();
-        let state = self.duo_enrollment_state(entry_id)?;
         Ok(PreparedDuoEnrollment {
             command,
             push,
-            entry_id,
+            entry_id: id,
             session,
-            state,
+            revision,
         })
     }
     pub(crate) fn finish_duo_enrollment(
@@ -110,7 +83,11 @@ impl Vault {
             .as_ref()
             .map(|k| *blake3::hash(k).as_bytes())
             != Some(prepared.session)
-            || self.duo_enrollment_state(prepared.entry_id)? != prepared.state
+            || self
+                .item(prepared.entry_id)
+                .filter(|i| i.active())
+                .map(|i| i.revision)
+                != Some(prepared.revision)
         {
             return Err(VaultError::Conflict(
                 "unlock session or item changed during Duo enrollment".into(),
@@ -130,43 +107,15 @@ impl Vault {
             }
         }
     }
-}
-
-impl Vault {
     fn duo_record(&mut self, target: &Target) -> Result<&mut DuoRecord, VaultError> {
-        let index = self
-            .entry_index(target)
+        let id = self
+            .entry_id(target)
             .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        self.recovery
-            .duo
-            .iter_mut()
-            .find(|r| r.entry_id == self.entries[index].id)
-            .ok_or_else(|| {
-                VaultError::NotFound(
-                    "entry has no push credentials; enroll a fresh link using pm duo enroll".into(),
-                )
-            })
-    }
-    #[cfg(test)]
-    fn enroll_push_with(
-        &mut self,
-        target: &Target,
-        replace: bool,
-        key: &mut VaultCredentials,
-        enroll: impl FnOnce() -> Result<crate::duo::PushEnrollment, VaultError>,
-    ) -> Result<(), VaultError> {
-        let prepared = self.prepare_duo_enrollment(
-            DuoCommand::Enroll {
-                target: target.clone(),
-                activation: String::new(),
-                mode: None,
-                replace,
-            },
-            true,
-            key,
-        )?;
-        self.finish_duo_enrollment(&prepared, DuoEnrollmentMaterial::Push(enroll()?), key)
-            .map(|_| ())
+        self.item_mut(id).unwrap().duo.as_mut().ok_or_else(|| {
+            VaultError::NotFound(
+                "item has no push credentials; enroll a fresh link using pm duo enroll".into(),
+            )
+        })
     }
     fn store_duo_enrollment(
         &mut self,
@@ -174,37 +123,15 @@ impl Vault {
         mut enrollment: crate::duo::PushEnrollment,
         key: &mut VaultCredentials,
     ) -> Result<(), VaultError> {
-        let index = self
-            .entry_index(&Target::Id(id))
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let (configuration, _) = totp::normalize_totp_configuration(&enrollment.configuration)?;
-        self.transaction(TransactionScope::Entry(id), key, |vault| {
-            vault.recovery.duo.retain_mut(|r| {
-                if r.entry_id == id {
-                    r.zeroize();
-                    false
-                } else {
-                    true
-                }
-            });
-            vault.recovery.totp.retain_mut(|r| {
-                if r.entry_id == id {
-                    r.zeroize();
-                    false
-                } else {
-                    true
-                }
-            });
-            vault.recovery.duo.push(DuoRecord {
-                entry_id: id,
-                review_key: None,
+        let authenticator = Authenticator::parse(&enrollment.configuration)?;
+        self.transaction(TransactionScope::Entry(id), key, |v| {
+            let item = v.item_mut(id).unwrap();
+            item.authenticator = Some(authenticator);
+            item.duo = Some(DuoRecord {
                 credentials: std::mem::take(&mut enrollment.credentials),
+                review_key: None,
             });
-            vault.recovery.totp.push(TotpRecord {
-                entry_id: id,
-                configuration,
-            });
-            vault.entries[index].modified = chrono::Local::now().to_string();
+            item.entry.modified = Timestamp::now();
             Ok((true, ()))
         })
         .map_err(|e| {
@@ -220,28 +147,18 @@ impl Vault {
             return Err(VaultError::Locked);
         }
         match command {
-            DuoCommand::Enroll { .. }
-            | DuoCommand::Requests { .. }
-            | DuoCommand::Respond { .. } => Err(VaultError::InvalidInput(
-                "Duo I/O must run outside the live vault lock".into(),
-            )),
             DuoCommand::Remove { target } => {
-                let index = self
-                    .entry_index(target)
+                let id = self
+                    .entry_id(target)
                     .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-                let id = self.entries[index].id;
-                self.transaction(TransactionScope::Entry(id),key,|vault| {
-                    let before=vault.recovery.duo.len();
-                    vault.recovery.duo.retain_mut(|r| { if r.entry_id == id {r.zeroize();false} else {true} });
-                    let changed=before!=vault.recovery.duo.len();
-                    if changed { vault.entries[index].modified=chrono::Local::now().to_string(); }
-                    Ok((changed,"Local push credentials removed. Remove the device separately in Duo; passcodes are retained.".into()))
-                })
+                self.transaction(TransactionScope::Entry(id),key,|v| {let item=v.item_mut(id).unwrap();let changed=item.duo.take().is_some();if changed {item.entry.modified=Timestamp::now();}Ok((changed,"Local push credentials removed. Remove the device separately in Duo; passcodes are retained.".into()))})
             }
+            _ => Err(VaultError::InvalidInput(
+                "Duo I/O must run outside the live vault owner".into(),
+            )),
         }
     }
 }
-
 pub(crate) struct PreparedDuoPoll {
     pub request: crate::duo::PreparedRequest,
     pub review: DuoReview,
@@ -249,9 +166,10 @@ pub(crate) struct PreparedDuoPoll {
 pub(crate) struct DuoReview {
     pub command: Zeroizing<DuoCommand>,
     pub session_tag: [u8; 32],
+    revision: u64,
 }
 pub(crate) enum DuoPollResult {
-    Requests(String),
+    Requests(Vec<crate::types::DuoPushRequest>),
     Decision(Box<crate::duo::PreparedRequest>),
 }
 impl Vault {
@@ -260,11 +178,11 @@ impl Vault {
         command: DuoCommand,
         key: &VaultCredentials,
     ) -> Result<PreparedDuoPoll, VaultError> {
-        let mut command = Zeroizing::new(command);
         if key.locked || key.keypass.is_none() {
             return Err(VaultError::Locked);
         }
-        let is_poll = matches!(&*command, DuoCommand::Requests { .. });
+        let mut command = Zeroizing::new(command);
+        let poll = matches!(&*command, DuoCommand::Requests { .. });
         let target = match &mut *command {
             DuoCommand::Requests { target } | DuoCommand::Respond { target, .. } => target,
             _ => {
@@ -273,14 +191,17 @@ impl Vault {
                 ));
             }
         };
+        let id = self
+            .entry_id(target)
+            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
+        let revision = self.revision(id).unwrap();
+        *target = Target::Id(id);
         let record = self.duo_record(target)?;
-        target.zeroize();
-        *target = Target::Id(record.entry_id);
-        if is_poll && record.review_key.is_none() {
+        if poll && record.review_key.is_none() {
             record.review_key = Some(rand::random());
         }
         let review_key = record.review_key.as_ref().ok_or_else(|| {
-            VaultError::InvalidInput("Review the Duo request again in this unlock session".into())
+            VaultError::InvalidInput("review the Duo request again in this unlock session".into())
         })?;
         let session_tag = *blake3::hash(review_key).as_bytes();
         let request = crate::duo::prepare_poll(&record.credentials)?;
@@ -289,6 +210,7 @@ impl Vault {
             review: DuoReview {
                 command,
                 session_tag,
+                revision,
             },
         })
     }
@@ -309,6 +231,11 @@ impl Vault {
                 ));
             }
         };
+        if self.target_revision(target) != Some(review.revision) {
+            return Err(VaultError::Conflict(
+                "item changed; review the Duo request again".into(),
+            ));
+        }
         let record = self.duo_record(target)?;
         let review_key = record.review_key.as_ref().ok_or_else(|| {
             VaultError::InvalidInput("Duo unlock session changed; review the request again".into())
@@ -323,9 +250,7 @@ impl Vault {
         }
         let pending = crate::duo::parse_requests(body, review_key)?;
         match &*review.command {
-            DuoCommand::Requests { .. } => serde_json::to_string(&pending)
-                .map(DuoPollResult::Requests)
-                .map_err(|_| VaultError::Validation("could not encode Duo requests".into())),
+            DuoCommand::Requests { .. } => Ok(DuoPollResult::Requests(pending)),
             DuoCommand::Respond {
                 request_id,
                 fingerprint,
@@ -340,7 +265,7 @@ impl Vault {
                 *approve,
                 code,
             )
-            .map(|request| DuoPollResult::Decision(Box::new(request))),
+            .map(|r| DuoPollResult::Decision(Box::new(r))),
             _ => unreachable!(),
         }
     }
@@ -349,66 +274,61 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn synthetic_record() -> DuoRecord {
+    fn credentials() -> DuoCredentials {
         let key = crate::duo::crypto::new_key().unwrap();
-        DuoRecord {
-            entry_id: 1,
-            credentials: DuoCredentials {
-                host: "api-test.duosecurity.com".into(),
-                akey: "syntheticAccount".into(),
-                pkey: "syntheticDevice".into(),
-                private_key: crate::duo::crypto::private_pem(&key).unwrap().to_string(),
-            },
-            review_key: None,
+        DuoCredentials {
+            host: "api-test.duosecurity.com".into(),
+            akey: "syntheticAccount".into(),
+            pkey: "syntheticDevice".into(),
+            private_key: crate::duo::crypto::private_pem(&key)
+                .unwrap()
+                .to_string()
+                .into(),
         }
     }
-    #[test]
-    fn review_keys_are_ephemeral_redacted_and_erased_on_lock() {
-        let mut record = synthetic_record();
-        record.review_key = Some([37; 32]);
-        let encoded = Zeroizing::new(serde_json::to_string(&record).unwrap());
-        assert!(!encoded.contains("review_key"));
-        let restored: DuoRecord = serde_json::from_str(&encoded).unwrap();
-        assert!(restored.review_key.is_none());
-        let debug = format!("{record:?}");
-        assert!(!debug.contains("PRIVATE KEY"));
-        assert!(!debug.contains("37"));
-        let mut metadata = VaultMetadata {
-            filename: "synthetic".into(),
-            duo_session: Some([37; 32]),
-        };
-        assert!(
-            !serde_json::to_string(&metadata)
-                .unwrap()
-                .contains("duo_session")
+    fn fixture() -> (Vault, VaultCredentials) {
+        let mut vault = Vault::from_entries(
+            vec![VaultEntry {
+                id: 1,
+                name: "Account".into(),
+                password: "password".into(),
+                ..Default::default()
+            }],
+            None,
         );
-        assert!(!format!("{metadata:?}").contains("37"));
-        let restored: VaultMetadata =
-            rmp_serde::from_slice(&rmp_serde::to_vec(&metadata).unwrap()).unwrap();
-        assert!(restored.duo_session.is_none());
-        metadata.zeroize();
-        assert!(metadata.duo_session.is_none());
-        record.zeroize();
-        assert!(record.review_key.is_none());
-        assert!(record.credentials.private_key.is_empty());
+        vault.set_test_duo(1, credentials());
+        let key = VaultCredentials {
+            locked: false,
+            keypass: Some(PasswordType::Session {
+                encryption_key: [42; 32],
+                salt: [7; 16],
+                kdf: 1,
+                memory_kib: 8192,
+                iterations: 1,
+                parallelism: 1,
+            }),
+        };
+        (vault, key)
+    }
+    fn body() -> Vec<u8> {
+        serde_json::to_vec(&json!({"stat":"OK","response":{"transactions":[{"urgid":"test-id","type":"Login","expiration":chrono::Utc::now().timestamp()+120,"step_up_code_info":{"num_digits":3}}]}})).unwrap()
+    }
+    fn enroll() -> DuoCommand {
+        DuoCommand::Enroll {
+            target: Target::Id(1),
+            activation: "synthetic-unused-activation".into(),
+            mode: Some(crate::types::OtpMode::Hotp),
+            replace: true,
+        }
+    }
+    fn material() -> DuoEnrollmentMaterial {
+        DuoEnrollmentMaterial::Passcodes(Zeroizing::new(
+            "otpauth://hotp/Duo?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0".into(),
+        ))
     }
     #[test]
-    fn locked_or_reopened_sessions_cannot_prepare_a_reviewed_decision() {
-        let mut vault = Vault::default();
-        vault.entries.push(VaultEntry {
-            id: 1,
-            ..Default::default()
-        });
-        vault.recovery.duo.push(synthetic_record());
-        let mut key = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Key("synthetic".into())),
-        };
-        let body = serde_json::to_vec(&json!({"stat":"OK","response":{"transactions":[{
-            "urgid":"test-id", "type":"Login", "expiration":chrono::Utc::now().timestamp()+120,
-            "step_up_code_info":{"num_digits":3}
-        }]}}))
-        .unwrap();
+    fn poll_reviews_are_bound_to_session_key_and_item_revision() {
+        let (mut vault, mut key) = fixture();
         let poll = vault
             .prepare_duo_poll(
                 DuoCommand::Requests {
@@ -417,13 +337,12 @@ mod tests {
                 &key,
             )
             .unwrap();
-        let DuoPollResult::Requests(output) =
-            vault.finish_duo_poll(&poll.review, &body, &key).unwrap()
+        let DuoPollResult::Requests(requests) =
+            vault.finish_duo_poll(&poll.review, &body(), &key).unwrap()
         else {
-            panic!("expected requests")
+            panic!("expected typed requests")
         };
-        let requests: Vec<crate::types::DuoPushRequest> = serde_json::from_str(&output).unwrap();
-        let reviewed = vault
+        let review = vault
             .prepare_duo_poll(
                 DuoCommand::Respond {
                     target: Target::Id(1),
@@ -436,22 +355,21 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            vault.finish_duo_poll(&reviewed.review, &body, &key),
+            vault.finish_duo_poll(&review.review, &body(), &key),
             Ok(DuoPollResult::Decision(_))
         ));
         key.locked = true;
         assert!(matches!(
-            vault.finish_duo_poll(&reviewed.review, &body, &key),
+            vault.finish_duo_poll(&review.review, &body(), &key),
             Err(VaultError::Locked)
         ));
         key.locked = false;
-        vault.recovery.duo[0].review_key = None;
+        vault.item_mut(1).unwrap().duo.as_mut().unwrap().review_key = None;
         assert!(
             vault
-                .finish_duo_poll(&reviewed.review, &body, &key)
+                .finish_duo_poll(&review.review, &body(), &key)
                 .is_err()
         );
-        // A new poll after unlock initializes another key, but old reviews fail.
         let new_poll = vault
             .prepare_duo_poll(
                 DuoCommand::Requests {
@@ -460,51 +378,26 @@ mod tests {
                 &key,
             )
             .unwrap();
-        assert_ne!(poll.review.session_tag, new_poll.review.session_tag);
+        assert_ne!(new_poll.review.session_tag, poll.review.session_tag);
+        let mut change = EntryUpdate {
+            target: Target::Id(1),
+            update: EntryChanges::default(),
+            password: Some("updated".into()),
+        };
+        change.update.notes = Some("changed while reviewing".into());
+        vault.update_entry_with_limit(change, &mut key, 10).unwrap();
         assert!(
             vault
-                .finish_duo_poll(&reviewed.review, &body, &key)
+                .finish_duo_poll(&new_poll.review, &body(), &key)
                 .is_err()
         );
     }
     #[test]
-    fn enrollment_cannot_commit_after_lock_reopen_or_item_changes() {
-        crate::file::init_test_data_dir();
-        let mut vault = Vault::default();
-        vault.metadata.filename = random_vault_filename();
-        vault.entries.push(VaultEntry {
-            id: 1,
-            ..Default::default()
-        });
-        let mut key = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [7; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            }),
-        };
+    fn enrollment_rejects_stale_session_and_changed_or_deleted_item() {
+        let (mut vault, mut key) = fixture();
         let prepared = vault
-            .prepare_duo_enrollment(
-                DuoCommand::Enroll {
-                    target: Target::Id(1),
-                    activation: "synthetic-never-used".into(),
-                    mode: Some(crate::types::OtpMode::Hotp),
-                    replace: false,
-                },
-                false,
-                &mut key,
-            )
+            .prepare_duo_enrollment(enroll(), false, &mut key)
             .unwrap();
-        let material = || {
-            DuoEnrollmentMaterial::Passcodes(Zeroizing::new(
-                "otpauth://hotp/Duo?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0&digits=6"
-                    .into(),
-            ))
-        };
         key.locked = true;
         assert!(matches!(
             vault.finish_duo_enrollment(&prepared, material(), &mut key),
@@ -519,160 +412,172 @@ mod tests {
                 .is_err()
         );
         vault.metadata.duo_session = session;
-        vault.entries[0].name = "changed".into();
-        assert!(
-            vault
-                .finish_duo_enrollment(&prepared, material(), &mut key)
-                .is_err()
-        );
-        assert!(vault.recovery.totp.is_empty());
-        vault.entries[0].name.clear();
         vault
-            .finish_duo_enrollment(&prepared, material(), &mut key)
+            .update_entry_with_limit(
+                EntryUpdate {
+                    target: Target::Id(1),
+                    update: EntryChanges::default(),
+                    password: Some("changed".into()),
+                },
+                &mut key,
+                10,
+            )
             .unwrap();
-        // A competing enrollment cannot overwrite the authenticator just saved.
         assert!(
             vault
                 .finish_duo_enrollment(&prepared, material(), &mut key)
                 .is_err()
         );
-        assert_eq!(vault.recovery.totp.len(), 1);
-        fs::remove_file(data_dir().join(&vault.metadata.filename)).unwrap();
+        let prepared = vault
+            .prepare_duo_enrollment(enroll(), false, &mut key)
+            .unwrap();
+        vault.delete_entry(Target::Id(1), &mut key).unwrap();
+        assert!(
+            vault
+                .finish_duo_enrollment(&prepared, material(), &mut key)
+                .is_err()
+        );
     }
     #[test]
-    fn enrollment_never_consumes_link_if_locked_existing_or_unwritable() {
-        crate::file::init_test_data_dir();
-        let mut vault = Vault::default();
-        vault.entries.push(VaultEntry {
-            id: 1,
-            ..Default::default()
-        });
-        let target = Target::Id(1);
-        let mut key = VaultCredentials::default();
-        assert!(matches!(
-            vault.enroll_push_with(&target, false, &mut key, || panic!("must not enroll")),
-            Err(VaultError::Locked)
-        ));
+    fn enrollment_preflight_checks_lock_target_conflicts_and_store_before_network() {
+        let (mut vault, mut key) = fixture();
+        key.locked = true;
+        assert!(
+            vault
+                .prepare_duo_enrollment(enroll(), false, &mut key)
+                .is_err()
+        );
         key.locked = false;
-        key.keypass = Some(PasswordType::Key("not-a-real-key".into()));
-        vault.recovery.totp.push(TotpRecord {
-            entry_id: 1,
-            configuration: "old".into(),
-        });
-        assert!(matches!(
-            vault.enroll_push_with(&target, false, &mut key, || panic!("must not enroll")),
-            Err(VaultError::Conflict(_))
-        ));
-        vault.metadata.filename = "missing-directory/push-vault.enc".into();
-        let before = vault.clone();
+        let missing = DuoCommand::Enroll {
+            target: Target::Id(99),
+            activation: "never-consumed".into(),
+            mode: None,
+            replace: false,
+        };
         assert!(
             vault
-                .enroll_push_with(&target, true, &mut key, || panic!("must not enroll"))
+                .prepare_duo_enrollment(missing, false, &mut key)
                 .is_err()
         );
-        assert_eq!(vault, before);
-    }
-    #[test]
-    fn old_messagepack_recovery_loads_with_empty_push_records() {
-        #[derive(Serialize)]
-        struct Old {
-            password_history: Vec<PasswordRevision>,
-            trash: Vec<TrashedEntry>,
-            next_entry_id: usize,
-            totp: Vec<TotpRecord>,
-            entry_metadata: Vec<EntryMetadata>,
-        }
-        let data = rmp_serde::to_vec(&Old {
-            password_history: vec![],
-            trash: vec![],
-            next_entry_id: 2,
-            totp: vec![],
-            entry_metadata: vec![],
-        })
-        .unwrap();
-        let recovery: RecoveryData = rmp_serde::from_slice(&data).unwrap();
-        assert!(recovery.duo.is_empty());
-        assert_eq!(recovery.next_entry_id, 2);
-    }
-}
-
-#[cfg(test)]
-mod storage_tests {
-    use super::*;
-    #[test]
-    fn push_credentials_survive_encrypted_storage_and_portable_id_remapping() {
-        crate::file::init_test_data_dir();
-        let private = crate::duo::crypto::new_key().unwrap();
-        let credentials = DuoCredentials {
-            host: "api-test.duosecurity.com".into(),
-            akey: "syntheticAccount".into(),
-            pkey: "syntheticDevice".into(),
-            private_key: crate::duo::crypto::private_pem(&private)
-                .unwrap()
-                .to_string(),
+        let conflict = DuoCommand::Enroll {
+            target: Target::Id(1),
+            activation: "never-consumed".into(),
+            mode: None,
+            replace: false,
         };
-        let mut vault = Vault::default();
-        vault.metadata.filename = random_vault_filename();
-        vault.entries.push(VaultEntry {
-            id: 1,
-            name: "work".into(),
-            ..Default::default()
-        });
-        let mut key = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [7; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            }),
-        };
-        vault.enroll_push_with(&Target::Id(1),false,&mut key,|| Ok(crate::duo::PushEnrollment {credentials:credentials.clone(),configuration:"otpauth://hotp/Duo?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0&digits=6".into()})).unwrap();
-        assert_eq!(vault.recovery.duo[0].credentials, credentials);
-        assert_eq!(vault.recovery.totp.len(), 1);
-        let encrypted = fs::read(data_dir().join(&vault.metadata.filename)).unwrap();
-        assert!(
-            !encrypted
-                .windows(credentials.akey.len())
-                .any(|s| s == credentials.akey.as_bytes())
-        );
-        assert!(!encrypted.windows(11).any(|s| s == b"PRIVATE KEY"));
-        let plaintext =
-            Zeroizing::new(decrypt_file(key.keypass.as_mut().unwrap(), &encrypted).unwrap());
-        let mut restored: Vault = rmp_serde::from_slice(&plaintext).unwrap();
-        validate_backup_vault(&mut restored).unwrap();
-        assert_eq!(restored.recovery.duo, vault.recovery.duo);
-        let before = vault.clone();
         assert!(
             vault
-                .enroll_push_with(&Target::Id(1), true, &mut key, || Err(
-                    VaultError::InvalidInput("synthetic activation rejection".into())
-                ))
+                .prepare_duo_enrollment(conflict, true, &mut key)
                 .is_err()
         );
-        assert_eq!(vault, before);
-        for reveal in [false, true] {
-            let item = vault.management_item_json(1, reveal).unwrap();
-            assert!(!item.contains(&credentials.akey));
-            assert!(!item.contains("PRIVATE KEY"));
-            assert!(item.contains("\"has_duo\":true"));
-        }
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("export.json");
+        vault.store = VaultStore::File {
+            directory: directory.path().join("missing"),
+            filename: "vault.enc".into(),
+        };
+        assert!(
+            vault
+                .prepare_duo_enrollment(enroll(), true, &mut key)
+                .is_err()
+        );
+        assert!(vault.metadata.duo_session.is_none());
+    }
+    #[test]
+    fn enrollment_stores_complete_item_and_review_keys_never_enter_document_or_export() {
+        let (mut vault, mut key) = fixture();
+        let prepared = vault
+            .prepare_duo_enrollment(enroll(), true, &mut key)
+            .unwrap();
+        let material = DuoEnrollmentMaterial::Push(crate::duo::PushEnrollment {
+            credentials: credentials(),
+            configuration: "otpauth://hotp/Duo?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=4"
+                .into(),
+        });
+        vault
+            .finish_duo_enrollment(&prepared, material, &mut key)
+            .unwrap();
+        let _poll = vault
+            .prepare_duo_poll(
+                DuoCommand::Requests {
+                    target: Target::Id(1),
+                },
+                &key,
+            )
+            .unwrap();
+        assert!(
+            vault
+                .item(1)
+                .unwrap()
+                .duo
+                .as_ref()
+                .unwrap()
+                .review_key
+                .is_some()
+        );
+        let document = persistence::encode_document(&vault.data, None).unwrap();
+        let decoded = persistence::decode_document(&document).unwrap();
+        assert!(
+            decoded
+                .items
+                .values()
+                .next()
+                .unwrap()
+                .duo
+                .as_ref()
+                .unwrap()
+                .review_key
+                .is_none()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("portable.json");
         vault.export(path.display().to_string(), false).unwrap();
-        let exported = Zeroizing::new(fs::read_to_string(path).unwrap());
-        let mut imported = import::import_json(&exported, "synthetic portable export").unwrap();
-        let mut receiver = Vault::default();
-        receiver.replace_portable_records(9, &mut imported[0], None, 10);
-        assert_eq!(receiver.recovery.duo[0].entry_id, 9);
-        assert_eq!(receiver.recovery.duo[0].credentials, credentials);
-        restored.recovery.duo.push(restored.recovery.duo[0].clone());
-        assert!(validate_backup_vault(&mut restored).is_err());
-        let mut secret_copy = credentials.clone();
-        secret_copy.zeroize();
-        assert!(secret_copy.private_key.is_empty());
-        fs::remove_file(data_dir().join(&vault.metadata.filename)).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("review_key"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("duo_session"));
+        let mut imported = Vault::memory();
+        imported
+            .import_with_options(
+                path.display().to_string(),
+                ConflictPolicy::Skip,
+                false,
+                10,
+                &mut VaultCredentials::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            imported.item(1).unwrap().duo.as_ref().unwrap().credentials,
+            vault.item(1).unwrap().duo.as_ref().unwrap().credentials
+        );
+        assert_eq!(
+            imported.item(1).unwrap().authenticator,
+            vault.item(1).unwrap().authenticator
+        );
+    }
+    #[test]
+    fn browser_duo_summaries_match_exact_https_issuer_without_device_keys() {
+        let (vault, _) = fixture();
+        let summaries = vault.browser_duo_items("https://api-test.duosecurity.com/frame/prompt");
+        assert_eq!(summaries.len(), 1);
+        let encoded = serde_json::to_string(&summaries).unwrap();
+        for secret in [
+            "syntheticAccount",
+            "syntheticDevice",
+            "PRIVATE KEY",
+            "password",
+        ] {
+            assert!(!encoded.contains(secret));
+        }
+        for origin in [
+            "http://api-test.duosecurity.com",
+            "https://api-test.duosecurity.com:8443",
+            "https://api-test.duosecurity.com.evil.example",
+            "https://api-test.duosecurity.com./",
+            "https://user@api-test.duosecurity.com",
+            "https://api-missing.duosecurity.com",
+            "https://duosecurity.com",
+            "invalid",
+        ] {
+            assert!(vault.browser_duo_items(origin).is_empty(), "{origin}");
+        }
     }
 }

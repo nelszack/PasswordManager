@@ -1,44 +1,53 @@
 use super::*;
+use crate::protocol::{ResponsePayload, RpcResponse, encode_rpc_response};
 
-pub async fn respond(message: &str, stream: &mut TcpStream) {
-    respond_with_code(ResponseCode::Success, message, stream).await;
-}
-
-pub async fn respond_with_code(code: ResponseCode, message: &str, stream: &mut TcpStream) {
-    write_response(code, message, false, stream).await;
-}
-
-pub(super) async fn deliver_responses(responses: Vec<BufferedResponse>, stream: &mut TcpStream) {
-    for response in responses {
-        write_response(response.code, &response.message, response.data, stream).await;
-    }
-}
-
-async fn write_response(code: ResponseCode, message: &str, data: bool, stream: &mut TcpStream) {
-    let frame = Zeroizing::new(if data {
-        encode_data_response(message)
-    } else {
-        encode_response(code, message)
-    });
-    let transport = TRANSPORT_RESPONSE_KEY.try_with(|key| {
-        key.borrow()
-            .as_deref()
-            .and_then(|key| encrypt_record(key, &frame))
-    });
-    let direct_test_write = transport.is_err();
-    let mut encrypted = transport.ok().flatten();
-    let _ = tokio::time::timeout(Duration::from_secs(2), async {
-        if let Some(record) = encrypted.as_deref() {
-            stream.write_all(record).await
-        } else if direct_test_write {
-            stream.write_all(&frame).await
+/// A connection's authenticated key is an explicit capability. There is no
+/// plaintext response path, including in tests or error handling.
+pub(super) async fn deliver_responses(
+    responses: Vec<RpcResponse>,
+    stream: &mut TcpStream,
+    response_key: &[u8; 32],
+) -> std::io::Result<()> {
+    let mut iter = responses.into_iter();
+    let Some(mut response) = iter.next() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "command produced no response",
+        ));
+    };
+    for next in iter {
+        response.code = response.code.max(next.code);
+        if let (ResponsePayload::Message(previous), ResponsePayload::Message(message)) =
+            (&mut response.payload, &next.payload)
+        {
+            if !previous.ends_with('\n') {
+                previous.push('\n');
+            }
+            previous.push_str(message);
         } else {
-            Ok(())
+            response.payload = next.payload;
         }
-    })
-    .await;
-    if let Some(record) = encrypted.as_mut() {
-        record.zeroize();
+        if next.operation.is_some() {
+            response.operation = next.operation;
+        }
+        if next.request_id.is_some() {
+            response.request_id = next.request_id;
+        }
     }
-    let _ = stream.flush().await;
+    let frame = Zeroizing::new(encode_rpc_response(&response).map_err(std::io::Error::other)?);
+    let encrypted = Zeroizing::new(
+        encrypt_record(response_key, &frame)
+            .ok_or_else(|| std::io::Error::other("could not encrypt server response"))?,
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        stream.write_all(&encrypted).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "server response write timed out",
+        )
+    })?
 }

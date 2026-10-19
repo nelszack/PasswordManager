@@ -1,4 +1,4 @@
-use clap::ValueEnum;
+use crate::secret::SecretString;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -89,85 +89,33 @@ impl Zeroize for ServerCommand {
     fn zeroize(&mut self) {
         match self {
             Self::Unlock(info) => info.zeroize(),
-            Self::Add(entry) => entry.zeroize(),
-            Self::AddTyped(entry) | Self::AddTypedWithOptions { entry, .. } => entry.zeroize(),
-            Self::Get(target)
+            Self::Add { entry, .. } => entry.zeroize(),
+            Self::Get { target, .. }
             | Self::GetSecret(target)
-            | Self::GetSecretData(target)
             | Self::AuthenticatorData(target)
             | Self::Delete(target)
             | Self::History(target) => target.zeroize(),
-            Self::GetWithOptions {
-                target,
-                copy_timeout,
-            } => {
-                target.zeroize();
-                copy_timeout.zeroize();
-            }
-            Self::GetDetails {
-                target,
-                copy_timeout,
-                reveal_secrets,
-            } => {
-                target.zeroize();
-                copy_timeout.zeroize();
-                reveal_secrets.zeroize();
-            }
-            Self::GetField {
-                target,
-                name,
-                copy_timeout,
-            } => {
-                target.zeroize();
-                name.zeroize();
-                copy_timeout.zeroize();
-            }
-            Self::GetFieldData { target, name } => {
+            Self::GetField { target, name, .. } => {
                 target.zeroize();
                 name.zeroize();
             }
-            Self::RestorePassword { target, revision } => {
-                target.zeroize();
-                revision.zeroize();
-            }
+            Self::Update(update) => update.zeroize(),
+            Self::New(key) | Self::Rekey(key) => key.zeroize(),
+            Self::Backup(request) | Self::RestoreBackup(request) => request.zeroize(),
+            Self::Import(request) => request.zeroize(),
             Self::Totp(command) => command.zeroize(),
             Self::Duo(command) => command.zeroize(),
-            Self::Backup(request) | Self::RestoreBackup(request) => request.zeroize(),
-            Self::Update(update) => update.zeroize(),
-            Self::UpdateTyped(update) => update.zeroize(),
-            Self::Export { path, force } => {
-                path.zeroize();
-                force.zeroize();
-            }
-            Self::Import(request) => request.zeroize(),
-            Self::New(key) | Self::Rekey(key) => key.zeroize(),
-            Self::Search(filter) => {
-                filter.query.zeroize();
-                filter.name.zeroize();
-                filter.username.zeroize();
-                filter.url.zeroize();
-                filter.notes.zeroize();
-            }
-            Self::BrowserLogins(domain)
-            | Self::BrowserDuoItems(domain)
-            | Self::BrowserLogin { domain, .. } => domain.zeroize(),
-            Self::ManagementList(filter) => filter.query.zeroize(),
-            Self::ManagementItem { .. } | Self::ManagementCopy { .. } => {}
-            Self::Kill
-            | Self::Lock(_)
-            | Self::Status
-            | Self::StatusData
-            | Self::View(_)
-            | Self::BrowserAutofill
-            | Self::BrowserAutofillItem(_)
-            | Self::Trash
-            | Self::RestoreTrash(_)
-            | Self::PurgeTrash(_)
-            | Self::Audit(_) => {}
+            Self::BrowserLogins(origin) | Self::BrowserDuoItems(origin) => origin.zeroize(),
+            Self::BrowserLogin { domain, .. } => domain.zeroize(),
+            Self::RestorePassword { target, .. } => target.zeroize(),
+            _ => {}
         }
     }
 }
+
+/// Canonical application operations. Wire tags and field names are explicit.
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "operation", content = "arguments", rename_all = "snake_case")]
 pub enum ServerCommand {
     Kill,
     Lock(bool),
@@ -177,16 +125,14 @@ pub enum ServerCommand {
     BrowserAutofill,
     BrowserAutofillItem(usize),
     Search(SearchFilter),
-    Add(PasswordEntry),
-    AddTyped(TypedEntry),
-    AddTypedWithOptions {
+    Add {
         entry: TypedEntry,
         copy_timeout: u8,
     },
-    Get(Target),
-    GetWithOptions {
+    Get {
         target: Target,
         copy_timeout: u8,
+        reveal_secrets: bool,
     },
     GetSecret(Target),
     Delete(Target),
@@ -202,8 +148,7 @@ pub enum ServerCommand {
     Totp(TotpCommand),
     Backup(BackupRequest),
     RestoreBackup(BackupRequest),
-    Update(EntryUpdate),
-    UpdateTyped(TypedUpdate),
+    Update(TypedUpdate),
     Export {
         path: String,
         force: bool,
@@ -216,18 +161,11 @@ pub enum ServerCommand {
         domain: String,
         id: usize,
     },
-    StatusData,
-    GetDetails {
-        target: Target,
-        copy_timeout: u8,
-        reveal_secrets: bool,
-    },
     GetField {
         target: Target,
         name: String,
         copy_timeout: Option<u8>,
     },
-    // Append protocol variants to preserve the indices of installed clients.
     ManagementList(SearchFilter),
     ManagementItem {
         id: usize,
@@ -238,13 +176,107 @@ pub enum ServerCommand {
         timeout: u8,
     },
     Duo(DuoCommand),
-    GetSecretData(Target),
-    GetFieldData {
-        target: Target,
-        name: String,
-    },
     AuthenticatorData(Target),
     BrowserDuoItems(String),
+    OperationStatus(String),
+}
+
+impl ServerCommand {
+    /// Includes externally visible effects such as HOTP consumption and copies.
+    pub fn is_mutation(&self) -> bool {
+        !matches!(
+            self,
+            Self::Status
+                | Self::View(_)
+                | Self::Search(_)
+                | Self::History(_)
+                | Self::Trash
+                | Self::Audit(_)
+                | Self::BrowserAutofill
+                | Self::BrowserAutofillItem(_)
+                | Self::BrowserLogins(_)
+                | Self::BrowserLogin { .. }
+                | Self::BrowserDuoItems(_)
+                | Self::ManagementList(_)
+                | Self::ManagementItem { .. }
+                | Self::GetSecret(_)
+                | Self::OperationStatus(_)
+                | Self::Duo(DuoCommand::Requests { .. })
+                | Self::Get {
+                    copy_timeout: 0,
+                    ..
+                }
+                | Self::GetField {
+                    copy_timeout: None,
+                    ..
+                }
+                | Self::Totp(TotpCommand::Watch {
+                    copy_timeout: None,
+                    ..
+                })
+        )
+    }
+    pub fn extends_unlock(&self) -> bool {
+        !matches!(
+            self,
+            Self::Kill
+                | Self::Lock(_)
+                | Self::Status
+                | Self::OperationStatus(_)
+                | Self::BrowserDuoItems(_)
+                | Self::Duo(DuoCommand::Requests { .. })
+                | Self::Totp(TotpCommand::Watch { .. })
+        )
+    }
+    pub fn revision_target(&self) -> Option<&Target> {
+        match self {
+            Self::Update(update) => Some(&update.entry.target),
+            Self::Delete(target)
+            | Self::GetSecret(target)
+            | Self::History(target)
+            | Self::AuthenticatorData(target)
+            | Self::Get { target, .. }
+            | Self::GetField { target, .. }
+            | Self::RestorePassword { target, .. } => Some(target),
+            Self::Totp(
+                TotpCommand::Set { target, .. }
+                | TotpCommand::Remove { target }
+                | TotpCommand::Show { target, .. }
+                | TotpCommand::Watch { target, .. }
+                | TotpCommand::Duo { target, .. },
+            ) => Some(target),
+            Self::Duo(
+                DuoCommand::Enroll { target, .. }
+                | DuoCommand::Requests { target }
+                | DuoCommand::Respond { target, .. }
+                | DuoCommand::Remove { target },
+            ) => Some(target),
+            _ => None,
+        }
+    }
+    pub fn target_id(&self) -> Option<usize> {
+        let target = match self {
+            Self::Update(update) => Some(&update.entry.target),
+            Self::Delete(target)
+            | Self::GetSecret(target)
+            | Self::History(target)
+            | Self::AuthenticatorData(target)
+            | Self::Get { target, .. }
+            | Self::GetField { target, .. }
+            | Self::RestorePassword { target, .. } => Some(target),
+            _ => None,
+        };
+        match target {
+            Some(Target::Id(id)) => Some(*id),
+            _ => match self {
+                Self::ManagementItem { id, .. }
+                | Self::ManagementCopy { id, .. }
+                | Self::BrowserLogin { id, .. }
+                | Self::BrowserAutofillItem(id) => Some(*id),
+                _ => None,
+            },
+        }
+    }
 }
 
 #[derive(
@@ -254,7 +286,7 @@ pub struct DuoCredentials {
     pub host: String,
     pub akey: String,
     pub pkey: String,
-    pub private_key: String,
+    pub private_key: SecretString,
 }
 
 impl std::fmt::Debug for DuoCredentials {
@@ -267,7 +299,7 @@ impl std::fmt::Debug for DuoCredentials {
 pub enum DuoCommand {
     Enroll {
         target: Target,
-        activation: String,
+        activation: SecretString,
         mode: Option<OtpMode>,
         replace: bool,
     },
@@ -279,7 +311,7 @@ pub enum DuoCommand {
         request_id: String,
         fingerprint: String,
         approve: bool,
-        code: String,
+        code: SecretString,
     },
     Remove {
         target: Target,
@@ -322,7 +354,7 @@ pub struct DuoPushRequest {
     pub fingerprint: String,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ItemKind {
     /// Website or application credentials with username, password, and optional TOTP.
@@ -344,7 +376,7 @@ pub enum ItemKind {
     ApiSecret,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConflictPolicy {
     /// Leave the existing item unchanged and omit the imported duplicate.
@@ -359,7 +391,7 @@ pub enum ConflictPolicy {
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CustomField {
     pub name: String,
-    pub value: String,
+    pub value: SecretString,
     pub secret: bool,
 }
 
@@ -399,7 +431,7 @@ impl std::fmt::Display for ItemKind {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SortField {
     /// Stable numeric entry ID.
@@ -484,19 +516,19 @@ impl std::fmt::Debug for UnlockInfo {
 pub struct PasswordEntry {
     pub name: String,
     pub username: Option<String>,
-    pub password: String,
+    pub password: SecretString,
     pub url: Option<String>,
-    pub notes: Option<String>,
+    pub notes: Option<SecretString>,
     pub copy: bool,
 }
 
 /// Metadata changes supplied by any client. Secret replacement lives in EntryUpdate.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct EntryChanges {
     pub name: Option<String>,
     pub username: Option<String>,
     pub url: Option<String>,
-    pub notes: Option<String>,
+    pub notes: Option<SecretString>,
 }
 
 impl std::fmt::Debug for EntryChanges {
@@ -509,23 +541,6 @@ impl std::fmt::Debug for EntryChanges {
             .field("notes", &self.notes.as_ref().map(|_| "<redacted>"))
             .finish()
     }
-}
-
-// Keep the original MessagePack field order for installed native hosts and servers.
-#[derive(Serialize, Deserialize)]
-struct UpdateWireArgs {
-    name: Option<String>,
-    username: Option<String>,
-    password: bool,
-    generate_password: bool,
-    url: Option<String>,
-    notes: Option<String>,
-}
-#[derive(Serialize, Deserialize)]
-struct EntryUpdateWire {
-    target: Target,
-    update: UpdateWireArgs,
-    password: Option<String>,
 }
 
 impl std::fmt::Debug for PasswordEntry {
@@ -569,7 +584,7 @@ pub struct SearchFilter {
     pub name: Option<String>,
     pub username: Option<String>,
     pub url: Option<String>,
-    pub notes: Option<String>,
+    pub notes: Option<SecretString>,
     pub list: ListOptions,
 }
 
@@ -577,7 +592,7 @@ pub struct SearchFilter {
 pub enum TotpCommand {
     Set {
         target: Target,
-        configuration: String,
+        configuration: SecretString,
     },
     Show {
         target: Target,
@@ -588,7 +603,7 @@ pub enum TotpCommand {
     },
     Duo {
         target: Target,
-        activation: String,
+        activation: SecretString,
         mode: OtpMode,
     },
     Watch {
@@ -597,7 +612,7 @@ pub enum TotpCommand {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OtpMode {
     Hotp,
     Totp,
@@ -663,64 +678,18 @@ pub enum Target {
     Id(usize),
     Name(String),
     Url(String),
-    Vault { key: PasswordType, keep_key: bool },
+    Vault {
+        key: PasswordType,
+        keep_key: bool,
+        vault_file: Option<String>,
+    },
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct EntryUpdate {
     pub target: Target,
     pub update: EntryChanges,
-    pub password: Option<String>,
-}
-
-impl Serialize for EntryUpdate {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Wire<'a> {
-            target: &'a Target,
-            update: WireChanges<'a>,
-            password: &'a Option<String>,
-        }
-        #[derive(Serialize)]
-        struct WireChanges<'a> {
-            name: &'a Option<String>,
-            username: &'a Option<String>,
-            password: bool,
-            generate_password: bool,
-            url: &'a Option<String>,
-            notes: &'a Option<String>,
-        }
-        Wire {
-            target: &self.target,
-            update: WireChanges {
-                name: &self.update.name,
-                username: &self.update.username,
-                password: self.password.is_some(),
-                generate_password: false,
-                url: &self.update.url,
-                notes: &self.update.notes,
-            },
-            password: &self.password,
-        }
-        .serialize(serializer)
-    }
-}
-impl<'de> Deserialize<'de> for EntryUpdate {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut wire = EntryUpdateWire::deserialize(deserializer)?;
-        if !wire.update.password {
-            wire.password.zeroize();
-        }
-        Ok(Self {
-            target: wire.target,
-            update: EntryChanges {
-                name: wire.update.name,
-                username: wire.update.username,
-                url: wire.update.url,
-                notes: wire.update.notes,
-            },
-            password: wire.password,
-        })
-    }
+    pub password: Option<SecretString>,
 }
 
 impl std::fmt::Debug for EntryUpdate {
@@ -836,191 +805,68 @@ impl Drop for PasswordType {
 }
 
 #[cfg(test)]
-mod test {
+mod contract_tests {
     use super::*;
-
     #[test]
-    fn sensitive_command_debug_output_is_redacted() {
-        let backup_secret = "backup-password-that-must-not-leak";
-        let backup = BackupRequest {
-            path: "archive.pmbackup".into(),
-            key_pass: PasswordType::Password(backup_secret.into()),
-            force: false,
-        };
-        let backup_debug = format!("{backup:?}");
-        assert!(backup_debug.contains("<redacted>"));
-        assert!(!backup_debug.contains(backup_secret));
-
-        let totp_secret = "JBSWY3DPEHPK3PXP";
-        let totp = TotpCommand::Set {
-            target: Target::Id(1),
-            configuration: totp_secret.into(),
-        };
-        let totp_debug = format!("{totp:?}");
-        assert!(totp_debug.contains("<redacted>"));
-        assert!(!totp_debug.contains(totp_secret));
-
-        let activation = "duo://activation-token-that-must-not-leak-encoded-host";
-        let mut duo = TotpCommand::Duo {
-            target: Target::Id(1),
-            activation: activation.into(),
-            mode: OtpMode::Hotp,
-        };
-        assert!(!format!("{duo:?}").contains(activation));
-        duo.zeroize();
-        assert!(matches!(duo, TotpCommand::Duo { activation, .. } if activation.is_empty()));
-
-        let item_secret = "typed-item-secret-that-must-not-leak";
-        let custom_secret = "custom-field-secret-that-must-not-leak";
-        let item = TypedEntry {
-            entry: PasswordEntry {
-                name: "API credential".into(),
-                username: None,
-                password: item_secret.into(),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            kind: ItemKind::ApiSecret,
-            additional_urls: Vec::new(),
-            custom_fields: vec![CustomField {
-                name: "token".into(),
-                value: custom_secret.into(),
-                secret: true,
-            }],
-        };
-        let item_debug = format!("{item:?}");
-        assert!(item_debug.contains("<redacted>"));
-        assert!(!item_debug.contains(item_secret));
-        assert!(!item_debug.contains(custom_secret));
-
-        let master_secret = "master-password-that-must-not-leak";
-        let unlock = ServerCommand::Unlock(UnlockInfo {
-            vault_file: None,
-            key: PasswordType::Password(master_secret.into()),
-            timeout: 60,
-        });
-        assert!(!format!("{unlock:?}").contains(master_secret));
-
-        let notes_secret = "private-notes-that-must-not-leak";
-        let changes = EntryChanges {
-            notes: Some(notes_secret.into()),
-            ..Default::default()
-        };
-        let changes_debug = format!("{changes:?}");
-        assert!(changes_debug.contains("<redacted>"));
-        assert!(!changes_debug.contains(notes_secret));
-
-        let update_secret = "updated-password-that-must-not-leak";
-        let update = ServerCommand::Update(EntryUpdate {
-            target: Target::Id(1),
-            update: changes,
-            password: Some(update_secret.into()),
-        });
-        assert!(!format!("{update:?}").contains(update_secret));
-        assert!(!format!("{update:?}").contains(notes_secret));
-
-        let import_secret = "import-password-that-must-not-leak";
-        let import = ServerCommand::Import(ImportRequest {
-            path: "input.csv".into(),
-            new: true,
-            key_pass: Some(PasswordType::Password(import_secret.into())),
-            preview: false,
-            conflicts: ConflictPolicy::Skip,
-            password_history_limit: 10,
-        });
-        assert!(!format!("{import:?}").contains(import_secret));
+    fn secret_commands_redact_debug_but_preserve_explicit_serialization() {
+        let secret = " padded\ncommand-secret\n ";
+        for command in [
+            ServerCommand::Totp(TotpCommand::Set {
+                target: Target::Id(1),
+                configuration: secret.into(),
+            }),
+            ServerCommand::Totp(TotpCommand::Duo {
+                target: Target::Id(1),
+                activation: secret.into(),
+                mode: OtpMode::Hotp,
+            }),
+            ServerCommand::Duo(DuoCommand::Respond {
+                target: Target::Id(1),
+                request_id: "request".into(),
+                fingerprint: "a".repeat(128),
+                approve: true,
+                code: secret.into(),
+            }),
+        ] {
+            assert!(!format!("{command:?}").contains("command-secret"));
+            let encoded = serde_json::to_string(&command).unwrap();
+            assert!(encoded.contains("command-secret"));
+            let mut decoded: ServerCommand = serde_json::from_str(&encoded).unwrap();
+            decoded.zeroize();
+            assert!(
+                !serde_json::to_string(&decoded)
+                    .unwrap()
+                    .contains("command-secret")
+            );
+        }
     }
-
     #[test]
-    fn sensitive_commands_are_zeroized_after_transport_encoding() {
-        let mut command = ServerCommand::Unlock(UnlockInfo {
-            vault_file: None,
-            key: PasswordType::Password("master-secret".into()),
-            timeout: 60,
-        });
-        command.zeroize();
-        assert!(matches!(
-            command,
-            ServerCommand::Unlock(UnlockInfo {
-                key: PasswordType::Password(ref password),
-                timeout: 0,
-                vault_file: None,
-            }) if password.is_empty()
-        ));
-
-        let mut command = ServerCommand::Add(PasswordEntry {
-            name: "service".into(),
-            username: Some("alice".into()),
-            password: "entry-secret".into(),
-            url: Some("example.com".into()),
-            notes: Some("private note".into()),
-            copy: true,
-        });
-        command.zeroize();
-        assert!(matches!(
-            command,
-            ServerCommand::Add(PasswordEntry {
-                ref password,
-                ref notes,
-                ..
-            }) if password.is_empty() && notes.as_deref().is_none_or(str::is_empty)
-        ));
-    }
-}
-
-#[cfg(test)]
-mod unlock_compatibility_tests {
-    use super::*;
-
-    #[test]
-    fn update_messages_preserve_legacy_field_order_and_secret_intent() {
-        for replace in [false, true] {
-            let wire = EntryUpdateWire {
-                target: Target::Id(17),
-                update: UpdateWireArgs {
-                    name: Some("Renamed".into()),
-                    username: None,
-                    password: replace,
-                    generate_password: true,
-                    url: Some("https://example.com".into()),
-                    notes: None,
+    fn metadata_secret_updates_have_one_canonical_named_representation() {
+        let command = ServerCommand::Update(TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(7),
+                update: EntryChanges {
+                    notes: Some("private note".into()),
+                    ..Default::default()
                 },
-                password: Some("synthetic-secret".into()),
-            };
-            for bytes in [
-                rmp_serde::to_vec(&wire).unwrap(),
-                rmp_serde::to_vec_named(&wire).unwrap(),
-            ] {
-                let decoded: EntryUpdate = rmp_serde::from_slice(&bytes).unwrap();
-                assert_eq!(decoded.update.name.as_deref(), Some("Renamed"));
-                assert_eq!(
-                    decoded.password.as_deref(),
-                    replace.then_some("synthetic-secret")
-                );
-                let encoded = rmp_serde::to_vec(&decoded).unwrap();
-                let legacy: EntryUpdateWire = rmp_serde::from_slice(&encoded).unwrap();
-                assert_eq!(legacy.update.password, replace);
-                assert!(!legacy.update.generate_password);
-                assert_eq!(legacy.password, decoded.password);
-            }
-        }
-    }
-
-    #[test]
-    fn old_unlock_messages_default_to_automatic_discovery() {
-        #[derive(Serialize)]
-        struct OldUnlockInfo {
-            key: PasswordType,
-            timeout: u64,
-        }
-        let bytes = rmp_serde::to_vec(&OldUnlockInfo {
-            key: PasswordType::Password("synthetic".into()),
-            timeout: 30,
-        })
-        .unwrap();
-        let decoded: UnlockInfo = rmp_serde::from_slice(&bytes).unwrap();
-        assert!(decoded.vault_file.is_none());
-        assert_eq!(decoded.timeout, 30);
+                password: Some("".into()),
+            },
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
+        });
+        let wire = serde_json::to_value(&command).unwrap();
+        assert_eq!(wire["operation"], "update");
+        assert_eq!(wire["arguments"]["entry"]["password"], "");
+        assert!(
+            wire["arguments"]["entry"]["update"]
+                .get("generate_password")
+                .is_none()
+        );
+        assert!(!format!("{command:?}").contains("private note"));
     }
 }

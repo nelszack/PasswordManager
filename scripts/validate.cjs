@@ -27,6 +27,7 @@ function run(command, args, announce = true, artifacts = null) {
     if (result.status !== 0) process.exit(result.status || 1);
 }
 
+run(process.execPath, ["scripts/build_extension.cjs", "--check"]);
 run("cargo", ["fmt", "--all", "--", "--check"]);
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "extension/manifest.json"), "utf8"));
 for (const entry of [manifest.background.service_worker, manifest.action.default_popup,
@@ -47,4 +48,5 @@ const executable = artifacts.find(artifact => artifact.target.name === "pm"
     && artifact.target.kind.includes("bin") && !artifact.profile.test && artifact.executable)?.executable;
 if (!executable) throw new Error("Cargo did not report the pm integration-test executable");
 run(executable, ["generate-command-reference", "--check"]);
+run(executable, ["generate-command-contract", "--check"]);
 run("cargo", ["clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"]);

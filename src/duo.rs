@@ -536,7 +536,7 @@ pub(crate) fn enroll_push(link: &str, mode: Option<OtpMode>) -> Result<PushEnrol
             .as_ref()
             .ok_or_else(|| invalid("Duo did not return a push device identifier"))?
             .clone(),
-        private_key: crypto::private_pem(&private_key)?.to_string(),
+        private_key: crypto::private_pem(&private_key)?.to_string().into(),
     };
     validate_credentials(&credentials)?;
     Ok(PushEnrollment {

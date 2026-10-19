@@ -11,7 +11,7 @@ test("credential lookups distinguish missing sites from native and malformed err
         }), []);
         assert.deepEqual(prompt.accountsFromLookup({
             success: true,
-            data: '[{"id":7,"username":"alice"}]'
+            data: [{"id": 7, "username": "alice"}]
         }), [{ id: 7, username: "alice" }]);
     }
     // credential lookup still reports native and malformed response errors
@@ -26,7 +26,7 @@ test("credential lookups distinguish missing sites from native and malformed err
         }), /Invalid credential response/);
         assert.throws(() => prompt.accountsFromLookup({
             success: true,
-            data: "{}"
+            data: {}
         }), /Invalid credential response/);
     }
 });

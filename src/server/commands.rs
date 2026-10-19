@@ -1,6 +1,7 @@
 use super::outcome::{
     respond, respond_conflict, respond_data, respond_domain_error,
     respond_domain_error_with_context, respond_domain_result, respond_failure, respond_not_found,
+    respond_payload,
 };
 use super::*;
 use crate::vault::{available, unlock_selected_vault};
@@ -20,7 +21,7 @@ fn combined_lock_warning(
 }
 
 fn handle_command(
-    responses: &mut Vec<BufferedResponse>,
+    responses: &mut Vec<crate::protocol::RpcResponse>,
     state: ConnectionState,
     msg: ServerCommand,
     session: &mut crate::vault::VaultSession,
@@ -34,62 +35,12 @@ fn handle_command(
         respond_failure("Server is stopping.", responses);
         return;
     }
-    let mut add_label = "Item";
-    let mut update_label = "Item";
-    let mut update_missing = "Item not found or unchanged.";
-    let msg = match msg {
-        ServerCommand::Add(entry) => {
-            add_label = "Entry";
-            ServerCommand::AddTypedWithOptions {
-                entry: TypedEntry {
-                    entry,
-                    kind: ItemKind::Login,
-                    additional_urls: vec![],
-                    custom_fields: vec![],
-                },
-                copy_timeout: 10,
-            }
-        }
-        ServerCommand::AddTyped(entry) => ServerCommand::AddTypedWithOptions {
-            entry,
-            copy_timeout: 10,
-        },
-        ServerCommand::Update(entry) => {
-            update_label = "Entry";
-            update_missing = "Entry not found.";
-            ServerCommand::UpdateTyped(TypedUpdate {
-                entry,
-                kind: None,
-                add_url: vec![],
-                remove_url: vec![],
-                clear_urls: false,
-                set_fields: vec![],
-                remove_fields: vec![],
-                clear_fields: false,
-            })
-        }
-        ServerCommand::Get(target) => ServerCommand::GetDetails {
-            target,
-            copy_timeout: 15,
-            reveal_secrets: false,
-        },
-        ServerCommand::GetWithOptions {
-            target,
-            copy_timeout,
-        } => ServerCommand::GetDetails {
-            target,
-            copy_timeout,
-            reveal_secrets: false,
-        },
-        other => other,
-    };
-    let (server_info, vlt) = session.parts_mut();
+    let mut edit = session.edit();
+    let (server_info, vlt) = edit.parts_mut();
     let ConnectionState {
         instance_lock: _instance_lock,
-        session: session_handle,
         kill_tx: _,
         token: _,
-        lock_generation,
         inactivity_timeout,
         stopping,
         background_error,
@@ -104,11 +55,11 @@ fn handle_command(
                 | ServerCommand::Lock(_)
                 | ServerCommand::Unlock(_)
                 | ServerCommand::Status
-                | ServerCommand::StatusData
                 | ServerCommand::New(_)
                 | ServerCommand::Delete(Target::Vault { .. })
                 | ServerCommand::RestoreBackup(_)
                 | ServerCommand::Import(_)
+                | ServerCommand::OperationStatus(_)
         )
     {
         let mut msg = msg;
@@ -116,36 +67,8 @@ fn handle_command(
         respond_failure("Vault locked.", responses);
         return;
     }
-    if !server_info.locked
-        && !matches!(
-            &msg,
-            ServerCommand::Kill
-                | ServerCommand::Lock(_)
-                | ServerCommand::Unlock(_)
-                | ServerCommand::Status
-                | ServerCommand::StatusData
-                | ServerCommand::BrowserDuoItems(_)
-                | ServerCommand::Duo(DuoCommand::Requests { .. })
-                | ServerCommand::Totp(TotpCommand::Watch { .. })
-        )
-    {
-        let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        schedule_auto_lock(
-            inactivity_timeout.load(Ordering::Acquire),
-            generation,
-            Arc::clone(&lock_generation),
-            Arc::clone(&session_handle),
-            Arc::clone(&background_error),
-        );
-    }
     match msg {
-        ServerCommand::Add(_)
-        | ServerCommand::AddTyped(_)
-        | ServerCommand::Update(_)
-        | ServerCommand::Get(_)
-        | ServerCommand::GetWithOptions { .. } => unreachable!("legacy commands are normalized"),
         ServerCommand::Kill => {
-            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked
                 && let Err(error) = lock_vlt(vlt, server_info)
             {
@@ -161,7 +84,6 @@ fn handle_command(
             *effect = CommandEffect::StopServer;
         }
         ServerCommand::Lock(send) => {
-            lock_generation.fetch_add(1, Ordering::AcqRel);
             let was_locked = server_info.locked;
             // Retry clipboard cleanup even when the vault was already locked.
             match lock_vlt(vlt, server_info) {
@@ -212,14 +134,6 @@ fn handle_command(
                             return;
                         }
                         inactivity_timeout.store(info.timeout, Ordering::Release);
-                        let generation = lock_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                        schedule_auto_lock(
-                            info.timeout,
-                            generation,
-                            Arc::clone(&lock_generation),
-                            session_handle,
-                            Arc::clone(&background_error),
-                        );
                         *background_error.blocking_lock() = None;
                         respond("Vault unlocked.", responses);
                     }
@@ -241,21 +155,20 @@ fn handle_command(
         }
         ServerCommand::Status => {
             let warning = combined_lock_warning(&background_error, system_lock.as_deref());
-            respond(
-                &status_message(server_info.locked, warning.as_deref()),
+            respond_payload(
+                ResponseCode::Success,
+                crate::protocol::ResponsePayload::Status(crate::protocol::ServerStatus::new(
+                    server_info.locked,
+                    warning,
+                )),
                 responses,
             );
         }
-        ServerCommand::StatusData => {
-            let warning = combined_lock_warning(&background_error, system_lock.as_deref());
-            let status = crate::protocol::ServerStatus::new(server_info.locked, warning);
-            respond(
-                &serde_json::to_string(&status).expect("status is serializable"),
-                responses,
-            );
-        }
+        ServerCommand::OperationStatus(_) => respond_failure(
+            "Operation status is resolved by the vault worker.",
+            responses,
+        ),
         ServerCommand::New(key_path) => {
-            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked
                 && let Err(error) = lock_vlt(vlt, server_info)
             {
@@ -296,19 +209,19 @@ fn handle_command(
                 respond_failure("Vault unavailable.", responses);
             }
         }
-        ServerCommand::AddTypedWithOptions {
+        ServerCommand::Add {
             entry: info,
             copy_timeout,
         } => {
             let pass = Zeroizing::new(info.entry.copy.then(|| info.entry.password.clone()));
             match available(vlt).and_then(|vault| vault.add_typed_entry(info, server_info)) {
                 Ok(true) => {
-                    respond(&format!("{add_label} added."), responses);
+                    respond("Item added.", responses);
                     if let Some(password) = pass.as_deref() {
                         copy_in_background(password.to_owned(), copy_timeout);
                     }
                 }
-                Ok(false) => respond_conflict(&format!("{add_label} already exists."), responses),
+                Ok(false) => respond_conflict("Item already exists.", responses),
                 Err(error) => respond_domain_error_with_context(
                     &error,
                     &format!("Add failed: {error}"),
@@ -317,8 +230,11 @@ fn handle_command(
             }
         }
         ServerCommand::Delete(id) => match id {
-            Target::Vault { key, keep_key } => {
-                lock_generation.fetch_add(1, Ordering::AcqRel);
+            Target::Vault {
+                key,
+                keep_key,
+                vault_file,
+            } => {
                 if let Err(error) = lock_vlt(vlt, server_info) {
                     respond_domain_error_with_context(
                         &error,
@@ -327,7 +243,7 @@ fn handle_command(
                     );
                     return;
                 }
-                match delete_vault(key, keep_key) {
+                match delete_vault(key, keep_key, vault_file.as_deref()) {
                     Ok(()) => respond("Vault deleted.", responses),
                     Err(e) => respond_domain_error_with_context(
                         &e,
@@ -351,12 +267,16 @@ fn handle_command(
         },
         ServerCommand::History(target) => {
             if let Some(vault) = vlt.as_ref() {
-                respond_domain_result(
-                    vault
-                        .view_password_history(target)
-                        .map(|rows| presentation::history(&rows)),
-                    responses,
-                );
+                match vault.view_password_history(target) {
+                    Ok(rows) => respond_payload(
+                        ResponseCode::Success,
+                        ResponsePayload::History(crate::vault::HistoryPage {
+                            history: rows.into_iter().map(str::to_owned).collect(),
+                        }),
+                        responses,
+                    ),
+                    Err(error) => respond_domain_error(&error, responses),
+                }
             }
         }
         ServerCommand::RestorePassword { target, revision } => {
@@ -374,7 +294,23 @@ fn handle_command(
         }
         ServerCommand::Trash => {
             if let Some(vault) = vlt.as_ref() {
-                respond(&presentation::trash(&vault.view_trash()), responses);
+                let trash = vault
+                    .view_trash()
+                    .into_iter()
+                    .map(|item| crate::vault::TrashSummary {
+                        id: item.entry.entry.id,
+                        name: item.entry.entry.name.clone(),
+                        kind: item.entry.metadata.map_or(ItemKind::Login, |m| m.kind),
+                        username: item.entry.entry.username.clone(),
+                        deleted: item.deleted.to_owned(),
+                        has_totp: item.entry.has_totp,
+                    })
+                    .collect();
+                respond_payload(
+                    ResponseCode::Success,
+                    ResponsePayload::Trash(crate::vault::TrashPage { trash }),
+                    responses,
+                );
             }
         }
         ServerCommand::RestoreTrash(id) => {
@@ -446,19 +382,19 @@ fn handle_command(
                     } => match vault.current_totp(target) {
                         Ok((code, ttl)) => {
                             let payload = crate::protocol::AuthenticatorResponse {
-                                code,
+                                code: code.into(),
                                 expires_in: Some(ttl),
                                 counter: None,
                                 mode: "totp".into(),
                             };
-                            let encoded = Zeroizing::new(
-                                serde_json::to_string(&payload)
-                                    .expect("authenticator data is serializable"),
-                            );
-                            respond_data(&encoded, responses);
                             if let Some(timeout) = copy_timeout {
-                                copy_in_background(payload.code.clone(), timeout);
+                                copy_in_background(payload.code.expose().to_owned(), timeout);
                             }
+                            respond_payload(
+                                ResponseCode::Success,
+                                crate::protocol::ResponsePayload::Authenticator(payload),
+                                responses,
+                            );
                         }
                         Err(error) => respond_domain_error_with_context(
                             &error,
@@ -517,22 +453,26 @@ fn handle_command(
                         copy_timeout,
                     } => match vault.current_otp(target, server_info) {
                         Ok(code) => {
-                            let message = Zeroizing::new(if let Some(counter) = code.counter {
-                                format!(
-                                    "HOTP: {} (counter {counter}; next counter saved)",
-                                    *code.code
-                                )
-                            } else {
-                                format!(
-                                    "TOTP: {} ({}s remaining)",
-                                    *code.code,
-                                    code.expires_in.unwrap_or_default()
-                                )
-                            });
-                            respond(&message, responses);
                             if let Some(timeout) = copy_timeout {
                                 copy_in_background(code.code.to_string(), timeout);
                             }
+                            respond_payload(
+                                ResponseCode::Success,
+                                crate::protocol::ResponsePayload::Authenticator(
+                                    crate::protocol::AuthenticatorResponse {
+                                        code: code.code.to_string().into(),
+                                        expires_in: code.expires_in,
+                                        counter: code.counter,
+                                        mode: if code.counter.is_some() {
+                                            "hotp"
+                                        } else {
+                                            "totp"
+                                        }
+                                        .into(),
+                                    },
+                                ),
+                                responses,
+                            );
                         }
                         Err(error) => respond_domain_error_with_context(
                             &error,
@@ -561,36 +501,49 @@ fn handle_command(
             }
         }
         ServerCommand::View(options) => {
-            respond_domain_result(
-                vlt.as_ref()
-                    .ok_or(crate::vault::VaultError::Locked)
-                    .and_then(|vault| {
-                        vault
-                            .view_entries(options)
-                            .map(|entries| presentation::entries(&entries))
-                    }),
-                responses,
-            );
+            match vlt
+                .as_ref()
+                .ok_or(crate::vault::VaultError::Locked)
+                .and_then(|v| {
+                    v.management_list(SearchFilter {
+                        list: options,
+                        ..Default::default()
+                    })
+                }) {
+                Ok(page) => respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::ItemPage(page),
+                    responses,
+                ),
+                Err(e) => respond_domain_error(&e, responses),
+            }
         }
         ServerCommand::ManagementList(filter) => {
-            respond_domain_result(
-                vlt.as_ref()
-                    .ok_or(crate::vault::VaultError::Locked)
-                    .and_then(|vault| vault.management_list_json(filter)),
-                responses,
-            );
+            match vlt
+                .as_ref()
+                .ok_or(crate::vault::VaultError::Locked)
+                .and_then(|v| v.management_list(filter))
+            {
+                Ok(page) => respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::ItemPage(page),
+                    responses,
+                ),
+                Err(e) => respond_domain_error(&e, responses),
+            }
         }
         ServerCommand::ManagementItem { id, reveal } => {
             match vlt
                 .as_ref()
                 .ok_or(crate::vault::VaultError::Locked)
-                .and_then(|vault| vault.management_item_json(id, reveal))
+                .and_then(|v| v.management_item(id, reveal))
             {
-                Ok(item) => {
-                    let item = Zeroizing::new(item);
-                    respond(&item, responses);
-                }
-                Err(error) => respond_domain_error(&error, responses),
+                Ok(item) => respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::Item(item),
+                    responses,
+                ),
+                Err(e) => respond_domain_error(&e, responses),
             }
         }
         ServerCommand::ManagementCopy { id, timeout } => {
@@ -620,55 +573,66 @@ fn handle_command(
         }
         ServerCommand::BrowserAutofill => {
             if let Some(vault) = vlt.as_ref() {
-                let items = zeroize::Zeroizing::new(vault.browser_autofill_json());
-                respond(&items, responses);
-            }
-        }
-        ServerCommand::BrowserDuoItems(origin) => {
-            if let Some(vault) = vlt.as_ref().filter(|_| !server_info.locked) {
-                respond(&vault.browser_duo_items_json(&origin), responses);
-            } else {
-                respond_failure("Vault locked.", responses);
-            }
-        }
-        ServerCommand::BrowserLogins(domain) => {
-            if let Some(vault) = vlt.as_ref().filter(|_| !server_info.locked) {
-                respond(&vault.browser_logins_json(&domain), responses);
-            } else {
-                respond_failure("Vault locked.", responses);
-            }
-        }
-        ServerCommand::BrowserLogin { domain, id } => {
-            if let Some(vault) = vlt.as_ref().filter(|_| !server_info.locked) {
-                if let Some(item) = vault.browser_login_json(&domain, id) {
-                    let item = Zeroizing::new(item);
-                    respond(&item, responses);
-                } else {
-                    respond_not_found("Login item not found for this site.", responses);
-                }
-            } else {
-                respond_failure("Vault locked.", responses);
-            }
-        }
-        ServerCommand::BrowserAutofillItem(id) => {
-            if let Some(vault) = vlt.as_ref() {
-                let item = vault.browser_autofill_item_json(id).ok_or_else(|| {
-                    crate::vault::VaultError::NotFound("Autofill item not found.".into())
-                });
-                respond_domain_result(item, responses);
-            }
-        }
-        ServerCommand::Search(filter) => {
-            if let Some(vault) = vlt.as_ref() {
-                respond_domain_result(
-                    vault
-                        .search(filter)
-                        .map(|entries| presentation::entries(&entries)),
+                respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::Summaries(vault.browser_autofill()),
                     responses,
                 );
             }
         }
-        ServerCommand::GetDetails {
+        ServerCommand::BrowserDuoItems(origin) => {
+            if let Some(vault) = vlt.as_ref() {
+                respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::Summaries(vault.browser_duo_items(&origin)),
+                    responses,
+                );
+            }
+        }
+        ServerCommand::BrowserLogins(origin) => {
+            if let Some(vault) = vlt.as_ref() {
+                respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::Summaries(vault.browser_logins(&origin)),
+                    responses,
+                );
+            }
+        }
+        ServerCommand::BrowserLogin { domain, id } => {
+            match vlt.as_ref().and_then(|v| v.browser_login(&domain, id)) {
+                Some(item) => respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::Login(item),
+                    responses,
+                ),
+                None => respond_not_found("Login item not found for this site.", responses),
+            }
+        }
+        ServerCommand::BrowserAutofillItem(id) => {
+            match vlt.as_ref().and_then(|v| v.browser_autofill_item(id)) {
+                Some(item) => respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::Autofill(item),
+                    responses,
+                ),
+                None => respond_not_found("Autofill item not found.", responses),
+            }
+        }
+        ServerCommand::Search(filter) => {
+            match vlt
+                .as_ref()
+                .ok_or(crate::vault::VaultError::Locked)
+                .and_then(|v| v.management_list(filter))
+            {
+                Ok(page) => respond_payload(
+                    ResponseCode::Success,
+                    crate::protocol::ResponsePayload::ItemPage(page),
+                    responses,
+                ),
+                Err(e) => respond_domain_error(&e, responses),
+            }
+        }
+        ServerCommand::Get {
             target,
             copy_timeout,
             reveal_secrets,
@@ -676,19 +640,24 @@ fn handle_command(
             match vlt
                 .as_ref()
                 .ok_or(crate::vault::VaultError::Locked)
-                .and_then(|vault| vault.get_entry(&target))
+                .and_then(|v| v.target_detail(&target, reveal_secrets))
             {
-                Ok(crate::vault::EntryOutput::Details(view)) => {
-                    respond(
-                        &presentation::entry_details_with_secrets(&view, reveal_secrets),
+                Ok(mut item) => {
+                    // CLI secret-field reveal does not implicitly reveal the primary secret.
+                    item.password = None;
+                    if copy_timeout > 0
+                        && let Some(vault) = vlt.as_ref()
+                        && let Ok(secret) = vault.get_secret(&target)
+                    {
+                        copy_in_background(secret.to_string(), copy_timeout);
+                    }
+                    respond_payload(
+                        ResponseCode::Success,
+                        crate::protocol::ResponsePayload::Item(item),
                         responses,
                     );
-                    if !view.entry.password.is_empty() {
-                        copy_in_background(view.entry.password.clone(), copy_timeout);
-                    }
                 }
-                Ok(crate::vault::EntryOutput::SiteLogins(output)) => respond(&output, responses),
-                Err(error) => respond_domain_error(&error, responses),
+                Err(e) => respond_domain_error(&e, responses),
             }
         }
         ServerCommand::GetField {
@@ -723,28 +692,18 @@ fn handle_command(
                                 ),
                             }
                         } else {
-                            respond(&value, responses);
+                            respond_data(&value, responses);
                         }
                     }
                     Err(error) => respond_domain_error(&error, responses),
                 }
             }
         }
-        ServerCommand::GetFieldData { target, name } => {
-            match vlt
-                .as_ref()
-                .ok_or(crate::vault::VaultError::Locked)
-                .and_then(|vault| vault.get_custom_field(&target, &name))
-            {
-                Ok(value) => respond_data(&value, responses),
-                Err(error) => respond_domain_error(&error, responses),
-            }
-        }
         ServerCommand::AuthenticatorData(target) => {
             match available(vlt).and_then(|vault| vault.current_otp(target, server_info)) {
                 Ok(code) => {
                     let payload = crate::protocol::AuthenticatorResponse {
-                        code: code.code.to_string(),
+                        code: code.code.to_string().into(),
                         expires_in: code.expires_in,
                         counter: code.counter,
                         mode: if code.counter.is_some() {
@@ -754,22 +713,12 @@ fn handle_command(
                         }
                         .into(),
                     };
-                    let encoded = Zeroizing::new(
-                        serde_json::to_string(&payload)
-                            .expect("authenticator data is serializable"),
+                    respond_payload(
+                        ResponseCode::Success,
+                        crate::protocol::ResponsePayload::Authenticator(payload),
+                        responses,
                     );
-                    respond_data(&encoded, responses);
                 }
-                Err(error) => respond_domain_error(&error, responses),
-            }
-        }
-        ServerCommand::GetSecretData(target) => {
-            match vlt
-                .as_ref()
-                .ok_or(crate::vault::VaultError::Locked)
-                .and_then(|vault| vault.get_secret(&target))
-            {
-                Ok(secret) => respond_data(&secret, responses),
                 Err(error) => respond_domain_error(&error, responses),
             }
         }
@@ -779,16 +728,16 @@ fn handle_command(
                 .ok_or(crate::vault::VaultError::Locked)
                 .and_then(|vault| vault.get_secret(&target))
             {
-                Ok(secret) => respond(&secret, responses),
+                Ok(secret) => respond_data(&secret, responses),
                 Err(error) => respond_domain_error(&error, responses),
             }
         }
-        ServerCommand::UpdateTyped(update) => {
+        ServerCommand::Update(update) => {
             match available(vlt).and_then(|vault| {
                 vault.update_typed_entry_with_limit(update, server_info, password_history_limit)
             }) {
-                Ok(true) => respond(&format!("{update_label} updated."), responses),
-                Ok(false) => respond_not_found(update_missing, responses),
+                Ok(true) => respond("Item updated.", responses),
+                Ok(false) => respond_not_found("Item not found or unchanged.", responses),
                 Err(error) => respond_domain_error_with_context(
                     &error,
                     &format!("Update failed: {error}"),
@@ -834,12 +783,12 @@ fn handle_command(
                     responses,
                 );
             } else {
-                match restore_encrypted_backup(&request.path, &mut request.key_pass, request.force)
-                {
-                    Ok(filename) => respond(
-                        &format!(
-                            "Encrypted backup restored as {filename}. Unlock it with the backup password/key."
-                        ),
+                match restore_encrypted_backup(&request.path, &mut request.key_pass) {
+                    Ok(filename) => respond_payload(
+                        ResponseCode::Success,
+                        crate::protocol::ResponsePayload::Vault(crate::protocol::VaultReference {
+                            vault_file: filename,
+                        }),
                         responses,
                     ),
                     Err(error) => respond_domain_error_with_context(
@@ -870,7 +819,11 @@ fn handle_command(
                     &mut ServerInfo::default(),
                 );
                 match result {
-                    Ok(report) => respond(&report.to_string(), responses),
+                    Ok(report) => respond_payload(
+                        ResponseCode::Success,
+                        crate::protocol::ResponsePayload::ImportReport(report),
+                        responses,
+                    ),
                     Err(error) => respond_domain_error_with_context(
                         &error,
                         &format!("Import preview failed: {error}"),
@@ -894,7 +847,11 @@ fn handle_command(
                         server_info,
                     )
                 }) {
-                    Ok(report) => respond(&report.to_string(), responses),
+                    Ok(report) => respond_payload(
+                        ResponseCode::Success,
+                        crate::protocol::ResponsePayload::ImportReport(report),
+                        responses,
+                    ),
                     Err(error) => respond_domain_error_with_context(
                         &error,
                         &format!("Import failed: {error}"),
@@ -904,7 +861,6 @@ fn handle_command(
                 return;
             }
 
-            lock_generation.fetch_add(1, Ordering::AcqRel);
             if !server_info.locked
                 && let Err(error) = lock_vlt(vlt, server_info)
             {
@@ -949,7 +905,11 @@ fn handle_command(
                     Ok(report) => {
                         vlt.zeroize();
                         server_info.zeroize();
-                        respond(&report.to_string(), responses)
+                        respond_payload(
+                            ResponseCode::Success,
+                            crate::protocol::ResponsePayload::ImportReport(report),
+                            responses,
+                        )
                     }
                     Err(e) => {
                         let _ = lock_vlt(vlt, server_info);

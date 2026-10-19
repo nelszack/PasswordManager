@@ -32,13 +32,16 @@ function environment(children = []) {
     const frames = [];
     const controls = [];
     const observed = [];
-    let notify;
+    let notify, disconnects = 0;
+    const registered = [], removed = [];
     const context = {
+        module: { exports: {} },
         document,
         HTMLInputElement: Input,
         MutationObserver: class {
             constructor(callback) { notify = callback; }
             observe(root, options) { observed.push({ root, options }); }
+            disconnect() { disconnects++; }
         },
         requestAnimationFrame: callback => frames.push(callback),
         typedAutofillKind: input => input.kind === "card" ? "payment-card" : null,
@@ -53,12 +56,14 @@ function environment(children = []) {
         createGeneratorButton: () => assert.fail("unexpected generator"),
         removeGeneratorButton: () => {}
     };
+    context.require = () => context;
     vm.createContext(context);
     const filename = require.resolve("./content_observer.js");
     vm.runInContext(fs.readFileSync(filename, "utf8"), context, { filename });
+    Object.assign(context, context.module.exports.create({ controls: context, generator: context, autofill: context, onRoot: root => registered.push(root), onRemoveRoot: root => removed.push(root) }));
     context.observeInputs();
     return {
-        document, controls, observed, frames,
+        document, controls, observed, frames, registered, removed, dispose: context.dispose, disconnects: () => disconnects,
         notify: mutations => notify(mutations),
         flush: () => frames.shift()()
     };
@@ -136,4 +141,24 @@ test("ancestor visibility changes rescan descendants and ignore extension style 
         env.notify([{ type: "attributes", target: extensionButton, attributeName: "style", addedNodes: [] }]);
         assert.equal(env.frames.length, 0);
     }
+});
+
+test("detaching a shadow root releases its listeners and observation; reinsertion creates one new root controller", () => {
+    const host = new Element(); host.shadowRoot = new Element([new Input()]); host.shadowRoot.host = host;
+    const env = environment([host]);
+    assert.deepEqual(env.registered, [env.document, host.shadowRoot]);
+    host.isConnected = false;
+    env.notify([{ type: "childList", addedNodes: [] }]);
+    assert.deepEqual(env.removed, [host.shadowRoot]); assert.equal(env.disconnects(), 1);
+    host.isConnected = true; env.notify([added(host)]); env.flush();
+    assert.deepEqual(env.registered, [env.document, host.shadowRoot, host.shadowRoot]);
+    env.dispose(); assert.equal(env.disconnects(), 2);
+    assert.deepEqual(env.removed, [host.shadowRoot, env.document, host.shadowRoot]);
+});
+
+test("disposing a document cancels deferred discovery rather than recreating controls after navigation", () => {
+    const env = environment(); const input = new Input(); input.parentNode = env.document;
+    env.document.children.push(input); env.notify([added(input)]);
+    env.dispose(); env.flush();
+    assert.deepEqual(env.controls, []);
 });

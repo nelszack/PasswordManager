@@ -27,8 +27,8 @@ function environment() {
         refreshStatus: async () => ({ native: true, running: true, locked }),
         nativeRequest: async (action, fields) => {
             calls.push({ action, ...fields });
-            if (action === "getLoginItems") return { success: true, data: JSON.stringify(items) };
-            if (action === "getDuoItems") return { success: true, data: JSON.stringify(issuerItems) };
+            if (action === "getLoginItems") return { success: true, data: items };
+            if (action === "getDuoItems") return { success: true, data: issuerItems };
             if (action === "managerDuoRequests") {
                 if (holdPoll) await holdPoll;
                 return { success: true, data: pending };

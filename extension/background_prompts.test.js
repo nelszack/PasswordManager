@@ -26,7 +26,7 @@ function environment() {
             if (action === "getLoginItems") {
                 if (lookupError) throw new Error(lookupError);
                 if (holdLookup) await new Promise(resolve => { resolveLookup = resolve; });
-                return { success: true, data: '[{"id":7,"name":"Example","username":"alice"}]' };
+                return { success: true, data: [{"id": 7, "name": "Example", "username": "alice"}] };
             }
             if (held) return new Promise(resolve => { resolveSave = resolve; });
             if (saveError) throw saveError;

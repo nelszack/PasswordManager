@@ -11,26 +11,14 @@ var PasswordManagerBackgroundState = (() => {
                 ...(value.warning ? { error: value.warning } : {})
             };
         }
-        // Compatibility with native hosts installed before structured status.
-        if (typeof value !== "string") throw new Error("Invalid server status");
-        const match = /^Status: (Locked|Unlocked)\nVersion: ([^\s]+)(?:\nWarning: ([\s\S]*))?$/i.exec(value);
-        if (!match) throw new Error("Invalid server status");
-        return { locked: match[1].toLowerCase() === "locked", serverVersion: match[2],
-            ...(match[3] ? { error: match[3] } : {}) };
+        throw new Error("Invalid server status");
     }
 
     function versionError(status = {}) {
-        const versions = [
-            ["extension", status.extensionVersion],
-            ["native host", status.nativeVersion],
-            ...(status.running ? [["password manager", status.serverVersion]] : [])
-        ];
-        const missing = versions.filter(([, version]) => !version).map(([name]) => name);
-        if (missing.length) {
-            return `Version mismatch: ${missing.join(" and ")} version unavailable. Update all Password Manager components together.`;
+        if (!Number.isSafeInteger(status.protocolVersion) || status.protocolVersion !== status.extensionProtocolVersion) {
+            return "Incompatible native protocol. Update the native host and extension together.";
         }
-        if (new Set(versions.map(([, version]) => version)).size <= 1) return null;
-        return `Version mismatch: ${versions.map(([name, version]) => `${name} ${version}`).join(", ")}. Update all Password Manager components together.`;
+        return null;
     }
 
     function badge(status) {
@@ -60,6 +48,7 @@ var PasswordManagerBackgroundState = (() => {
             && left?.versionError === right?.versionError
             && left?.extensionVersion === right?.extensionVersion
             && left?.nativeVersion === right?.nativeVersion
+            && left?.protocolVersion === right?.protocolVersion
             && left?.serverVersion === right?.serverVersion;
     }
 

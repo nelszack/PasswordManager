@@ -1,7 +1,7 @@
 (function (root, factory) {
     const api = factory();
-    root.PasswordManagerFormSubmission = api;
     if (typeof module === "object" && module.exports) module.exports = api;
+    else root.PasswordManagerFormSubmission = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
 

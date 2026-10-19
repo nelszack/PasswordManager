@@ -1,9 +1,11 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Vault manager</title><link rel="stylesheet" href="manager.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Vault manager</title><link rel="stylesheet" href="manager.css">    <script src="ui_session.js" defer></script>
+</head>
 <body>
   <header><h1>Vault manager</h1><span id="connection">Checking connection…</span><button id="lock" disabled>Lock vault</button></header>
   <p id="message" role="status" aria-live="polite"></p>
+  <button id="acknowledgeUnknown" type="button" hidden>I inspected the vault; allow new changes</button>
   <button id="reviewOutcome" type="button" hidden>Review vault state</button>
   <section id="locked" hidden>
     <h2>Unlock vault</h2><p id="setup">Start the server with <code>pm start</code>. Enter a master password or an absolute key-file path.</p>
@@ -53,5 +55,5 @@
       <p>Saved settings apply to generation buttons on signup forms. Site overrides match the exact HTTPS origin, including its port. Generated values are never stored in extension storage.</p>
     </form>
   </section>
-  <script src="password_generator.js"></script><script src="manager.js"></script>
+  <script src="manager_runtime.js"></script>
 </body></html>

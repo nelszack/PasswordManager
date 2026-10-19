@@ -1,15 +1,10 @@
+pub mod native_contract;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, Generate, KeyInit},
 };
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
-
-const RESPONSE_MAGIC: &[u8; 4] = b"PMR1";
-// Data frames preserve every byte, including empty secrets and whitespace.
-// Only newly appended commands use these frames; legacy commands retain PMR1.
-const DATA_RESPONSE_MAGIC: &[u8; 4] = b"PMD1";
-const RESPONSE_HEADER_LEN: usize = 9;
 
 pub const SECURE_PREFACE: &[u8; 4] = b"PMS2";
 pub const SECURE_HELLO_LEN: usize = 4 + 32 + 32;
@@ -138,7 +133,13 @@ pub fn decrypt_record_stream(
     Ok(plaintext)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub const PROTOCOL_VERSION: u16 = 1;
+pub const DEFAULT_PORT: u16 = 7878;
+pub fn server_addr(port: u16) -> std::net::SocketAddr {
+    ([127, 0, 0, 1], port).into()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum ResponseCode {
     Success = 0,
@@ -146,91 +147,271 @@ pub enum ResponseCode {
     InvalidInput = 2,
     NotFound = 3,
     Conflict = 4,
-    /// The mutation committed, but its durability could not be confirmed.
     Durability = 5,
 }
 
-#[derive(PartialEq, Eq)]
-pub struct ProtocolResponse {
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct RequestEnvelope {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub operation_id: Option<String>,
+    pub expected_revision: Option<u64>,
+    pub command: crate::types::ServerCommand,
+}
+impl RequestEnvelope {
+    pub fn new(command: crate::types::ServerCommand) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: hex::encode(rand::random::<[u8; 16]>()),
+            operation_id: command
+                .is_mutation()
+                .then(|| hex::encode(rand::random::<[u8; 16]>())),
+            expected_revision: None,
+            command,
+        }
+    }
+    pub fn with_operation(
+        mut self,
+        operation_id: Option<String>,
+        expected_revision: Option<u64>,
+    ) -> Self {
+        self.operation_id = operation_id;
+        self.expected_revision = expected_revision;
+        self
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(format!(
+                "unsupported protocol version {}; expected {}",
+                self.protocol_version, PROTOCOL_VERSION
+            ));
+        }
+        for id in std::iter::once(&self.request_id).chain(self.operation_id.iter()) {
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                return Err("invalid request or operation identifier".into());
+            }
+        }
+        if self.command.is_mutation() && self.operation_id.is_none() {
+            return Err("mutations require an operation identifier".into());
+        }
+        Ok(())
+    }
+}
+impl Zeroize for RequestEnvelope {
+    fn zeroize(&mut self) {
+        self.command.zeroize();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationState {
+    Pending,
+    Committed,
+    CommittedDurabilityUnknown,
+    Failed,
+    Unknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationReceipt {
+    pub operation_id: String,
+    pub state: OperationState,
+    pub revision: Option<u64>,
+}
+
+/// Dynamically structured reports still own the cleanup of every string.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SecretJson(serde_json::Value);
+impl SecretJson {
+    pub fn expose_owned(mut self) -> serde_json::Value {
+        std::mem::take(&mut self.0)
+    }
+}
+impl From<serde_json::Value> for SecretJson {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+impl std::ops::Deref for SecretJson {
+    type Target = serde_json::Value;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::fmt::Debug for SecretJson {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+impl Zeroize for SecretJson {
+    fn zeroize(&mut self) {
+        fn wipe(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::String(s) => s.zeroize(),
+                serde_json::Value::Array(v) => v.iter_mut().for_each(wipe),
+                serde_json::Value::Object(v) => v.values_mut().for_each(wipe),
+                _ => {}
+            }
+        }
+        wipe(&mut self.0);
+        self.0 = serde_json::Value::Null;
+    }
+}
+impl Drop for SecretJson {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VaultReference {
+    pub vault_file: String,
+}
+
+/// Responses carry records; terminal and browser formatting live in adapters.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ResponsePayload {
+    Message(String),
+    Secret(crate::secret::SecretString),
+    Status(ServerStatus),
+    Authenticator(AuthenticatorResponse),
+    Vault(VaultReference),
+    ItemPage(crate::vault::ItemPage),
+    Item(crate::vault::ItemDetail),
+    Summaries(Vec<crate::vault::ItemSummary>),
+    Login(crate::vault::BrowserLogin),
+    Autofill(crate::vault::AutofillItem),
+    Operation(OperationReceipt),
+    Audit(crate::vault::AuditReport),
+    ImportReport(crate::vault::ImportReport),
+    DuoRequests(Vec<crate::types::DuoPushRequest>),
+    History(crate::vault::HistoryPage),
+    Trash(crate::vault::TrashPage),
+}
+impl ResponsePayload {
+    pub fn into_json(self) -> serde_json::Value {
+        match self {
+            Self::Message(value) => serde_json::Value::String(value),
+            Self::Secret(value) => serde_json::to_value(value).expect("secret is serializable"),
+            Self::Status(value) => serde_json::to_value(value).expect("status is serializable"),
+            Self::Authenticator(value) => {
+                serde_json::to_value(value).expect("code is serializable")
+            }
+            Self::Vault(value) => serde_json::to_value(value).expect("vault reference serializes"),
+            Self::ItemPage(value) => serde_json::to_value(value).expect("page is serializable"),
+            Self::Item(value) => serde_json::to_value(value).expect("item is serializable"),
+            Self::Summaries(value) => {
+                serde_json::to_value(value).expect("summaries are serializable")
+            }
+            Self::Login(value) => serde_json::to_value(value).expect("login is serializable"),
+            Self::Autofill(value) => serde_json::to_value(value).expect("autofill is serializable"),
+            Self::Operation(value) => serde_json::to_value(value).expect("receipt is serializable"),
+            Self::DuoRequests(value) => serde_json::to_value(value).expect("requests serialize"),
+            Self::ImportReport(value) => {
+                serde_json::to_value(value).expect("import report serializes")
+            }
+            Self::Audit(value) => serde_json::to_value(value).expect("audit is serializable"),
+            Self::History(value) => serde_json::to_value(value).expect("history serializes"),
+            Self::Trash(value) => serde_json::to_value(value).expect("trash serializes"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcResponse {
+    pub protocol_version: u16,
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub code: i32,
-    pub message: String,
-    pub data: bool,
+    pub payload: ResponsePayload,
+    pub operation: Option<OperationReceipt>,
 }
-
-impl std::fmt::Debug for ProtocolResponse {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProtocolResponse")
-            .field("code", &self.code)
-            .field("message", &"<redacted>")
-            .finish()
+impl RpcResponse {
+    pub fn new(code: ResponseCode, payload: ResponsePayload) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: None,
+            code: code as i32,
+            payload,
+            operation: None,
+        }
+    }
+    pub fn success(payload: ResponsePayload) -> Self {
+        Self::new(ResponseCode::Success, payload)
+    }
+    pub fn message(code: ResponseCode, message: impl Into<String>) -> Self {
+        Self::new(code, ResponsePayload::Message(message.into()))
+    }
+    pub fn error_message(&self) -> String {
+        match &self.payload {
+            ResponsePayload::Message(s) => s.clone(),
+            ResponsePayload::Audit(report) => report
+                .breach_error
+                .clone()
+                .unwrap_or_else(|| "Audit checks are incomplete".into()),
+            _ => "operation failed".into(),
+        }
     }
 }
+impl Zeroize for RpcResponse {
+    fn zeroize(&mut self) {
+        match &mut self.payload {
+            ResponsePayload::Message(s) => s.zeroize(),
+            ResponsePayload::Secret(s) => s.zeroize(),
+            ResponsePayload::Authenticator(a) => a.zeroize(),
+            // Typed DTO secret fields own their cleanup. Replacing drops them.
+            _ => {}
+        }
+        self.payload = ResponsePayload::Message(String::new());
+    }
+}
+// Responses are often moved into adapters; secret fields have their own Drop.
+pub type ProtocolResponse = RpcResponse;
 
+pub fn encode_rpc_response(response: &RpcResponse) -> Result<Vec<u8>, String> {
+    rmp_serde::to_vec_named(response).map_err(|_| "could not encode server response".into())
+}
 pub fn encode_response(code: ResponseCode, message: &str) -> Vec<u8> {
-    encode_frame(RESPONSE_MAGIC, code, message)
+    encode_rpc_response(&RpcResponse::message(code, message)).expect("message is serializable")
 }
-
 pub fn encode_data_response(message: &str) -> Vec<u8> {
-    encode_frame(DATA_RESPONSE_MAGIC, ResponseCode::Success, message)
+    encode_rpc_response(&RpcResponse::success(ResponsePayload::Secret(
+        message.into(),
+    )))
+    .expect("secret is serializable")
 }
-
-fn encode_frame(magic: &[u8; 4], code: ResponseCode, message: &str) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(RESPONSE_HEADER_LEN + message.len());
-    frame.extend_from_slice(magic);
-    frame.push(code as u8);
-    frame.extend_from_slice(&(message.len() as u32).to_be_bytes());
-    frame.extend_from_slice(message.as_bytes());
-    frame
-}
-
-pub fn decode_responses(mut bytes: &[u8]) -> Result<ProtocolResponse, String> {
-    let mut message = String::new();
-    let mut code = ResponseCode::Success as i32;
-    let mut frames = 0;
-    let mut data = false;
-    while !bytes.is_empty() {
-        if bytes.len() < RESPONSE_HEADER_LEN
-            || (&bytes[..4] != RESPONSE_MAGIC && &bytes[..4] != DATA_RESPONSE_MAGIC)
-        {
-            return Err("server returned an invalid response frame".to_string());
-        }
-        let frame_data = &bytes[..4] == DATA_RESPONSE_MAGIC;
-        if frames > 0 && (data || frame_data) {
-            return Err("server returned multiple or mixed data responses".to_string());
-        }
-        data = frame_data;
-        frames += 1;
-        let frame_code = bytes[4] as i32;
-        if frame_code > ResponseCode::Durability as i32 || (data && frame_code != 0) {
-            return Err("server returned an unknown response code".to_string());
-        }
-        let length = u32::from_be_bytes(
-            bytes[5..9]
-                .try_into()
-                .map_err(|_| "server returned an invalid response length".to_string())?,
-        ) as usize;
-        bytes = &bytes[RESPONSE_HEADER_LEN..];
-        if bytes.len() < length {
-            return Err("server returned a truncated response".to_string());
-        }
-        let text = std::str::from_utf8(&bytes[..length])
-            .map_err(|_| "server returned invalid UTF-8".to_string())?;
-        message.push_str(text);
-        if !data && !text.ends_with('\n') {
-            message.push('\n');
-        }
-        code = code.max(frame_code);
-        bytes = &bytes[length..];
+pub fn decode_responses(bytes: &[u8]) -> Result<RpcResponse, String> {
+    use serde::Deserialize;
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut deserializer = rmp_serde::Deserializer::new(&mut cursor);
+    let response = RpcResponse::deserialize(&mut deserializer)
+        .map_err(|_| "server returned an invalid response".to_string())?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err("server returned trailing response data".into());
     }
-    if frames == 0 {
-        return Err("server returned an empty response".to_string());
+    if response.protocol_version != PROTOCOL_VERSION {
+        return Err("server uses an incompatible protocol version".into());
     }
-    Ok(ProtocolResponse {
-        code,
-        message,
-        data,
-    })
+    if let ResponsePayload::Authenticator(code) = &response.payload
+        && !code.valid()
+    {
+        return Err("server returned invalid authenticator data".into());
+    }
+    if !(0..=ResponseCode::Durability as i32).contains(&response.code) {
+        return Err("server returned an unknown response code".into());
+    }
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -238,125 +419,88 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn hotp_counters_preserve_full_u64_in_json_and_typed_messagepack() {
+        for counter in [0, (1 << 53) - 1, 1 << 53, u64::MAX] {
+            let authenticator = AuthenticatorResponse {
+                code: "123456".into(),
+                expires_in: None,
+                counter: Some(counter),
+                mode: "hotp".into(),
+            };
+            let json = serde_json::to_value(&authenticator).unwrap();
+            assert_eq!(json["counter"], counter.to_string());
+            assert_eq!(
+                serde_json::from_value::<AuthenticatorResponse>(json)
+                    .unwrap()
+                    .counter,
+                Some(counter)
+            );
+            let encoded = rmp_serde::to_vec_named(&authenticator).unwrap();
+            let wire: serde_json::Value = rmp_serde::from_slice(&encoded).unwrap();
+            assert_eq!(wire["counter"].as_u64(), Some(counter));
+            let response = RpcResponse::success(ResponsePayload::Authenticator(authenticator));
+            let decoded = decode_responses(&encode_rpc_response(&response).unwrap()).unwrap();
+            assert_eq!(decoded.payload.into_json()["counter"], counter.to_string());
+        }
+        let totp = AuthenticatorResponse {
+            code: "123456".into(),
+            expires_in: Some(30),
+            counter: None,
+            mode: "totp".into(),
+        };
+        let json = serde_json::to_value(&totp).unwrap();
+        assert!(json["counter"].is_null());
+        assert_eq!(
+            serde_json::from_value::<AuthenticatorResponse>(json)
+                .unwrap()
+                .counter,
+            None
+        );
+    }
+
+    #[test]
+    fn json_hotp_counters_reject_lossy_or_noncanonical_values() {
+        for counter in [
+            serde_json::json!(0),
+            serde_json::json!(9007199254740992u64),
+            serde_json::json!(""),
+            serde_json::json!("00"),
+            serde_json::json!("+1"),
+            serde_json::json!("-1"),
+            serde_json::json!(" 1"),
+            serde_json::json!("1.0"),
+            serde_json::json!("1e3"),
+            serde_json::json!("18446744073709551616"),
+        ] {
+            assert!(
+                serde_json::from_value::<AuthenticatorResponse>(serde_json::json!({
+                    "code": "123456", "mode": "hotp", "expires_in": null, "counter": counter
+                }))
+                .is_err()
+            );
+        }
+    }
     proptest! {
         #[test]
-        fn data_frames_preserve_every_utf8_byte(message in ".{0,2048}") {
-            let response = decode_responses(&encode_data_response(&message)).unwrap();
-            prop_assert!(response.data);
-            prop_assert_eq!(response.code, 0);
-            prop_assert_eq!(response.message, message);
+        fn secret_payloads_preserve_every_byte(secret in ".{0,2048}") {
+            let response=decode_responses(&encode_data_response(&secret)).unwrap();
+            match response.payload { ResponsePayload::Secret(value)=>prop_assert_eq!(value.expose(),secret), _=>prop_assert!(false) }
         }
         #[test]
-        fn arbitrary_input_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-            let _ = decode_responses(&bytes);
-        }
-
-        #[test]
-        fn arbitrary_utf8_messages_round_trip(message in ".{1,2048}") {
-            let response = decode_responses(&encode_response(ResponseCode::Success, &message)).unwrap();
-            prop_assert_eq!(response.code, ResponseCode::Success as i32);
-            let expected = if message.ends_with('\n') { message } else { format!("{message}\n") };
-            prop_assert_eq!(response.message, expected);
+        fn arbitrary_responses_never_panic(bytes in proptest::collection::vec(any::<u8>(),0..4096)) {
+            let _=decode_responses(&bytes);
         }
     }
-
     #[test]
-    fn data_frames_preserve_empty_secrets_and_reject_ambiguous_payloads() {
-        for secret in ["", "  padded  ", "\n", "private key\n\n", "\0\t 🔐\r\n"] {
-            let response = decode_responses(&encode_data_response(secret)).unwrap();
-            assert_eq!(response.message, secret);
-            assert!(response.data);
-        }
-        let data = encode_data_response("value");
-        let display = encode_response(ResponseCode::Success, "label");
-        for frames in [
-            [data.clone(), data.clone()],
-            [data.clone(), display.clone()],
-            [display, data],
-        ] {
-            assert!(decode_responses(&frames.concat()).is_err());
-        }
+    fn explicit_versions_and_single_response_reject_ambiguity() {
+        let mut response = RpcResponse::message(ResponseCode::Success, "one");
+        response.protocol_version += 1;
+        assert!(decode_responses(&encode_rpc_response(&response).unwrap()).is_err());
+        let mut encoded = encode_response(ResponseCode::Success, "one");
+        encoded.extend(encode_response(ResponseCode::Success, "two"));
+        assert!(decode_responses(&encoded).is_err());
     }
-
-    #[test]
-    fn structured_frames_preserve_codes_utf8_and_newlines() {
-        // Append new response codes without changing installed clients' values.
-        assert_eq!(ResponseCode::Conflict as u8, 4);
-        assert_eq!(ResponseCode::Durability as u8, 5);
-        for (label, messages, expected_code, expected_message) in [
-            (
-                "highest error code",
-                vec![
-                    (ResponseCode::Success, "first"),
-                    (ResponseCode::NotFound, "missing"),
-                ],
-                ResponseCode::NotFound,
-                "first\nmissing\n",
-            ),
-            (
-                "wording independent of classification",
-                vec![(ResponseCode::Conflict, "wording may change freely")],
-                ResponseCode::Conflict,
-                "wording may change freely\n",
-            ),
-            (
-                "committed durability error",
-                vec![(
-                    ResponseCode::Durability,
-                    "replacement committed; review before retrying",
-                )],
-                ResponseCode::Durability,
-                "replacement committed; review before retrying\n",
-            ),
-            (
-                "secret response",
-                vec![(ResponseCode::Success, "response-password-must-stay-private")],
-                ResponseCode::Success,
-                "response-password-must-stay-private\n",
-            ),
-            (
-                "UTF-8 and existing newline",
-                vec![
-                    (ResponseCode::Success, "héllo 🔐\n"),
-                    (ResponseCode::Success, "done"),
-                ],
-                ResponseCode::Success,
-                "héllo 🔐\ndone\n",
-            ),
-        ] {
-            let frames = messages
-                .into_iter()
-                .flat_map(|(code, message)| encode_response(code, message))
-                .collect::<Vec<_>>();
-            let response = decode_responses(&frames).unwrap();
-            assert_eq!(response.code, expected_code as i32, "{label}");
-            assert_eq!(response.message, expected_message, "{label}");
-            let debug = format!("{response:?}");
-            assert!(debug.contains("<redacted>"), "{label}");
-            assert!(!debug.contains(expected_message.trim_end()), "{label}");
-        }
-    }
-
-    #[test]
-    fn malformed_unknown_empty_and_invalid_utf8_frames_are_rejected() {
-        let valid = encode_response(ResponseCode::Success, "ok");
-        let mut unknown = valid.clone();
-        unknown[4] = 99;
-        let mut truncated = valid;
-        truncated.pop();
-        let mut invalid_utf8 = encode_response(ResponseCode::Success, "x");
-        *invalid_utf8.last_mut().unwrap() = 0xff;
-        for (label, frame) in [
-            ("not a frame", b"not-a-frame".to_vec()),
-            ("unknown code", unknown),
-            ("truncated", truncated),
-            ("empty", Vec::new()),
-            ("invalid UTF-8", invalid_utf8),
-        ] {
-            assert!(decode_responses(&frame).is_err(), "{label}");
-        }
-    }
-
     #[test]
     fn secure_transport_authenticates_the_server_and_encrypts_both_directions() {
         let token = "ab".repeat(32);
@@ -400,8 +544,7 @@ mod tests {
     }
 }
 
-/// Machine-readable server state. CLI presentation is kept outside this contract.
-#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerStatus {
     pub locked: bool,
@@ -417,25 +560,61 @@ impl ServerStatus {
         }
     }
 }
-
-/// Authenticator data is independent of human-readable CLI wording.
-#[derive(serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[derive(
+    Clone, Debug, serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticatorResponse {
-    pub code: String,
+    pub code: crate::secret::SecretString,
     pub expires_in: Option<u64>,
+    #[serde(with = "optional_json_u64")]
     pub counter: Option<u64>,
     pub mode: String,
 }
-
 impl AuthenticatorResponse {
     pub fn valid(&self) -> bool {
         (6..=8).contains(&self.code.len())
-            && self.code.bytes().all(|byte| byte.is_ascii_digit())
+            && self.code.bytes().all(|b| b.is_ascii_digit())
             && match self.mode.as_str() {
                 "hotp" => self.counter.is_some() && self.expires_in.is_none(),
                 "totp" => self.counter.is_none() && self.expires_in.is_some(),
                 _ => false,
             }
+    }
+}
+
+// JSON numbers cannot preserve every HOTP counter in JavaScript. Keep the full
+// domain range as decimal text there, while MessagePack retains its typed u64.
+mod optional_json_u64 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            value
+                .map(|counter| counter.to_string())
+                .serialize(serializer)
+        } else {
+            value.serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        if !deserializer.is_human_readable() {
+            return Option::<u64>::deserialize(deserializer);
+        }
+        Option::<String>::deserialize(deserializer)?
+            .map(|counter| {
+                if counter.is_empty()
+                    || counter.len() > 20
+                    || !counter.bytes().all(|byte| byte.is_ascii_digit())
+                    || counter.len() > 1 && counter.starts_with('0')
+                {
+                    return Err(serde::de::Error::custom("invalid decimal u64 counter"));
+                }
+                counter.parse().map_err(serde::de::Error::custom)
+            })
+            .transpose()
     }
 }

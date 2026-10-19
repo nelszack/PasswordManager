@@ -1,5 +1,7 @@
 use password_manager::{cli::CliCommands, client, config, server::is_running};
 
+pub(crate) mod output;
+use output::Output;
 mod duo;
 mod local;
 mod remote;
@@ -10,6 +12,7 @@ pub async fn run(
     conf: config::Config,
     config_file: std::path::PathBuf,
     client: client::AuthenticatedClient,
+    console: Output,
 ) {
     let port = client.port;
     let server_running = is_running(port);
@@ -25,12 +28,13 @@ pub async fn run(
         &client,
         server_running,
         configured_server_running,
+        &console,
     )
     .await
     {
         if !server_running {
-            client::exit_error("Server is not running. Start it with `pm start`.", 1);
+            console.exit_error("Server is not running. Start it with `pm start`.", 1);
         }
-        remote::run(command, &conf, &client).await;
+        remote::run(command, &conf, &client, &console).await;
     }
 }

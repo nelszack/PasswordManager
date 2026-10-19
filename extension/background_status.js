@@ -1,10 +1,22 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundStatus = {
-    create({ chrome, nativeRequest, state, version, invalidate, cleanupExpired, setInterval }) {
+    create({ chrome, nativeRequest, state, version, invalidate, cleanupExpired, setInterval, clearInterval = globalThis.clearInterval, closeIdle = () => {}, protocolVersion }) {
         const STATUS_POLL_ALARM = "status-poll";
         const LIVE_STATUS_POLL_MS = 2000;
         let cachedStatus = null;
         let statusRefresh = null;
+        let liveTimer = null;
+        const views = new Set();
+        chrome.runtime.onConnect?.addListener(port => {
+            if (port.name !== "pm-ui") return;
+            views.add(port);
+            if (liveTimer === null) liveTimer = setInterval(refreshStatus, LIVE_STATUS_POLL_MS);
+            refreshStatus();
+            port.onDisconnect.addListener(() => {
+                views.delete(port);
+                if (!views.size) { clearInterval(liveTimer); liveTimer = null; closeIdle(); }
+            });
+        });
         chrome.runtime.onInstalled.addListener(() => {
             startStatusMonitoring();
         });
@@ -58,7 +70,8 @@ const PasswordManagerBackgroundStatus = {
                     const status = {
                         native: true, running: false, locked: false, error: response.error,
                         extensionVersion: version,
-                        nativeVersion: response.nativeVersion
+                        nativeVersion: response.nativeVersion,
+                        protocolVersion: response.protocolVersion, extensionProtocolVersion: protocolVersion
                     };
                     return { ...status, versionError: state.versionError(status) };
                 }
@@ -67,6 +80,7 @@ const PasswordManagerBackgroundStatus = {
                     running: true,
                     extensionVersion: version,
                     nativeVersion: response.nativeVersion,
+                    protocolVersion: response.protocolVersion, extensionProtocolVersion: protocolVersion,
                     ...state.parseServerStatus(response.data)
                 };
                 return { ...status, versionError: state.versionError(status) };
@@ -92,8 +106,7 @@ const PasswordManagerBackgroundStatus = {
         }
 
         function start() {
-            // The native port keeps the worker alive; alarms cover suspension/restart.
-            setInterval(refreshStatus, LIVE_STATUS_POLL_MS);
+            // Quiet browsers wake only for an alarm; open extension views opt into live updates.
             startStatusMonitoring();
         }
 

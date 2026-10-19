@@ -50,9 +50,8 @@ for (const [name, script] of [...scripts].sort()) {
     console.log(`${name}: ${(100 * covered / script.source.length).toFixed(2)}% byte coverage`);
 }
 const required = {
-    "content_fields.js": 60,
     "credential_prompt.js": 40,
-    "form_submission.js": 60
+    "content_runtime.js": 38
 };
 for (const [name, minimum] of Object.entries(required)) {
     const script = scripts.get(name);

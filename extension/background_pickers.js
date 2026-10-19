@@ -185,7 +185,7 @@ const PasswordManagerBackgroundPickers = {
                         domain: pending.domain, entryId: selected.id
                     });
                     if (!response.success) throw new Error(response.error || "Login unavailable");
-                    payload = JSON.parse(response.data);
+                    payload = response.data;
                     const username = payload.username ? String(payload.username).trim() : "";
                     filledLogin = {
                         username,
@@ -199,7 +199,7 @@ const PasswordManagerBackgroundPickers = {
                 } else {
                     const response = await nativeRequest("getAutofillItem", { entryId: selected.id });
                     if (!response.success) throw new Error(response.error || "Autofill item unavailable");
-                    payload = JSON.parse(response.data);
+                    payload = response.data;
                 }
                 if (pendingPickers.get(request.token) !== pending || pending.expiresAt <= Date.now()) {
                     throw new Error("Secure picker expired");

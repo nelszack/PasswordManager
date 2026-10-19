@@ -1,5 +1,5 @@
 //! OS event sources never carry credentials. A callback locks the existing
-//! session synchronously, using the same cleanup path as explicit locking.
+//! session through its control mailbox, using the explicit-lock cleanup path.
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,

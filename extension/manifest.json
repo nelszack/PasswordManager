@@ -23,19 +23,7 @@
         "https://*/*"
       ],
       "js": [
-        "form_submission.js",
-        "content_fields.js",
-        "content_detection.js",
-        "duo_detection.js",
-        "content_controls.js",
-        "password_generator.js",
-        "content_generator.js",
-        "content_autofill.js",
-        "content_bridge.js",
-        "content_observer.js",
-        "content_credentials.js",
-        "content.js",
-        "content_duo.js"
+        "content_runtime.js"
       ],
       "run_at": "document_idle",
       "all_frames": true

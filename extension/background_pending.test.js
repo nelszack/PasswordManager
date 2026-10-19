@@ -27,21 +27,21 @@ function environment() {
     });
     const sender = { tab: { id: 7 }, frameId: 0, url: "https://example.com/login" };
     const call = (service, method, ...args) => new Promise(resolve => service[method](...args, resolve));
-    const set = (service, value = "synthetic") => call(service, "set", { pending: { username: "alice", password: value } }, sender);
+    const set = (service, value = "alice") => call(service, "set", { pending: { username: value } }, sender);
     return { create, stored, sender, timers, call, set,
         advance(ms) { now += ms; }, fail(method) { failure = method; }, closeTab(id) { closed(id); }
     };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-test("pending credentials survive worker restart and are consumed exactly once", async () => {
+test("pending usernames survive worker restart and are consumed exactly once", async () => {
     const env = environment(), first = env.create();
     assert.equal((await env.set(first)).success, true);
     const restarted = env.create();
     const [one, two] = await Promise.all([
         env.call(restarted, "consume", env.sender), env.call(restarted, "consume", env.sender)
     ]);
-    assert.equal(one.pending.password, "synthetic");
+    assert.equal(one.pending.username, "alice");
     assert.equal(two.pending, null);
     assert.equal(env.stored["pmPopupPending:7"], undefined);
 });
@@ -55,11 +55,11 @@ test("cross-origin and cross-tab navigation cannot consume another site's creden
     assert.equal((await env.call(service, "consume", env.sender)).pending, null);
 });
 
-test("expiry removes stored secrets without deleting a newer navigation record", async () => {
+test("expiry removes stored usernames without deleting a newer navigation record", async () => {
     const env = environment(), service = env.create(); await env.set(service, "old");
     env.advance(50000); await env.set(service, "replacement");
     env.advance(10000); env.timers[0](); await flush();
-    assert.equal(env.stored["pmPopupPending:7"].password, "replacement");
+    assert.equal(env.stored["pmPopupPending:7"].username, "replacement");
     env.advance(50000); env.timers[1](); await flush();
     assert.equal(env.stored["pmPopupPending:7"], undefined);
     assert.equal(service.takeRemembered(env.sender), null);
@@ -101,18 +101,26 @@ test("storage failures disclose no pending secret and do not poison later operat
         assert.deepEqual(await env.call(service, "consume", env.sender), { success: false, error: `${method} failed` });
     }
     env.fail(null);
-    assert.equal((await env.call(service, "consume", env.sender)).pending.password, "synthetic");
+    assert.equal((await env.call(service, "consume", env.sender)).pending.username, "alice");
 });
 
 test("invalid senders and oversized pending payloads fail before storage", async () => {
     const env = environment(), service = env.create();
-    const request = { pending: { username: "alice", password: "synthetic" } };
+    const request = { pending: { username: "alice" } };
     for (const sender of [{}, { tab: { id: 7 }, url: "file:///tmp/test" }]) {
         assert.equal((await env.call(service, "set", request, sender)).success, false);
         assert.equal((await env.call(service, "consume", sender)).success, false);
     }
     assert.equal((await env.call(service, "clear", {})).success, false);
-    assert.equal((await env.set(service, "x".repeat(65537))).success, false);
+    assert.equal((await env.set(service, "x".repeat(4097))).success, false);
     assert.equal((await env.call(service, "set", {}, env.sender)).success, false);
     assert.deepEqual(env.stored, {});
+});
+
+test("navigation records reject password-bearing payloads and persist only username context", async () => {
+    const env = environment(), service = env.create();
+    const response = await env.call(service, "set", { pending: { username: "alice", password: "secret" } }, env.sender);
+    assert.equal(response.success, false); assert.deepEqual(env.stored, {});
+    await env.set(service);
+    assert.deepEqual(env.stored["pmPopupPending:7"], { domain: "https://example.com", username: "alice", time: 1000 });
 });

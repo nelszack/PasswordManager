@@ -1,7 +1,4 @@
-use crate::{
-    cli::ConfigArgs,
-    file::{set_private_perms, sync_parent},
-};
+use crate::file::{set_private_perms, sync_parent};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use tempfile::NamedTempFile;
@@ -41,6 +38,23 @@ pub struct ClipboardConfig {
 #[serde(default)]
 pub struct UnlockConfig {
     pub timeout: u64,
+    pub vault_id: Option<String>,
+}
+
+/// Configuration changes are independent of any argument parser.
+#[derive(Default)]
+pub struct ConfigChanges {
+    pub reset: bool,
+    pub genpass_length: Option<u8>,
+    pub genpass_stats: Option<bool>,
+    pub genpass_copy: Option<bool>,
+    pub password_copy: Option<bool>,
+    pub clipboard_timeout: Option<u8>,
+    pub unlock_timeout: Option<u64>,
+    pub password_history_limit: Option<usize>,
+    pub trash_retention_days: Option<u64>,
+    pub server_port: Option<u16>,
+    pub default_vault: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -90,14 +104,17 @@ impl Default for ClipboardConfig {
 
 impl Default for UnlockConfig {
     fn default() -> Self {
-        Self { timeout: 15 * 60 }
+        Self {
+            timeout: 15 * 60,
+            vault_id: None,
+        }
     }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            port: crate::server::DEFAULT_PORT,
+            port: crate::protocol::DEFAULT_PORT,
         }
     }
 }
@@ -142,9 +159,10 @@ fn has_missing_fields(current: &serde_json::Value, complete: &serde_json::Value)
         return true;
     };
     complete.iter().any(|(name, complete_value)| {
-        current
-            .get(name)
-            .is_none_or(|current_value| has_missing_fields(current_value, complete_value))
+        !complete_value.is_null()
+            && current
+                .get(name)
+                .is_none_or(|current_value| has_missing_fields(current_value, complete_value))
     })
 }
 
@@ -198,9 +216,10 @@ fn default_test_config(write_to_file: bool, config_path: &Path) -> Config {
 
 pub fn try_update(
     mut config: Config,
-    modify: ConfigArgs,
+    modify: impl Into<ConfigChanges>,
     config_path: &Path,
 ) -> Result<Config, String> {
+    let modify = modify.into();
     if modify.reset {
         config = Config::default();
     }
@@ -234,12 +253,16 @@ pub fn try_update(
     if let Some(i) = modify.server_port {
         config.server.port = i;
     }
+    if let Some(vault_id) = modify.default_vault {
+        crate::vault::validate_vault_filename(&vault_id).map_err(|error| error.to_string())?;
+        config.unlock.vault_id = Some(vault_id);
+    }
     write_file(&config, config_path)?;
     Ok(config)
 }
 
 #[cfg(test)]
-fn update(config: Config, modify: ConfigArgs, config_path: &Path) {
+fn update(config: Config, modify: impl Into<ConfigChanges>, config_path: &Path) {
     let _ =
         try_update(config, modify, config_path).expect("test configuration update should succeed");
 }

@@ -1,7 +1,7 @@
 (function (root, factory) {
     const api = factory();
-    root.PasswordManagerContentDetection = api;
     if (typeof module === "object" && module.exports) module.exports = api;
+    else root.PasswordManagerContentDetection = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
 
@@ -28,7 +28,7 @@
         while (node && node.nodeType === 1) {
             const style = getComputedStyle(node);
             if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
-            node = node.parentElement;
+            node = node.parentElement || node.getRootNode?.().host;
         }
         return true;
     }

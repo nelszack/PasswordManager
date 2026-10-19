@@ -19,7 +19,7 @@ fn field(item: &mut ImportedItem, name: &str, value: Option<String>, secret: boo
     if let Some(value) = value.filter(|value| !value.is_empty()) {
         item.custom_fields.push(CustomField {
             name: name.into(),
-            value,
+            value: value.into(),
             secret,
         });
     }
@@ -28,7 +28,7 @@ fn field(item: &mut ImportedItem, name: &str, value: Option<String>, secret: boo
 fn totp(item: &mut ImportedItem, value: Option<String>, index: usize, losses: &mut ImportLosses) {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         match normalize_totp_configuration(&value) {
-            Ok((normalized, _)) => item.totp = Some(normalized),
+            Ok((normalized, _)) => item.totp = Some(normalized.into()),
             Err(_) => {
                 // Retain unsupported providers (for example Steam) as a secret
                 // field. Never echo the seed or parser error into the report.
@@ -43,6 +43,7 @@ pub(super) fn external_json(
     root: Value,
     path: &str,
 ) -> Result<(Vec<ImportedItem>, ImportLosses), String> {
+    let root = SensitiveJson(root);
     if root.get("encrypted").and_then(Value::as_bool) == Some(true)
         || root.get("passwordProtected").and_then(Value::as_bool) == Some(true)
     {
@@ -136,7 +137,6 @@ pub(super) fn external_json(
         let name = json_text(value, &["name", "title"])
             .or_else(|| urls.first().cloned())
             .ok_or_else(|| format!("source item {index} in {path:?} has no name or URL"))?;
-        let now = chrono::Local::now().to_string();
         let password = match kind {
             ItemKind::Login => raw(login, "password")
                 .or_else(|| raw(value, "password"))
@@ -160,11 +160,23 @@ pub(super) fn external_json(
             username: raw(login, "username")
                 .or_else(|| raw(login, "login"))
                 .or_else(|| raw(value, "username")),
-            password,
+            password: password.into(),
             url: urls.first().cloned(),
-            notes: raw(value, "notes").or_else(|| raw(value, "note")),
-            created: json_text(value, &["created", "creationDate"]).unwrap_or_else(|| now.clone()),
-            modified: json_text(value, &["modified", "revisionDate"]).unwrap_or(now),
+            notes: raw(value, "notes")
+                .or_else(|| raw(value, "note"))
+                .map(Into::into),
+            created: imported_timestamp(
+                json_text(value, &["created", "creationDate"]),
+                index,
+                "creation timestamp",
+                &mut losses,
+            ),
+            modified: imported_timestamp(
+                json_text(value, &["modified", "revisionDate"]),
+                index,
+                "modification timestamp",
+                &mut losses,
+            ),
         });
         if kind == ItemKind::SecureNote && (bitwarden || raw(value, "password").is_none()) {
             // The note body is the primary secret, never searchable/listed notes.
@@ -173,8 +185,11 @@ pub(super) fn external_json(
         // Rich external imports replace metadata just like portable imports.
         item.kind = kind;
         item.additional_urls = urls.into_iter().skip(1).collect();
-        item.password_changed =
-            raw(value, "password_changed").or_else(|| raw(login, "passwordRevisionDate"));
+        item.password_changed = raw(value, "password_changed")
+            .or_else(|| raw(login, "passwordRevisionDate"))
+            .map(|value| {
+                imported_timestamp(Some(value), index, "password change timestamp", &mut losses)
+            });
         if let Some(history) = value
             .get("passwordHistory")
             .or_else(|| value.get("password_history"))
@@ -183,9 +198,14 @@ pub(super) fn external_json(
             for revision in history {
                 if let Some(password) = raw(revision, "password") {
                     item.password_history.push(PortableRevision {
-                        password,
-                        changed: json_text(revision, &["changed", "lastUsedDate"])
-                            .unwrap_or_else(|| item.entry.modified.clone()),
+                        password: password.into(),
+                        changed: imported_timestamp(
+                            json_text(revision, &["changed", "lastUsedDate"])
+                                .or_else(|| Some(item.entry.modified.to_string())),
+                            index,
+                            "password history timestamp",
+                            &mut losses,
+                        ),
                     });
                 } else {
                     losses.warn(index, "unsupported password history record omitted");
@@ -241,7 +261,7 @@ pub(super) fn external_json(
             };
             item.custom_fields.push(CustomField {
                 name,
-                value,
+                value: value.into(),
                 secret,
             });
         }
@@ -579,11 +599,10 @@ pub(super) fn csv_with_losses(
         if kind == ItemKind::SecureNote && password.is_empty() {
             password = note.clone().unwrap_or_default();
         }
-        let now = chrono::Local::now().to_string();
         let mut item = ImportedItem::login(VaultEntry {
             id: 0,
             name,
-            password,
+            password: password.into(),
             username: headers
                 .iter()
                 .position(|header| {
@@ -597,15 +616,23 @@ pub(super) fn csv_with_losses(
                 &row,
                 &["url", "website", "loginuri", "formactionorigin"],
             ),
-            notes: note,
-            created: csv_field(&headers, &row, &["created", "timecreated"])
-                .unwrap_or_else(|| now.clone()),
-            modified: csv_field(
-                &headers,
-                &row,
-                &["modified", "timemodified", "timepasswordchanged"],
-            )
-            .unwrap_or(now),
+            notes: note.map(Into::into),
+            created: imported_timestamp(
+                csv_field(&headers, &row, &["created", "timecreated"]),
+                index,
+                "creation timestamp",
+                &mut losses,
+            ),
+            modified: imported_timestamp(
+                csv_field(
+                    &headers,
+                    &row,
+                    &["modified", "timemodified", "timepasswordchanged"],
+                ),
+                index,
+                "modification timestamp",
+                &mut losses,
+            ),
         });
         item.kind = kind;
         if kind == ItemKind::SecureNote
@@ -615,7 +642,7 @@ pub(super) fn csv_with_losses(
                 .take()
                 .filter(|notes| !notes.is_empty() && notes != &item.entry.password)
         {
-            field(&mut item, "imported note", Some(notes), true);
+            field(&mut item, "imported note", Some(notes.expose_owned()), true);
         }
         totp(
             &mut item,

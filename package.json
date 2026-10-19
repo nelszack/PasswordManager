@@ -3,10 +3,11 @@
   "private": true,
   "scripts": {
     "validate": "node scripts/validate.cjs",
-    "test:extension": "node --test extension/*.test.js",
-    "test:extension:coverage": "node extension/check_unit_coverage.cjs",
-    "test:e2e": "playwright test",
-    "test:e2e:coverage": "node -e \"require('node:fs').rmSync('test-results/e2e-coverage', { recursive: true, force: true })\" && PM_E2E_COVERAGE_DIR=test-results/e2e-coverage playwright test && node extension/e2e/report_coverage.cjs test-results/e2e-coverage"
+    "test:extension": "node scripts/build_extension.cjs --check && node --test extension/*.test.js",
+    "test:extension:coverage": "node scripts/build_extension.cjs --check && node extension/check_unit_coverage.cjs",
+    "test:e2e": "node scripts/build_extension.cjs --check && playwright test",
+    "test:e2e:coverage": "node scripts/build_extension.cjs --check && node -e \"require('node:fs').rmSync('test-results/e2e-coverage', { recursive: true, force: true })\" && PM_E2E_COVERAGE_DIR=test-results/e2e-coverage playwright test && node extension/e2e/report_coverage.cjs test-results/e2e-coverage",
+    "build:extension": "node scripts/build_extension.cjs"
   },
   "devDependencies": {
     "@playwright/test": "1.64.0"

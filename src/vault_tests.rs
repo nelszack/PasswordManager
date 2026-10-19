@@ -1,264 +1,661 @@
-use super::audit::password_hash;
-use super::browser::url_match_json;
 use super::import::{import_csv, import_json};
 use super::totp::{normalize_totp_configuration, parse_totp_configuration};
 use super::*;
-use crate::encryption::gen_master_key;
-use crate::file::init_test_data_dir;
-use chrono::FixedOffset;
 use proptest::prelude::*;
-use std::fs;
+const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 
-const HISTORY_LIMIT: usize = 10;
-
-#[test]
-fn browser_duo_summaries_match_only_the_exact_https_issuer_and_reveal_no_credentials() {
-    let mut vault = Vault::default();
-    for (id, host) in [
-        (1, "api-test.duosecurity.com"),
-        (2, "api-other.duosecurity.com"),
-    ] {
-        vault.entries.push(VaultEntry {
-            id,
-            name: format!("Account {id}"),
-            username: Some("private-username".into()),
-            password: "login-secret".into(),
-            ..Default::default()
-        });
-        vault.recovery.duo.push(DuoRecord {
-            entry_id: id,
-            credentials: DuoCredentials {
-                host: host.into(),
-                akey: "account-secret".into(),
-                pkey: "device-secret".into(),
-                private_key: "signing-secret".into(),
-            },
-            review_key: None,
-        });
+fn entry(id: usize, name: &str, password: &str) -> VaultEntry {
+    VaultEntry {
+        id,
+        name: name.into(),
+        username: Some("alice".into()),
+        password: password.into(),
+        url: Some("https://example.com".into()),
+        created: "2020-01-01T00:00:00Z".into(),
+        modified: "2020-01-01T00:00:00Z".into(),
+        ..Default::default()
     }
-    let summaries = vault.browser_duo_items_json("https://api-test.duosecurity.com/frame/prompt");
-    let summaries: serde_json::Value = serde_json::from_str(&summaries).unwrap();
-    assert_eq!(
-        summaries,
-        serde_json::json!([{"id": 1, "name": "Account 1", "has_duo": true}])
-    );
-    for origin in [
-        "https://API-TEST.duosecurity.com",
-        "https://api-test.duosecurity.com:443",
-    ] {
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&vault.browser_duo_items_json(origin))
-                .unwrap(),
-            summaries
-        );
+}
+fn memory() -> Vault {
+    Vault::from_entries(
+        vec![
+            entry(1, "first", "secret"),
+            entry(2, "second", "other-secret"),
+        ],
+        None,
+    )
+}
+fn key(byte: u8) -> PasswordType {
+    PasswordType::Session {
+        encryption_key: [byte; 32],
+        salt: [7; 16],
+        kdf: 1,
+        memory_kib: 8192,
+        iterations: 1,
+        parallelism: 1,
     }
-    for origin in [
-        "http://api-test.duosecurity.com",
-        "https://api-test.duosecurity.com:8443",
-        "https://api-test.duosecurity.com.evil.example",
-        "https://api-test.duosecurity.com./",
-        "https://user@api-test.duosecurity.com",
-        "https://api-missing.duosecurity.com",
-        "https://duosecurity.com",
-        "https://m-test.duosecurity.com",
-        "invalid",
-    ] {
-        assert_eq!(vault.browser_duo_items_json(origin), "[]", "{origin}");
+}
+fn credentials() -> VaultCredentials {
+    VaultCredentials {
+        locked: false,
+        keypass: Some(key(42)),
     }
+}
+fn persisted() -> (tempfile::TempDir, Vault, VaultCredentials) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = memory();
+    vault.metadata.filename = "test.enc".into();
+    vault.store = VaultStore::File {
+        directory: dir.path().to_owned(),
+        filename: "test.enc".into(),
+    };
+    let mut credentials = credentials();
+    write_vault(&vault, &mut credentials).unwrap();
+    (dir, vault, credentials)
+}
+fn update(id: usize, password: &str) -> TypedUpdate {
+    TypedUpdate {
+        entry: EntryUpdate {
+            target: Target::Id(id),
+            update: EntryChanges::default(),
+            password: Some(password.into()),
+        },
+        kind: None,
+        add_url: vec![],
+        remove_url: vec![],
+        clear_urls: false,
+        set_fields: vec![],
+        remove_fields: vec![],
+        clear_fields: false,
+    }
+}
+fn hotp(counter: u64) -> String {
+    format!("otpauth://hotp/Test?secret={SECRET}&counter={counter}")
+}
+fn reopen(vault: &Vault) -> Vault {
+    let VaultStore::File {
+        directory,
+        filename,
+    } = &vault.store
+    else {
+        panic!("persistent fixture")
+    };
+    persistence::lookup_vault_in(directory, &mut key(42), Some(filename))
+        .unwrap()
+        .unwrap()
+        .1
 }
 
 #[test]
-fn browser_login_summaries_are_secret_free_and_selection_is_site_scoped() {
-    let mut vault = Vault {
-        entries: vec![
-            VaultEntry {
-                id: 1,
-                name: "Personal".into(),
-                password: "first-secret".into(),
-                url: Some("https://example.com".into()),
-                ..VaultEntry::default()
-            },
-            VaultEntry {
-                id: 2,
-                name: "Other site".into(),
-                password: "other-secret".into(),
-                url: Some("https://other.example".into()),
-                ..VaultEntry::default()
-            },
-            VaultEntry {
-                id: 3,
-                name: "Card".into(),
-                password: "card-secret".into(),
-                url: Some("https://example.com".into()),
-                ..VaultEntry::default()
-            },
-        ],
-        metadata: VaultMetadata::default(),
-        recovery: RecoveryData::default(),
-    };
-    vault.recovery.entry_metadata.push(EntryMetadata {
-        entry_id: 3,
-        kind: ItemKind::PaymentCard,
-        ..EntryMetadata::default()
-    });
-    vault.recovery.totp.push(TotpRecord {
-        entry_id: 1,
-        configuration: "totp-secret".into(),
-    });
-    vault.recovery.duo.push(DuoRecord {
-        entry_id: 1,
-        credentials: crate::types::DuoCredentials {
-            host: "api-test.duosecurity.com".into(),
-            akey: "account-secret".into(),
-            pkey: "device-secret".into(),
-            private_key: "signing-secret".into(),
-        },
-        review_key: None,
-    });
-    let summaries = vault.browser_logins_json("https://example.com");
-    assert!(!summaries.contains("secret"));
-    assert!(!summaries.contains("password"));
-    let summaries: serde_json::Value = serde_json::from_str(&summaries).unwrap();
-    assert_eq!(summaries.as_array().unwrap().len(), 1);
-    assert_eq!(summaries[0]["has_totp"], true);
-    assert_eq!(summaries[0]["has_duo"], true);
-    let other: serde_json::Value =
-        serde_json::from_str(&vault.browser_logins_json("https://other.example")).unwrap();
-    assert_eq!(other[0]["has_duo"], false);
-    let selected = vault.browser_login_json("https://example.com", 1).unwrap();
-    assert!(selected.contains("first-secret"));
-    assert!(!selected.contains("other-secret"));
-    assert!(!selected.contains("totp-secret"));
-    assert!(vault.browser_login_json("https://example.com", 2).is_none());
-    assert!(vault.browser_login_json("https://example.com", 3).is_none());
+fn missing_credentials_never_report_a_successful_persistent_write() {
+    let (_dir, mut vault, _) = persisted();
+    let before = vault.clone();
+    assert!(matches!(
+        vault.update_typed_entry_with_limit(update(1, "new"), &mut VaultCredentials::default(), 10),
+        Err(VaultError::Locked)
+    ));
+    assert_eq!(vault, before);
+    assert_eq!(reopen(&vault).data, before.data);
+    let mut detached = Vault::default();
+    assert!(write_vault(&detached, &mut credentials()).is_err());
+    assert!(
+        detached
+            .add_entry(
+                PasswordEntry {
+                    name: "test".into(),
+                    username: None,
+                    password: "secret".into(),
+                    url: None,
+                    notes: None,
+                    copy: false
+                },
+                &mut credentials()
+            )
+            .is_err()
+    );
+    assert!(detached.data.items.is_empty());
+}
+#[test]
+fn explicit_memory_store_supports_pure_mutation_without_credentials() {
+    let mut vault = Vault::memory();
     assert!(
         vault
-            .browser_login_json("https://example.com", 99)
-            .is_none()
+            .add_entry(
+                PasswordEntry {
+                    name: "test".into(),
+                    username: None,
+                    password: "secret".into(),
+                    url: None,
+                    notes: None,
+                    copy: false
+                },
+                &mut VaultCredentials::default()
+            )
+            .unwrap()
     );
-    assert_eq!(vault.browser_logins_json("https://unrelated.example"), "[]");
+    assert_eq!(vault.get_secret(&Target::Id(1)).unwrap().as_str(), "secret");
 }
-
-fn time_close(time: String) -> bool {
-    let thing =
-        chrono::DateTime::<FixedOffset>::parse_from_str(&time, "%Y-%m-%d %H:%M:%S%.f %:z").unwrap();
-    let diff = chrono::Local::now().signed_duration_since(thing);
-    diff.num_seconds() < 1
+#[test]
+fn stage_and_commit_keep_live_state_consistent_before_and_after_replacement() {
+    let (dir, mut vault, mut credentials) = persisted();
+    let old = fs::read(dir.path().join("test.enc")).unwrap();
+    let before = vault.clone();
+    let failed = persistence::with_write_fault(1, || {
+        vault.update_typed_entry_with_limit(update(1, "after"), &mut credentials, 10)
+    })
+    .unwrap_err();
+    assert!(!failed.committed());
+    assert_eq!(vault, before);
+    assert_eq!(fs::read(dir.path().join("test.enc")).unwrap(), old);
+    let failed = persistence::with_write_fault(2, || {
+        vault.update_typed_entry_with_limit(update(1, "after"), &mut credentials, 10)
+    })
+    .unwrap_err();
+    assert!(failed.committed());
+    assert_eq!(vault.get_secret(&Target::Id(1)).unwrap().as_str(), "after");
+    assert_eq!(reopen(&vault).data, vault.data);
+    assert_eq!(vault.item_revision(1), Some(2));
+    assert_eq!(vault.vault_revision(), 1);
+    write_vault(&vault, &mut credentials).unwrap();
+    assert_eq!(reopen(&vault).data, vault.data);
+}
+#[test]
+fn staging_panic_never_changes_the_live_aggregate() {
+    let mut vault = memory();
+    let before = vault.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), _> = vault.transaction(
+            TransactionScope::Entry(1),
+            &mut VaultCredentials::default(),
+            |v| {
+                v.item_mut(1).unwrap().entry.password = "changed".into();
+                panic!("injected mutation panic")
+            },
+        );
+    }));
+    assert!(result.is_err());
+    assert_eq!(vault, before);
+}
+#[test]
+fn revisions_change_only_for_touched_items_and_real_changes() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    assert!(
+        !vault
+            .update_typed_entry_with_limit(update(1, "secret"), &mut key, 10)
+            .unwrap()
+    );
+    assert_eq!(vault.vault_revision(), 0);
+    assert_eq!(vault.revision(1), Some(1));
+    vault
+        .update_typed_entry_with_limit(update(1, "new"), &mut key, 10)
+        .unwrap();
+    assert_eq!(vault.revision(1), Some(2));
+    assert_eq!(vault.revision(2), Some(1));
+    assert!(vault.check_revision(1, 1).is_err());
+    assert!(vault.check_revision(1, 2).is_ok());
+    assert_eq!(
+        vault.target_revision(&Target::Name("first".into())),
+        Some(2)
+    );
+}
+#[test]
+fn missing_targets_do_not_consume_ids_change_history_or_accept_private_notes() {
+    let mut vault = memory();
+    let before = vault.clone();
+    let mut change = update(99, "discarded-secret");
+    change.entry.update.notes = Some("discarded-notes".into());
+    assert!(
+        !vault
+            .update_typed_entry_with_limit(change, &mut VaultCredentials::default(), 10)
+            .unwrap()
+    );
+    assert!(
+        !vault
+            .delete_entry(Target::Id(99), &mut VaultCredentials::default())
+            .unwrap()
+    );
+    assert!(vault.get_secret(&Target::Id(99)).is_err());
+    assert_eq!(vault, before);
+}
+#[test]
+fn complete_item_survives_trash_and_restore_and_is_wholly_purged() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    vault.set_totp(Target::Id(1), &hotp(3), &mut key).unwrap();
+    vault.set_test_metadata(
+        1,
+        ItemKind::PaymentCard,
+        vec!["https://account.example.com".into()],
+        vec![CustomField {
+            name: "pin".into(),
+            value: "private-pin".into(),
+            secret: true,
+        }],
+    );
+    vault
+        .update_typed_entry_with_limit(update(1, "new-secret"), &mut key, 10)
+        .unwrap();
+    let before = vault.item(1).unwrap().clone();
+    vault.delete_entry(Target::Id(1), &mut key).unwrap();
+    assert!(vault.get_secret(&Target::Id(1)).is_err());
+    assert_eq!(vault.view_trash()[0].entry.entry.id, 1);
+    assert!(vault.browser_login("https://example.com", 1).is_none());
+    assert!(vault.restore_trashed(1, &mut key).unwrap());
+    let after = vault.item(1).unwrap();
+    assert_eq!(after.history, before.history);
+    assert_eq!(after.authenticator, before.authenticator);
+    assert_eq!(after.metadata, before.metadata);
+    vault.delete_entry(Target::Id(1), &mut key).unwrap();
+    assert!(vault.purge_trash(Some(1), &mut key).unwrap());
+    assert!(vault.item(1).is_none());
+    assert!(vault.item(2).is_some());
+}
+#[test]
+fn trash_selection_uses_stable_ids_after_other_items_are_purged() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    for id in [1, 2] {
+        vault.delete_entry(Target::Id(id), &mut key).unwrap();
+    }
+    vault.purge_trash(Some(1), &mut key).unwrap();
+    assert!(vault.restore_trashed(2, &mut key).unwrap());
+    assert_eq!(
+        vault.get_secret(&Target::Id(2)).unwrap().as_str(),
+        "other-secret"
+    );
+}
+#[test]
+fn stable_ids_are_never_reused_after_purge() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    vault.delete_entry(Target::Id(2), &mut key).unwrap();
+    vault.purge_trash(None, &mut key).unwrap();
+    vault
+        .add_entry(
+            PasswordEntry {
+                name: "third".into(),
+                username: None,
+                password: "secret".into(),
+                url: None,
+                notes: None,
+                copy: false,
+            },
+            &mut key,
+        )
+        .unwrap();
+    assert!(vault.item(2).is_none());
+    assert!(vault.item(3).is_some());
+}
+#[test]
+fn history_limits_and_restore_preserve_exact_secret_bytes() {
+    for limit in [0, 1, 3] {
+        let mut vault = memory();
+        let mut key = VaultCredentials::default();
+        for password in ["one", "two", " \nexact\t "] {
+            vault
+                .update_typed_entry_with_limit(update(1, password), &mut key, limit)
+                .unwrap();
+        }
+        assert_eq!(vault.item(1).unwrap().history.len(), limit);
+        assert_eq!(
+            vault.get_secret(&Target::Id(1)).unwrap().as_str(),
+            " \nexact\t "
+        );
+        if limit > 0 {
+            assert!(vault.restore_password(Target::Id(1), 1, &mut key).unwrap());
+            assert_eq!(vault.get_secret(&Target::Id(1)).unwrap().as_str(), "two");
+        } else {
+            assert!(vault.restore_password(Target::Id(1), 1, &mut key).is_err());
+        }
+    }
+}
+#[test]
+fn summaries_and_search_never_include_secret_fields_or_passwords() {
+    let mut vault = memory();
+    vault.set_test_metadata(
+        1,
+        ItemKind::Login,
+        vec!["https://accounts.example.com".into()],
+        vec![CustomField {
+            name: "token".into(),
+            value: "secret-token".into(),
+            secret: true,
+        }],
+    );
+    vault.item_mut(1).unwrap().entry.notes = Some("private note".into());
+    let encoded =
+        serde_json::to_string(&vault.management_list(SearchFilter::default()).unwrap()).unwrap();
+    for secret in ["secret-token", "private note", "other-secret"] {
+        assert!(!encoded.contains(secret));
+    }
+    let detail = vault.management_item(1, false).unwrap();
+    assert!(detail.password.is_none());
+    assert!(detail.fields[0].value.is_none());
+    assert_eq!(
+        vault.management_item(1, true).unwrap().password.unwrap(),
+        "secret"
+    );
+    assert!(
+        vault
+            .search(SearchFilter {
+                query: Some("secret-token".into()),
+                ..Default::default()
+            })
+            .is_err()
+    );
+    assert_eq!(
+        vault
+            .search(SearchFilter {
+                query: Some("accounts.example.com".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        vault
+            .get_custom_field(&Target::Id(1), "TOKEN")
+            .unwrap()
+            .as_str(),
+        "secret-token"
+    );
+}
+#[test]
+fn list_filters_type_authenticator_age_and_sorting_from_complete_items() {
+    let mut vault = memory();
+    vault.set_test_metadata(2, ItemKind::Identity, vec![], vec![]);
+    vault.set_test_totp(1, SECRET);
+    let views = vault
+        .view_entries(ListOptions {
+            kind: Some(ItemKind::Login),
+            has_totp: Some(true),
+            stale_days: Some(365),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].entry.id, 1);
+    let ordered = vault
+        .view_entries(ListOptions {
+            sort: SortField::Id,
+            descending: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ordered[0].entry.id, 2);
+}
+#[test]
+fn trash_retention_handles_canonical_dates_and_extreme_thresholds() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    for id in [1, 2] {
+        vault.delete_entry(Target::Id(id), &mut key).unwrap();
+    }
+    vault.item_mut(1).unwrap().lifecycle = Lifecycle::Trashed {
+        deleted_at: "2020-01-01T00:00:00Z".into(),
+    };
+    assert_eq!(vault.purge_expired_trash(u64::MAX, &mut key).unwrap(), 0);
+    assert_eq!(vault.purge_expired_trash(365, &mut key).unwrap(), 1);
+    assert!(vault.item(1).is_none());
+    assert!(vault.item(2).is_some());
+}
+#[test]
+fn hotp_matches_rfc_4226_and_advances_exactly_one_counter() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    vault.set_totp(Target::Id(1), &hotp(0), &mut key).unwrap();
+    for (counter, code) in [
+        "755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583", "399871",
+        "520489",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = vault.current_otp(Target::Id(1), &mut key).unwrap();
+        assert_eq!(result.code.as_str(), code);
+        assert_eq!(result.counter, Some(counter as u64));
+        assert!(result.expires_in.is_none());
+    }
+    assert!(vault.current_totp(Target::Id(1)).is_err());
+}
+#[test]
+fn hotp_counter_tracks_commit_even_when_result_is_durability_error() {
+    let (_dir, mut vault, mut key) = persisted();
+    vault.set_totp(Target::Id(1), &hotp(0), &mut key).unwrap();
+    for (fault, expected) in [(1, 0), (2, 1)] {
+        let error =
+            persistence::with_write_fault(fault, || vault.current_otp(Target::Id(1), &mut key))
+                .err()
+                .unwrap();
+        assert_eq!(error.committed(), fault == 2);
+        let config = &vault
+            .item(1)
+            .unwrap()
+            .authenticator
+            .as_ref()
+            .unwrap()
+            .configuration;
+        assert!(config.ends_with(&format!("counter={expected}")));
+        assert_eq!(reopen(&vault).data, vault.data);
+    }
+    assert_eq!(
+        vault
+            .current_otp(Target::Id(1), &mut key)
+            .unwrap()
+            .code
+            .as_str(),
+        "287082"
+    );
+}
+#[test]
+fn hotp_supports_u64_counters_and_refuses_overflow_without_returning_a_code() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    vault
+        .set_totp(Target::Id(1), &hotp(u64::MAX - 1), &mut key)
+        .unwrap();
+    assert_eq!(
+        vault.current_otp(Target::Id(1), &mut key).unwrap().counter,
+        Some(u64::MAX - 1)
+    );
+    let before = vault.clone();
+    assert!(vault.current_otp(Target::Id(1), &mut key).is_err());
+    assert_eq!(vault, before);
+}
+#[test]
+fn invalid_authenticator_inputs_never_modify_the_item() {
+    let mut vault = memory();
+    let before = vault.clone();
+    for value in [
+        "",
+        "bad seed",
+        "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ&counter=-1",
+        "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ&counter=0&counter=1",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&period=0",
+    ] {
+        assert!(
+            vault
+                .set_totp(Target::Id(1), value, &mut VaultCredentials::default())
+                .is_err(),
+            "{value}"
+        );
+        assert_eq!(vault, before);
+    }
+}
+#[test]
+fn portable_round_trip_remaps_ids_and_keeps_typed_item_metadata_history_and_hotp() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("export.json");
+    let mut source = memory();
+    let mut key = VaultCredentials::default();
+    source.set_test_metadata(
+        1,
+        ItemKind::Identity,
+        vec!["https://accounts.example.com".into()],
+        vec![CustomField {
+            name: "pin".into(),
+            value: "1234".into(),
+            secret: true,
+        }],
+    );
+    source.set_totp(Target::Id(1), &hotp(7), &mut key).unwrap();
+    source
+        .update_typed_entry_with_limit(update(1, "changed"), &mut key, 10)
+        .unwrap();
+    source.export(path.display().to_string(), false).unwrap();
+    let mut destination = Vault::from_entries(vec![entry(42, "existing", "existing-secret")], None);
+    let report = destination
+        .import_with_options(
+            path.display().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            10,
+            &mut key,
+        )
+        .unwrap();
+    assert_eq!(report.added, 2);
+    let imported = destination.item(43).unwrap();
+    assert_eq!(imported.entry.name, "first");
+    assert_eq!(imported.metadata, source.item(1).unwrap().metadata);
+    assert_eq!(imported.history, source.item(1).unwrap().history);
+    assert_eq!(
+        imported.authenticator,
+        source.item(1).unwrap().authenticator
+    );
+}
+#[test]
+fn import_preview_conflicts_and_same_batch_replacements_share_a_plan() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.json");
+    fs::write(&path,r#"[{"name":"third","username":"x","password":"one"},{"name":"third","username":"x","password":"two"}]"#).unwrap();
+    let mut vault = memory();
+    let before = vault.clone();
+    let mut key = VaultCredentials::default();
+    let preview = vault
+        .import_with_options(
+            path.display().to_string(),
+            ConflictPolicy::Replace,
+            true,
+            10,
+            &mut key,
+        )
+        .unwrap();
+    assert_eq!(vault, before);
+    let report = vault
+        .import_with_options(
+            path.display().to_string(),
+            ConflictPolicy::Replace,
+            false,
+            10,
+            &mut key,
+        )
+        .unwrap();
+    assert_eq!(
+        (report.added, report.replaced),
+        (preview.added, preview.replaced)
+    );
+    assert_eq!((report.added, report.replaced), (1, 1));
+    assert_eq!(vault.item(3).unwrap().entry.password, "two");
+}
+#[test]
+fn invalid_import_and_validation_errors_leave_live_state_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bad.json");
+    fs::write(
+        &path,
+        r#"[{"name":"valid","password":"one"},{"password":"missing-name"}]"#,
+    )
+    .unwrap();
+    let mut vault = memory();
+    let before = vault.clone();
+    assert!(
+        vault
+            .import_with_options(
+                path.display().to_string(),
+                ConflictPolicy::Skip,
+                false,
+                10,
+                &mut VaultCredentials::default()
+            )
+            .is_err()
+    );
+    assert_eq!(vault, before);
+}
+#[test]
+fn export_files_refuse_clobber_and_preserve_exact_credentials() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("export.json");
+    let mut vault = memory();
+    vault.item_mut(1).unwrap().entry.password = " \nexact\t ".into();
+    vault.export(path.display().to_string(), false).unwrap();
+    assert!(vault.export(path.display().to_string(), false).is_err());
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(json["items"][0]["password"], " \nexact\t ");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+#[test]
+fn browser_login_selection_and_typed_autofill_are_separate_and_secret_scoped() {
+    let mut vault = memory();
+    vault.set_test_metadata(2, ItemKind::PaymentCard, vec![], vec![]);
+    assert_eq!(vault.browser_logins("https://example.com").len(), 1);
+    assert!(vault.browser_login("https://example.com", 2).is_none());
+    assert!(vault.browser_login("https://other.example", 1).is_none());
+    assert_eq!(
+        vault
+            .browser_login("https://example.com", 1)
+            .unwrap()
+            .password,
+        "secret"
+    );
+    assert_eq!(vault.browser_autofill().len(), 1);
+    assert!(vault.browser_autofill_item(1).is_none());
+    assert_eq!(
+        vault.browser_autofill_item(2).unwrap().primary_secret,
+        "other-secret"
+    );
+}
+#[test]
+fn validated_timestamp_and_nonzero_fixed_width_identity_reject_invalid_documents() {
+    assert!(serde_json::from_str::<Timestamp>("\"yesterday\"").is_err());
+    assert!(serde_json::from_str::<ItemId>("0").is_err());
+    assert!(serde_json::from_str::<ItemId>(&u64::MAX.to_string()).is_err());
+    let id: ItemId = serde_json::from_str(&MAX_ITEM_ID.to_string()).unwrap();
+    assert_eq!(u64::from(id), MAX_ITEM_ID);
+    assert_eq!(
+        Timestamp::parse("2020-01-01T01:00:00+01:00").unwrap(),
+        Timestamp::parse("2020-01-01T00:00:00Z").unwrap()
+    );
+}
+#[test]
+fn native_document_has_independent_schema_and_no_runtime_keys_or_paths() {
+    let mut vault = memory();
+    vault.metadata.filename = "runtime-only.enc".into();
+    vault.metadata.duo_session = Some([37; 32]);
+    let bytes = persistence::encode_document(&vault.data, None).unwrap();
+    let json: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(json["schema_version"], 2);
+    assert!(json.get("vault_id").is_some());
+    for key in ["filename", "duo_session", "review_key", "keypass"] {
+        assert!(!format!("{json:?}").contains(key));
+    }
+    assert_eq!(persistence::decode_document(&bytes).unwrap(), vault.data);
 }
 
 proptest! {
     #[test]
-    fn arbitrary_import_documents_never_panic(contents in ".{0,4096}") {
-        let _ = import_json(&contents, "fuzz.json");
-        let _ = import_csv(&contents, "fuzz.csv");
-    }
-
+    fn arbitrary_import_documents_never_panic(contents in ".{0,4096}") {let _=import_json(&contents,"fuzz.json");let _=import_csv(&contents,"fuzz.csv");}
     #[test]
-    fn arbitrary_url_inputs_never_panic(value in ".{0,2048}") {
-        let _ = hostname(&value);
-        let _ = hosts_match(&value, &value);
-        let _ = url_match_json(&[], &[], &[], &value);
-    }
+    fn arbitrary_url_inputs_never_panic(value in ".{0,2048}") {let _=hostname(&value);let _=hosts_match(&value,&value);let _=memory().browser_logins(&value);}
 }
-
-#[test]
-fn misspelled_entries_field_is_rejected() {
-    #[derive(Serialize)]
-    struct InvalidVault {
-        enteries: Vec<VaultEntry>,
-        metadata: VaultMetadata,
-        recovery: RecoveryData,
-    }
-
-    let invalid = InvalidVault {
-        enteries: vec![VaultEntry {
-            id: 1,
-            name: "example".to_string(),
-            password: "secret".to_string(),
-            ..VaultEntry::default()
-        }],
-        metadata: VaultMetadata {
-            filename: "invalid.enc".to_string(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    };
-    // Array encoding omits field names and would not exercise the typo.
-    let encoded = rmp_serde::to_vec_named(&invalid).unwrap();
-    assert!(rmp_serde::from_slice::<Vault>(&encoded).is_err());
-}
-
-#[test]
-fn test_url_match_json_escapes_special_chars() {
-    let entries = vec![VaultEntry {
-        id: 1,
-        name: String::from("site\"with\"quote"),
-        username: Some(String::from("bob")),
-        password: String::from("pa\"ss\\wrd"),
-        url: Some(String::from("example.com")),
-        notes: None,
-        created: String::from("2026-01-01"),
-        modified: String::from("2026-01-01"),
-    }];
-    let totp = vec![TotpRecord {
-        entry_id: 1,
-        configuration: "secret-never-exported".into(),
-    }];
-    let json = url_match_json(&entries, &totp, &[], "example.com").unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed[0]["password"], "pa\"ss\\wrd");
-    assert_eq!(parsed[0]["name"], "site\"with\"quote");
-    assert_eq!(parsed[0]["username"], "bob");
-    assert_eq!(parsed[0]["id"], 1);
-    assert_eq!(parsed[0]["has_totp"], true);
-    assert!(!json.contains("secret-never-exported"));
-}
-#[test]
-fn browser_autofill_returns_only_cards_and_identities() {
-    let mut vault = recovery_test_vault(vec![
-        recovery_test_entry(1, "login", "login-user", "login-password"),
-        recovery_test_entry(2, "Personal Visa", "Alice Example", "4111111111111111"),
-        recovery_test_entry(3, "Home identity", "alice@example.com", ""),
-    ]);
-    vault.recovery.entry_metadata = vec![
-        EntryMetadata {
-            entry_id: 2,
-            kind: ItemKind::PaymentCard,
-            custom_fields: vec![CustomField {
-                name: "expiration month".into(),
-                value: "09".into(),
-                secret: false,
-            }],
-            ..EntryMetadata::default()
-        },
-        EntryMetadata {
-            entry_id: 3,
-            kind: ItemKind::Identity,
-            custom_fields: vec![CustomField {
-                name: "city".into(),
-                value: "Boise".into(),
-                secret: false,
-            }],
-            ..EntryMetadata::default()
-        },
-    ];
-
-    let parsed: serde_json::Value = serde_json::from_str(&vault.browser_autofill_json()).unwrap();
-    let items = parsed.as_array().unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["kind"], "payment-card");
-    assert!(items[0].get("primary_secret").is_none());
-    assert!(items[0].get("custom_fields").is_none());
-    assert_eq!(items[1]["kind"], "identity");
-    assert!(!vault.browser_autofill_json().contains("login-password"));
-
-    let card: serde_json::Value =
-        serde_json::from_str(&vault.browser_autofill_item_json(2).unwrap()).unwrap();
-    assert_eq!(card["primary_secret"], "4111111111111111");
-    assert_eq!(card["custom_fields"][0]["value"], "09");
-    assert!(vault.browser_autofill_item_json(1).is_none());
-}
-
 #[test]
 fn browser_credentials_are_bound_to_normalized_origins() {
     for (saved, requested, expected) in [
@@ -337,253 +734,62 @@ fn browser_credentials_are_bound_to_normalized_origins() {
         ("https://example.com:70000", "https://example.com", false),
         ("https://example.com", "https://*.example.com", false),
     ] {
-        let mut vault = Vault::default();
-        vault.entries.push(VaultEntry {
-            id: 2,
-            password: "synthetic-secret".into(),
-            url: Some(saved.into()),
-            ..Default::default()
-        });
+        let vault = Vault::from_entries(
+            vec![VaultEntry {
+                id: 2,
+                password: "synthetic-secret".into(),
+                url: Some(saved.into()),
+                ..Default::default()
+            }],
+            None,
+        );
         assert_eq!(
             hosts_match(saved, requested),
             expected,
             "{saved:?} -> {requested:?}"
         );
         assert_eq!(
-            vault.browser_login_json(requested, 2).is_some(),
+            vault.browser_login(requested, 2).is_some(),
             expected,
             "selection: {saved:?} -> {requested:?}"
         );
         assert_eq!(
-            vault.get_entry(&Target::Url(requested.into())).is_ok(),
-            expected,
-            "legacy lookup: {saved:?} -> {requested:?}"
-        );
-        let summaries: serde_json::Value =
-            serde_json::from_str(&vault.browser_logins_json(requested)).unwrap();
-        assert_eq!(
-            summaries.as_array().unwrap().len(),
+            vault.browser_logins(requested).len(),
             usize::from(expected),
             "summaries: {saved:?} -> {requested:?}"
         );
-        let matched = url_match_json(&vault.entries, &[], &[], requested);
-        assert_eq!(
-            matched.is_some(),
-            expected,
-            "JSON lookup: {saved:?} -> {requested:?}"
-        );
-        if let Some(matched) = matched {
-            let parsed: serde_json::Value = serde_json::from_str(&matched).unwrap();
-            assert_eq!(parsed[0]["id"], 2, "{saved:?} -> {requested:?}");
-            assert_eq!(parsed[0]["has_totp"], false, "{saved:?} -> {requested:?}");
-        }
     }
 }
 #[test]
-fn entry_mutations_leave_vault_unchanged_when_target_is_missing() {
-    let mut vault = recovery_test_vault(vec![VaultEntry {
-        id: 1,
-        name: "test".into(),
-        password: "p".into(),
-        ..Default::default()
-    }]);
-    let before = vault.clone();
-    let mut credentials = ServerInfo::default();
-    for target in [Target::Name("nope".into()), Target::Id(0), Target::Id(100)] {
-        for operation in ["delete", "update"] {
-            let changed = if operation == "delete" {
-                vault.delete_entry(target.clone(), &mut credentials)
-            } else {
-                vault.update_entry_with_limit(
-                    EntryUpdate {
-                        target: target.clone(),
-                        update: EntryChanges {
-                            name: Some("x".into()),
-                            ..Default::default()
-                        },
-                        password: None,
-                    },
-                    &mut credentials,
-                    HISTORY_LIMIT,
-                )
-            }
-            .unwrap();
-            assert!(!changed, "{operation}, {target:?}");
-            assert_eq!(vault, before, "{operation}, {target:?}");
-        }
-    }
-}
-#[test]
-fn test_add_entry() {
-    for info in [
-        PasswordEntry {
-            name: "test".into(),
-            username: Some("test".into()),
-            password: "test123".into(),
-            url: None,
-            notes: None,
-            copy: false,
-        },
-        PasswordEntry {
-            name: "full_entry".into(),
-            username: Some("admin".into()),
-            password: "secret123".into(),
-            url: Some("https://example.com".into()),
-            notes: Some("important account".into()),
-            copy: false,
-        },
-        PasswordEntry {
-            name: "minimal".into(),
-            username: None,
-            password: "pass".into(),
-            url: None,
-            notes: None,
-            copy: false,
-        },
-    ] {
-        let mut vault = recovery_test_vault(Vec::new());
-        assert!(
-            vault
-                .add_entry(info.clone(), &mut ServerInfo::default())
-                .unwrap()
-        );
-        let expected = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: info.name,
-                username: info.username,
-                password: info.password,
-                url: info.url,
-                notes: info.notes,
-                created: vault.entries[0].created.clone(),
-                modified: vault.entries[0].modified.clone(),
-            }],
-            metadata: VaultMetadata {
-                filename: "test.enc".into(),
-                duo_session: None,
-            },
-            recovery: RecoveryData {
-                next_entry_id: 2,
-                ..RecoveryData::default()
-            },
-        };
-        assert_eq!(vault, expected);
-        assert!(time_close(vault.entries[0].created.clone()));
-        assert!(time_close(vault.entries[0].modified.clone()));
-    }
-}
-#[test]
-fn test_delete_entry_by_id_or_name() {
-    for target in [Target::Id(1), Target::Name("test".into())] {
-        let mut vlt = recovery_test_vault(vec![recovery_test_entry(1, "test", "test", "test123")]);
-        let original = vlt.entries[0].clone();
-        assert!(
-            vlt.delete_entry(target.clone(), &mut ServerInfo::default())
-                .unwrap(),
-            "{target:?}"
-        );
-        assert!(vlt.entries.is_empty(), "{target:?}");
-        assert_eq!(vlt.recovery.trash.len(), 1, "{target:?}");
-        assert_eq!(vlt.recovery.trash[0].entry, original, "{target:?}");
-    }
+fn totp_matches_rfc_6238_sha1_vectors() {
+    let raw = "GEZD GNBV-GY3TQOJQ GEZDGNBVGY3TQOJQ";
+    let (normalized, bits) = normalize_totp_configuration(raw).unwrap();
+    assert_eq!(normalized, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    assert_eq!(bits, 160);
+    let totp = parse_totp_configuration(&normalized).unwrap();
+    assert_eq!(totp.generate(59).to_string(), "287082");
+
+    let uri = "otpauth://totp/RFC?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30";
+    let totp = parse_totp_configuration(uri).unwrap();
+    assert_eq!(totp.generate(59).to_string(), "94287082");
 }
 
 #[test]
-fn test_update_entry_by_id_or_name() {
-    for target in [Target::Id(1), Target::Name("test".into())] {
-        let mut vlt = recovery_test_vault(vec![recovery_test_entry(1, "test", "test", "test123")]);
-        let mut expected = vlt.clone();
-        assert!(
-            vlt.update_entry_with_limit(
-                EntryUpdate {
-                    target: target.clone(),
-                    update: EntryChanges {
-                        name: Some(String::from("test2")),
-                        username: Some(String::from("test2")),
-                        ..Default::default()
-                    },
-                    password: None,
-                },
-                &mut ServerInfo::default(),
-                HISTORY_LIMIT,
-            )
-            .unwrap(),
-            "{target:?}"
-        );
-        expected.entries[0].name = "test2".into();
-        expected.entries[0].username = Some("test2".into());
-        expected.entries[0].modified = vlt.entries[0].modified.clone();
-        assert_eq!(vlt, expected, "{target:?}");
-        assert!(time_close(vlt.entries[0].modified.clone()), "{target:?}");
-    }
-}
+fn totp_accepts_github_compatible_80_bit_secrets() {
+    let github_secret = "GEZDGNBVGY3TQOJQ";
+    let (normalized, bits) = normalize_totp_configuration(github_secret).unwrap();
+    assert_eq!(bits, 80);
+    let raw_totp = parse_totp_configuration(&normalized).unwrap();
 
-#[test]
-fn test_export_import() {
-    let mut vault = recovery_test_vault(vec![
-        recovery_test_entry(1, "Login", "alice", " padded-secret "),
-        recovery_test_entry(2, "Identity", "alice@example.com", ""),
-    ]);
-    vault.recovery.entry_metadata.push(EntryMetadata {
-        entry_id: 2,
-        kind: ItemKind::Identity,
-        ..EntryMetadata::default()
-    });
-    vault.recovery.next_entry_id = 3;
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("export.csv").display().to_string();
-    vault.export(path.clone(), false).unwrap();
-    let mut imported = recovery_test_vault(Vec::new());
-    let mut server_info = ServerInfo::default();
-    let preview = imported
-        .import_with_options(
-            path.clone(),
-            ConflictPolicy::Skip,
-            true,
-            HISTORY_LIMIT,
-            &mut server_info,
-        )
-        .unwrap();
-    assert_eq!(preview.added, 2);
-    assert!(imported.entries.is_empty());
-    imported
-        .import_with_options(
-            path,
-            ConflictPolicy::Skip,
-            false,
-            HISTORY_LIMIT,
-            &mut server_info,
-        )
-        .unwrap();
-    assert_eq!(imported.entries.len(), 2);
-    assert_eq!(imported.entries[0].password, " padded-secret ");
-    assert_eq!(imported.entries[1].password, "");
-    // CSV intentionally omits typed metadata, but preserves every entry field.
-    vault.recovery.entry_metadata.clear();
-    assert_eq!(vault, imported);
-}
-
-#[test]
-fn test_failed_import_does_not_partially_modify_vault() {
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "id,name,username,password,url,notes,created,modified").unwrap();
-    writeln!(file, "2,valid,user,password,,,created,modified").unwrap();
-    // Empty passwords are valid; a row without either a name or URL is not.
-    writeln!(file, "3,,user,,,,created,modified").unwrap();
-
-    let mut vault = Vault::default();
-    assert!(
-        vault
-            .import_with_options(
-                file.path().display().to_string(),
-                ConflictPolicy::Skip,
-                false,
-                HISTORY_LIMIT,
-                &mut ServerInfo::default(),
-            )
-            .is_err()
+    let uri = format!(
+        "otpauth://totp/GitHub:test?secret={github_secret}&issuer=GitHub&algorithm=SHA1&digits=6&period=30"
     );
-    assert!(vault.entries.is_empty());
+    let (normalized_uri, uri_bits) = normalize_totp_configuration(&uri).unwrap();
+    assert_eq!(uri_bits, 80);
+    let uri_totp = parse_totp_configuration(&normalized_uri).unwrap();
+    assert_eq!(raw_totp.generate(59), uri_totp.generate(59));
+
+    assert!(normalize_totp_configuration("GEZDGNBVGY3TQ").is_err());
 }
 
 #[test]
@@ -654,7 +860,11 @@ fn login_imports_preserve_fields_and_credential_bytes() {
                 "{format}, {case}"
             );
             assert_eq!(entry.password, password, "{format}, {case}");
-            assert_eq!(entry.notes.as_deref(), Some("personal"), "{format}, {case}");
+            assert_eq!(
+                entry.notes.as_ref().map(|s| s.as_str()),
+                Some("personal"),
+                "{format}, {case}"
+            );
             assert_eq!(
                 entry.url.as_deref(),
                 Some("https://example.com/login"),
@@ -675,1876 +885,146 @@ fn login_imports_preserve_fields_and_credential_bytes() {
 }
 
 #[test]
-fn test_json_export_round_trip() {
+fn malformed_external_dates_report_loss_while_portable_and_native_dates_are_strict() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("export.json");
-    let vault = Vault {
-        entries: vec![VaultEntry {
-            id: 1,
-            name: "Example".into(),
-            username: Some("alice".into()),
-            password: "secret".into(),
-            url: Some("example.com".into()),
-            notes: None,
-            created: "created".into(),
-            modified: "modified".into(),
-        }],
-        metadata: VaultMetadata::default(),
-        recovery: RecoveryData {
-            password_history: vec![PasswordRevision {
-                entry_id: 1,
-                password: "previous-secret".into(),
-                changed: "2025-01-01T00:00:00Z".into(),
-            }],
-            totp: vec![TotpRecord {
-                entry_id: 1,
-                configuration: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into(),
-            }],
-            entry_metadata: vec![EntryMetadata {
-                entry_id: 1,
-                kind: ItemKind::ApiSecret,
-                additional_urls: vec!["api.example.com".into()],
-                password_changed: Some("2026-01-01T00:00:00Z".into()),
-                custom_fields: vec![CustomField {
-                    name: "environment".into(),
-                    value: "production".into(),
-                    secret: false,
-                }],
-            }],
-            ..RecoveryData::default()
-        },
-    };
-    vault.export(path.display().to_string(), false).unwrap();
-    let exported: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(exported["format"], PORTABLE_FORMAT);
-    assert_eq!(exported["version"], PORTABLE_VERSION);
-    let mut imported = Vault::default();
-    imported
+    let input = directory.path().join("external.json");
+    fs::write(
+        &input,
+        r#"[{"name":"test","password":"secret","created":"yesterday","modified":"unknown"}]"#,
+    )
+    .unwrap();
+    let mut imported = Vault::memory();
+    let report = imported
+        .import_with_options(
+            input.display().to_string(),
+            ConflictPolicy::Skip,
+            false,
+            10,
+            &mut VaultCredentials::default(),
+        )
+        .unwrap();
+    assert_eq!(report.loss_count, 2);
+    assert!(!report.losses.join(" ").contains("secret"));
+    assert!(Timestamp::parse(&imported.item(1).unwrap().entry.created).is_ok());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("portable.json");
+    memory().export(path.display().to_string(), false).unwrap();
+    let mut document: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    document["items"][0]["created"] = "yesterday".into();
+    assert!(import_json(&document.to_string(), "portable.json").is_err());
+}
+#[test]
+fn identity_and_revision_exhaustion_leave_live_state_unchanged() {
+    let mut vault = memory();
+    vault.data.next_item_id = MAX_ITEM_ID + 1;
+    let before = vault.clone();
+    assert!(
+        vault
+            .add_entry(
+                PasswordEntry {
+                    name: "new".into(),
+                    username: None,
+                    password: "secret".into(),
+                    url: None,
+                    notes: None,
+                    copy: false
+                },
+                &mut VaultCredentials::default()
+            )
+            .is_err()
+    );
+    assert_eq!(vault, before);
+    vault.data.revision = MAX_ITEM_ID;
+    let before = vault.clone();
+    assert!(
+        vault
+            .update_typed_entry_with_limit(update(1, "new"), &mut VaultCredentials::default(), 10)
+            .is_err()
+    );
+    assert_eq!(vault, before);
+    vault.data.revision = 0;
+    vault.item_mut(1).unwrap().revision = MAX_ITEM_ID;
+    let before = vault.clone();
+    assert!(
+        vault
+            .update_typed_entry_with_limit(update(1, "new"), &mut VaultCredentials::default(), 10)
+            .is_err()
+    );
+    assert_eq!(vault, before);
+}
+#[test]
+fn typed_totp_has_correct_lifetime_without_mutating_any_revision() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    for period in [30, 60] {
+        vault
+            .set_totp(
+                Target::Id(1),
+                &format!("otpauth://totp/Test?secret={SECRET}&period={period}"),
+                &mut key,
+            )
+            .unwrap();
+        let before = vault.clone();
+        for (timestamp, code, ttl) in [
+            (0, "755224", period),
+            (period - 1, "755224", 1),
+            (period, "287082", period),
+            (period + 10, "287082", period - 10),
+            (period * 2, "359152", period),
+        ] {
+            assert_eq!(
+                vault.totp_at(&Target::Id(1), timestamp).unwrap(),
+                (code.into(), ttl)
+            );
+        }
+        assert_eq!(vault, before);
+    }
+}
+#[test]
+fn csv_round_trip_preserves_exact_password_and_private_notes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("export.csv");
+    let mut source = memory();
+    source.item_mut(1).unwrap().entry.password = " \nexact\t ".into();
+    source.item_mut(1).unwrap().entry.notes = Some("multiline\nnotes".into());
+    source.export(path.display().to_string(), false).unwrap();
+    let mut target = Vault::memory();
+    target
         .import_with_options(
             path.display().to_string(),
             ConflictPolicy::Skip,
             false,
-            HISTORY_LIMIT,
-            &mut ServerInfo::default(),
+            10,
+            &mut VaultCredentials::default(),
         )
         .unwrap();
-    assert_eq!(imported.entries, vault.entries);
     assert_eq!(
-        imported.recovery.entry_metadata,
-        vault.recovery.entry_metadata
-    );
-    assert_eq!(
-        imported.recovery.password_history,
-        vault.recovery.password_history
-    );
-    assert_eq!(imported.recovery.totp, vault.recovery.totp);
-}
-
-#[test]
-fn test_import_assigns_local_stable_ids() {
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "id,name,username,password,url,notes,created,modified").unwrap();
-    writeln!(file, "99,first,user,password,,,created,modified").unwrap();
-
-    let mut vault = Vault::default();
-    vault
-        .import_with_options(
-            file.path().display().to_string(),
-            ConflictPolicy::Skip,
-            false,
-            HISTORY_LIMIT,
-            &mut ServerInfo::default(),
-        )
-        .unwrap();
-    assert_eq!(vault.entries[0].id, 1);
-}
-
-#[test]
-fn portable_import_remaps_ids_for_associated_records() {
-    let file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
-    let portable = serde_json::json!({
-        "format": PORTABLE_FORMAT,
-        "version": PORTABLE_VERSION,
-        "exported_at": "2026-01-01T00:00:00Z",
-        "items": [{
-            "id": 999,
-            "name": "Imported API",
-            "username": "alice",
-            "password": "current-secret",
-            "url": "https://api.example.com",
-            "notes": null,
-            "created": "2025-01-01T00:00:00Z",
-            "modified": "2026-01-01T00:00:00Z",
-            "type": "api-secret",
-            "additional_urls": ["https://backup.example.com"],
-            "custom_fields": [{"name": "env", "value": "prod", "secret": false}],
-            "password_changed": "2026-01-01T00:00:00Z",
-            "password_history": [{"password": "old-secret", "changed": "2025-06-01T00:00:00Z"}],
-            "totp": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-        }]
-    });
-    fs::write(file.path(), serde_json::to_vec(&portable).unwrap()).unwrap();
-
-    let mut vault = recovery_test_vault(vec![recovery_test_entry(
-        10,
-        "Existing",
-        "bob",
-        "existing-secret",
-    )]);
-    vault
-        .import_with_options(
-            file.path().display().to_string(),
-            ConflictPolicy::Skip,
-            false,
-            HISTORY_LIMIT,
-            &mut ServerInfo::default(),
-        )
-        .unwrap();
-
-    assert_eq!(vault.entries[1].id, 11);
-    assert_eq!(vault.recovery.entry_metadata[0].entry_id, 11);
-    assert_eq!(vault.recovery.password_history[0].entry_id, 11);
-    assert_eq!(vault.recovery.totp[0].entry_id, 11);
-}
-
-#[test]
-fn test_import_new_persists_vault_to_disk() {
-    init_test_data_dir();
-    let pass = PasswordType::Password("import_fix_test_pass!".to_string());
-    let mut server_info = ServerInfo {
-        locked: true,
-        keypass: Some(pass.clone()),
-    };
-    let mut vlt: Option<Vault> = None;
-    create_vault(&mut vlt, &mut server_info, false).unwrap();
-
-    let mut tf = NamedTempFile::new().unwrap();
-    {
-        use std::io::Write;
-        writeln!(tf, "id,name,username,password,url,notes,created,modified").unwrap();
-        writeln!(
-            tf,
-            "1,example.com,bob,secret,,,2026-01-01 00:00:00,2026-01-01 00:00:00"
-        )
-        .unwrap();
-        writeln!(
-            tf,
-            "2,test.org,alice,pw456,,,2026-01-02 00:00:00,2026-01-02 00:00:00"
-        )
-        .unwrap();
-    }
-    vlt.as_mut()
-        .unwrap()
-        .import_with_options(
-            tf.path().to_str().unwrap().to_string(),
-            ConflictPolicy::Skip,
-            false,
-            HISTORY_LIMIT,
-            &mut server_info,
-        )
-        .unwrap();
-
-    vlt.as_ref().unwrap().lock_vault(&mut server_info).unwrap();
-
-    let vlt1 = unlock_vault(&mut ServerInfo {
-        locked: true,
-        keypass: Some(pass),
-    })
-    .unwrap();
-    assert_eq!(vlt1.entries.len(), 2);
-    assert_eq!(vlt1.entries[0].name, "example.com");
-    assert_eq!(vlt1.entries[1].name, "test.org");
-
-    let fname = vlt1.metadata.filename.clone();
-    let _ = fs::remove_file(data_dir().join(fname));
-}
-#[test]
-fn test_lock_unlock_with_key_or_password() {
-    init_test_data_dir();
-    let key_directory = tempfile::tempdir().unwrap();
-    let key_path = key_directory.path().join("lock-unlock.key");
-    let key = PasswordType::Key(key_path.to_string_lossy().into_owned());
-    gen_master_key(&mut key.clone(), true);
-    for (label, credential) in [
-        ("key", key),
-        (
-            "password",
-            PasswordType::Password("test_password1234!".into()),
-        ),
-    ] {
-        let filename = random_vault_filename();
-        let vlt = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: String::from("test"),
-                username: Some(String::from("test")),
-                password: String::from("test123"),
-                url: None,
-                notes: None,
-                created: chrono::Local::now().to_string(),
-                modified: chrono::Local::now().to_string(),
-            }],
-            metadata: VaultMetadata {
-                filename: filename.clone(),
-                duo_session: None,
-            },
-            recovery: RecoveryData::default(),
-        };
-        let mut info = ServerInfo {
-            locked: false,
-            keypass: Some(credential.clone()),
-        };
-        write_vault(&vlt, &mut info).unwrap();
-        vlt.lock_vault(&mut info).unwrap();
-        let vlt1 = unlock_vault(&mut ServerInfo {
-            locked: true,
-            keypass: Some(credential),
-        })
-        .unwrap();
-        let data_path = data_dir();
-        let file_path = data_path.join(&filename);
-        fs::remove_file(file_path).unwrap();
-        assert_eq!(vlt.entries, vlt1.entries, "{label}");
-        assert_eq!(vlt.metadata, vlt1.metadata, "{label}");
-        assert_eq!(vlt1.recovery.next_entry_id, 2, "{label}");
-    }
-}
-
-#[test]
-fn test_create_vault_with_key_or_password() {
-    init_test_data_dir();
-    for locked in [false, true] {
-        let key_directory = tempfile::tempdir().unwrap();
-        let key_path = key_directory.path().join("create-vault.key");
-        let password = if locked {
-            "Cedar-Lantern-Quartz-4821!"
-        } else {
-            "Cedar-Lantern-Quartz-9274!"
-        };
-        for (label, credential) in [
-            (
-                "key",
-                PasswordType::Key(key_path.to_string_lossy().into_owned()),
-            ),
-            ("password", PasswordType::Password(password.into())),
-        ] {
-            let mut vault = None;
-            let mut server_info = ServerInfo {
-                locked: true,
-                keypass: Some(credential.clone()),
-            };
-            create_vault(&mut vault, &mut server_info, locked).unwrap();
-            let (filename, mut stored) = find_vault(&mut credential.clone()).unwrap();
-            stored.zeroize();
-            if locked {
-                assert!(vault.is_none(), "{label}, locked={locked}");
-            } else {
-                assert_eq!(
-                    vault,
-                    Some(Vault {
-                        entries: Vec::new(),
-                        metadata: VaultMetadata {
-                            filename: filename.clone(),
-                            duo_session: None,
-                        },
-                        recovery: RecoveryData::default(),
-                    }),
-                    "{label}, locked={locked}"
-                );
-            }
-            fs::remove_file(data_dir().join(filename)).unwrap();
-        }
-    }
-}
-
-#[test]
-fn delete_key_vault_applies_the_requested_key_retention_policy() {
-    init_test_data_dir();
-    for keep_key in [false, true] {
-        let key_directory = tempfile::tempdir().unwrap();
-        let key_path = key_directory
-            .path()
-            .join("delete-vault.key")
-            .to_string_lossy()
-            .into_owned();
-        let mut vault = None;
-        let mut server_info = ServerInfo {
-            locked: true,
-            keypass: Some(PasswordType::Key(key_path.clone())),
-        };
-        create_vault(&mut vault, &mut server_info, true).unwrap();
-        let (filename, mut stored) = find_vault(&mut PasswordType::Key(key_path.clone())).unwrap();
-        stored.zeroize();
-        delete_vault(PasswordType::Key(key_path.clone()), keep_key).unwrap();
-        assert!(!data_dir().join(filename).exists(), "keep_key={keep_key}");
-        assert_eq!(
-            Path::new(&key_path).is_file(),
-            keep_key,
-            "keep_key={keep_key}"
-        );
-    }
-}
-
-#[test]
-fn new_vault_rekey_and_backup_passwords_enforce_the_minimum() {
-    init_test_data_dir();
-    let mut vault = None;
-    let mut server_info = ServerInfo {
-        locked: true,
-        keypass: Some(PasswordType::Password("short".into())),
-    };
-    assert!(create_vault(&mut vault, &mut server_info, false).is_err());
-    assert!(vault.is_none());
-
-    let mut detached = Vault::default();
-    assert!(
-        detached
-            .rekey(
-                &mut ServerInfo::default(),
-                PasswordType::Password("short".into())
-            )
-            .is_err()
-    );
-
-    let output_dir = tempfile::tempdir().unwrap();
-    let path = output_dir.path().join("weak-password.pmbackup");
-    let mut short = PasswordType::Password("short".into());
-    assert!(
-        detached
-            .encrypted_backup(path.display().to_string(), &mut short, false)
-            .is_err()
-    );
-    assert!(!path.exists());
-}
-
-#[test]
-fn test_rekey_replaces_vault_and_new_password_unlocks() {
-    init_test_data_dir();
-    let unique = format!("{:016x}", rand::random::<u64>());
-    let mut server_info = ServerInfo {
-        locked: false,
-        keypass: Some(PasswordType::Password(format!("old-{unique}"))),
-    };
-    let mut vault = None;
-    create_vault(&mut vault, &mut server_info, false).unwrap();
-    let old_path = data_dir().join(&vault.as_ref().unwrap().metadata.filename);
-    let new_password = PasswordType::Password(format!("new-{unique}"));
-    vault
-        .as_mut()
-        .unwrap()
-        .rekey(&mut server_info, new_password.clone())
-        .unwrap();
-    let new_path = data_dir().join(&vault.as_ref().unwrap().metadata.filename);
-    assert_eq!(old_path, new_path);
-    assert!(new_path.exists());
-    let mut unlock_info = ServerInfo {
-        locked: true,
-        keypass: Some(new_password),
-    };
-    assert!(unlock_vault(&mut unlock_info).is_some());
-    fs::remove_file(new_path).unwrap();
-}
-#[test]
-fn test_add_duplicate_entry_name() {
-    let mut vlt = recovery_test_vault(Vec::new());
-    let mut credentials = ServerInfo::default();
-    for (username, password, added, count) in [
-        ("user1", "pass1", true, 1),
-        ("user2", "pass2", true, 2),
-        ("user1", "pass3", false, 2),
-    ] {
-        let before = vlt.clone();
-        assert_eq!(
-            vlt.add_entry(
-                PasswordEntry {
-                    name: "test".into(),
-                    username: Some(username.into()),
-                    password: password.into(),
-                    url: None,
-                    notes: None,
-                    copy: false,
-                },
-                &mut credentials,
-            )
-            .unwrap(),
-            added,
-            "{username}, expected added={added}"
-        );
-        assert_eq!(vlt.entries.len(), count);
-        if !added {
-            assert_eq!(vlt, before, "duplicate must preserve the existing secret");
-        }
-    }
-}
-#[test]
-fn entry_ids_are_sequential_and_deletion_preserves_other_ids() {
-    let mut vlt = recovery_test_vault(Vec::new());
-    for i in 0..5 {
-        assert!(
-            vlt.add_entry(
-                PasswordEntry {
-                    name: format!("entry{}", i),
-                    username: Some(format!("user{}", i)),
-                    password: format!("pass{}", i),
-                    url: None,
-                    notes: None,
-                    copy: false,
-                },
-                &mut ServerInfo {
-                    locked: true,
-                    keypass: None,
-                },
-            )
-            .unwrap()
-        );
-    }
-    assert_eq!(vlt.entries.len(), 5);
-    for (index, entry) in vlt.entries.iter().enumerate() {
-        assert_eq!(entry.id, index + 1);
-    }
-    assert!(
-        vlt.delete_entry(
-            Target::Id(2),
-            &mut ServerInfo {
-                locked: true,
-                keypass: None,
-            },
-        )
-        .unwrap()
+        target.item(1).unwrap().entry.password,
+        source.item(1).unwrap().entry.password
     );
     assert_eq!(
-        vlt.entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        vec![1, 3, 4, 5]
+        target.item(1).unwrap().entry.notes,
+        source.item(1).unwrap().entry.notes
     );
 }
-
 #[test]
-fn test_delete_name_with_only_first_match() {
-    let second = recovery_test_entry(2, "dup", "user2", "pass2");
-    let mut vlt = recovery_test_vault(vec![
-        recovery_test_entry(1, "dup", "user1", "pass1"),
-        second.clone(),
-    ]);
-    assert!(
-        vlt.delete_entry(Target::Name("dup".into()), &mut ServerInfo::default())
-            .unwrap()
-    );
-    assert_eq!(vlt.entries, [second]);
-}
-
-#[test]
-fn test_update_individual_and_all_fields() {
-    for field in ["password", "url", "notes", "all"] {
-        let all = field == "all";
-        let mut initial = recovery_test_entry(
-            1,
-            if all { "original" } else { "test" },
-            if all { "old_user" } else { "test" },
-            if all {
-                "old_pass"
-            } else if field == "password" {
-                "oldpass"
-            } else {
-                "test123"
-            },
-        );
-        initial.url = all.then(|| "http://old.com".into());
-        initial.notes = all.then(|| "old notes".into());
-        initial.created = chrono::Local::now().to_string();
-        initial.modified = initial.created.clone();
-        let mut vault = recovery_test_vault(vec![initial.clone()]);
-        let update = EntryChanges {
-            name: all.then(|| "new_name".into()),
-            username: all.then(|| "new_user".into()),
-            url: (all || field == "url").then(|| {
-                if all {
-                    "https://new.com"
-                } else {
-                    "https://example.com"
-                }
-                .into()
-            }),
-            notes: (all || field == "notes")
-                .then(|| if all { "new notes" } else { "important notes" }.into()),
-        };
-        let password =
-            (all || field == "password").then(|| if all { "new_pass" } else { "newpass" }.into());
-        assert!(
-            vault
-                .update_entry_with_limit(
-                    EntryUpdate {
-                        target: Target::Id(1),
-                        update,
-                        password
-                    },
-                    &mut ServerInfo::default(),
-                    HISTORY_LIMIT
-                )
-                .unwrap(),
-            "{field}"
-        );
-        let entry = &vault.entries[0];
-        assert_eq!(entry.name, if all { "new_name" } else { "test" }, "{field}");
-        assert_eq!(
-            entry.username.as_deref(),
-            Some(if all { "new_user" } else { "test" }),
-            "{field}"
-        );
-        assert_eq!(
-            entry.password,
-            if all {
-                "new_pass"
-            } else if field == "password" {
-                "newpass"
-            } else {
-                "test123"
-            },
-            "{field}"
-        );
-        assert_eq!(
-            entry.url.as_deref(),
-            if all {
-                Some("https://new.com")
-            } else if field == "url" {
-                Some("https://example.com")
-            } else {
-                None
-            },
-            "{field}"
-        );
-        assert_eq!(
-            entry.notes.as_deref(),
-            if all {
-                Some("new notes")
-            } else if field == "notes" {
-                Some("important notes")
-            } else {
-                None
-            },
-            "{field}"
-        );
-        assert_eq!(entry.created, initial.created, "{field}");
-    }
-}
-
-#[test]
-fn test_update_no_changes() {
-    let mut entry = recovery_test_entry(1, "test", "test", "test123");
-    entry.url = None;
-    let mut vlt = recovery_test_vault(vec![entry]);
-    let before = vlt.clone();
-    assert!(
-        !vlt.update_entry_with_limit(
-            EntryUpdate {
-                target: Target::Id(1),
-                update: EntryChanges::default(),
-                password: None,
-            },
-            &mut ServerInfo::default(),
-            HISTORY_LIMIT,
-        )
-        .unwrap()
-    );
-    assert_eq!(vlt, before);
-}
-
-fn recovery_test_vault(entries: Vec<VaultEntry>) -> Vault {
-    Vault {
-        entries,
-        metadata: VaultMetadata {
-            filename: "test.enc".into(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    }
-}
-
-fn recovery_test_entry(id: usize, name: &str, username: &str, password: &str) -> VaultEntry {
-    VaultEntry {
-        id,
-        name: name.into(),
-        username: Some(username.into()),
-        password: password.into(),
-        url: Some("example.com".into()),
-        notes: None,
-        created: "created".into(),
-        modified: "modified".into(),
-    }
-}
-
-#[test]
-fn password_updates_create_restorable_history() {
-    let mut vault = recovery_test_vault(vec![recovery_test_entry(1, "site", "alice", "old")]);
-    let mut server_info = ServerInfo::default();
-    vault
-        .update_entry_with_limit(
-            EntryUpdate {
-                target: Target::Id(1),
-                update: EntryChanges {
-                    name: None,
-                    username: None,
-                    url: None,
-                    notes: None,
-                },
-                password: Some("new".into()),
-            },
-            &mut server_info,
-            HISTORY_LIMIT,
-        )
-        .unwrap();
-    assert_eq!(vault.recovery.password_history[0].password, "old");
-    vault
-        .restore_password(Target::Id(1), 1, &mut server_info)
-        .unwrap();
-    assert_eq!(vault.entries[0].password, "old");
-    assert_eq!(vault.recovery.password_history[0].password, "new");
-}
-
-#[test]
-fn password_history_respects_default_custom_and_disabled_limits() {
-    for (limit, changes, oldest) in [(HISTORY_LIMIT, 15, "p5"), (2, 3, "p1")] {
-        let mut vault = recovery_test_vault(vec![recovery_test_entry(1, "site", "alice", "p0")]);
-        for index in 1..=changes {
-            let old = std::mem::replace(&mut vault.entries[0].password, format!("p{index}"));
-            vault.push_password_history_with_limit(1, old, limit);
-        }
-        assert_eq!(
-            vault.recovery.password_history.len(),
-            limit,
-            "limit={limit}"
-        );
-        assert_eq!(
-            vault.recovery.password_history[0].password, oldest,
-            "limit={limit}"
-        );
-        let retained = vault.recovery.password_history.clone();
-        vault.push_password_history_with_limit(1, "discarded".into(), 0);
-        assert_eq!(
-            vault.recovery.password_history, retained,
-            "disabled limit after limit={limit}"
-        );
-    }
-}
-
-#[test]
-fn stable_ids_survive_delete_add_and_restore() {
-    let mut vault = recovery_test_vault(vec![
-        recovery_test_entry(4, "first", "alice", "one"),
-        recovery_test_entry(9, "second", "bob", "two"),
-    ]);
-    let mut server_info = ServerInfo::default();
-
-    assert!(vault.delete_entry(Target::Id(4), &mut server_info).unwrap());
-    assert_eq!(vault.entries[0].id, 9);
-    vault
-        .add_entry(
-            PasswordEntry {
-                name: "third".into(),
-                username: Some("carol".into()),
-                password: "three".into(),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            &mut server_info,
-        )
-        .unwrap();
-    assert_eq!(vault.entries[1].id, 10);
-
-    assert!(vault.restore_trashed(1, &mut server_info).unwrap());
-    assert_eq!(vault.entries[2].id, 4);
-    assert_eq!(vault.recovery.next_entry_id, 11);
-
-    vault
-        .delete_entry(Target::Id(10), &mut server_info)
-        .unwrap();
-    vault.purge_trash(None, &mut server_info).unwrap();
-    vault
-        .add_entry(
-            PasswordEntry {
-                name: "fourth".into(),
-                username: Some("dana".into()),
-                password: "four".into(),
-                url: None,
-                notes: None,
-                copy: false,
-            },
-            &mut server_info,
-        )
-        .unwrap();
-    assert_eq!(vault.entries.last().unwrap().id, 11);
-}
-
-#[test]
-fn search_is_case_insensitive_combines_filters_and_excludes_passwords() {
-    let mut first = recovery_test_entry(3, "GitHub", "Alice", "hidden-token");
-    first.url = Some("https://github.com/login".into());
-    first.notes = Some("Personal account".into());
-    let mut second = recovery_test_entry(8, "GitLab", "alice-work", "different-secret");
-    second.url = Some("https://gitlab.example".into());
-    second.notes = Some("Work account".into());
-    let vault = recovery_test_vault(vec![first, second]);
-
-    let query_results = vault.search_entries(&SearchFilter {
-        query: Some("ALICE".into()),
-        ..SearchFilter::default()
-    });
-    assert_eq!(query_results.len(), 2);
-
-    let filtered = vault.search_entries(&SearchFilter {
-        name: Some("git".into()),
-        url: Some("github.com".into()),
-        notes: Some("personal".into()),
-        ..SearchFilter::default()
-    });
-    assert_eq!(filtered.len(), 1);
-    assert_eq!(filtered[0].id, 3);
-
-    let password_results = vault.search_entries(&SearchFilter {
-        query: Some("hidden-token".into()),
-        ..SearchFilter::default()
-    });
-    assert!(password_results.is_empty());
-}
-
-#[test]
-fn additional_urls_are_searchable_and_used_only_for_login_autofill() {
-    let login = recovery_test_entry(3, "Example", "alice", "strong-enough-secret");
-    let note = recovery_test_entry(4, "Private note", "", "not-for-the-browser");
-    let metadata = vec![
-        EntryMetadata {
-            entry_id: 3,
-            kind: ItemKind::Login,
-            additional_urls: vec!["https://accounts.example.net/login".into()],
-            password_changed: None,
-            custom_fields: Vec::new(),
-        },
-        EntryMetadata {
-            entry_id: 4,
-            kind: ItemKind::SecureNote,
-            additional_urls: vec!["https://notes.example.net".into()],
-            password_changed: None,
-            custom_fields: Vec::new(),
-        },
-    ];
-    let mut vault = recovery_test_vault(vec![login.clone(), note.clone()]);
-    vault.recovery.entry_metadata = metadata.clone();
-
-    let matches = vault.search_entries(&SearchFilter {
-        url: Some("accounts.example.net".into()),
-        ..SearchFilter::default()
-    });
-    assert_eq!(
-        matches.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        [3]
-    );
-    assert!(url_match_json(&[login], &[], &metadata, "accounts.example.net").is_some());
-    assert!(url_match_json(&[note], &[], &metadata, "notes.example.net").is_none());
-}
-
-#[test]
-fn typed_add_and_update_persist_item_metadata_by_stable_id() {
-    let mut vault = recovery_test_vault(Vec::new());
-    let mut server_info = ServerInfo::default();
-    assert!(
-        vault
-            .add_typed_entry(
-                TypedEntry {
-                    entry: PasswordEntry {
-                        name: "Router".into(),
-                        username: Some("WPA3".into()),
-                        password: "network-secret".into(),
-                        url: Some("https://router.example".into()),
-                        notes: None,
-                        copy: false,
-                    },
-                    kind: ItemKind::Wifi,
-                    additional_urls: vec![
-                        "https://backup-router.example".into(),
-                        "https://backup-router.example".into(),
-                    ],
-                    custom_fields: vec![
-                        CustomField {
-                            name: "location".into(),
-                            value: "upstairs".into(),
-                            secret: false,
-                        },
-                        CustomField {
-                            name: "admin-pin".into(),
-                            value: "8192".into(),
-                            secret: true,
-                        },
-                    ],
-                },
-                &mut server_info,
-            )
-            .unwrap()
-    );
-    let entry_id = vault.entries[0].id;
-    assert_eq!(vault.item_kind(entry_id), ItemKind::Wifi);
-    assert_eq!(vault.custom_fields(entry_id).len(), 2);
-    assert_eq!(
-        vault
-            .search_entries(&SearchFilter {
-                query: Some("upstairs".into()),
-                ..SearchFilter::default()
-            })
-            .len(),
-        1
-    );
-    assert!(
-        vault
-            .search_entries(&SearchFilter {
-                query: Some("8192".into()),
-                ..SearchFilter::default()
-            })
-            .is_empty()
-    );
-    assert_eq!(
-        vault.all_urls(&vault.entries[0]).collect::<Vec<_>>(),
-        ["https://router.example", "https://backup-router.example"]
-    );
-
-    assert!(
-        vault
-            .update_typed_entry_with_limit(
-                TypedUpdate {
-                    entry: EntryUpdate {
-                        target: Target::Id(entry_id),
-                        update: EntryChanges {
-                            name: None,
-                            username: None,
-                            url: None,
-                            notes: None,
-                        },
-                        password: None,
-                    },
-                    kind: Some(ItemKind::Login),
-                    add_url: vec!["https://new.example".into()],
-                    remove_url: vec!["https://router.example".into()],
-                    clear_urls: false,
-                    set_fields: vec![CustomField {
-                        name: "location".into(),
-                        value: "downstairs".into(),
-                        secret: false,
-                    }],
-                    remove_fields: vec!["admin-pin".into()],
-                    clear_fields: false,
-                },
-                &mut server_info,
-                HISTORY_LIMIT,
-            )
-            .unwrap()
-    );
-    assert_eq!(vault.item_kind(entry_id), ItemKind::Login);
-    assert_eq!(
-        vault.custom_fields(entry_id),
-        [CustomField {
-            name: "location".into(),
-            value: "downstairs".into(),
-            secret: false,
-        }]
-    );
-    assert_eq!(
-        vault.all_urls(&vault.entries[0]).collect::<Vec<_>>(),
-        ["https://backup-router.example", "https://new.example"]
-    );
-}
-
-#[test]
-fn import_preview_and_conflict_policies_are_deterministic() {
-    let mut existing = recovery_test_entry(7, "Example", "alice", "old-password");
-    existing.url = Some("https://example.com".into());
-    let mut vault = recovery_test_vault(vec![existing]);
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "name,username,password,url").unwrap();
-    writeln!(file, "Example,alice,new-password,https://example.com").unwrap();
-    let path = file.path().display().to_string();
-    let mut server_info = ServerInfo::default();
-
-    let before = vault.clone();
-    let preview = vault
-        .import_with_options(
-            path.clone(),
-            ConflictPolicy::Replace,
-            true,
-            1,
-            &mut server_info,
-        )
-        .unwrap();
-    assert_eq!(preview.total, 1);
-    assert_eq!(preview.replaced, 1);
-    assert_eq!(vault, before);
-
-    let replaced = vault
-        .import_with_options(
-            path.clone(),
-            ConflictPolicy::Replace,
-            false,
-            1,
-            &mut server_info,
-        )
-        .unwrap();
-    assert_eq!(replaced.replaced, 1);
-    assert_eq!(vault.entries[0].id, 7);
-    assert_eq!(vault.entries[0].password, "new-password");
-    assert_eq!(vault.recovery.password_history.len(), 1);
-
-    let kept = vault
-        .import_with_options(path, ConflictPolicy::KeepBoth, false, 1, &mut server_info)
-        .unwrap();
-    assert_eq!(kept.renamed, 1);
-    assert_eq!(vault.entries.len(), 2);
-    assert_eq!(vault.entries[1].name, "Example (imported)");
-}
-
-#[test]
-fn replacement_imports_refresh_password_age_only_when_the_secret_changes() {
+fn oversize_import_is_rejected_before_parsing_or_mutation() {
     let directory = tempfile::tempdir().unwrap();
-    for portable in [false, true] {
-        for limit in [0, HISTORY_LIMIT] {
-            let mut entry = recovery_test_entry(7, "Example", "alice", "old-password");
-            entry.created = "2000-01-01T00:00:00Z".into();
-            let mut vault = recovery_test_vault(vec![entry.clone()]);
-            vault.recovery.entry_metadata.push(EntryMetadata {
-                entry_id: 7,
-                password_changed: Some("2001-01-01T00:00:00Z".into()),
-                ..EntryMetadata::default()
-            });
-            assert!(vault.password_is_stale(&vault.entries[0], 365));
-            let path = directory.path().join(if portable {
-                "replace.json"
-            } else {
-                "replace.csv"
-            });
-            if portable {
-                entry.password = "new-password".into();
-                let mut source = recovery_test_vault(vec![entry]);
-                source.recovery.entry_metadata.push(EntryMetadata {
-                    entry_id: 7,
-                    password_changed: Some("2002-01-01T00:00:00Z".into()),
-                    ..EntryMetadata::default()
-                });
-                source.export(path.display().to_string(), true).unwrap();
-            } else {
-                fs::write(
-                    &path,
-                    "name,username,password,url\nExample,alice,new-password,example.com\n",
-                )
-                .unwrap();
-            }
-            let mut server_info = ServerInfo::default();
-            vault
-                .import_with_options(
-                    path.display().to_string(),
-                    ConflictPolicy::Replace,
-                    false,
-                    limit,
-                    &mut server_info,
-                )
-                .unwrap();
-            assert_eq!(vault.entries[0].id, 7);
-            assert_eq!(vault.entries[0].created, "2000-01-01T00:00:00Z");
-            assert_eq!(vault.entries[0].password, "new-password");
-            assert!(!vault.password_is_stale(&vault.entries[0], 365));
-            assert_eq!(
-                vault.recovery.password_history.len(),
-                usize::from(limit > 0)
-            );
-            if !portable {
-                let changed = vault.password_changed(&vault.entries[0]).to_string();
-                vault
-                    .import_with_options(
-                        path.display().to_string(),
-                        ConflictPolicy::Replace,
-                        false,
-                        limit,
-                        &mut server_info,
-                    )
-                    .unwrap();
-                assert_eq!(vault.password_changed(&vault.entries[0]), changed);
-                assert_eq!(
-                    vault.recovery.password_history.len(),
-                    usize::from(limit > 0)
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn date_sorting_uses_instants_across_formats_offsets_and_unknown_dates() {
-    let timestamps = [
-        (1, "2025-01-01T00:00:00-07:00"),
-        (2, "2025-01-01T01:00:00+00:00"),
-        (3, "2025-01-01 02:00:00 +00:00"),
-        (4, "unknown"),
-    ];
-    let mut vault = recovery_test_vault(
-        timestamps
-            .iter()
-            .map(|(id, timestamp)| {
-                let mut entry = recovery_test_entry(*id, "Example", "alice", "secret");
-                entry.created = timestamp.to_string();
-                entry.modified = timestamp.to_string();
-                entry
-            })
-            .collect(),
-    );
-    // Password-age sorting must use its own metadata, rather than creation time.
-    vault.recovery.entry_metadata = timestamps
-        .iter()
-        .map(|(id, timestamp)| EntryMetadata {
-            entry_id: 5 - id,
-            password_changed: Some(timestamp.to_string()),
-            ..EntryMetadata::default()
-        })
-        .collect();
-    for sort in [
-        SortField::Created,
-        SortField::Modified,
-        SortField::PasswordAge,
-    ] {
-        for descending in [false, true] {
-            let mut expected = if sort == SortField::PasswordAge {
-                vec![1, 3, 2, 4]
-            } else {
-                vec![4, 2, 3, 1]
-            };
-            if descending {
-                expected.reverse();
-            }
-            let sorted = vault
-                .view_entries(ListOptions {
-                    sort,
-                    descending,
-                    ..ListOptions::default()
-                })
-                .unwrap();
-            assert_eq!(
-                sorted.iter().map(|view| view.entry.id).collect::<Vec<_>>(),
-                expected
-            );
-        }
-    }
-}
-
-#[test]
-fn oversized_import_files_are_rejected_before_their_contents_are_read() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("oversized.json");
+    let path = directory.path().join("oversize.json");
     let file = fs::File::create(&path).unwrap();
     file.set_len(MAX_IMPORT_BYTES + 1).unwrap();
-
-    let error = Vault::default()
-        .import_with_options(
-            path.display().to_string(),
-            ConflictPolicy::Skip,
-            true,
-            1,
-            &mut ServerInfo::default(),
-        )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("128 MiB limit"), "{error}");
-}
-
-#[test]
-fn imports_with_too_many_items_are_rejected_before_vault_changes() {
-    let mut file = NamedTempFile::new().unwrap();
-    {
-        let mut writer = std::io::BufWriter::new(file.as_file_mut());
-        writeln!(writer, "name,username,password,url").unwrap();
-        for index in 0..=MAX_IMPORT_ITEMS {
-            writeln!(writer, "item-{index},user,password,").unwrap();
-        }
-        writer.flush().unwrap();
-    }
-    let mut vault = recovery_test_vault(vec![recovery_test_entry(
-        1,
-        "existing",
-        "alice",
-        "unchanged",
-    )]);
+    let mut vault = memory();
     let before = vault.clone();
-
-    let error = vault
-        .import_with_options(
-            file.path().display().to_string(),
-            ConflictPolicy::Skip,
-            false,
-            1,
-            &mut ServerInfo::default(),
-        )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("100000 item limit"), "{error}");
+    assert!(
+        vault
+            .import_with_options(
+                path.display().to_string(),
+                ConflictPolicy::Skip,
+                false,
+                10,
+                &mut VaultCredentials::default()
+            )
+            .is_err()
+    );
     assert_eq!(vault, before);
-}
-
-#[test]
-fn indexed_import_conflicts_track_entries_added_in_the_same_batch() {
-    let mut existing = recovery_test_entry(7, "Example", "alice", "old-password");
-    existing.url = Some("https://example.com".into());
-    let mut vault = recovery_test_vault(vec![existing]);
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "name,username,password,url").unwrap();
-    writeln!(file, "Example,alice,first,https://example.com").unwrap();
-    writeln!(file, "Example,alice,second,https://example.com").unwrap();
-
-    let report = vault
-        .import_with_options(
-            file.path().display().to_string(),
-            ConflictPolicy::KeepBoth,
-            false,
-            1,
-            &mut ServerInfo::default(),
-        )
-        .unwrap();
-
-    assert_eq!(report.renamed, 2);
-    assert_eq!(vault.entries[1].name, "Example (imported)");
-    assert_eq!(vault.entries[2].name, "Example (imported 2)");
-}
-
-#[test]
-fn trash_retention_expires_only_old_items_and_removes_associated_records() {
-    let mut vault = recovery_test_vault(Vec::new());
-    let old = TrashedEntry {
-        entry: recovery_test_entry(11, "old", "alice", "secret"),
-        history: Vec::new(),
-        deleted: (chrono::Local::now() - chrono::Duration::days(60)).to_string(),
-    };
-    let recent = TrashedEntry {
-        entry: recovery_test_entry(12, "recent", "bob", "secret"),
-        history: Vec::new(),
-        deleted: chrono::Local::now().to_string(),
-    };
-    vault.recovery.trash = vec![old, recent];
-    vault.recovery.entry_metadata.push(EntryMetadata {
-        entry_id: 11,
-        ..EntryMetadata::default()
-    });
-    vault.recovery.totp.push(TotpRecord {
-        entry_id: 11,
-        configuration: "secret".into(),
-    });
-    let purged = vault
-        .purge_expired_trash(30, &mut ServerInfo::default())
-        .unwrap();
-    assert_eq!(purged, 1);
-    assert_eq!(vault.recovery.trash[0].entry.id, 12);
-    assert!(vault.recovery.entry_metadata.is_empty());
-    assert!(vault.recovery.totp.is_empty());
-}
-
-#[test]
-fn oversized_day_thresholds_do_not_panic_or_expire_records() {
-    let now = chrono::Utc::now();
-    let mut entry = recovery_test_entry(11, "old", "alice", "synthetic-secret");
-    entry.created = (now - chrono::Duration::days(60)).to_rfc3339();
-    let mut vault = recovery_test_vault(vec![entry.clone()]);
-    vault.recovery.trash.push(TrashedEntry {
-        entry: recovery_test_entry(12, "deleted", "bob", "synthetic-secret"),
-        history: Vec::new(),
-        deleted: (chrono::Local::now() - chrono::Duration::days(60)).to_string(),
-    });
-    let before = vault.clone();
-    for days in [u64::MAX, i64::MAX as u64, (i64::MAX / 86_400) as u64] {
-        assert!(!password_is_stale_at(&entry.created, days, now));
-        assert!(
-            vault
-                .apply_list_options(
-                    vault.entries.iter().collect(),
-                    &ListOptions {
-                        stale_days: Some(days),
-                        ..Default::default()
-                    },
-                )
-                .is_empty()
-        );
-        assert!(
-            vault
-                .audit_snapshot(&AuditOptions {
-                    stale_days: Some(days),
-                    ..Default::default()
-                })
-                .entries
-                .iter()
-                .all(|entry| !entry.stale)
-        );
-        assert_eq!(
-            vault
-                .purge_expired_trash(days, &mut ServerInfo::default())
-                .unwrap(),
-            0
-        );
-        assert_eq!(vault, before);
-    }
-    assert!(password_is_stale_at(&entry.created, 30, now));
-}
-
-#[test]
-fn list_options_filter_item_type_totp_and_weakness_and_sort_results() {
-    let mut alpha = recovery_test_entry(8, "Alpha", "alice", "A-very-long-unique-password-42!");
-    alpha.created = "2024-01-01".into();
-    let mut beta = recovery_test_entry(2, "beta", "bob", "password");
-    beta.created = "2023-01-01".into();
-    let mut vault = recovery_test_vault(vec![alpha, beta]);
-    vault.recovery.entry_metadata = vec![EntryMetadata {
-        entry_id: 2,
-        kind: ItemKind::Wifi,
-        additional_urls: Vec::new(),
-        password_changed: Some("2025-01-01T00:00:00Z".into()),
-        custom_fields: Vec::new(),
-    }];
-    vault.recovery.totp.push(TotpRecord {
-        entry_id: 8,
-        configuration: "secret".into(),
-    });
-
-    let typed = vault.apply_list_options(
-        vault.entries.iter().collect(),
-        &ListOptions {
-            kind: Some(ItemKind::Wifi),
-            ..ListOptions::default()
-        },
-    );
-    assert_eq!(typed.iter().map(|entry| entry.id).collect::<Vec<_>>(), [2]);
-
-    let with_totp = vault.apply_list_options(
-        vault.entries.iter().collect(),
-        &ListOptions {
-            has_totp: Some(true),
-            ..ListOptions::default()
-        },
-    );
-    assert_eq!(
-        with_totp.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        [8]
-    );
-
-    let weak = vault.apply_list_options(
-        vault.entries.iter().collect(),
-        &ListOptions {
-            weak: true,
-            ..ListOptions::default()
-        },
-    );
-    assert_eq!(weak.iter().map(|entry| entry.id).collect::<Vec<_>>(), [2]);
-
-    let stale = vault.apply_list_options(
-        vault.entries.iter().collect(),
-        &ListOptions {
-            stale_days: Some(365),
-            ..ListOptions::default()
-        },
-    );
-    assert_eq!(stale.iter().map(|entry| entry.id).collect::<Vec<_>>(), [2]);
-
-    let sorted = vault.apply_list_options(
-        vault.entries.iter().collect(),
-        &ListOptions {
-            sort: SortField::Name,
-            descending: true,
-            ..ListOptions::default()
-        },
-    );
-    assert_eq!(
-        sorted.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        [2, 8]
-    );
-}
-
-#[test]
-fn totp_matches_rfc_6238_sha1_vectors() {
-    let raw = "GEZD GNBV-GY3TQOJQ GEZDGNBVGY3TQOJQ";
-    let (normalized, bits) = normalize_totp_configuration(raw).unwrap();
-    assert_eq!(normalized, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
-    assert_eq!(bits, 160);
-    let totp = parse_totp_configuration(&normalized).unwrap();
-    assert_eq!(totp.generate(59).to_string(), "287082");
-
-    let uri = "otpauth://totp/RFC?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30";
-    let totp = parse_totp_configuration(uri).unwrap();
-    assert_eq!(totp.generate(59).to_string(), "94287082");
-}
-
-#[test]
-fn totp_accepts_github_compatible_80_bit_secrets() {
-    let github_secret = "GEZDGNBVGY3TQOJQ";
-    let (normalized, bits) = normalize_totp_configuration(github_secret).unwrap();
-    assert_eq!(bits, 80);
-    let raw_totp = parse_totp_configuration(&normalized).unwrap();
-
-    let uri = format!(
-        "otpauth://totp/GitHub:test?secret={github_secret}&issuer=GitHub&algorithm=SHA1&digits=6&period=30"
-    );
-    let (normalized_uri, uri_bits) = normalize_totp_configuration(&uri).unwrap();
-    assert_eq!(uri_bits, 80);
-    let uri_totp = parse_totp_configuration(&normalized_uri).unwrap();
-    assert_eq!(raw_totp.generate(59), uri_totp.generate(59));
-
-    assert!(normalize_totp_configuration("GEZDGNBVGY3TQ").is_err());
-}
-
-#[test]
-fn totp_and_duo_follow_trash_restore_and_are_erased_on_purge() {
-    let mut vault =
-        recovery_test_vault(vec![recovery_test_entry(7, "service", "alice", "password")]);
-    let mut server_info = ServerInfo::default();
-    let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-
-    assert_eq!(
-        vault
-            .set_totp(Target::Id(7), secret, &mut server_info)
-            .unwrap(),
-        Some(160)
-    );
-    assert_eq!(vault.totp_at(&Target::Id(7), 59).unwrap().0, "287082");
-    vault.recovery.duo.push(DuoRecord {
-        review_key: None,
-        entry_id: 7,
-        credentials: DuoCredentials {
-            private_key: "synthetic".into(),
-            host: String::new(),
-            akey: String::new(),
-            pkey: String::new(),
-        },
-    });
-
-    assert!(vault.delete_entry(Target::Id(7), &mut server_info).unwrap());
-    assert!(vault.entries.is_empty());
-    assert_eq!(vault.recovery.trash.len(), 1);
-    assert!(vault.totp_at(&Target::Id(7), 59).is_err());
-    assert_eq!(vault.recovery.totp[0].entry_id, 7);
-    assert_eq!(vault.recovery.duo[0].entry_id, 7);
-    assert!(vault.restore_trashed(1, &mut server_info).unwrap());
-    assert_eq!(vault.entries[0].name, "service");
-    assert!(vault.recovery.trash.is_empty());
-    assert_eq!(vault.totp_at(&Target::Id(7), 59).unwrap().0, "287082");
-
-    assert!(vault.delete_entry(Target::Id(7), &mut server_info).unwrap());
-    assert!(vault.purge_trash(None, &mut server_info).unwrap());
-    assert!(vault.recovery.trash.is_empty());
-    assert!(vault.recovery.totp.is_empty());
-    assert!(vault.recovery.duo.is_empty());
-}
-
-#[test]
-fn totp_rejects_invalid_configuration_and_can_be_removed() {
-    let mut vault =
-        recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
-    let mut server_info = ServerInfo::default();
-    assert!(
-        vault
-            .set_totp(Target::Id(1), "not base32!", &mut server_info)
-            .is_err()
-    );
-    assert!(vault.recovery.totp.is_empty());
-
-    vault
-        .set_totp(
-            Target::Id(1),
-            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
-            &mut server_info,
-        )
-        .unwrap();
-    assert!(vault.remove_totp(Target::Id(1), &mut server_info).unwrap());
-    assert!(vault.recovery.totp.is_empty());
-    assert!(!vault.remove_totp(Target::Id(1), &mut server_info).unwrap());
-}
-
-#[test]
-fn incomplete_recovery_data_is_rejected() {
-    #[derive(Serialize)]
-    struct IncompleteRecoveryData {
-        password_history: Vec<PasswordRevision>,
-        trash: Vec<TrashedEntry>,
-        next_entry_id: usize,
-    }
-
-    let encoded = rmp_serde::to_vec(&IncompleteRecoveryData {
-        password_history: Vec::new(),
-        trash: Vec::new(),
-        next_entry_id: 12,
-    })
-    .unwrap();
-    assert!(rmp_serde::from_slice::<RecoveryData>(&encoded).is_err());
-}
-
-#[test]
-fn totp_secrets_are_redacted_and_only_in_full_fidelity_json_exports() {
-    let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-    let mut vault =
-        recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
-    vault
-        .set_totp(Target::Id(1), secret, &mut ServerInfo::default())
-        .unwrap();
-    assert!(!format!("{:?}", vault.recovery.totp[0]).contains(secret));
-
-    let directory = tempfile::tempdir().unwrap();
-    let json_path = directory.path().join("export.json");
-    vault
-        .export(json_path.display().to_string(), false)
-        .unwrap();
-    assert!(fs::read_to_string(json_path).unwrap().contains(secret));
-
-    let csv_path = directory.path().join("export.csv");
-    vault.export(csv_path.display().to_string(), false).unwrap();
-    assert!(!fs::read_to_string(csv_path).unwrap().contains(secret));
-}
-
-#[cfg(unix)]
-#[test]
-fn plaintext_exports_are_created_with_owner_only_permissions() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let vault = recovery_test_vault(vec![recovery_test_entry(
-        1,
-        "service",
-        "alice",
-        "exported-secret",
-    )]);
-    for extension in ["json", "csv"] {
-        let path = directory.path().join(format!("export.{extension}"));
-        vault.export(path.display().to_string(), false).unwrap();
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-}
-
-#[test]
-fn plaintext_exports_do_not_replace_existing_files_without_force() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("export.json");
-    fs::write(&path, "keep this file").unwrap();
-    let vault = recovery_test_vault(vec![recovery_test_entry(
-        1,
-        "service",
-        "alice",
-        "exported-secret",
-    )]);
-
-    let error = vault.export(path.display().to_string(), false).unwrap_err();
-    assert!(error.to_string().contains("already exists"), "{error}");
-    assert_eq!(fs::read_to_string(&path).unwrap(), "keep this file");
-
-    vault.export(path.display().to_string(), true).unwrap();
-    let exported = fs::read_to_string(path).unwrap();
-    assert!(exported.contains("exported-secret"));
-}
-
-#[test]
-fn encrypted_backup_round_trip_preserves_complete_vault_state() {
-    init_test_data_dir();
-    let directory = tempfile::tempdir().unwrap();
-    let backup_path = directory.path().join("complete.pmbackup");
-    let totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-    let mut vault = recovery_test_vault(vec![recovery_test_entry(
-        1,
-        "active-service",
-        "alice",
-        "active-password",
-    )]);
-    vault.recovery.next_entry_id = 3;
-    vault.recovery.password_history.push(PasswordRevision {
-        entry_id: 1,
-        password: "previous-password".into(),
-        changed: "yesterday".into(),
-    });
-    vault.recovery.trash.push(TrashedEntry {
-        entry: recovery_test_entry(2, "deleted-service", "bob", "deleted-password"),
-        history: vec![PasswordRevision {
-            entry_id: 2,
-            password: "deleted-previous".into(),
-            changed: "last-week".into(),
-        }],
-        deleted: "today".into(),
-    });
-    vault.recovery.totp.extend([
-        TotpRecord {
-            entry_id: 1,
-            configuration: totp_secret.into(),
-        },
-        TotpRecord {
-            entry_id: 2,
-            configuration: totp_secret.into(),
-        },
-    ]);
-
-    let password = format!("backup-{:016x}", rand::random::<u64>());
-    let mut backup_key = PasswordType::Password(password.clone());
-    vault
-        .encrypted_backup(backup_path.display().to_string(), &mut backup_key, false)
-        .unwrap();
-    let encrypted = fs::read(&backup_path).unwrap();
-    assert!(encrypted.starts_with(BACKUP_MAGIC));
-    assert!(
-        !encrypted
-            .windows(totp_secret.len())
-            .any(|part| part == totp_secret.as_bytes())
-    );
-    assert!(
-        vault
-            .encrypted_backup(backup_path.display().to_string(), &mut backup_key, false)
-            .is_err()
-    );
-    assert_eq!(fs::read(&backup_path).unwrap(), encrypted);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    let mut wrong_key = PasswordType::Password("wrong-backup-password".into());
-    assert!(
-        restore_encrypted_backup(backup_path.to_str().unwrap(), &mut wrong_key, false).is_err()
-    );
-
-    let filename =
-        restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, false).unwrap();
-    let mut restored_info = ServerInfo {
-        locked: true,
-        keypass: Some(PasswordType::Password(password)),
-    };
-    let restored = unlock_vault(&mut restored_info).unwrap();
-    assert_eq!(restored.entries, vault.entries);
-    assert_eq!(restored.recovery, vault.recovery);
-    assert_eq!(restored.metadata.filename, filename);
-
-    assert!(
-        restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, false)
-            .unwrap_err()
-            .to_string()
-            .contains("--force")
-    );
-    assert_eq!(
-        restore_encrypted_backup(backup_path.to_str().unwrap(), &mut backup_key, true).unwrap(),
-        filename
-    );
-    fs::remove_file(data_dir().join(filename)).unwrap();
-}
-
-#[test]
-fn encrypted_backup_rejects_invalid_files_tampering_and_invalid_vault_state() {
-    init_test_data_dir();
-    let directory = tempfile::tempdir().unwrap();
-    let tampered_path = directory.path().join("tampered.pmbackup");
-    let invalid_path = directory.path().join("invalid.pmbackup");
-    let password = format!("adversarial-backup-{:016x}", rand::random::<u64>());
-    let mut key = PasswordType::Password(password.clone());
-
-    let missing_path = directory.path().join("missing.pmbackup");
-    let error =
-        restore_encrypted_backup(missing_path.to_str().unwrap(), &mut key, false).unwrap_err();
-    assert!(matches!(error, VaultError::Persistence(_)), "{error}");
-    assert!(matches!(&key, PasswordType::Password(saved) if saved == &password));
-
-    let oversized_path = directory.path().join("oversized.pmbackup");
-    fs::File::create(&oversized_path)
-        .unwrap()
-        .set_len(MAX_BACKUP_BYTES + 1)
-        .unwrap();
-    for (path, expected_error) in [
-        (oversized_path.as_path(), "byte limit"),
-        (directory.path(), "regular file"),
-    ] {
-        let error = restore_encrypted_backup(path.to_str().unwrap(), &mut key, false).unwrap_err();
-        assert!(matches!(error, VaultError::Validation(_)), "{error}");
-        assert!(
-            error.to_string().contains(expected_error),
-            "{}: {error}",
-            path.display()
-        );
-    }
-
-    let vault = recovery_test_vault(vec![recovery_test_entry(1, "service", "alice", "password")]);
-    // Oversized writes must preserve both an existing destination and the password.
-    fs::write(&tampered_path, b"existing-backup").unwrap();
-    let error = vault
-        .encrypted_backup_with_limit(tampered_path.display().to_string(), &mut key, true, 1)
-        .unwrap_err();
-    assert!(matches!(error, VaultError::Validation(_)));
-    assert_eq!(fs::read(&tampered_path).unwrap(), b"existing-backup");
-    assert!(matches!(key, PasswordType::Password(ref value) if value == &password));
-    fs::remove_file(&tampered_path).unwrap();
-    assert!(
-        vault
-            .encrypted_backup_with_limit(tampered_path.display().to_string(), &mut key, false, 1)
-            .is_err()
-    );
-    assert!(!tampered_path.exists());
-
-    vault
-        .encrypted_backup(tampered_path.display().to_string(), &mut key, false)
-        .unwrap();
-    // RFC 3339's automatic fractional precision can change between writes.
-    // Size the successful write for the longest timestamp representation;
-    // persistence's size-limit tests separately cover the exact byte boundary.
-    let envelope = BackupEnvelopeRef {
-        version: BACKUP_VERSION,
-        created: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
-        vault: &vault,
-    };
-    let max_length = (rmp_serde::to_vec(&envelope).unwrap().len()
-        + BACKUP_MAGIC.len()
-        + 1
-        + crate::encryption::ENCRYPTED_FILE_OVERHEAD) as u64;
-    vault
-        .encrypted_backup_with_limit(
-            tampered_path.display().to_string(),
-            &mut key,
-            true,
-            max_length,
-        )
-        .unwrap();
-    assert!(fs::metadata(&tampered_path).unwrap().len() <= max_length);
-    let mut tampered = fs::read(&tampered_path).unwrap();
-    *tampered.last_mut().unwrap() ^= 1;
-    fs::write(&tampered_path, tampered).unwrap();
-    assert!(
-        restore_encrypted_backup(tampered_path.to_str().unwrap(), &mut key, false)
-            .unwrap_err()
-            .to_string()
-            .contains("corrupted")
-    );
-
-    let mut invalid =
-        recovery_test_vault(vec![recovery_test_entry(1, "active", "alice", "password")]);
-    invalid.recovery.trash.push(TrashedEntry {
-        entry: recovery_test_entry(1, "deleted", "bob", "password"),
-        history: Vec::new(),
-        deleted: "today".into(),
-    });
-    let envelope = BackupEnvelopeRef {
-        version: BACKUP_VERSION,
-        created: chrono::Utc::now().to_rfc3339(),
-        vault: &invalid,
-    };
-    let plaintext = rmp_serde::to_vec(&envelope).unwrap();
-    let encrypted = try_encrypt_file(&mut key, &plaintext).unwrap();
-    let mut contents = BACKUP_MAGIC.to_vec();
-    contents.push(BACKUP_VERSION);
-    contents.extend_from_slice(&encrypted);
-    fs::write(&invalid_path, contents).unwrap();
-
-    assert!(find_vault(&mut key).is_none());
-    assert!(
-        restore_encrypted_backup(invalid_path.to_str().unwrap(), &mut key, false)
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate entry IDs")
-    );
-    assert!(find_vault(&mut key).is_none());
-}
-
-#[test]
-fn production_kdf_covers_vault_unlock_rekey_backup_restore_and_tamper_workflows() {
-    with_test_kdf_parameters(PRODUCTION_KDF_PARAMETERS, || {
-        init_test_data_dir();
-        let directory = tempfile::tempdir().unwrap();
-        let unique = format!("production-workflow-{:016x}", rand::random::<u64>());
-        let old_password = format!("old-{unique}");
-        let new_password = format!("new-{unique}");
-
-        let mut server_info = ServerInfo {
-            locked: false,
-            keypass: Some(PasswordType::Password(old_password.clone())),
-        };
-        let mut vault = None;
-        create_vault(&mut vault, &mut server_info, false).unwrap();
-        let original_filename = vault.as_ref().unwrap().metadata.filename.clone();
-        let encrypted_vault = fs::read(data_dir().join(&original_filename)).unwrap();
-        assert_eq!(
-            u32::from_be_bytes(encrypted_vault[10..14].try_into().unwrap()),
-            PRODUCTION_KDF_PARAMETERS.memory_kib
-        );
-        assert_eq!(
-            u32::from_be_bytes(encrypted_vault[14..18].try_into().unwrap()),
-            PRODUCTION_KDF_PARAMETERS.iterations
-        );
-        assert_eq!(
-            u32::from_be_bytes(encrypted_vault[18..22].try_into().unwrap()),
-            PRODUCTION_KDF_PARAMETERS.parallelism
-        );
-
-        vault
-            .as_ref()
-            .unwrap()
-            .lock_vault(&mut server_info)
-            .unwrap();
-        let mut old_unlock = ServerInfo {
-            locked: true,
-            keypass: Some(PasswordType::Password(old_password)),
-        };
-        let mut unlocked = unlock_vault(&mut old_unlock).unwrap();
-        assert_eq!(unlocked.metadata.filename, original_filename);
-
-        unlocked
-            .rekey(&mut old_unlock, PasswordType::Password(new_password))
-            .unwrap();
-        let rekeyed_filename = unlocked.metadata.filename.clone();
-        assert_eq!(original_filename, rekeyed_filename);
-
-        let backup_path = directory.path().join("production.pmbackup");
-        let tampered_path = directory.path().join("production-tampered.pmbackup");
-        unlocked
-            .encrypted_backup(
-                backup_path.display().to_string(),
-                old_unlock.keypass.as_mut().unwrap(),
-                false,
-            )
-            .unwrap();
-
-        let mut tampered = fs::read(&backup_path).unwrap();
-        *tampered.last_mut().unwrap() ^= 1;
-        fs::write(&tampered_path, tampered).unwrap();
-        let mut tamper_key = old_unlock.keypass.clone().unwrap();
-        assert!(
-            restore_encrypted_backup(tampered_path.to_str().unwrap(), &mut tamper_key, false)
-                .unwrap_err()
-                .to_string()
-                .contains("corrupted")
-        );
-
-        fs::remove_file(data_dir().join(&rekeyed_filename)).unwrap();
-        let mut restore_key = old_unlock.keypass.clone().unwrap();
-        let restored_filename =
-            restore_encrypted_backup(backup_path.to_str().unwrap(), &mut restore_key, false)
-                .unwrap();
-        let mut restored_unlock = ServerInfo {
-            locked: true,
-            keypass: Some(restore_key),
-        };
-        let restored = unlock_vault(&mut restored_unlock).unwrap();
-        assert_eq!(restored.entries, unlocked.entries);
-        assert_eq!(restored.recovery, unlocked.recovery);
-
-        fs::remove_file(data_dir().join(restored_filename)).unwrap();
-    });
-}
-
-#[test]
-fn audit_reports_weak_reused_and_duplicate_logins_without_passwords() {
-    let vault = recovery_test_vault(vec![
-        recovery_test_entry(1, "first", "alice", "secret"),
-        recovery_test_entry(2, "second", "alice", "secret"),
-    ]);
-    let findings = vault
-        .audit_snapshot(&AuditOptions::default())
-        .findings(None, None);
-    assert_eq!(findings.weak.len(), 2);
-    assert_eq!(findings.reused.len(), 1);
-    assert_eq!(findings.duplicates.len(), 1);
-    let report = crate::server::presentation::audit(&findings);
-    assert!(report.contains("2 weak entries"));
-    assert!(report.contains("1 reused-password groups"));
-    assert!(report.contains("1 duplicate-login groups"));
-    assert!(!report.contains("secret"));
-}
-
-#[test]
-fn audit_reports_stale_missing_totp_and_breached_passwords() {
-    let mut vault = recovery_test_vault(vec![recovery_test_entry(
-        7,
-        "old account",
-        "alice",
-        "known-breached-value",
-    )]);
-    vault.recovery.entry_metadata.push(EntryMetadata {
-        entry_id: 7,
-        password_changed: Some("2020-01-01T00:00:00Z".into()),
-        ..EntryMetadata::default()
-    });
-    let mut breached = HashMap::new();
-    breached.insert(password_hash("known-breached-value"), 42);
-    let options = AuditOptions {
-        stale_days: Some(365),
-        check_breaches: true,
-        require_totp: true,
-    };
-    let findings = vault
-        .audit_snapshot(&options)
-        .findings(Some(&breached), None);
-    assert_eq!(findings.score, 0);
-    assert_eq!(findings.stale[0].id, 7);
-    assert_eq!(findings.missing_totp[0].id, 7);
-    assert_eq!(findings.breached[0].1, 42);
-    assert!(
-        !serde_json::to_string(&findings)
-            .unwrap()
-            .contains("known-breached-value")
-    );
-    let report = crate::server::presentation::audit(&findings);
-    assert!(report.contains("Stale password: 7. old account"));
-    assert!(report.contains("Missing TOTP: 7. old account"));
-    assert!(report.contains("Breached password: 7. old account (seen 42 times)"));
-    assert!(report.contains("Health score: 0/100"));
-    assert!(!report.contains("known-breached-value"));
-}
-
-#[test]
-fn domain_reads_classify_missing_records_and_invalid_selectors() {
-    let vault = Vault::default();
-    assert!(matches!(
-        vault.get_entry(&Target::Id(1)),
-        Err(VaultError::NotFound(_))
-    ));
-    assert!(matches!(
-        vault.get_entry(&Target::Vault {
-            key: PasswordType::Password(String::new()),
-            keep_key: false
-        }),
-        Err(VaultError::InvalidInput(_))
-    ));
-    assert!(matches!(
-        vault.get_secret(&Target::Url("example.com".into())),
-        Err(VaultError::NotFound(_))
-    ));
-}
-
-#[test]
-fn import_preview_matches_execution_for_conflicts_between_source_rows() {
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "name,url,username,password").unwrap();
-    writeln!(file, "new,https://example.com,alice,first-secret").unwrap();
-    writeln!(file, "new,https://example.com,alice,second-secret").unwrap();
-    writeln!(file, "new,https://example.com,alice,third-secret").unwrap();
-    for policy in [
-        ConflictPolicy::Skip,
-        ConflictPolicy::Replace,
-        ConflictPolicy::KeepBoth,
-    ] {
-        let mut vault = Vault::default();
-        let before = vault.clone();
-        let path = file.path().display().to_string();
-        let mut preview = vault
-            .import_with_options(
-                path.clone(),
-                policy,
-                true,
-                HISTORY_LIMIT,
-                &mut ServerInfo::default(),
-            )
-            .unwrap();
-        assert_eq!(vault, before);
-        let actual = vault
-            .import_with_options(
-                path,
-                policy,
-                false,
-                HISTORY_LIMIT,
-                &mut ServerInfo::default(),
-            )
-            .unwrap();
-        preview.preview = false;
-        assert_eq!(preview, actual);
-    }
 }

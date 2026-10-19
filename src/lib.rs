@@ -10,6 +10,7 @@ pub mod file;
 pub mod native_messaging;
 pub mod password;
 pub mod protocol;
+pub mod secret;
 pub mod server;
 mod terminal;
 pub mod types;
@@ -22,8 +23,9 @@ pub mod fuzz_support {
     pub fn native_message(data: &[u8]) {
         crate::native_messaging::fuzz_message(data);
         let _ = crate::protocol::decode_responses(data);
-        if let Ok(mut command) = rmp_serde::from_slice::<crate::types::ServerCommand>(data) {
-            zeroize::Zeroize::zeroize(&mut command);
+        if let Ok(mut request) = rmp_serde::from_slice::<crate::protocol::RequestEnvelope>(data) {
+            let _ = request.validate();
+            zeroize::Zeroize::zeroize(&mut request);
         }
     }
 

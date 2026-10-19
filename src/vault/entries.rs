@@ -4,23 +4,22 @@ impl Vault {
     pub fn add_entry(
         &mut self,
         info: PasswordEntry,
-        key_pass: &mut VaultCredentials,
+        key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         self.add_typed_entry(
             TypedEntry {
                 entry: info,
                 kind: ItemKind::Login,
-                additional_urls: Vec::new(),
-                custom_fields: Vec::new(),
+                additional_urls: vec![],
+                custom_fields: vec![],
             },
-            key_pass,
+            key,
         )
     }
-
     pub fn add_typed_entry(
         &mut self,
         request: TypedEntry,
-        key_pass: &mut VaultCredentials,
+        key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let TypedEntry {
             entry: info,
@@ -29,36 +28,36 @@ impl Vault {
             custom_fields,
         } = request;
         let mut info = Zeroizing::new(info);
-        let mut custom_fields = Zeroizing::new(custom_fields);
-        info.url = info
-            .url
-            .take()
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty());
-        let mut normalized_urls = Vec::new();
-        for url in additional_urls {
-            let url = url.trim();
-            if !url.is_empty()
-                && info.url.as_deref() != Some(url)
-                && !normalized_urls.iter().any(|saved| saved == url)
-            {
-                normalized_urls.push(url.to_string());
-            }
-        }
         if self
-            .entries
-            .iter()
+            .active_entries()
             .any(|entry| entry.name == info.name && entry.username == info.username)
         {
             return Ok(false);
         }
-
+        info.url = info
+            .url
+            .take()
+            .map(|u| u.trim().to_owned())
+            .filter(|u| !u.is_empty());
+        let mut urls = Vec::new();
+        for url in additional_urls {
+            let url = url.trim();
+            if !url.is_empty() && info.url.as_deref() != Some(url) && !urls.iter().any(|s| s == url)
+            {
+                urls.push(url.to_owned());
+            }
+        }
         let id = self.next_entry_id()?;
-        self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
+        self.transaction(TransactionScope::Entry(id), key, |vault| {
             let id = vault.allocate_entry_id()?;
-            let now = chrono::Local::now().to_string();
-            let password_changed = (!info.password.is_empty()).then(|| now.clone());
-            vault.entries.push(VaultEntry {
+            let now = Timestamp::now();
+            let metadata = EntryMetadata {
+                kind,
+                additional_urls: urls,
+                password_changed: (!info.password.is_empty()).then(|| now.clone()),
+                custom_fields,
+            };
+            let entry = VaultEntry {
                 id,
                 name: std::mem::take(&mut info.name),
                 username: info.username.take(),
@@ -67,70 +66,56 @@ impl Vault {
                 notes: info.notes.take(),
                 created: now.clone(),
                 modified: now,
-            });
-            let metadata_added =
-                kind != ItemKind::Login || !normalized_urls.is_empty() || !custom_fields.is_empty();
-            if metadata_added {
-                vault.recovery.entry_metadata.push(EntryMetadata {
-                    entry_id: id,
-                    kind,
-                    additional_urls: normalized_urls,
-                    password_changed,
-                    custom_fields: std::mem::take(&mut *custom_fields),
-                });
-            }
+            };
+            vault
+                .data
+                .items
+                .insert(ItemId::from_public(id)?, Item::new(entry, metadata));
             Ok((true, true))
         })
     }
-
     pub fn delete_entry(
         &mut self,
         target: Target,
-        key_pass: &mut VaultCredentials,
+        key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
-        let Some(index) = self.entry_index(&target) else {
+        let Some(id) = self.entry_id(&target) else {
             return Ok(false);
         };
-        let id = self.entries[index].id;
-        self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
-            let entry = vault.entries.remove(index);
-            let history = vault.take_history_records(id);
-            vault.recovery.trash.push(TrashedEntry {
-                entry,
-                history,
-                deleted: chrono::Local::now().to_string(),
-            });
+        self.transaction(TransactionScope::Entry(id), key, |v| {
+            let item = v.item_mut(id).expect("selected item");
+            item.lifecycle = Lifecycle::Trashed {
+                deleted_at: Timestamp::now(),
+            };
             Ok((true, true))
         })
     }
-
     pub fn update_entry_with_limit(
         &mut self,
-        change: EntryUpdate,
-        key_pass: &mut VaultCredentials,
-        password_history_limit: usize,
+        entry: EntryUpdate,
+        key: &mut VaultCredentials,
+        limit: usize,
     ) -> Result<bool, VaultError> {
         self.update_typed_entry_with_limit(
             TypedUpdate {
-                entry: change,
+                entry,
                 kind: None,
-                add_url: Vec::new(),
-                remove_url: Vec::new(),
+                add_url: vec![],
+                remove_url: vec![],
                 clear_urls: false,
-                set_fields: Vec::new(),
-                remove_fields: Vec::new(),
+                set_fields: vec![],
+                remove_fields: vec![],
                 clear_fields: false,
             },
-            key_pass,
-            password_history_limit,
+            key,
+            limit,
         )
     }
-
     pub fn update_typed_entry_with_limit(
         &mut self,
         change: TypedUpdate,
-        key_pass: &mut VaultCredentials,
-        password_history_limit: usize,
+        key: &mut VaultCredentials,
+        limit: usize,
     ) -> Result<bool, VaultError> {
         let TypedUpdate {
             entry: change,
@@ -142,96 +127,54 @@ impl Vault {
             remove_fields,
             clear_fields,
         } = change;
-        let EntryUpdate {
-            target,
-            update,
-            password,
-        } = change;
-        let mut password = Zeroizing::new(password);
-        let set_fields = Zeroizing::new(set_fields);
-        let index = self.entry_index(&target);
-        let Some(index) = index else {
+        let mut change = Zeroizing::new(change);
+        let Some(id) = self.entry_id(&change.target) else {
             return Ok(false);
         };
-
-        let id = self.entries[index].id;
-        self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
-            let original = Zeroizing::new(vault.entries[index].clone());
-            let password_changed = password
+        self.transaction(TransactionScope::Entry(id), key, |vault| {
+            let changed_password = change
+                .password
                 .as_ref()
-                .is_some_and(|new_password| *new_password != original.password);
-            let old_password = password_changed.then(|| original.password.clone());
-            let metadata_modified = vault.apply_metadata_update(
-                original.id,
+                .is_some_and(|p| p.as_str() != vault.item(id).unwrap().entry.password.as_str());
+            if changed_password {
+                let old = vault.item(id).unwrap().entry.password.clone();
+                vault.push_password_history_with_limit(id, old, limit);
+            }
+            let metadata_changed = vault.apply_metadata_update(
+                id,
                 MetadataUpdate {
                     kind,
                     add_urls: &add_url,
                     remove_urls: &remove_url,
                     clear_urls,
-                    primary_url: update.url.as_deref(),
-                    password_changed,
+                    primary_url: change.update.url.as_deref(),
+                    password_changed: changed_password,
                     set_fields: &set_fields,
                     remove_fields: &remove_fields,
                     clear_fields,
                 },
             );
-            let mut modified = apply_update(&mut vault.entries[index], update, password.take());
+            let entry = &mut vault.item_mut(id).unwrap().entry;
+            let update = std::mem::take(&mut change.update);
+            let mut changed = apply_update(entry, update, change.password.take());
             if clear_urls {
-                modified |= vault.entries[index].url.take().is_some();
-            } else if vault.entries[index]
-                .url
-                .as_ref()
-                .is_some_and(|url| remove_url.iter().any(|removed| removed == url))
-            {
-                vault.entries[index].url = None;
-                modified = true;
+                changed |= entry.url.take().is_some();
+            } else if entry.url.as_ref().is_some_and(|u| remove_url.contains(u)) {
+                entry.url = None;
+                changed = true;
             }
-            if modified || metadata_modified {
-                vault.entries[index].modified = chrono::Local::now().to_string();
+            if changed || metadata_changed {
+                entry.modified = Timestamp::now();
             }
-            if let Some(old_password) = old_password {
-                vault.push_password_history_with_limit(
-                    original.id,
-                    old_password,
-                    password_history_limit,
-                );
-            }
-            Ok((modified || metadata_modified, modified || metadata_modified))
+            Ok((changed || metadata_changed, changed || metadata_changed))
         })
     }
-
-    pub(super) fn apply_metadata_update(
-        &mut self,
-        entry_id: usize,
-        update: MetadataUpdate<'_>,
-    ) -> bool {
-        let requested = update.kind.is_some()
-            || !update.add_urls.is_empty()
-            || !update.remove_urls.is_empty()
-            || update.clear_urls
-            || update.password_changed
-            || !update.set_fields.is_empty()
-            || !update.remove_fields.is_empty()
-            || update.clear_fields;
-        if !requested {
+    fn apply_metadata_update(&mut self, id: usize, update: MetadataUpdate<'_>) -> bool {
+        let Some(item) = self.item_mut(id) else {
             return false;
-        }
-        let index = if let Some(index) = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .position(|record| record.entry_id == entry_id)
-        {
-            index
-        } else {
-            self.recovery.entry_metadata.push(EntryMetadata {
-                entry_id,
-                ..EntryMetadata::default()
-            });
-            self.recovery.entry_metadata.len() - 1
         };
-        let record = &mut self.recovery.entry_metadata[index];
-        let before = Zeroizing::new(record.clone());
+        let record = &mut item.metadata;
+        let before = record.clone();
         if let Some(kind) = update.kind {
             record.kind = kind;
         }
@@ -240,81 +183,79 @@ impl Vault {
         }
         record
             .additional_urls
-            .retain(|url| !update.remove_urls.iter().any(|removed| removed == url));
-        if let Some(primary) = update.primary_url {
-            record.additional_urls.retain(|url| url != primary);
-        }
+            .retain(|u| !update.remove_urls.contains(u) && update.primary_url != Some(u.as_str()));
         for url in update.add_urls {
             let url = url.trim();
             if !url.is_empty() && !record.additional_urls.iter().any(|saved| saved == url) {
-                record.additional_urls.push(url.to_string());
+                record.additional_urls.push(url.into());
             }
         }
         if update.password_changed {
-            record.password_changed = Some(chrono::Local::now().to_string());
+            record.password_changed = Some(Timestamp::now());
         }
         if update.clear_fields {
-            record.custom_fields.zeroize();
             record.custom_fields.clear();
         }
-        for name in update.remove_fields {
-            let name = name.trim();
-            let mut retained = Vec::with_capacity(record.custom_fields.len());
-            for mut field in std::mem::take(&mut record.custom_fields) {
-                if field.name.eq_ignore_ascii_case(name) {
-                    field.zeroize();
-                } else {
-                    retained.push(field);
-                }
-            }
-            record.custom_fields = retained;
-        }
+        record.custom_fields.retain(|f| {
+            !update
+                .remove_fields
+                .iter()
+                .any(|n| f.name.eq_ignore_ascii_case(n.trim()))
+        });
         for field in update.set_fields {
-            if let Some(existing) = record
+            if let Some(old) = record
                 .custom_fields
                 .iter_mut()
-                .find(|existing| existing.name.eq_ignore_ascii_case(&field.name))
+                .find(|f| f.name.eq_ignore_ascii_case(&field.name))
             {
-                existing.zeroize();
-                *existing = field.clone();
+                *old = field.clone();
             } else {
                 record.custom_fields.push(field.clone());
             }
         }
-        *record != *before
+        *record != before
     }
 }
-
 pub(super) fn apply_update(
     entry: &mut VaultEntry,
-    update: EntryChanges,
-    password: Option<String>,
+    mut update: EntryChanges,
+    password: Option<SecretString>,
 ) -> bool {
-    let mut modified = false;
-    if let Some(name) = update.name {
-        entry.name = name;
-        modified = true;
+    let mut changed = false;
+    if let Some(value) = update.name.take()
+        && entry.name != value
+    {
+        entry.name = value;
+        changed = true;
     }
-    if let Some(notes) = update.notes {
-        entry.notes.zeroize();
-        entry.notes = (!notes.is_empty()).then_some(notes);
-        modified = true;
+    if let Some(value) = update.username.take() {
+        let value = (!value.is_empty()).then_some(value);
+        if entry.username != value {
+            entry.username = value;
+            changed = true;
+        }
     }
-    if let Some(password) = password {
-        entry.password.zeroize();
-        entry.password = password;
-        modified = true;
+    if let Some(value) = update.url.take()
+        && entry.url.as_ref() != Some(&value)
+    {
+        entry.url = Some(value);
+        changed = true;
     }
-    if let Some(url) = update.url {
-        entry.url = Some(url);
-        modified = true;
+    if let Some(value) = update.notes.take() {
+        let value = (!value.is_empty()).then_some(value);
+        if entry.notes != value {
+            entry.notes = value;
+            changed = true;
+        }
     }
-    if let Some(username) = update.username {
-        entry.username = (!username.is_empty()).then_some(username);
-        modified = true;
+    if let Some(value) = password
+        && entry.password != value
+    {
+        entry.password = value;
+        changed = true;
     }
-    if modified {
-        entry.modified = chrono::Local::now().to_string();
+    if changed {
+        entry.modified = Timestamp::now();
     }
-    modified
+    changed
 }

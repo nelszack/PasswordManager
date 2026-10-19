@@ -2,6 +2,29 @@ use super::totp::normalize_totp_configuration;
 use super::*;
 mod formats;
 
+/// Third-party JSON has no secret-typed fields. Erase its transient strings too
+/// after conversion, including validation/error paths.
+struct SensitiveJson(serde_json::Value);
+impl std::ops::Deref for SensitiveJson {
+    type Target = serde_json::Value;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for SensitiveJson {
+    fn drop(&mut self) {
+        fn wipe(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::String(value) => value.zeroize(),
+                serde_json::Value::Array(values) => values.iter_mut().for_each(wipe),
+                serde_json::Value::Object(values) => values.values_mut().for_each(wipe),
+                _ => {}
+            }
+        }
+        wipe(&mut self.0);
+    }
+}
+
 #[derive(Default)]
 struct ImportLosses {
     unsupported: usize,
@@ -16,6 +39,27 @@ impl ImportLosses {
         if self.messages.len() < 100 {
             self.messages.push(format!("Source item {item}: {message}"));
         }
+    }
+}
+
+fn imported_timestamp(
+    value: Option<String>,
+    index: usize,
+    label: &str,
+    losses: &mut ImportLosses,
+) -> Timestamp {
+    match value {
+        None => Timestamp::now(),
+        Some(value) => match Timestamp::parse(&value) {
+            Ok(timestamp) => timestamp,
+            Err(_) => {
+                losses.warn(
+                    index,
+                    &format!("unrecognized {label} replaced with import time"),
+                );
+                Timestamp::now()
+            }
+        },
     }
 }
 
@@ -59,10 +103,11 @@ fn import_json_with_losses(
     contents: &str,
     path: &str,
 ) -> Result<(Vec<ImportedItem>, ImportLosses), String> {
-    let root: serde_json::Value =
-        serde_json::from_str(contents).map_err(|e| format!("invalid JSON in {path:?}: {e}"))?;
+    let mut root = SensitiveJson(
+        serde_json::from_str(contents).map_err(|e| format!("invalid JSON in {path:?}: {e}"))?,
+    );
     if root.get("format").and_then(serde_json::Value::as_str) == Some(PORTABLE_FORMAT) {
-        let portable: PortableExport = serde_json::from_value(root)
+        let portable: PortableExport = serde_json::from_str(contents)
             .map_err(|e| format!("invalid portable JSON in {path:?}: {e}"))?;
         if portable.version != PORTABLE_VERSION {
             return Err(format!(
@@ -82,7 +127,7 @@ fn import_json_with_losses(
                         normalize_totp_configuration(configuration).map_err(|error| {
                             format!("invalid TOTP configuration for {:?}: {error}", item.name)
                         })?;
-                    item.totp = Some(normalized);
+                    item.totp = Some(normalized.into());
                 }
                 if let Some(credentials) = &item.duo {
                     crate::duo::validate_credentials(credentials).map_err(|e| e.to_string())?;
@@ -111,90 +156,51 @@ fn import_json_with_losses(
             .collect::<Result<Vec<_>, String>>()?;
         return Ok((items, ImportLosses::default()));
     }
-    formats::external_json(root, path)
+    formats::external_json(std::mem::take(&mut root.0), path)
 }
 
 impl Vault {
-    pub(super) fn replace_portable_records(
+    fn replace_portable_records(
         &mut self,
-        entry_id: usize,
+        id: usize,
         imported: &mut ImportedItem,
-        old_password: Option<String>,
-        password_history_limit: usize,
-    ) {
-        self.remove_metadata_records(&[entry_id]);
-        self.remove_totp_records(&[entry_id]);
-        self.recovery.duo.retain_mut(|r| {
-            if r.entry_id == entry_id {
-                r.zeroize();
-                false
-            } else {
-                true
-            }
+        old_password: Option<SecretString>,
+        limit: usize,
+    ) -> Result<(), VaultError> {
+        let authenticator = imported
+            .totp
+            .as_ref()
+            .map(|s| Authenticator::parse(s))
+            .transpose()?;
+        let item = self.item_mut(id).unwrap();
+        item.metadata = EntryMetadata {
+            kind: imported.kind,
+            additional_urls: std::mem::take(&mut imported.additional_urls),
+            password_changed: imported.password_changed.take(),
+            custom_fields: std::mem::take(&mut imported.custom_fields),
+        };
+        item.duo = imported.duo.take().map(|credentials| DuoRecord {
+            credentials,
+            review_key: None,
         });
-        if let Some(credentials) = imported.duo.take() {
-            self.recovery.duo.push(DuoRecord {
-                review_key: None,
-                entry_id,
-                credentials,
-            });
-        }
-
-        let mut retained = Vec::with_capacity(self.recovery.password_history.len());
-        for mut revision in std::mem::take(&mut self.recovery.password_history) {
-            if revision.entry_id == entry_id {
-                revision.zeroize();
-            } else {
-                retained.push(revision);
-            }
-        }
-        self.recovery.password_history = retained;
-
-        let mut history = std::mem::take(&mut imported.password_history)
+        item.authenticator = authenticator;
+        item.history = std::mem::take(&mut imported.password_history)
             .into_iter()
-            .map(|revision| PasswordRevision {
-                entry_id,
-                password: revision.password,
-                changed: revision.changed,
+            .map(|r| PasswordRevision {
+                password: r.password,
+                changed: r.changed,
             })
-            .collect::<Vec<_>>();
+            .collect();
         if let Some(password) = old_password {
-            history.push(PasswordRevision {
-                entry_id,
+            item.history.push(PasswordRevision {
                 password,
-                changed: chrono::Local::now().to_string(),
+                changed: Timestamp::now(),
             });
         }
-        if history.len() > password_history_limit {
-            let mut removed = history.drain(..history.len() - password_history_limit);
-            removed.by_ref().for_each(|revision| {
-                let mut revision = revision;
-                revision.zeroize();
-            });
-        }
-        self.recovery.password_history.extend(history);
-
-        if imported.kind != ItemKind::Login
-            || !imported.additional_urls.is_empty()
-            || !imported.custom_fields.is_empty()
-            || imported.password_changed.is_some()
-        {
-            self.recovery.entry_metadata.push(EntryMetadata {
-                entry_id,
-                kind: imported.kind,
-                additional_urls: std::mem::take(&mut imported.additional_urls),
-                password_changed: imported.password_changed.take(),
-                custom_fields: std::mem::take(&mut imported.custom_fields),
-            });
-        }
-        if let Some(configuration) = imported.totp.take() {
-            self.recovery.totp.push(TotpRecord {
-                entry_id,
-                configuration,
-            });
-        }
+        let excess = item.history.len().saturating_sub(limit);
+        item.history.drain(..excess);
+        Ok(())
     }
-
     pub fn import_with_options(
         &mut self,
         path: String,
@@ -259,69 +265,81 @@ impl Vault {
                 losses.warn(losses.source_positions.get(position).copied().unwrap_or(position + 1), "password history exceeds the configured retention limit; oldest revisions will be omitted");
             }
         }
-        let mut plan = self.plan_import(imported, conflicts, preview);
+        let mut plan = self.plan_import(imported, conflicts, preview)?;
         plan.report.unsupported = losses.unsupported;
         plan.report.loss_count = losses.count;
         plan.report.losses = losses.messages;
         if preview {
             return Ok(plan.report);
         }
-        self.transaction(TransactionScope::All, key_pass, |vault| {
+        let affected: HashSet<ItemId> = plan
+            .operations
+            .iter()
+            .filter_map(|(id, _)| *id)
+            .map(ItemId::from_public)
+            .collect::<Result<_, _>>()?;
+        self.transaction(TransactionScope::Items(affected), key_pass, |vault| {
             let changed = !plan.operations.is_empty();
-            if plan.operations.iter().any(|(index, _)| index.is_none()) {
-                vault.ensure_next_entry_id()?;
-            }
-            for (index, mut imported) in plan.operations {
-                if let Some(index) = index {
-                    let id = vault.entries[index].id;
-                    let created = vault.entries[index].created.clone();
-                    let old_password = (vault.entries[index].password != imported.entry.password)
-                        .then(|| vault.entries[index].password.clone());
+            for (selected, mut imported) in plan.operations {
+                let (id, old_password) = if let Some(id) = selected {
+                    let item = vault
+                        .item_mut(id)
+                        .ok_or_else(|| VaultError::Conflict("import target changed".into()))?;
+                    let old = (item.entry.password != imported.entry.password)
+                        .then(|| item.entry.password.clone());
                     imported.entry.id = id;
-                    imported.entry.created = created;
-                    imported.entry.modified = chrono::Local::now().to_string();
-                    vault.entries[index].zeroize();
-                    vault.entries[index] = std::mem::take(&mut imported.entry);
-                    if imported.portable {
-                        if old_password.is_some() {
-                            imported.password_changed = Some(vault.entries[index].modified.clone());
-                        }
-                        vault.replace_portable_records(
-                            id,
-                            &mut imported,
-                            old_password,
-                            password_history_limit,
-                        );
-                    } else if let Some(password) = old_password {
-                        vault.apply_metadata_update(
-                            id,
-                            MetadataUpdate {
-                                password_changed: true,
-                                kind: None,
-                                add_urls: &[],
-                                remove_urls: &[],
-                                clear_urls: false,
-                                primary_url: None,
-                                set_fields: &[],
-                                remove_fields: &[],
-                                clear_fields: false,
-                            },
-                        );
+                    imported.entry.created = item.entry.created.clone();
+                    imported.entry.modified = Timestamp::now();
+                    item.entry = std::mem::take(&mut imported.entry);
+                    (id, old)
+                } else {
+                    let id = vault.allocate_entry_id()?;
+                    imported.entry.id = id;
+                    vault.data.items.insert(
+                        ItemId::from_public(id)?,
+                        Item::new(
+                            std::mem::take(&mut imported.entry),
+                            EntryMetadata::default(),
+                        ),
+                    );
+                    (id, None)
+                };
+                if imported.portable {
+                    if old_password.is_some() {
+                        imported.password_changed = Some(Timestamp::now());
+                    }
+                    vault.replace_portable_records(
+                        id,
+                        &mut imported,
+                        old_password,
+                        password_history_limit,
+                    )?;
+                } else {
+                    // External provider import data is also complete item data. Preserve
+                    // existing metadata on a replacement only when the source omits it.
+                    let item = vault.item_mut(id).unwrap();
+                    item.metadata.kind = imported.kind;
+                    if !imported.additional_urls.is_empty() {
+                        item.metadata.additional_urls =
+                            std::mem::take(&mut imported.additional_urls);
+                    }
+                    if !imported.custom_fields.is_empty() {
+                        item.metadata.custom_fields = std::mem::take(&mut imported.custom_fields);
+                    }
+                    if let Some(config) = imported.totp.take() {
+                        item.authenticator = Some(Authenticator::parse(&config)?);
+                    }
+                    if let Some(credentials) = imported.duo.take() {
+                        item.duo = Some(DuoRecord {
+                            credentials,
+                            review_key: None,
+                        });
+                    }
+                    if let Some(password) = old_password {
+                        item.metadata.password_changed = Some(Timestamp::now());
                         vault.push_password_history_with_limit(
                             id,
                             password,
-                            password_history_limit,
-                        );
-                    }
-                } else {
-                    let id = vault.allocate_validated_entry_id()?;
-                    imported.entry.id = id;
-                    vault.entries.push(std::mem::take(&mut imported.entry));
-                    if imported.portable {
-                        vault.replace_portable_records(
-                            id,
-                            &mut imported,
-                            None,
                             password_history_limit,
                         );
                     }
@@ -330,7 +348,6 @@ impl Vault {
             Ok((changed, plan.report))
         })
     }
-
     /// Plan using only names, usernames and URLs. Previews never copy live secrets
     /// or mutate the vault, and use exactly the same conflict decisions as imports.
     fn plan_import(
@@ -338,29 +355,28 @@ impl Vault {
         imported: Vec<ImportedItem>,
         conflicts: ConflictPolicy,
         preview: bool,
-    ) -> ImportPlan {
+    ) -> Result<ImportPlan, VaultError> {
         let mut report = ImportReport {
             total: imported.len(),
             preview,
             ..Default::default()
         };
         let mut duplicates = HashMap::new();
-        for (index, entry) in self.entries.iter().enumerate() {
+        for entry in self.active_entries() {
             duplicates
                 .entry((
                     entry.name.clone(),
                     entry.username.clone(),
                     entry.url.clone(),
                 ))
-                .or_insert(index);
+                .or_insert(entry.id);
         }
         let mut names: HashSet<_> = self
-            .entries
-            .iter()
+            .active_entries()
             .map(|e| (e.name.clone(), e.username.clone()))
             .collect();
         let mut operations = Vec::new();
-        let mut next_index = self.entries.len();
+        let mut next_index = self.next_entry_id()?;
         for mut item in imported {
             let key = (
                 item.entry.name.clone(),
@@ -407,154 +423,16 @@ impl Vault {
                 ),
                 next_index,
             );
-            next_index += 1;
+            next_index = next_index
+                .checked_add(1)
+                .ok_or_else(|| VaultError::InvalidInput("item ID space exhausted".into()))?;
             operations.push((None, item));
         }
-        ImportPlan { operations, report }
+        Ok(ImportPlan { operations, report })
     }
 }
 
 struct ImportPlan {
     operations: Vec<(Option<usize>, ImportedItem)>,
     report: ImportReport,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rich_preview_and_execution_report_the_same_losses_and_keep_source_positions() {
-        let mut file = NamedTempFile::new().unwrap();
-        write!(file, "{}", json!({ "items": [
-            { "type": 99, "password": "synthetic-unsupported" },
-            { "type": 1, "name": "Account", "login": {
-                "password": "synthetic-password", "totp": "JBSWY3DPEHPK3PXP",
-                "uris": [{ "uri": "https://one.example" }, { "uri": "https://two.example" }] },
-                "passwordHistory": [{ "password": "synthetic-newer" }, { "password": "synthetic-older" }],
-                "fields": [{ "name": "token", "value": "synthetic-token", "type": 1 }] }
-        ] })).unwrap();
-        let mut vault = Vault::default();
-        let before = vault.clone();
-        let path = file.path().display().to_string();
-        let preview = vault
-            .import_with_options(
-                path.clone(),
-                ConflictPolicy::Skip,
-                true,
-                1,
-                &mut VaultCredentials::default(),
-            )
-            .unwrap();
-        assert_eq!(vault, before);
-        assert_eq!(preview.added, 1);
-        assert_eq!(preview.unsupported, 1);
-        assert_eq!(preview.loss_count, 2);
-        assert!(preview.losses[1].starts_with("Source item 2:"));
-        assert!(!preview.to_string().contains("synthetic-"));
-        let imported = vault
-            .import_with_options(
-                path,
-                ConflictPolicy::Skip,
-                false,
-                1,
-                &mut VaultCredentials::default(),
-            )
-            .unwrap();
-        assert_eq!(imported.losses, preview.losses);
-        assert_eq!(imported.unsupported, preview.unsupported);
-        assert_eq!(vault.entries[0].password, "synthetic-password");
-        assert_eq!(
-            vault.recovery.entry_metadata[0].additional_urls,
-            ["https://two.example"]
-        );
-        assert!(vault.recovery.entry_metadata[0].custom_fields[0].secret);
-        assert_eq!(vault.recovery.password_history.len(), 1);
-        assert_eq!(
-            vault.recovery.password_history[0].password,
-            "synthetic-newer"
-        );
-        assert_eq!(vault.recovery.totp.len(), 1);
-    }
-
-    fn batch() -> NamedTempFile {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            "name,password\nfirst,synthetic-one\nsecond,synthetic-two"
-        )
-        .unwrap();
-        file
-    }
-
-    #[test]
-    fn batch_ids_respect_active_trash_and_reserved_counters() {
-        let file = batch();
-        for (counter, expected) in [(0, 91), (5, 91), (200, 200)] {
-            let mut vault = Vault::default();
-            vault.entries.push(VaultEntry {
-                id: 42,
-                ..Default::default()
-            });
-            vault.recovery.trash.push(TrashedEntry {
-                entry: VaultEntry {
-                    id: 90,
-                    ..Default::default()
-                },
-                history: Vec::new(),
-                deleted: "synthetic".into(),
-            });
-            vault.recovery.next_entry_id = counter;
-            let before = vault.clone();
-            let preview = vault
-                .import_with_options(
-                    file.path().display().to_string(),
-                    ConflictPolicy::Skip,
-                    true,
-                    1,
-                    &mut VaultCredentials::default(),
-                )
-                .unwrap();
-            assert_eq!(preview.added, 2);
-            assert_eq!(vault, before);
-            vault
-                .import_with_options(
-                    file.path().display().to_string(),
-                    ConflictPolicy::Skip,
-                    false,
-                    1,
-                    &mut VaultCredentials::default(),
-                )
-                .unwrap();
-            assert_eq!(
-                vault
-                    .entries
-                    .iter()
-                    .map(|entry| entry.id)
-                    .collect::<Vec<_>>(),
-                vec![42, expected, expected + 1]
-            );
-            assert_eq!(vault.recovery.next_entry_id, expected + 2);
-            assert_eq!(vault.recovery.trash, before.recovery.trash);
-        }
-    }
-
-    #[test]
-    fn counter_overflow_rolls_back_the_entire_batch() {
-        let file = batch();
-        let mut vault = Vault::default();
-        vault.recovery.next_entry_id = usize::MAX - 1;
-        let before = vault.clone();
-        let error = vault
-            .import_with_options(
-                file.path().display().to_string(),
-                ConflictPolicy::Skip,
-                false,
-                1,
-                &mut VaultCredentials::default(),
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("ID space is exhausted"));
-        assert_eq!(vault, before);
-    }
 }

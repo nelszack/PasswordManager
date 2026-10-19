@@ -8,15 +8,12 @@
     const MAX_AGE_MS = 60_000;
 
     function create(pending, domain, now = Date.now()) {
-        if (!pending || typeof pending.password !== "string" || typeof domain !== "string") {
+        if (!pending || typeof pending.username !== "string" || !pending.username || "password" in pending || typeof domain !== "string") {
             throw new Error("Invalid pending credentials");
         }
         return {
             domain,
             username: String(pending.username || ""),
-            password: pending.password,
-            accountName: String(pending.accountName || ""),
-            hasAccounts: Boolean(pending.hasAccounts),
             time: now
         };
     }
@@ -24,7 +21,7 @@
     function usable(record, domain, now = Date.now()) {
         return Boolean(record)
             && record.domain === domain
-            && typeof record.password === "string"
+            && typeof record.username === "string" && record.username.length > 0 && !("password" in record)
             && Number.isFinite(record.time)
             && now >= record.time
             && now - record.time < MAX_AGE_MS;

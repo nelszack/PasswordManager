@@ -47,6 +47,11 @@ vault states.
 Backup restoration enforces the same limit on the actual file read; external
 key files must be regular files within a 1 MiB limit.
 The loopback server uses a rotating token and authenticated encrypted transport.
+Requests and responses use a versioned, named-field contract, and every response
+requires its connection's authenticated encryption key. The single vault worker
+owns either locked state or a complete unlocked session with cached key material.
+Private passwords, notes, custom-field values, seeds and signing keys own their
+cleanup on drop; invalid requests and early returns follow the same lifetime rules.
 A shared 64 MiB budget bounds ciphertext and plaintext request buffers before
 authentication; requests exceeding the available budget are rejected.
 The extension derives site identity from browser sender metadata and requires
@@ -92,7 +97,7 @@ and unlock session; navigation, dismissal and lock invalidate the window.
 Verified Push requires
 the code shown on the login page; codes from the Push payload are never supplied.
 Unknown Push modes and unsupported device requirements block approval.
-Duo network waits release the vault mutex, and the extension routes lock/status
+Duo network waits run outside the vault owner, and the extension routes lock/status
 separately from Push requests. Enrollment commits require the original unlock
 session and unchanged target item.
 
@@ -123,14 +128,23 @@ executables at 250 ms intervals. These notifications and checks supplement the
 inactivity timer and cannot guarantee delivery before a forced suspend or process
 termination. Resume notifications also request locking.
 
-Vault mutations use an atomic file replacement. A pre-replacement failure rolls
-back memory. A directory-sync failure after replacement retains the committed
+Vault mutations stage complete affected items and use atomic file replacement.
+A pre-replacement failure discards the staged change. A directory-sync failure
+after replacement retains the committed
 memory state and reports uncertain durability; the operation must not be blindly
 retried. Rekeying replaces ciphertext at the same opaque vault filename. After an
 interruption there is one vault file, holding either the old or new ciphertext.
 If power fails before directory sync completes, which version survives depends
 on the filesystem. Keep both credentials until the rekey succeeds durably, or
 verify which credential opens the file after an interrupted operation.
+
+Mutation IDs provide bounded duplicate suppression within the current daemon,
+and expected item revisions prevent stale manager edits. The daemon retains at
+most 256 operation results and does not persist these receipts across restarts.
+Unknown outcomes require explicit state inspection before the manager permits
+another change; pending operations cannot be dismissed as unknown. Reconnection
+and acknowledgement never replay the original write. Operation IDs do not
+provide exactly-once guarantees for external Duo actions or clipboard effects.
 
 ### Limits
 
@@ -139,7 +153,7 @@ verify which credential opens the file after an interrupted operation.
 - `pm get` redacts secret custom fields by default. `--reveal-secrets` displays
   them, `--field NAME` prints a selected custom-field value, and `--password-only`
   prints the primary secret. `--field NAME --copy` copies without printing the
-  value. `--json` wraps the same output without additional redaction. Terminal
+  value. `--json` returns the selected structured data without additional redaction. Terminal
   logs can retain explicitly revealed values.
 - Autofill necessarily gives the selected secret to the destination page. A
   compromised website or browser can read it after delivery.

@@ -5,6 +5,8 @@ const result = spawnSync(process.execPath, [
     "--test",
     "--test-coverage-include=extension/*.js",
     "--test-coverage-include-all",
+    "--test-coverage-exclude=extension/content_runtime.js",
+    "--test-coverage-exclude=extension/manager_runtime.js",
     "--test-coverage-lines=58",
     "--test-coverage-branches=78",
     "extension/*.test.js"
@@ -39,8 +41,7 @@ const thresholds = {
     "picker.js": [75, 50],
     "picker_state.js": [95, 90],
     "popup.js": [95, 80],
-    "popup_state.js": [95, 90],
-    "relay.js": [90, 80]
+    "popup_state.js": [95, 90]
 };
 
 for (const [file, [minimumLines, minimumBranches]] of Object.entries(thresholds)) {
