@@ -183,7 +183,7 @@ provide exactly-once guarantees for external Duo actions or clipboard effects.
 ## Security regression testing
 
 Run the Rust and extension suites, strict linting, and browser end-to-end tests as
-described in the README. Persistence tests inject failures before replacement and
+described in the [contributor guide](docs/development.md#testing). Persistence tests inject failures before replacement and
 after replacement to check key adoption, rollback, and restart behavior. Subprocess
 tests also exit abruptly at both stages of rekeying and reopen the surviving vault. Clipboard
 tests check replacement, deadlines, lock cleanup, and transient failures.

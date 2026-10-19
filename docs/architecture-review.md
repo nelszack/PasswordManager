@@ -1,6 +1,6 @@
 # Architecture review
 
-Reviewed 2026-10-18 against the pre-refactor checkout (`c1fe149`). Source line references below describe that historical implementation. The approved refactor is implemented on `refactor/architecture`; the README describes the current design. This is a design recommendation, not a security certification. Three independent reviews covered the vault/store, application/protocol, and browser extension; the primary review checked the consequential findings against source and ran the existing suites.
+Reviewed 2026-10-18 against the pre-refactor checkout (`c1fe149`). Source line references below describe that historical implementation. The approved refactor is implemented on `refactor/architecture`; the [contributor guide](development.md#architecture) describes the current design. This is a design recommendation, not a security certification. Three independent reviews covered the vault/store, application/protocol, and browser extension; the primary review checked the consequential findings against source and ran the existing suites.
 
 ## Recommendation
 

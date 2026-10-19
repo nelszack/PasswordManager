@@ -1,89 +1,42 @@
 # Password Manager
 
-See the browser-friendly [complete command and flag reference](docs/commands.html)
-for command descriptions, usage, and flags. Run `pm <COMMAND> --help` for
-terminal help and available examples.
+A local-first password manager with a Rust CLI and a Chrome/Chromium browser
+extension. Vaults use Argon2id key derivation and XChaCha20-Poly1305 encryption.
 
-A secure, local-first password manager with a CLI interface and browser extension.
+- Store logins, secure notes, payment cards, identities, Wi-Fi credentials,
+  software licenses, SSH keys, and API secrets, with multiple URLs and custom fields.
+- Generate passwords or passphrases; search, filter, and audit for weak, reused,
+  duplicate, stale, or breached passwords and missing authenticators.
+- Use TOTP/HOTP codes and experimental Duo passcode and manual Push enrollment.
+- Autofill logins, cards, identities, and OTP codes; generate passwords and manage
+  vault entries from the extension.
+- Recover password history and deleted entries; import/export CSV or portable
+  JSON, preview import conflicts and data loss, and create encrypted full-vault backups.
+- Keep stable entry IDs, timed clipboard cleanup, and inactivity/system-event locking.
 
-## Features
-
-- **Secure Storage**: Versioned encrypted vaults using Argon2id and XChaCha20-Poly1305
-- **Password Generator**: Random passwords with configurable character sets, or readable passphrases
-- **Password Strength Checker**: Evaluate password strength with zxcvbn
-- **Security Health**: Score weak, reused, duplicate, stale, breached, and TOTP coverage findings without exposing passwords
-- **Recovery**: Bounded password history and encrypted trash with restore/purge controls
-- **Search and Filtering**: Case-insensitive searches across non-secret entry fields
-- **Typed Items**: Logins, secure notes, payment cards, identities, Wi-Fi,
-  software licenses, SSH keys, and API secrets
-- **Multiple URLs**: Associate several explicitly approved sites with one login
-- **Sorting and Rich Filters**: Sort listings and filter by type, TOTP, or weakness
-- **Custom Fields**: Searchable fields and privately prompted secret fields
-- **Stable IDs**: Entry IDs remain unchanged when other entries are deleted or restored
-- **OTP Authenticator**: Encrypted per-entry TOTP/HOTP secrets, persistent HOTP counters, and Duo passcode / manual Push enrollment
-- **Browser Extension**: Login, payment-card, identity, and TOTP autofill with save/update prompts
-- **Browser Vault Manager**: Extension-owned unlock, search, add/edit, reveal/copy, and delete-to-trash controls
-- **In-page Password Generation**: Fill new-password and confirmation fields securely
-- **Clipboard Integration**: Prompt copy completion, coordinated auto-clear, and lock cleanup
-- **Import/Export**: Interoperable CSV plus versioned, full-fidelity portable JSON
-- **Import Planning**: Non-mutating previews with skip, replace, and keep-both policies
-- **Import Loss Reporting**: Rich Bitwarden items and explicit reports for unsupported data
-- **Encrypted Backups**: Versioned, authenticated full-vault backup and disaster recovery
-- **Background Server**: Long-running server for quick access
-- **System Event Locking**: Lock on screen lock, session disconnect, and suspend/resume events
+[User guide](docs/user-guide.md) · [Command reference](docs/commands.html) ·
+[Contributor guide](docs/development.md) · [Security policy](SECURITY.md)
 
 ## Installation
 
-Build from the repository root with a current stable Rust toolchain and a native
-C/C++ build toolchain (MSVC on Windows):
+Build with a current stable Rust toolchain and a native C/C++ toolchain
+(MSVC on Windows):
 
 ```bash
 cargo build --release --locked
 ```
 
-The binary will be at `target/release/pm` (`target/release/pm.exe` on Windows).
-Add that directory to your `PATH`, or use the full executable path in the
-commands below. Release archives include a prebuilt binary and the extension;
-keep the binary at a stable path before registering the browser native host.
+Add `target/release` to `PATH`, or use the full path to `pm` (`pm.exe` on Windows).
+Release archives include a prebuilt binary and the extension. Keep the executable
+at a stable path before registering the browser native host.
 
-Building does not change shell setup or browser native-host registrations.
-Enable dynamic completions as described in [Shell Completions](#shell-completions),
-and register the native host once with
-`pm native-host install` as described in [Browser Extension](#browser-extension).
+For upgrades, run `pm native-host update` using the new executable, restart the
+server, and reload the extension. On Windows, fully close the browser first:
+the native host is a copy that must be refreshed **after** rebuilding.
+See [installation and upgrade troubleshooting](docs/user-guide.md#installation)
+and [shell completions](docs/user-guide.md#shell-completions).
 
-After upgrading, run the intended executable explicitly to update an existing
-native host while preserving browser manifests and approved extension IDs:
-
-```bash
-./target/release/pm native-host update
-```
-
-Unix hosts link to that executable. Windows copies it to the registered host.
-On Windows, recompile or replace `pm.exe` **before** running `native-host update`
-with that new executable. Rebuilding afterward does not refresh the copied host.
-Fully close the browser, including background processes, before updating the host.
-Restart the server and reload the extension after upgrading. Open a new shell to
-refresh dynamic completion registration. If using static completion files,
-regenerate them with `pm completions` to pick up new commands.
-
-If a Windows build fails with `failed to remove file ...\\target\\release\\pm.exe`,
-a running process is holding the build executable open. Older native-host
-launchers ran that executable directly. Fully exit the browser, including its
-background processes, and stop the server with `.\target\release\pm.exe kill`.
-Then build and replace the old launcher with the current copied host:
-
-```powershell
-cargo build --release --locked
-.\target\release\pm.exe native-host update
-```
-
-Reopen the browser after updating. The copied Windows native host allows future
-builds while the browser is open. A server started from `target\release\pm.exe`
-still needs to be stopped with `pm kill` before rebuilding that executable.
-
-## Usage
-
-### Create Your First Vault
+## Quick start
 
 ```bash
 pm start
@@ -91,1047 +44,87 @@ pm new
 pm unlock
 pm add --name "Example account" --username alice --url https://example.com
 pm view
+pm get --entry-name "Example account"
 pm lock
 ```
 
-`pm new` prompts twice for a master password, creates an empty vault, and leaves
-it locked. New master passwords must contain at least 14 characters and pass a
-predictability check. Use `pm unlock` before adding or reading entries.
+`pm new` prompts twice for a master password and leaves the new vault locked.
+New passwords must be at least 14 characters and pass a predictability check.
+Entry secrets are entered through hidden prompts. By default, `get` redacts
+secrets in its output and copies the primary secret with timed clipboard cleanup.
 
-For a vault protected by an external key instead:
+Use `pm status` to check the server and `pm kill` to stop it. The server holds
+one unlocked vault at a time. With multiple vaults, list IDs with `pm vaults`,
+then use `pm unlock --vault-file ID` or configure a default vault.
+External-key vaults are also supported; keep keys outside application data and
+separate from the vault. See [vault creation](docs/user-guide.md#create-your-first-vault).
 
-```bash
-pm start
-mkdir -p ./keys
-pm new --key ./keys/vault.key
-pm unlock --key ./keys/vault.key
-```
-
-The key's parent directory must exist. The new key path must not already exist
-and must be outside the application data directory. Keep the key separately from the vault. `pm init` and `pm create` are
-aliases for `pm new`. Creating another vault locks the currently open vault.
-
-### Start the Server
+## Common commands
 
 ```bash
-pm start
-```
-
-The server creates a new private session token on every start. CLI and
-native-messaging clients read it from the protected application data directory;
-it is not displayed to the user or stored in the extension. A clean shutdown
-removes the token file. Before any command is sent, the server proves possession
-of that token with a fresh challenge. Commands and responses are then protected
-with direction-specific XChaCha20-Poly1305 session keys.
-
-Committed mutations with uncertain durability return response code `5`; the
-native bridge marks these outcomes as uncertain so browser controls require
-review before retrying. Existing response codes and framing are unchanged.
-Older clients reject code `5` as an unknown error instead of reporting success;
-upgrade the CLI and native host together with the server.
-
-Check the server with `pm status`; stop it with `pm kill`. The server holds one
-unlocked vault at a time. Lock it before unlocking a different vault.
-Only one server can own an application data directory, including when different
-ports are requested. Its private `server.lock` file stays in place after shutdown;
-the operating system releases the lock when the server exits.
-
-### Generate a Password
-
-```bash
-pm genpass --length 20 --copy
-pm genpass --length 24 --exclude-ambiguous --no-symbols
+pm genpass --length 24 --exclude-ambiguous --copy
 pm genpass --passphrase --words 7 --separator "."
-```
-
-Character classes can be disabled with `--no-uppercase`, `--no-lowercase`,
-`--no-digits`, and `--no-symbols`; replace the default symbol set with
-`--symbols`. Lengths and passphrase word counts must be at least one, and at
-least one non-empty character class must remain. Character-set flags cannot be
-combined with passphrase generation.
-
-### Add a New Entry
-
-```bash
-pm add --name "github.com" --username "user@email.com" --generate-password --copy
-```
-
-Login items are the default. Repeat `--url` to associate several sites with the
-same login; the first URL is primary and every additional URL participates in
-search and browser-extension matching:
-
-```bash
-pm add --name "Example account" --username alice \
-  --url https://example.com --url https://accounts.example.net
-```
-
-Other encrypted item types use the same compact field model: `--name` is the
-display name, `--username` is an optional account/owner identifier, the hidden
-password prompt stores the primary secret, and `--notes` stores supporting
-details. Identity items have no primary-secret prompt.
-
-```bash
-pm add --type secure-note --name "Alarm code"
-pm add --type payment-card --name "Personal Visa" --username "Alice Example"
-pm add --type identity --name "Shipping identity" --username "alice@example.com" --notes "Home address"
-pm add --type wifi --name "Office Wi-Fi" --username WPA3
-pm add --type software-license --name "Design app" --username "Alice Example"
-pm add --type ssh-key --name "Production SSH" --username deploy
-pm add --type api-secret --name "Deployment API" --username key-id-123
-```
-
-For secure notes the primary secret is the note body; for cards it is the card
-number; for Wi-Fi it is the network password; and for licenses, SSH, and API
-items it is the corresponding key or secret. These values are read through the
-hidden prompt and handled like login passwords.
-
-Add searchable custom fields with `--field NAME=VALUE`. For sensitive values,
-use `--secret-field NAME`; the value is read through a hidden prompt and is not
-searched or displayed in ordinary listings (field names remain visible):
-
-```bash
-pm add --name "Hosting" --field environment=production --secret-field recovery-code
-```
-
-### View All Entries
-
-```bash
-pm view
-```
-
-Listings can be sorted by stable ID, name, creation time, modification time, or
-password age. Add `--descending` to reverse the selected order:
-
-```bash
-pm view --sort name
-pm view --sort modified --descending
-pm view --sort password-age
-```
-
-Date sorting compares actual timestamps across time zones and supported formats.
-Entries with unrecognized dates sort first in ascending order and last in
-descending order.
-
-### Search and Filter Entries
-
-Search across names, usernames, all associated URLs, notes, custom-field names,
-and non-secret custom-field values (passwords and secret field values are never
-searched):
-
-```bash
-pm search github
-pm search --username alice --url github.com
-pm search work --name git --notes account
-pm search --type wifi
-pm search --totp --sort name
-pm search --weak --sort password-age
-pm search --stale-days 365 --sort password-age
-```
-
-The general search term matches any non-secret field. Field-specific filters are
-combined, so every supplied filter must match. Matching is case-insensitive.
-The `--type`, `--totp`, `--no-totp`, `--weak`, and `--stale-days` filters work with both
-`view` and `search`. Supported types are `login`, `secure-note`,
-`payment-card`, `identity`, `wifi`, `software-license`, `ssh-key`, and
-`api-secret`. TOTP and weakness filters apply across item types; `--no-totp`
-also includes non-login items without authenticators. Add `--type login` to limit
-these filters to accounts. Weakness filtering ignores items with no primary
-secret and selects zxcvbn scores of 0–2.
-
-Vault writes enforce the same 128 MiB encrypted-file limit used during unlock.
-An operation that exceeds the limit fails before replacement and rolls back its
-in-memory changes.
-
-### Get a Password
-
-```bash
-pm get --entry-name "github.com"
-```
-
-`get` prints item details with the primary secret, notes, and secret custom fields
-redacted. It copies a non-empty primary secret when the clipboard timeout is
-nonzero. Use `--password-only` to print just the primary secret without copying.
-Use `--reveal-secrets` to display secret custom-field values, or `--field NAME`
-to print one custom field by its case-insensitive name. Add `--copy` to copy that
-field without printing its value; this requires a nonzero clipboard timeout and
-reports clipboard failures. These field options do not copy the primary secret.
-`--json` returns structured data and respects the selected reveal option.
-
-```bash
-pm get --id 3 --reveal-secrets
-pm get --id 3 --field recovery-code
-pm get --id 3 --field recovery-code --copy
-```
-
-### Update an Entry
-
-```bash
-pm update --name "New Name" --entry-name "github.com"
-```
-
-Change the primary secret through a hidden prompt, or generate a replacement:
-
-```bash
+pm search github --sort name
 pm update --id 3 --password
-pm update --id 3 --password --generate-password
-```
-
-Item types and URL associations can be changed without altering the secret:
-
-```bash
-pm update --id 3 --type login
-pm update --id 3 --add-url https://login.example.net
-pm update --id 3 --remove-url https://old.example.com
-pm update --id 3 --clear-urls
-pm update --id 3 --field environment=staging
-pm update --id 3 --secret-field api-token
-pm update --id 3 --remove-field environment
-pm update --id 3 --clear-fields
-```
-
-### Delete an Entry
-
-```bash
-pm delete --entry-name "github.com"
-```
-
-Deletion moves the entry and its password history into encrypted trash. Manage
-deleted entries with:
-
-```bash
-pm trash
-pm restore --id 1
-pm purge --id 1
-pm purge --all
-```
-
-`restore` and `purge --id` use the **stable entry IDs** shown by `pm trash`.
-These IDs remain unchanged when other trash items are restored or purged.
-Purging is permanent.
-
-Trash retention can optionally purge old items whenever a vault is unlocked.
-It is disabled by default; configure a number of days to enable it.
-
-Active entry IDs are persistent: deleting or restoring a different entry does
-not renumber them. Restoring a trashed entry also restores its original ID, and
-imports receive new local IDs instead of trusting IDs from the source file.
-
-To permanently delete an entire vault, supply its password or key:
-
-```bash
-# Prompt for the vault's master password
-pm delete --vault
-
-# Select a vault explicitly when multiple vaults exist
-pm delete --vault --vault-file VAULT_ID.enc
-
-# Delete a key-based vault and its key file
-pm delete --vault --key ./keys/vault.key
-
-# Delete the vault but intentionally retain a shared or backup key
-pm delete --vault --key ./keys/vault.key --keep-key
-```
-
-Whole-vault deletion cannot be restored. A supplied key file is removed only
-after it has successfully opened the matching vault and that vault has been
-deleted. Deletion uses `--vault-file`, then the configured default vault, or the
-only vault when exactly one exists. It never searches vaults by password.
-
-### Password History
-
-Changing a password retains previous passwords inside the encrypted vault. The
-default limit is ten revisions and can be configured or set to zero to disable
-new history. History output shows timestamps, not password values:
-
-```bash
-pm history --entry-name "github.com"
-pm restore-password --entry-name "github.com" --revision 1
-```
-
-Revision `1` is the newest previous password. Restoring a revision places the
-current password back into history, so the operation can be reversed.
-
-### Audit the Vault
-
-```bash
-pm audit
 pm audit --stale-days 365 --require-totp
-pm audit --breaches
-```
-
-The audit assigns a health score and checks active logins for weak passwords,
-reused-password groups, and duplicate site/username combinations. Optional
-checks report passwords older than a chosen number of days and accounts without
-TOTP. Reports identify affected entries but never print their passwords.
-
-`--breaches` performs an opt-in Pwned Passwords range check. It sends only the
-first five characters of each password's SHA-1 hash, requests padded responses,
-and never sends a password or complete hash. The ordinary audit remains fully
-offline. Network failures retain both local results and successful
-breach findings, identify entries with unchecked breach status, and return a
-failure exit status to indicate an incomplete audit. Up to eight requests run
-concurrently with a 15-second request timeout and a four-minute overall deadline.
-
-### TOTP and HOTP Authenticators
-
-Paste either a Base32 TOTP secret or a complete `otpauth://totp/...` or `otpauth://hotp/...`
-URI into the hidden setup prompt:
-
-```bash
-pm totp set --entry-name "github.com"
-pm totp show --entry-name "github.com"
-pm totp show --entry-name "github.com" --watch
-pm totp show --id 3 --copy --copy-time 20
-pm totp remove --id 3
-```
-
-TOTP output includes the current code and its remaining validity. Raw Base32
-secrets use the standard SHA-1, six-digit, 30-second configuration; OTPAuth
-URIs can specify their algorithm, digits, and period. Correct system time is
-required for valid codes. Entry and trash listings mark configured accounts
-with an authenticator indicator without revealing their secrets. The existing
-`--totp`, `--no-totp`, and `--require-totp` options include HOTP authenticators too.
-
-Use `pm totp show --watch` with an entry selector to keep the code and countdown
-updated until Ctrl+C or the vault locks. Add `--copy` to copy each new code once;
-`--copy-time` still controls clipboard clearing. Watching does not extend the
-vault's auto-lock deadline. In a terminal the countdown updates in place; redirected
-output and `--json` emit one line per update. HOTP cannot be watched and attempting
-to do so does not consume a counter.
-
-The countdown follows the configured period's Unix-time boundaries (normally
-every 30 seconds). Duo Mobile may start its displayed 30-second countdown when
-you reveal a passcode, so its refresh can appear 10–20 seconds later even with
-the same secret and synchronized clocks. See [Duo's explanation of its countdown](https://community.cisco.com/t5/duo-mobile-app/delay-in-authenticator-code/td-p/4884436).
-If the actual codes are consistently shifted, check automatic time on both devices
-and that both authenticators use the same secret, algorithm, digits, and period.
-
-HOTP URIs must include an unsigned `counter` parameter, for example
-`otpauth://hotp/Example?secret=BASE32_SECRET&counter=0`. HOTP supports SHA-1,
-SHA-256, or SHA-512 and six to eight digits. Each `pm totp show` or browser
-authenticator selection generates the code at the saved counter and atomically
-saves the next counter in the encrypted vault **before returning the code**.
-HOTP output shows the consumed counter rather than a countdown. JSON and browser
-API responses represent the counter as a decimal string so the
-full unsigned 64-bit range survives JavaScript parsing. Request codes
-when you intend to use them: repeatedly generating unused codes can move beyond
-the provider's acceptance window. Restoring an older backup or importing an old
-export also restores its counter and may require provider resynchronization.
-
-#### Duo passcode enrollment
-
-Use a fresh Duo enrollment link for a separate device, then paste either the
-`https://m-….duosecurity.com/activate/…` setup link or its `duo://…` activation
-link into the hidden prompt:
-
-```bash
-pm totp duo --entry-name "work"
-pm totp show --entry-name "work" --copy
-```
-
-Duo enrollment defaults to **HOTP**. If your organization accepts time-based
-codes, select TOTP explicitly with `pm totp duo --entry-name "work" --mode totp`.
-The link does not identify which passcode type your organization accepts; there
-is no automatic fallback. The command saves the authenticator without generating
-or consuming its first HOTP code. Enrollment refuses to overwrite an existing
-authenticator; remove it explicitly first if replacing it.
-
-This is experimental compatibility with Duo's undocumented mobile activation
-endpoint, based on the [duo-hotp protocol implementation](https://github.com/WillForan/duo-hotp).
-It enrolls for **passcode generation only**. Push credentials are discarded;
-use `pm duo enroll` below for push support. Keep an official Duo Mobile device
-as a fallback while testing this experimental client. Organizational settings can reject this enrollment
-or its passcodes. Activation links are consumed by enrollment and can expire;
-an already-used link does not export an existing phone's secret or HOTP counter.
-If enrollment succeeds but saving fails, or the request times out, check your
-Duo device enrollment before trying again with a fresh link.
-
-At sign-in, Duo may automatically send a push for an enrolled device. Choose
-**Other options → Duo Mobile passcode** for the device enrolled through `pm`,
-then enter the code from `pm totp show --entry-name "work"`. Available sign-in
-methods are controlled by your organization's [Duo authentication policy](https://duo.com/docs/policy#authentication-methods).
-If the passcode method is missing, an administrator must check whether it is
-allowed for your account and application. Enrollment through `pm` cannot change
-those policies.
-
-The importer restricts setup and activation requests to HTTPS Duo hosts, bounds
-responses, and keeps links and returned secrets out of diagnostics. The passcode-only command stores the OTP configuration in the encrypted vault;
-no plaintext secret files are created.
-
-Enrollment failures identify the setup-page or activation step and show the HTTP
-status and Duo error code when available. Known rejection reasons, parameter
-names, and fixed topic hints from error messages are displayed, while arbitrary
-response text stays private. Topic hints report what Duo's response mentions;
-they do not establish the rejection's cause. If reporting
-a failure, share this error message rather than the activation link or response
-body. Restart the server after rebuilding to load updated enrollment behavior.
-Activation fields are sent as a URL-encoded POST form with the matching content
-type; only `customer_protocol=1` is sent in the query string.
-HTTP 403 / Duo code 40301 during mobile activation does not identify the root
-cause by itself. The compatibility profile uses the form fields and version
-metadata inspected in the [official Android 4.123.0 app](https://dl.duosecurity.com/DuoMobile-latest.apk),
-with a header that also identifies PasswordManager and its lack of Duo certificate
-pinning. HTTPS certificate validation remains enabled. Mobile security measurements
-and hardware attestation are not available and are not fabricated; an organization
-requiring them may reject enrollment. Client compatibility and enrollment
-restrictions both need to be considered. Switching
-between HOTP and TOTP cannot resolve a failure before Duo returns the OTP secret.
-
-#### Duo Push
-
-Use a **fresh activation link** for push enrollment. The earlier `pm totp duo`
-command discarded the private signing key, so its device cannot be upgraded in
-place. Enroll a new device in Duo and replace the local authenticator:
-
-```bash
-pm duo enroll --entry-name "work" --replace
-pm duo watch --entry-name "work" --interactive
-# Or decide once, without copying an ID when exactly one request is pending:
-pm duo approve --entry-name "work"
-pm duo deny --entry-name "work"
-# With multiple requests, select the exact ID printed by requests/watch:
-pm duo requests --entry-name "work"
-pm duo deny --entry-name "work" --request REQUEST_ID
-```
-
-Interactive watch displays each request and prompts in the same terminal: type
-`a` then Enter to approve, `d` then Enter to deny, Enter to skip, or `q` then Enter
-to quit. This choice confirms the displayed request; no second confirmation is
-needed. A skipped request is not prompted again unless its context changes or it
-disappears and returns. Verified Push asks for the login-page code after `a`;
-Enter at the code prompt cancels the decision and ends monitoring. Use
-`pm duo watch --entry-name "work" --notify` for passive monitoring instead.
-One-shot `approve`/`deny` still display the request and ask you to type the action
-to confirm. Omitting `--request` with multiple pending requests fails without
-answering any of them.
-
-The enrollment prompt hides the activation link. Push credentials (the Duo host,
-account and device identifiers, and RSA signing key) are stored inside the
-**encrypted vault**, alongside the passcode authenticator. Push enrollment uses
-Duo's `use_totp` response when present, otherwise HOTP; `--mode` overrides this.
-`--replace` replaces the local OTP and push enrollment after the new activation
-succeeds. It does not remove the old device from Duo. An error after activation
-may have consumed the link; check device enrollment before retrying.
-
-Select this device at login, then check or monitor requests. In the browser
-extension, a detected Duo challenge opens a separate **Duo Push** window when a
-pending request is available. Review the application, account and location, then
-click **Approve** or **Deny** once. Verified Push requires typing the code from
-the login page into the window; the extension never extracts or supplies that code.
-**Dismiss** closes the window without answering and suppresses that same request
-on the current page. Closing the login page, navigating away, locking the vault
-or disconnecting the native host invalidates the window.
-
-Attach Duo enrollment to the saved login whose URL matches the sign-in site.
-Embedded Duo frames use the parent site's matching logins. A login selected in
-the credential chooser, or recognized during credential submission, is remembered
-for five minutes in the same tab to handle redirects to HTTPS Duo-hosted pages.
-A Duo-hosted challenge can also find enrollments for its exact HTTPS Duo server,
-including when SSO used a different saved login. Enrollment credentials and
-account summaries stay in the background; this lookup does not release passwords.
-Automatic detection polls about every five seconds while the challenge is visible,
-for up to five minutes. Detection uses visible challenge text; unusual or localized
-pages may need the manual **Vault manager → Duo Push** panel instead. Requests and
-decisions stay inside the extension; the website receives no request details.
-Rebuild and restart the server, update the native host, and reload the extension
-after updating, so login summaries include Duo enrollment availability.
-
-In **Vault manager**, select the enrolled item and use its **Duo Push** panel for
-manual request checks or monitoring. Monitoring polls while this
-item is open; CLI monitoring runs until Ctrl+C, an error, or vault lock. It does
-not register with Android/iOS notification services. `--notify` provides passive
-desktop alerts using `notify-send`, if available. Polling does not reset auto-lock.
-
-Each approval or denial requires an explicit choice after reviewing the
-application, account, location, expiry and request ID. Approve only a login you
-started. Verified Push requires you to type the code shown on the **login page**;
-no code is extracted from the push payload or automatically supplied. Immediately
-before responding, the server fetches the exact request again and checks that
-its context and requirements have not changed. Expired or changed requests cannot
-be answered using an earlier review. Review tokens are keyed and valid only for
-the current unlock session; locking and reopening the vault requires a new review.
-Duo network waits do not hold the vault lock. An enrollment that finishes after
-locking, switching vaults, or changing its item is not saved; the activation link
-may already have been consumed. A decision timeout has an unknown outcome;
-check the login before retrying. Requests that require device biometrics, GPS,
-proximity, passwordless device authentication or key rotation cannot be approved
-by this client. Unknown verification requirements also block approval. Denial
-remains available for supported pending-request shapes.
-
-Duo Push uses an undocumented mobile API and may be rejected by organization
-policy or future server changes. HTTPS validation is enabled, and requests use
-RSA-SHA512 signatures through the AWS-LC backend also used by rustls. This client
-cannot provide mobile hardware attestation.
-An administrator must permit a compatible authentication method; enrollment does
-not change organization policy.
-
-`pm duo remove --entry-name "work"` removes local push credentials and retains
-passcodes; remove the device separately in Duo. Push credentials follow trash,
-restore and purge operations. Encrypted backups and **plaintext portable JSON
-exports** include them; CSV exports omit them, just as they omit OTP secrets.
-
-Restoring an encrypted backup on another computer preserves the same Duo device
-identity. Both copies should be able to fetch the same pending Push requests when
-their vaults are unlocked and monitoring is enabled. Responding on either copy
-resolves that request; it does not create a second enrolled device. Simultaneous
-use on two computers has not been tested against live Duo.
-
-Approving or denying a Push request does **not** advance the local HOTP counter.
-The Verified Push number from the login page is separate from HOTP. Generating
-an HOTP passcode advances only that vault copy's counter, and backup/restore does
-not synchronize later changes between computers. Use one active copy for HOTP
-passcode generation. Use fresh links for separate enrollments, and avoid
-simultaneous enrollments for the same item.
-
-RFC 4226 specifies a 128-bit minimum secret and recommends 160 bits. Some
-providers, including GitHub, issue 80-bit secrets for compatibility. Provider
-secrets from 80 bits upward are accepted, with a warning below 128 bits;
-shorter secrets remain rejected.
-
-Authenticator configurations are stored only inside the encrypted vault. They
-remain attached to an entry in trash and after restoration, and are securely
-removed when that trash entry is purged. Plaintext CSV exports omit authenticator
-configurations and richer item metadata. Portable JSON exports preserve active
-item metadata, history, and TOTP configurations; use an encrypted backup when
-trash and the complete recovery state must also be preserved.
-
-### Lock/Unlock
-
-```bash
-pm lock
-pm unlock --timeout 15m
-```
-
-To avoid trying every vault's password KDF, list the opaque vault IDs and select
-one explicitly. Listing works without a running server and does not decrypt files:
-
-```bash
-pm vaults
-pm unlock --vault-file 0123456789abcdef0123456789abcdef.enc
-pm unlock --vault-file 0123456789abcdef0123456789abcdef.enc --key ./keys/vault.key
-```
-
-The selector accepts one `.enc` filename from the application data directory.
-Missing files, unreadable keys, invalid headers, unsupported versions, and invalid
-authenticated records produce specific errors. A wrong password and modified
-ciphertext cannot be distinguished by authentication alone. Omitting the selector
-retains automatic vault discovery.
-
-The timeout is based on inactivity: each authenticated vault operation resets it;
-passive status polling does not.
-Durations accept seconds or `s`, `m`, `h`, and `d` suffixes. New configurations
-default to 15 minutes; a value of `0` disables inactivity locking.
-Locking clears vault memory without depending on storage writes. If automatic
-clipboard cleanup fails, `pm status` reports a warning and the extension shows a
-warning badge; the vault itself is already locked.
-
-The server also locks on operating-system screen-lock and suspend/resume events,
-even when the inactivity timeout is zero. Linux listens to logind lock hints and
-sleep signals, plus GNOME/KDE/freedesktop screensaver notifications. It holds a
-logind delay inhibitor while preparing for suspend, releasing it after vault
-cleanup. When launched in a systemd user scope outside a login session, it uses
-logind's automatic lookup of the user's display session to monitor lock hints.
-Standalone `hyprlock`, `swaylock`, `i3lock`, and `xsecurelock` processes
-owned by the same user are also checked every 250 ms, covering lockers that do
-not publish a D-Bus hint. Windows uses session and power notifications; macOS uses
-workspace sleep/session notifications and the distributed screen-lock notification.
-Unavailable event sources appear in `pm status` and the browser status warning;
-Linux connections retry automatically. Inactivity locking remains available.
-
-### Change the Master Password or Key File
-
-Unlock the vault first, then run:
-
-```bash
-# Prompt for and confirm a new master password
-pm rekey
-
-# Or create and switch to a new external key file
-pm rekey --key /secure/removable-media/replacement.key
-```
-
-New vault, rekey, import, and backup passwords must contain at least 14
-characters and pass a predictability check.
-
-Existing key files must be regular files no larger than 1 MiB. Generated key
-files contain 32 random bytes.
-
-New key files must be outside the application data directory, so copying the
-encrypted vault does not also copy its key. Relative paths are resolved from
-the directory where `pm` is run.
-
-Rekeying atomically replaces the ciphertext at the same random vault filename.
-There is one vault file throughout the operation. An old key file is left in place,
-but the successfully rekeyed vault no longer uses it. If replacement completes but
-directory synchronization fails, the new key remains active and the command
-reports that durability is uncertain. Keep both credentials until the operation
-succeeds durably; after an interruption, verify which credential opens the vault.
-Historical backups and filesystem snapshots still use their original credentials.
-
-### Import/Export
-
-Relative import, export, and backup paths are resolved from the directory where
-you run the CLI, independently of where the background server was started.
-Exports and backups must be saved outside the application's data and configuration
-directories. `--force` cannot override this protection.
-
-For a complete backup that preserves entries, stable IDs, item types, additional
-URLs, custom fields, password-age metadata, password history, trash, TOTP/HOTP
-configurations and counters, and Duo Push credentials, use the encrypted backup
-commands:
-
-```bash
-# Prompts for and confirms an independent backup password
+pm totp set --id 3
+pm totp show --id 3 --copy
+pm delete --id 3
+pm trash
+pm restore --id 3
 pm backup create --path vault.pmbackup
-
-# Existing files are protected unless replacement is explicit
-pm backup create --path vault.pmbackup --force
-
-# The server must be running with the current vault locked
-pm lock
-pm backup restore --path vault.pmbackup
-pm unlock --vault-file ID_PRINTED_BY_RESTORE
 ```
 
-Use `--key /absolute/path/to/backup.key` on both commands to use an existing
-external key file instead of a password. Keep that key separately; it is not
-embedded in the backup. Restore writes a new vault with an independent identity
-and prints its filename. Select that ID when unlocking it with the backup
-credential. Existing vaults are preserved; restoration does not infer a
-destination from a matching password. `--force` applies to backup creation,
-where it explicitly replaces an existing backup file.
+Deletion moves entries to encrypted trash; purging and whole-vault deletion are
+permanent. Encrypted backups preserve the complete vault and recovery state.
+CSV and portable JSON exports contain **plaintext secrets**; CSV omits OTP/Duo
+credentials, and portable JSON includes sensitive authenticator and history data.
+Review [backup and import/export guidance](docs/user-guide.md#importexport) before use.
 
-Backup files use a versioned format and XChaCha20-Poly1305 authenticated
-encryption with a fresh nonce and, for passwords, a fresh Argon2id salt. They
-are written atomically with private file permissions. The format contains all
-encrypted recovery material and is limited to 128 MiB when creating and restoring.
+Run `pm <COMMAND> --help` or open the [complete command reference](docs/commands.html)
+for flags and examples. The [user guide](docs/user-guide.md) covers typed items,
+custom fields, history, rekeying, authenticators, Duo Push, and scripted JSON output.
 
-For interoperability with other password managers, plaintext import/export is
-still available:
+## Browser extension
 
-```bash
-pm import --path backup.csv --new
-pm export --path backup.csv
-pm import --path bitwarden.json --new
-pm export --path backup.json
-
-# Plaintext exports do not overwrite files unless explicitly requested
-pm export --path backup.json --force
-```
-
-Preview an import without creating or changing entries, then choose how exact
-name/username/URL conflicts are handled:
-
-```bash
-pm import --path backup.csv --preview
-pm import --path backup.csv --conflicts skip
-pm import --path backup.csv --conflicts replace
-pm import --path backup.csv --conflicts keep-both
-```
-
-Bitwarden JSON imports preserve logins, secure notes, cards, identities, SSH keys,
-all login URLs, TOTP, password history, and custom fields. Folder names and
-favorites are retained as custom fields. Hidden fields, card security codes, and
-sensitive identity numbers stay secret fields; secure-note bodies become primary
-secrets rather than ordinary searchable notes. History follows the configured
-retention limit.
-
-Both previews and completed imports report unsupported item counts and bounded,
-secret-free warnings. These identify omitted passkeys, attachments, linked fields,
-and unsupported matching/access policies. Unsupported authenticator configurations
-and additional CSV/JSON properties are retained as secret fields when possible.
-Encrypted Bitwarden exports must first be exported as unencrypted JSON. CSV
-imports accept Bitwarden's login column aliases and typed rows; extra columns are
-kept as secret fields. Review `--preview` warnings before importing.
-
-Imports and previews against the current vault require it to be unlocked and
-leave it unlocked. Use `--new --preview` to preview against an empty vault while
-the server's vault is locked. Previews require a running server but do not prompt
-for a new vault password or change the current lock state. A completed `--new`
-import leaves the new vault locked.
-`--key` is used only with `--new`, where it creates the new vault's external key.
-Import files are limited to 128 MiB and 100,000 items.
-
-`replace` preserves the existing stable ID and records a changed password in
-history, resetting its password age. `keep-both` adds a new stable ID and appends
-an `(imported)` suffix.
-
-The format is detected from the input content; exports use a versioned portable
-JSON envelope when the path ends in `.json`, otherwise CSV. Portable JSON
-preserves active item types, additional URLs, custom fields, password-age
-metadata, password history (bounded by the configured limit), and TOTP
-configurations. Imported IDs are always remapped to safe local IDs. Supported inputs also include Chrome/Chromium
-CSV, Firefox CSV, Bitwarden JSON, and 1Password CSV with compatible login columns.
-Bitwarden imports preserve supported item types and their rich metadata as
-described above. Generic CSV/JSON defaults to login items and accepts explicit
-item types; extra properties are retained as secret fields with a report of
-unsupported behavior. Portable JSON provides full fidelity for this application's
-own metadata.
-Conflicts compare the exact name, username, and primary URL, including duplicate
-rows within one input file. They are skipped by default; `--conflicts` changes
-that behavior. Password values are preserved exactly, including whitespace and
-empty strings. Generic login items require a password field; typed imports use
-their corresponding secret, such as a note body, card number, or private key.
-Both export formats contain plaintext secrets; portable JSON can also contain
-TOTP secrets and password history, so
-exports should be protected or deleted after use. Export refuses to replace an
-existing file unless `--force` is supplied.
-
-### Check Password Strength
-
-```bash
-# Prompt privately (recommended)
-pm passcheck
-
-# Explicit arguments are useful for scripts but may remain in shell history
-pm passcheck --password "mypassword123"
-```
-
-### Configure Settings
-
-```bash
-# Display the effective configuration
-pm config
-
-pm config --length 24 --stats true --clipboard-timeout 30 --unlock-timeout 15m
-pm config --password-copy false
-pm config --password-history-limit 20 --trash-retention-days 30
-pm config --server-port 8787
-```
-
-Recovery settings are loaded when the server starts. Restart a running server
-after changing them. A history limit or trash retention value of `0` disables
-that behavior.
-
-When an upgrade introduces a new setting, the first command that reads an older
-configuration adds the setting to `config.toml` with its current default value.
-Existing setting values are preserved.
-
-The server listens only on the loopback interface and uses port `7878` by
-default. The setting is stored as `port = 7878` under `[server]` in
-`config.toml`. A global flag overrides it for one invocation:
-
-```bash
-pm --port 8787 start
-pm --port 8787 status
-pm --port 8787 kill
-```
-
-Pass the same override to every server-backed CLI command. The browser native
-host reads the config file, so use `pm config --server-port PORT` instead of a
-one-time flag when the extension must use the alternate port. Stop the running
-server before changing its configured port, then start it again.
-
-### Configuration and Data Locations
-
-`config.toml` lives in the platform configuration directory; encrypted `.enc`
-vaults, the session token, and the native-host installation live in the application
-data directory. On Linux these default to `~/.config/password_manager` and
-`~/.local/share/password_manager`, respecting `XDG_CONFIG_HOME` and
-`XDG_DATA_HOME`. macOS and Windows use platform paths from the `directories` crate.
-
-Set `PM_CONFIG_DIR` and `PM_DATA_DIR` to override the directories. Use absolute
-paths and the same values for the server, CLI, and browser-launched native host.
-A browser launched outside your shell may not inherit those overrides. Use the
-same `PM_DATA_DIR` when installing or updating the native host.
-
-Built-in defaults are a 12-character generated password, no generation statistics,
-clipboard copying enabled for generated values and newly added login passwords,
-a 15-second clipboard timeout, a 15-minute inactivity timeout, ten password-history
-revisions, disabled trash expiration, and server port 7878. `pm config --reset`
-restores all defaults. Invalid configuration files produce an error and are left
-unchanged.
-
-### Structured and Scripted Output
-
-Public commands accept global `--json` and `--quiet` flags. JSON output
-uses an object containing `ok` plus `data` for records or `error` for failures;
-local display-only commands such as password generation use `output`. Mutation
-responses also include an operation receipt. Transport,
-vault, and availability failures exit with status 1; CLI or local-input errors
-use status 2; missing records use status 3; and conflicts use status 4. Quiet
-mode still prints errors. Retrieve only a primary secret without clipboard
-activity with `get --password-only`:
-
-```bash
-pm --json view --sort name
-pm --quiet lock
-pm get --id 3 --password-only
-```
-
-Password-only and custom-field retrieval preserve the stored value exactly in
-JSON output and when standard output is redirected, including trailing spaces,
-newlines, and empty values. Redirected secret output has no added newline.
-
-### Shell Completions
-
-Dynamic completions query the installed `pm` for current commands, flags and
-value choices on each Tab press. They run before application initialization,
-without loading configuration, unlocking a vault, or contacting the server.
-Add the line for your shell to its startup configuration:
-
-```bash
-# Bash: add to ~/.bashrc
-source <(COMPLETE=bash pm)
-
-# Zsh: add to ~/.zshrc
-source <(COMPLETE=zsh pm)
-```
-
-```fish
-# Fish: add to ~/.config/fish/completions/pm.fish
-COMPLETE=fish pm | source
-```
-
-```elvish
-# Elvish: add to ~/.elvish/rc.elv
-eval (E:COMPLETE=elvish pm | slurp)
-```
-
-```powershell
-# PowerShell: add to $PROFILE
-$env:COMPLETE = 'powershell'
-try { pm | Out-String | Invoke-Expression } finally { Remove-Item Env:\COMPLETE }
-```
-
-Replace any existing `pm` completion registration or source line with the dynamic
-line, then open a new shell. Ensure the intended `pm` executable is on `PATH`
-before that line runs. The dynamic interface uses Clap's `unstable-dynamic`
-feature; generate registration at shell startup so it follows library upgrades.
-In Bash, `complete -p pm` should name `_clap_complete_pm`. Refresh an existing
-session with `source <(COMPLETE=bash pm)`.
-
-Static completions remain available. Generate or replace a separate file for the
-chosen shell using the intended installed executable:
-
-```bash
-# Bash: bash-completion can load this standard user location
-mkdir -p ~/.local/share/bash-completion/completions
-pm completions bash --output ~/.local/share/bash-completion/completions/pm
-
-# Zsh: add ~/.zfunc to fpath before running compinit in ~/.zshrc
-mkdir -p ~/.zfunc
-pm completions zsh --output ~/.zfunc/_pm
-
-# Fish: loaded automatically by Fish
-mkdir -p ~/.config/fish/completions
-pm completions fish --output ~/.config/fish/completions/pm.fish
-```
-
-Create the destination directory first. For PowerShell, generate a separate file
-and add a dot-source line to your existing profile:
-
-```powershell
-pm completions powershell --output "$HOME/pm-completions.ps1"
-# Add this line to $PROFILE:
-. "$HOME/pm-completions.ps1"
-```
-
-These static files support `bash`, `zsh`, `fish`, `elvish`, and `powershell`.
-Omitting `--output` or using `--output -` writes to standard output. Reload your
-shell after setup. If a static Bash setup still completes filenames, check
-`complete -p pm` and source the file from `~/.bashrc`:
-
-```bash
-source ~/.local/share/bash-completion/completions/pm
-```
-
-## Browser Extension
-
-Choose **Open vault manager** in the extension popup to open the extension-owned
-management page. It can unlock a selected vault using its master password or an
-absolute external-key path, search items, add/edit all supported item types,
-manage custom fields and URLs, reveal selected secrets, copy primary secrets,
-and move entries to encrypted trash. Blank password and hidden-field values
-preserve existing secrets during an edit. Use **Reveal secrets** before changing
-the name or visibility of a hidden field whose value is not currently shown.
-Revealed values clear after 30 seconds; locking or disconnecting clears the editor.
-Copying uses the configured server clipboard timeout and lock cleanup.
-Multiline secrets use a dedicated editor. Changing an item's type preserves the
-secret being edited, including line breaks, and retains the reveal timeout.
-
-Lock and status requests use a separate native-host connection from item work
-and Duo polling. Requests that expire while queued are never sent. If a sent
-save loses its response, it may still complete: the manager clears its editor
-and requires **Review vault state** before another change. Review the refreshed
-items before retrying. A save prompt with an uncertain outcome disables saving;
-dismiss it and inspect the vault manager. Closing a native connection cannot
-cancel a mutation already accepted by the server.
-
-Items enrolled with `pm duo enroll` show a **Duo Push** panel with request checks,
-monitoring, and explicit **Approve login** / **Deny login** controls. See
-[Duo Push](#duo-push) for enrollment, verification codes, and backup behavior.
-
-The manager also contains browser generator settings: password length,
-uppercase/lowercase/digits, a custom symbol set, ambiguous-character exclusion,
-or passphrases with a word count and separator. **Save browser defaults** applies
-these options to generation buttons on signup forms, including already-open
-pages. These browser settings are independent of CLI defaults. Only settings
-are saved in extension storage; generated values and vault secrets are not.
-Enter an exact HTTPS origin in **Site origin** to save an override for that site
-instead. Origins include the scheme and port; overrides do not extend to other
-subdomains. **Remove site override** returns that site to the browser defaults.
-
-The browser extension injects credential-handling code only into HTTPS pages.
-It does not offer autofill or save prompts on plaintext HTTP pages.
-
-1. Build or install `pm` at a stable path, then load the `extension` folder as
-   an unpacked extension in Chrome, Chromium, or Helium on Linux, macOS, or
-   Windows.
-2. Copy its 32-character ID from `chrome://extensions` and register the native
-   host:
+1. Load `extension/` as an unpacked extension in Chrome, Chromium, or Helium.
+2. Copy its ID from `chrome://extensions`, then register the native host:
 
    ```bash
    pm native-host install --extension-id YOUR_EXTENSION_ID --browser chrome
    ```
 
-   Use `--browser chromium` for Chromium or `--browser helium` for Helium.
-   Reload the extension after installing the host.
+   Use `--browser chromium` or `--browser helium` as appropriate, then reload
+   the extension. On Windows, fully exit and reopen Helium after registration.
+3. Start and unlock the server. Use the key button beside a login field to
+   choose an account, or **Open vault manager** in the popup to unlock and manage items.
 
-   On Windows, `--browser helium` automatically uses Helium's
-   Chromium-compatible native-messaging registry location. Fully exit Helium,
-   including any background processes, and reopen it after registration.
-3. Start and unlock the password-manager server.
-4. Visit a login page and use the key button beside a credential field to
-   choose an account. The extension can offer to save or update credentials
-   when a login is submitted.
+Autofill and save prompts operate on HTTPS pages. Credentials match saved
+origins, including scheme and port; subdomain sharing requires an explicit
+wildcard URL. See the [browser guide](docs/user-guide.md#browser-extension) for
+matching rules, generator settings, card/identity fields, and recovery after an
+uncertain save. [Duo Push](docs/user-guide.md#duo-push) requires separate enrollment
+and an explicit decision for each request.
 
-The service worker talks to `com.myproject.password_manager` through Chrome's
-native-messaging API. The browser launches the registered native-host executable,
-which forwards a small, validated command set to the authenticated local
-server. The extension no longer requests localhost access or stores the server
-session token. Page origins are derived from trusted browser sender metadata;
-content scripts cannot select a different vault origin or request a TOTP code
-for an unrelated entry. Pending save prompts are held briefly in service-worker
-session storage and are isolated by tab and origin. On Linux and macOS the
-installer creates a host link and writes
-the browser manifest in the browser's per-user application-support directory.
-On Windows it installs `pm-native-host.exe` and registers the manifest under
-the current user's browser registry key, so administrator rights are not
-required. Unix registrations link to the executable; Windows registration
-copies it. If you move the executable or install a new release binary, run
-`pm native-host update` using the new executable. This preserves browser
-manifests and approved extension IDs. On Windows, fully close the browser first.
-
-Autofill is form-aware: choosing an account fills only the username and current
-password fields associated with that control. Other login forms and
-new/confirmation-password fields on the page are left unchanged. Forms created
-or revealed after page load are detected automatically.
-
-New-password fields receive a generator button. By default it creates a 20-character
-password locally with the browser's cryptographic random-number generator and
-fills matching new/confirmation fields. The generated value is not sent across
-the extension bridge unless the user submits and chooses to save it.
-
-For entries configured with TOTP or HOTP, the extension also places an authenticator
-button beside fields marked `autocomplete="one-time-code"` or clearly labelled
-as OTP/2FA verification fields. Choose the account to fetch and fill a current
-code. Only the generated code and its remaining lifetime are returned to the
-extension; the encrypted OTP secret never leaves the vault server. Selecting an
-HOTP authenticator consumes one counter, just like `pm totp show`.
-
-Payment-card and identity fields also receive contextual picker buttons. The
-actual selection happens in a separate extension-owned window that the webpage
-cannot inspect or restyle. Only secret-free labels enter that window; after the
-user selects one, the extension retrieves that single item from the unlocked
-vault and fills controls in the same form. Locking or losing the native-host
-connection invalidates open pickers, including requests still opening a window.
-Closing, canceling, or expiring a picker releases the original page's pending
-selection immediately. The picker displays the receiving site;
-for an embedded frame from a different origin, it also displays the main page
-and requires explicit confirmation before filling. The extension uses the
-browser's `tabs` permission to read the main page's URL for this destination
-check. Cardholder/email fall back to the item's `--username`, and the card
-number comes from the card item's primary secret. Other values are read from
-custom fields using common names, for example:
+## Configuration
 
 ```bash
-pm add --type payment-card --name "Personal Visa" --username "Alice Example" \
-  --field "expiration month=09" --field "expiration year=2030" --secret-field cvv
-
-pm add --type identity --name "Home identity" --username alice@example.com \
-  --field "full name=Alice Example" --field "address line 1=123 Main St" \
-  --field city=Boise --field state=Idaho --field "postal code=83702" \
-  --field country=US --field "phone number=2085550100"
+pm config
+pm config --length 24 --clipboard-timeout 30 --unlock-timeout 15m
+pm config --password-history-limit 20 --trash-retention-days 30
 ```
 
-Supported standard browser fields include cardholder name, card number,
-expiration, security code, name components, email, telephone, organization,
-street-address lines, city, state/region, country, and postal code. Select boxes
-are matched using either their option value or visible label. Payment and
-identity secrets are never requested merely because a page loaded.
+Defaults include a 12-character generated password, 15-second clipboard cleanup,
+15-minute inactivity lock, ten password revisions, no trash expiration, and
+loopback server port `7878`. Restart the server after changing recovery settings.
+Use `pm config --reset` to restore defaults.
 
-Credentials match the normalized saved origin: scheme, hostname, and port.
-Bare domains mean HTTPS on port 443. Different ports and HTTP/HTTPS origins
-require separate saved URLs. To deliberately share an entry with subdomains,
-store its URL as a wildcard, such as `https://*.example.com:8443`; the scheme
-and port must still match. Public-suffix wildcards such as `*.com`, `*.co.uk`,
-and `*.github.io`, URLs with credentials, backslashes, and control characters
-are rejected for matching. Existing ambiguous URLs remain stored but must be
-corrected before browser filling can use them.
-
-Save/update prompts use account summaries and never compare stored passwords
-in a content script. They run after user interaction without delaying or
-replaying the site's submission. A prompt may also appear for an already saved
-account; cancel it when no update is needed. Script-driven submissions without
-user activation do not request account information.
-
-Terminal displays escape control characters in entry metadata. Explicit raw
-secret output to a pipe and plaintext exports preserve the stored values.
-
-The badge and any open popup track native-host, server, and vault lock state
-continuously, including changes made through the CLI and automatic locking.
-They also show a warning when the extension release, installed native host,
-and running password-manager server are not the same version. Restart the
-server and reinstall/reload the extension after an upgrade to clear it.
-The popup can lock the vault and open the vault manager. Management requests are
-accepted only from that extension-owned page; website content scripts retain
-their existing site-scoped permissions.
-
-## Architecture
-
-- `src/main.rs` and `src/app/` - CLI initialization, explicit output settings, local commands, and conversion to server requests
-- `src/server.rs` and `src/server/` - Authenticated connections, a bounded vault worker, command handling, and external effects
-- `src/client.rs` and `src/client/transport.rs` - Authenticated Result-returning client with explicit connection settings
-- `src/client/presentation.rs` - Human-readable rendering of typed response records
-- `src/native_messaging.rs` - Chrome native host protocol and registration
-- `src/vault.rs` and `src/vault/` - Complete item aggregates, staged mutations, import/export, and versioned document storage
-- `src/secret.rs` - Redacted secret fields that wipe their contents on drop
-- `src/encryption.rs` - Encryption/decryption utilities
-- `src/password.rs` - Password generation and strength checking
-- `src/cli.rs` - CLI argument parsing
-- `src/config.rs` - Configuration management
-- `src/clipboard.rs` - Clipboard operations
-- `src/file.rs` - Application paths, key-path validation, private permissions, and atomic file writes
-- `src/protocol.rs` and `src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
-- `src/lib.rs` - Shared production library used by the CLI and fuzz harness
-- `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
-- `docs/commands.template.html` - Static layout used by the command-reference generator
-- `extension/` - Browser extension (Chrome/Chromium)
-
-See the [architecture review](docs/architecture-review.md) for the reasoning behind
-the domain, protocol, and session refactor.
-
-Vault IDs identify files; credentials authenticate the selected vault. When there
-is one vault, `pm unlock` selects it. With multiple vaults, use `--vault-file ID`
-or set `pm config --default-vault ID`. Independent vaults can share a credential.
-The internal protocol and vault document formats changed during development;
-older binaries and vault files need a verified portable export/import using the
-original binary. Upgrade the CLI, native host and extension together. Future
-runtime compatibility uses protocol versions rather than matching package versions.
-
-### Clipboard behavior
-
-CLI copies return after the clipboard is set, without waiting through the timeout.
-A detached helper holds the clipboard until cleanup; secrets travel over stdin,
-never command-line arguments. Server copies share one worker, and copying again
-replaces its owned value and resets its deadline. Explicit and inactivity locking
-clear the latest server-owned copy immediately. Cleanup preserves text copied by
-another application. A timeout of `0` disables copying, as before.
-
-Clipboard history managers may retain copies. CLI-generated copies have independent
-timeouts and are not canceled by server locking. See [SECURITY.md](SECURITY.md)
-for the threat model and limits.
+On Linux, configuration lives in `~/.config/password_manager` and data in
+`~/.local/share/password_manager`, respecting XDG overrides. macOS and Windows
+use platform directories. `PM_CONFIG_DIR` and `PM_DATA_DIR` override these paths;
+use consistent absolute paths for the CLI, server, and browser native host.
+See [configuration details](docs/user-guide.md#configure-settings) and
+[data locations](docs/user-guide.md#configuration-and-data-locations).
 
 ## Security
 
@@ -1154,195 +147,25 @@ vulnerability-reporting process.
   owner-only `0600` permissions on Linux/macOS and explicit current-user-only
   ACLs on Windows
 
-## Testing
+Clipboard history can retain secrets, and CLI-generated copies have independent
+cleanup timers that server locking does not cancel. See
+[clipboard behavior](docs/user-guide.md#clipboard-behavior).
 
-Run Rust and extension unit checks from the repository root:
+Upgrade the CLI, native host, and extension together. Older development vault
+formats require a verified portable export/import using the original binary;
+there is no automatic migration. If a mutation reports an uncertain outcome,
+inspect vault state before retrying.
 
-```bash
-cargo fmt --all -- --check
-cargo test --locked --all-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
-npm ci
-npm run test:extension
-npm run test:extension:coverage
-```
+## Contributing
 
-The shared validation command used by both CI and release packaging runs the
-checks above, verifies the generated command reference, and checks every
-extension script's syntax. The command-reference check reuses the all-features
-executable built for the Rust integration tests:
+Run the shared Rust and extension validation from the repository root
+(Node.js 26.7 or newer):
 
 ```bash
 npm ci
 npm run validate
 ```
 
-The extension coverage and shared validation commands require Node.js 26.7 or
-newer. CI and release validation use Node 26; browser end-to-end tests use Node 22.
-Extension unit coverage enforces individual thresholds for the background
-services, including native request and pending-credential lifecycles.
-
-Browser tests run headlessly by default, so they do not open desktop windows or
-take focus and do not require a graphical session. The
-real native-host/server integration test runs on Linux and requires the binary
-at `target/debug/pm`; it is skipped if the binary is missing. Set up and run on
-Linux with:
-
-```bash
-cargo build --locked
-npx playwright install --with-deps chromium
-npm run test:e2e:coverage
-# To watch the browser while debugging (requires a graphical session):
-PM_E2E_HEADED=1 npm run test:e2e
-```
-
-The coverage command writes reports under `test-results/e2e-coverage`; use
-`npm run test:e2e` to run without coverage collection. Browser tests use temporary
-profiles and synthetic vaults. Most fixtures enable HTTP in a temporary extension
-copy; production injection remains HTTPS-only.
-
-For Rust coverage, install the LLVM tools and coverage runner first:
-
-```bash
-rustup component add llvm-tools-preview
-cargo install cargo-llvm-cov --locked
-cargo llvm-cov --locked --all-features --workspace --fail-under-lines 65
-```
-
-After changing CLI commands or flags, regenerate and verify the browser command
-reference with:
-
-```bash
-cargo run -- generate-command-reference
-cargo run -- generate-command-reference --check
-```
-
-The suite covers authenticated encrypted transport, native-message validation,
-encrypted backup recovery and tamper detection, hostile encryption parameters,
-secret redaction, vault recovery state, TOTP vectors, URL matching, and
-plaintext import/export compatibility. GitHub Actions runs the full test and
-strict-lint suite on Linux, macOS, and Windows for pushes to `main` and pull
-requests. Browser end-to-end and coverage jobs run separately on Linux.
-Rust build caches are saved on `main` and restored by pull requests, reducing
-duplicate cache storage without skipping checks. Default-feature builds remain
-covered by the browser integration and release jobs.
-
-Protocol tests check explicit operation tags, named fields, version rejection,
-request correlation, and exact secret payloads. The native host receives typed
-records, OTP codes, counters, and lifetimes independently of CLI wording. Remote
-`--json` results expose records in `data`; config, vault listings and TOTP watch
-also expose structured data.
-
-Dependency changes are scanned against the RustSec advisory database and
-reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
-weekly, including npm browser-test dependencies and the fuzz harness. Scheduled
-security checks audit the Rust and npm lockfiles, including the fuzz lockfile.
-Repository secret-scanning and push-protection settings are managed separately
-from the checked-in workflows.
-
-Coverage-guided fuzz targets and scheduled CI sessions exercise encrypted headers,
-native messages, and import parsers. See [fuzz/README.md](fuzz/README.md) for local
-setup, synthetic seeds, and reproducing findings. The CLI and fuzzers share the
-production implementation through `src/lib.rs`.
-
-Vault persistence tests distinguish failures before atomic replacement from
-failures afterward. The latter retain committed memory and keys and report
-uncertain durability, so callers should inspect state before retrying a mutation.
-
-## Releases
-
-Releases are never published automatically. First push a semantic-version tag
-matching the version in `Cargo.toml`, for example:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The CLI/package version in `Cargo.toml` is the release version and must match
-the browser manifest's `version_name` for release packaging. Runtime compatibility
-uses the protocol version. The manifest's numeric `version` remains an independent extension-package
-revision because browser stores require monotonically increasing revisions.
-
-Then open the **Release** workflow in GitHub Actions, choose **Run workflow**,
-and enter that existing tag. The pipeline runs the shared validation command,
-including extension version synchronization and coverage, then
-creates a **draft** release with archives for Linux x86-64, Windows x86-64,
-macOS Apple Silicon, and macOS Intel. Review the draft and publish it manually
-from GitHub's Releases page.
-
-Each archive contains `pm`, the browser extension, README, security policy, command
-reference, fuzzing guide, and shell completions. Draft releases include generated notes, SHA-256 checksums, and
-GitHub build-provenance attestations. Prerelease tags such as
-`v0.2.0-beta.1` are marked as prereleases, but still remain drafts until you
-publish them.
-
-## Development
-
-Vault logic lives in `src/vault/`, grouped by entries, queries, recovery, OTP, Duo,
-imports, exports, backups, and persistence. Each complete item owns its metadata,
-secret history, authenticators, Duo enrollment, revision, and active/trash state.
-The encrypted `VaultDocument` has its own schema version and vault identity;
-paths, keys and runtime review tokens are excluded from it.
-
-Mutations stage affected complete items and serialize a combined document view.
-Live state changes only when atomic file replacement commits. A failure before
-replacement discards the staged data; a directory-sync failure afterward adopts
-committed state and keys and reports uncertain durability. Imports stage a bulk
-change. Secret fields wipe on drop, including validation and early-return paths.
-Memory-only mutation tests use an explicit memory store; missing credentials
-cannot silently turn a persistent write into a memory-only success.
-
-The daemon's bounded worker owns `VaultSession::Locked` or a complete unlocked
-vault with cached encryption material. It prioritizes lock/shutdown control work,
-uses one inactivity deadline, and publishes nonsecret status independently of
-long operations. A filesystem commit already in progress must finish at its safe
-boundary before locking. Duo and breach network waits run outside the owner;
-Duo finalization rechecks the unlock session and item revision. Connections carry
-an explicit response encryption key, with no plaintext-response fallback.
-
-The protocol uses versioned envelopes, explicit operation tags and named fields.
-Domain reads return records; `src/client/presentation.rs` formats human output,
-and the native host only adapts browser framing and validated operations. CLI
-output settings are explicit values in the executable; reusable clients return
-results instead of terminating the process.
-
-Mutation IDs deduplicate requests within a running daemon, with up to 256 retained
-results and a 64 KiB limit on each cached result. Large reads/reports retain only
-a receipt. Expected item revisions reject stale manager edits. Receipts distinguish
-pending, committed, failed, unknown, and committed-but-durability-uncertain states.
-Locking discards cached secret responses while retaining nonsecret receipts.
-Receipts are not durable across daemon restarts or unlimited retention. An unknown
-outcome requires state inspection and explicit acknowledgement in the manager;
-a pending operation cannot be acknowledged. Neither reconnect nor acknowledgement
-replays an uncertain write. Remote Duo effects can remain uncertain even when the
-local vault is healthy.
-
-The extension keeps dependency-injected background services for native requests,
-status, navigation context, pickers, prompts and message routing. Only trusted
-extension decisions authorize saves and selected-secret release. Nonsecret
-username navigation context and unresolved operation IDs/actions use session
-storage; secret decision windows are invalidated on worker restart. Idle status
-uses a one-minute alarm, with two-second polling while extension UI is open.
-Native lanes close when idle and reconnect after a bounded silent-port deadline.
-
-Content and manager entrypoints use explicit modules. A per-document/root
-controller captures credentials from supported nested open shadow roots and
-cleans up its observers and listeners. Closed shadow roots are not supported.
-After editing frontend modules, regenerate the checked-in bundles:
-
-```bash
-npm run build:extension
-```
-
-The dependency-free build writes `content_runtime.js` and `manager_runtime.js`;
-unit tests, browser tests and shared validation check that they are current.
-Browser operation policies, runtime validators and TypeScript declarations come
-from `src/protocol/native_contract.rs` and its template. Regenerate them with:
-
-```bash
-cargo run -- generate-command-contract
-cargo run -- generate-command-contract --check
-```
-
-See [Testing](#testing) for prerequisites and CI checks.
+The [contributor guide](docs/development.md) covers architecture, browser tests,
+coverage, generated extension bundles and command contracts, and manual release
+packaging. See the [fuzzing guide](fuzz/README.md) for fuzz targets and reproduction.
