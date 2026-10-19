@@ -1,10 +1,52 @@
 use super::*;
+use crate::cli::ConfigArgs;
 use std::fs;
 
 fn isolated_config() -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     (directory, path)
+}
+
+#[test]
+fn default_vault_selection_is_validated_and_resettable() {
+    let (_directory, path) = isolated_config();
+    let initial = default_test_config(true, &path);
+    let updated = try_update(
+        initial,
+        ConfigChanges {
+            default_vault: Some("selected.enc".into()),
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(
+        read_config(&path).unlock.vault_id.as_deref(),
+        Some("selected.enc")
+    );
+    assert!(
+        try_update(
+            updated.clone(),
+            ConfigChanges {
+                default_vault: Some("../other.enc".into()),
+                ..Default::default()
+            },
+            &path
+        )
+        .is_err()
+    );
+    assert_eq!(read_config(&path), updated);
+    let reset = try_update(
+        updated,
+        ConfigChanges {
+            reset: true,
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert!(reset.unlock.vault_id.is_none());
 }
 
 #[test]
@@ -59,7 +101,10 @@ fn updates_persist_all_fields_and_boundary_values() {
                     copy
                 },
                 clipboard: ClipboardConfig { timeout: clipboard },
-                unlock: UnlockConfig { timeout: unlock },
+                unlock: UnlockConfig {
+                    timeout: unlock,
+                    vault_id: None
+                },
                 copy: CopyConfig { passwords: true },
                 recovery: RecoveryConfig {
                     password_history_limit: history,
@@ -193,7 +238,10 @@ fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
             copy: false,
         },
         clipboard: ClipboardConfig { timeout: 30 },
-        unlock: UnlockConfig { timeout: 5 },
+        unlock: UnlockConfig {
+            timeout: 5,
+            vault_id: None,
+        },
         ..Config::default()
     };
     assert_eq!(read_config(&config_path), reset_with_overrides);

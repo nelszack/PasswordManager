@@ -1,179 +1,118 @@
 use super::*;
-
-#[derive(Serialize)]
-struct ManagementItem<'a> {
-    id: usize,
-    name: &'a str,
-    username: Option<&'a str>,
-    kind: ItemKind,
-    urls: Vec<&'a str>,
-    notes: Option<&'a str>,
-    password: Option<&'a str>,
-    has_secret: bool,
-    fields: Vec<ManagementField<'a>>,
-    has_totp: bool,
-    has_duo: bool,
-    created: &'a str,
-    modified: &'a str,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemSummary {
+    pub id: usize,
+    pub revision: u64,
+    pub name: String,
+    pub username: Option<String>,
+    pub kind: ItemKind,
+    pub urls: Vec<String>,
+    pub has_totp: bool,
+    pub has_duo: bool,
 }
-
-#[derive(Serialize)]
-struct ManagementField<'a> {
-    name: &'a str,
-    secret: bool,
-    value: Option<&'a str>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemPage {
+    pub items: Vec<ItemSummary>,
+    pub total: usize,
 }
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryPage {
+    pub history: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashSummary {
+    pub id: usize,
+    pub name: String,
+    pub kind: ItemKind,
+    pub username: Option<String>,
+    pub deleted: String,
+    pub has_totp: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashPage {
+    pub trash: Vec<TrashSummary>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemField {
+    pub name: String,
+    pub secret: bool,
+    pub value: Option<SecretString>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemDetail {
+    pub id: usize,
+    pub revision: u64,
+    pub name: String,
+    pub username: Option<String>,
+    pub kind: ItemKind,
+    pub urls: Vec<String>,
+    pub notes: Option<SecretString>,
+    pub password: Option<SecretString>,
+    pub has_secret: bool,
+    pub fields: Vec<ItemField>,
+    pub has_totp: bool,
+    pub has_duo: bool,
+    pub created: String,
+    pub modified: String,
+}
 impl Vault {
-    /// Summaries contain no notes, passwords, authenticator seeds or field values.
-    pub fn management_list_json(&self, filter: SearchFilter) -> Result<String, VaultError> {
-        let views = match self.search(filter) {
-            Ok(views) => views,
-            Err(VaultError::NotFound(_)) => Vec::new(),
-            Err(error) => return Err(error),
-        };
-        let total = views.len();
-        let items: Vec<_> = views
+    pub(super) fn summary(&self, item: &Item) -> ItemSummary {
+        ItemSummary {
+            id: item.entry.id,
+            revision: item.revision,
+            name: item.entry.name.clone(),
+            username: item.entry.username.clone(),
+            kind: item.metadata.kind,
+            urls: self.all_urls(&item.entry).map(str::to_owned).collect(),
+            has_totp: item.authenticator.is_some(),
+            has_duo: item.duo.is_some(),
+        }
+    }
+    pub fn management_list(&self, filter: SearchFilter) -> Result<ItemPage, VaultError> {
+        let entries = self.apply_list_options(self.search_entries(&filter), &filter.list);
+        let total = entries.len();
+        let items = entries
             .into_iter()
-            .take(100)
-            .map(|view| {
-                json!({
-                    "id": view.entry.id, "name": view.entry.name, "username": view.entry.username,
-                    "kind": view.metadata.map_or(ItemKind::Login, |m| m.kind),
-                    "urls": view.urls, "has_totp": view.has_totp,
-                    "has_duo": self.recovery.duo.iter().any(|r| r.entry_id == view.entry.id),
+            .map(|e| self.summary(self.item(e.id).unwrap()))
+            .collect();
+        Ok(ItemPage { items, total })
+    }
+    pub fn management_item(&self, id: usize, reveal: bool) -> Result<ItemDetail, VaultError> {
+        let item = self
+            .item(id)
+            .filter(|i| i.active())
+            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
+        let e = &item.entry;
+        Ok(ItemDetail {
+            id,
+            revision: item.revision,
+            name: e.name.clone(),
+            username: e.username.clone(),
+            kind: item.metadata.kind,
+            urls: self.all_urls(e).map(str::to_owned).collect(),
+            notes: e.notes.clone(),
+            password: reveal.then(|| e.password.clone()),
+            has_secret: !e.password.is_empty(),
+            fields: item
+                .metadata
+                .custom_fields
+                .iter()
+                .map(|f| ItemField {
+                    name: f.name.clone(),
+                    secret: f.secret,
+                    value: (!f.secret || reveal).then(|| f.value.clone()),
                 })
-            })
-            .collect();
-        serde_json::to_string(&json!({ "items": items, "total": total }))
-            .map_err(|_| VaultError::InvalidInput("could not encode item summaries".into()))
-    }
-
-    /// Secrets are included only in an explicit reveal of one selected item.
-    pub fn management_item_json(&self, id: usize, reveal: bool) -> Result<String, VaultError> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|entry| entry.id == id)
-            .ok_or_else(|| VaultError::NotFound("Item not found.".into()))?;
-        let metadata = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .find(|m| m.entry_id == id);
-        let mut urls = entry.url.as_deref().into_iter().collect::<Vec<_>>();
-        if let Some(metadata) = metadata {
-            urls.extend(metadata.additional_urls.iter().map(String::as_str));
-        }
-        let fields: Vec<_> = metadata
-            .into_iter()
-            .flat_map(|m| &m.custom_fields)
-            .map(|field| ManagementField {
-                name: &field.name,
-                secret: field.secret,
-                value: (!(field.secret && !reveal)).then_some(field.value.as_str()),
-            })
-            .collect();
-        serde_json::to_string(&ManagementItem {
-            id: entry.id,
-            name: &entry.name,
-            username: entry.username.as_deref(),
-            kind: metadata.map_or(ItemKind::Login, |m| m.kind),
-            urls,
-            notes: entry.notes.as_deref(),
-            password: reveal.then_some(entry.password.as_str()),
-            has_secret: !entry.password.is_empty(),
-            fields,
-            has_totp: self.recovery.totp.iter().any(|t| t.entry_id == id),
-            has_duo: self.recovery.duo.iter().any(|r| r.entry_id == id),
-            created: &entry.created,
-            modified: &entry.modified,
+                .collect(),
+            has_totp: item.authenticator.is_some(),
+            has_duo: item.duo.is_some(),
+            created: e.created.to_string(),
+            modified: e.modified.to_string(),
         })
-        .map_err(|_| VaultError::InvalidInput("could not encode item details".into()))
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn summaries_and_default_details_redact_secrets_and_selection_is_explicit() {
-        let vault = Vault {
-            entries: vec![VaultEntry {
-                id: 4,
-                name: "Example".into(),
-                password: "synthetic-password".into(),
-                url: Some("https://example.com".into()),
-                notes: Some("private-notes".into()),
-                ..Default::default()
-            }],
-            recovery: RecoveryData {
-                entry_metadata: vec![EntryMetadata {
-                    entry_id: 4,
-                    additional_urls: vec!["https://accounts.example.com".into()],
-                    custom_fields: vec![
-                        CustomField {
-                            name: "token".into(),
-                            value: "secret-token".into(),
-                            secret: true,
-                        },
-                        CustomField {
-                            name: "environment".into(),
-                            value: "prod \"blue\" 🔐".into(),
-                            secret: false,
-                        },
-                    ],
-                    ..Default::default()
-                }],
-                totp: vec![TotpRecord {
-                    entry_id: 4,
-                    configuration: "authenticator-seed".into(),
-                }],
-                ..Default::default()
-            },
-            metadata: VaultMetadata::default(),
-        };
-        let summaries = vault.management_list_json(SearchFilter::default()).unwrap();
-        for secret in [
-            "synthetic-password",
-            "secret-token",
-            "authenticator-seed",
-            "private-notes",
-        ] {
-            assert!(!summaries.contains(secret));
-        }
-        let details = vault.management_item_json(4, false).unwrap();
-        let mut expected = json!({
-            "id": 4, "name": "Example", "username": null, "kind": "login",
-            "urls": ["https://example.com", "https://accounts.example.com"],
-            "notes": "private-notes", "password": null, "has_secret": true,
-            "fields": [
-                { "name": "token", "secret": true, "value": null },
-                { "name": "environment", "secret": false, "value": "prod \"blue\" 🔐" },
-            ],
-            "has_totp": true, "has_duo": false, "created": "", "modified": "",
-        });
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&details).unwrap(),
-            expected
-        );
-        let revealed = vault.management_item_json(4, true).unwrap();
-        expected["password"] = json!("synthetic-password");
-        expected["fields"][0]["value"] = json!("secret-token");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&revealed).unwrap(),
-            expected
-        );
-        assert!(vault.management_item_json(5, true).is_err());
-        let search = vault
-            .management_list_json(SearchFilter {
-                query: Some("secret-token".into()),
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&search).unwrap()["total"],
-            0
-        );
+    pub fn target_detail(&self, target: &Target, reveal: bool) -> Result<ItemDetail, VaultError> {
+        let id = self
+            .entry_id(target)
+            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
+        self.management_item(id, reveal)
     }
 }

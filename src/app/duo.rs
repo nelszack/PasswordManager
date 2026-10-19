@@ -1,7 +1,8 @@
+use super::output::Output;
 use super::remote::target_type;
 use password_manager::{
     cli::DuoCommands,
-    client::{self, AuthenticatedClient},
+    client::AuthenticatedClient,
     types::{DuoCommand, DuoPushRequest, ServerCommand, Target},
 };
 use std::{
@@ -12,11 +13,16 @@ use std::{
 use zeroize::Zeroizing;
 
 fn fetch(client: &AuthenticatedClient, target: &Target) -> Result<Vec<DuoPushRequest>, String> {
-    let response = Zeroizing::new(client.request(ServerCommand::Duo(DuoCommand::Requests {
+    let response = client.request_response(ServerCommand::Duo(DuoCommand::Requests {
         target: target.clone(),
-    }))?);
-    serde_json::from_str(&response).map_err(|_| "invalid Duo request response".into())
+    }))?;
+    if response.code != 0 {
+        return Err(response.error_message());
+    }
+    serde_json::from_value(response.payload.into_json())
+        .map_err(|_| "invalid Duo request response".into())
 }
+
 fn review(r: &DuoPushRequest) -> String {
     format!(
         "Request: {}\nApplication: {}\nAccount: {}\nLocation: {}\nSummary: {}\nExpires: {}\n{}",
@@ -35,12 +41,16 @@ fn review(r: &DuoPushRequest) -> String {
                 .unwrap_or_default())
     )
 }
-pub(super) fn run(command: DuoCommands, client: &AuthenticatedClient) {
-    if let Err(error) = execute(command, client) {
-        client::exit_error(&error, 1);
+pub(super) fn run(command: DuoCommands, client: &AuthenticatedClient, console: &Output) {
+    if let Err(error) = execute(command, client, console) {
+        console.exit_error(&error, 1);
     }
 }
-fn execute(command: DuoCommands, client: &AuthenticatedClient) -> Result<(), String> {
+fn execute(
+    command: DuoCommands,
+    client: &AuthenticatedClient,
+    console: &Output,
+) -> Result<(), String> {
     match command {
         DuoCommands::Enroll {
             target,
@@ -59,19 +69,19 @@ fn execute(command: DuoCommands, client: &AuthenticatedClient) -> Result<(), Str
             );
             let response = client.request(ServerCommand::Duo(DuoCommand::Enroll {
                 target: target_type(target),
-                activation: activation.to_string(),
+                activation: activation.to_string().into(),
                 mode,
                 replace,
             }))?;
-            client::print_success(&response);
+            console.print_success(&response);
         }
         DuoCommands::Requests { target } => {
             let requests = fetch(client, &target_type(target))?;
             if requests.is_empty() {
-                client::print_success("No pending Duo requests.");
+                console.print_success("No pending Duo requests.");
             }
             for r in requests {
-                client::print_success(&review(&r));
+                console.print_success(&review(&r));
             }
         }
         DuoCommands::Watch {
@@ -85,7 +95,7 @@ fn execute(command: DuoCommands, client: &AuthenticatedClient) -> Result<(), Str
             }
             let target = target_type(target);
             let mut seen = HashSet::new();
-            client::print_success(if interactive {
+            console.print_success(if interactive {
                 "Watching Duo requests. After review: a to approve, d to deny, Enter to skip, q to quit. Polling does not extend auto-lock. Ctrl+C to stop."
             } else {
                 "Watching Duo requests. Use pm duo approve/deny in another terminal (--request ID if multiple requests are pending). Polling does not extend auto-lock. Ctrl+C to stop."
@@ -96,7 +106,7 @@ fn execute(command: DuoCommands, client: &AuthenticatedClient) -> Result<(), Str
                 seen.retain(|fingerprint| pending.contains(fingerprint));
                 for r in requests {
                     if seen.insert(r.fingerprint.clone()) {
-                        client::print_success(&review(&r));
+                        console.print_success(&review(&r));
                         if notify {
                             // Passive alert only. No action callback can approve a request.
                             if std::process::Command::new("notify-send")
@@ -113,15 +123,15 @@ fn execute(command: DuoCommands, client: &AuthenticatedClient) -> Result<(), Str
                                 .status()
                                 .is_err()
                             {
-                                client::print_warning(
+                                console.print_warning(
                                     "notify-send is unavailable; requests will still be printed.",
                                 );
                             }
                         }
                         if interactive {
-                            match interactive_decision(&r, prompt)? {
+                            match interactive_decision(&r, console, prompt)? {
                                 WatchDecision::Respond { approve, code } => {
-                                    respond(client, target.clone(), r, approve, code)?;
+                                    respond(client, target.clone(), r, approve, code, console)?;
                                 }
                                 WatchDecision::Skip => {}
                                 WatchDecision::Quit => return Ok(()),
@@ -133,13 +143,13 @@ fn execute(command: DuoCommands, client: &AuthenticatedClient) -> Result<(), Str
             }
         }
         DuoCommands::Approve { target, request } => {
-            decision(client, target_type(target), request, true)?
+            decision(client, target_type(target), request, true, console)?
         }
         DuoCommands::Deny { target, request } => {
-            decision(client, target_type(target), request, false)?
+            decision(client, target_type(target), request, false, console)?
         }
         DuoCommands::Remove { target } => {
-            client::print_success(&client.request(ServerCommand::Duo(DuoCommand::Remove {
+            console.print_success(&client.request(ServerCommand::Duo(DuoCommand::Remove {
                 target: target_type(target),
             }))?)
         }
@@ -151,6 +161,7 @@ fn decision(
     target: Target,
     id: Option<String>,
     approve: bool,
+    console: &Output,
 ) -> Result<(), String> {
     if !io::stdin().is_terminal() {
         return Err(
@@ -160,7 +171,7 @@ fn decision(
     }
     let requests = fetch(client, &target)?;
     let r = select_request(requests, id.as_deref())?;
-    client::print_success(&review(&r));
+    console.print_success(&review(&r));
     if approve && let Some(reason) = &r.unsupported {
         return Err(reason.clone());
     }
@@ -172,8 +183,8 @@ fn decision(
     if confirmation.as_str() != answer {
         return Err("Duo decision cancelled".into());
     }
-    let code = verification_code(&r, approve, &mut prompt)?;
-    respond(client, target, r, approve, code)
+    let code = verification_code(&r, approve, &mut prompt, console)?;
+    respond(client, target, r, approve, code, console)
 }
 
 fn select_request(
@@ -210,6 +221,7 @@ enum WatchDecision {
 
 fn interactive_decision(
     r: &DuoPushRequest,
+    console: &Output,
     mut read: impl FnMut(&str) -> Result<Zeroizing<String>, String>,
 ) -> Result<WatchDecision, String> {
     loop {
@@ -224,11 +236,11 @@ fn interactive_decision(
             "" => return Ok(WatchDecision::Skip),
             "q" => return Ok(WatchDecision::Quit),
             _ => {
-                client::print_warning("Choose one of the displayed actions.");
+                console.print_warning("Choose one of the displayed actions.");
                 continue;
             }
         };
-        let code = verification_code(r, approve, &mut read)?;
+        let code = verification_code(r, approve, &mut read, console)?;
         return Ok(WatchDecision::Respond { approve, code });
     }
 }
@@ -237,6 +249,7 @@ fn verification_code(
     r: &DuoPushRequest,
     approve: bool,
     read: &mut impl FnMut(&str) -> Result<Zeroizing<String>, String>,
+    console: &Output,
 ) -> Result<Zeroizing<String>, String> {
     if approve && let Some(digits) = r.code_digits {
         loop {
@@ -247,7 +260,7 @@ fn verification_code(
             if code.len() == digits && code.bytes().all(|b| b.is_ascii_digit()) {
                 return Ok(code);
             }
-            client::print_warning(&format!(
+            console.print_warning(&format!(
                 "Enter the {digits}-digit verification code shown on the login page, or Enter to cancel."
             ));
         }
@@ -262,15 +275,16 @@ fn respond(
     r: DuoPushRequest,
     approve: bool,
     code: Zeroizing<String>,
+    console: &Output,
 ) -> Result<(), String> {
     let response = client.request(ServerCommand::Duo(DuoCommand::Respond {
         target,
         request_id: r.id,
         fingerprint: r.fingerprint,
         approve,
-        code: code.to_string(),
+        code: code.to_string().into(),
     }))?;
-    client::print_success(&response);
+    console.print_success(&response);
     Ok(())
 }
 
@@ -295,7 +309,7 @@ mod tests {
 
     fn choose(r: &DuoPushRequest, answers: &[&str]) -> Result<WatchDecision, String> {
         let mut answers: VecDeque<_> = answers.iter().copied().collect();
-        let decision = interactive_decision(r, |_| {
+        let decision = interactive_decision(r, &Output::default(), |_| {
             Ok(Zeroizing::new(
                 answers.pop_front().expect("unexpected extra prompt").into(),
             ))
@@ -390,6 +404,11 @@ mod tests {
                 Expected::Cancelled => assert!(decision.is_err(), "{name}"),
             }
         }
-        assert!(interactive_decision(&unsupported, |_| Err("terminal closed".into())).is_err());
+        assert!(
+            interactive_decision(&unsupported, &Output::default(), |_| Err(
+                "terminal closed".into()
+            ))
+            .is_err()
+        );
     }
 }

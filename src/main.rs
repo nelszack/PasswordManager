@@ -8,6 +8,7 @@ use password_manager::{
 };
 use std::fs;
 mod app;
+use app::output::Output;
 
 fn main() {
     let invoked_as_native_host = native_messaging::invoked_directly();
@@ -74,13 +75,13 @@ async fn run(invoked_as_native_host: bool) {
         return;
     }
     let cli = cli.expect("native host returned before CLI dispatch");
-    client::configure_output(cli.json, cli.quiet);
+    let output = Output::new(cli.json, cli.quiet);
     if let Some(error) = output_error(&cli) {
-        client::exit_error(error, 2);
+        output.exit_error(error, 2);
     }
     let conf = match try_read_config(&config_file) {
         Ok(config) => config,
-        Err(error) => client::exit_error(&error, 1),
+        Err(error) => output.exit_error(&error, 1),
     };
     let port = cli.port.unwrap_or(conf.server.port);
     let client = client::AuthenticatedClient::new(port);
@@ -89,5 +90,5 @@ async fn run(invoked_as_native_host: bool) {
         println!();
         return;
     };
-    app::run(command, conf, config_file, client).await;
+    app::run(command, conf, config_file, client, output).await;
 }

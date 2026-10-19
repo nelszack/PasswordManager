@@ -113,13 +113,12 @@ test("the extension saves through the real native host into a temporary vault", 
         environment, "--json", "get", "--entry-name", "Real Native Entry"
     ));
     expect(result.ok).toBe(true);
-    expect(result.output).toContain("real@example.com");
-    expect(result.output).toContain(origin);
+    expect(result.data).toMatchObject({ username: "real@example.com", urls: expect.arrayContaining([origin]) });
     const secret = JSON.parse(runPm(
         environment, "--json", "get", "--entry-name", "Real Native Entry",
         "--password-only"
     ));
-    expect(secret).toMatchObject({ ok: true, output: "real-native-password" });
+    expect(secret).toMatchObject({ ok: true, data: "real-native-password" });
 
     await page.locator("#username").fill("");
     await page.locator("#password").fill("");
@@ -296,10 +295,11 @@ test("manager preserves CRLF primary and custom fields across hidden and reveale
     const plain = "public first\r\npublic second\rlast";
     const secret = "private first\r\nprivate second\rlast";
     await manager.evaluate(async ({ primary, plain, secret }) => {
+        const send = (action, fields) => new Promise((resolve, reject) => chrome.runtime.sendMessage({ action, ...fields }, response => response.success ? resolve(response.data) : reject(new Error(response.error))));
         await send("managerAdd", { item: { name: "Multiline fields", kind: "secure-note", username: "", password: primary,
             notes: "stored notes\r\nsecond line", urls: [], fields: [{ name: "public", value: plain, secret: false }, { name: "private\r\nfield", value: secret, secret: true }] } });
-        await loadItems();
     }, { primary, plain, secret });
+    await manager.locator("#search").fill("Multiline");
     const open = async () => {
         await manager.locator("#items button").click();
         await expect(manager.locator("#editor")).toBeVisible();
@@ -309,7 +309,11 @@ test("manager preserves CRLF primary and custom fields across hidden and reveale
         await manager.locator("#editForm button:not([type='button'])").click();
         await expect(manager.locator("#editor")).toBeHidden();
     };
-    const read = () => manager.evaluate(() => send("managerItem", { entryId: selected, reveal: true }));
+    const read = () => manager.evaluate(async () => {
+        const send = (action, fields) => new Promise((resolve, reject) => chrome.runtime.sendMessage({ action, ...fields }, response => response.success ? resolve(response.data) : reject(new Error(response.error))));
+        const result = await send("managerList", { query: "Multiline fields" });
+        return send("managerItem", { entryId: result.items[0].id, reveal: true });
+    });
     const assertStored = async () => {
         const item = await read();
         expect(item.password).toBe(primary);
@@ -348,4 +352,35 @@ test("manager preserves CRLF primary and custom fields across hidden and reveale
     await save(); await open();
     const edited = await read();
     expect(edited.fields.find(field => field.name === "private\r\nfield").value).toBe("edited\ncustom value");
+});
+
+test("overlapping manager edits reject the stale revision instead of silently overwriting the first save", async ({ realVault }) => {
+    test.setTimeout(90_000);
+    const { browser, environment, keyPath } = realVault;
+    const first = await browser.context.newPage();
+    await first.goto(`chrome-extension://${browser.extensionId}/manager.html`);
+    await first.locator("#keyPath").fill(keyPath);
+    await first.locator("#unlockForm button").click();
+    await expect(first.locator("#unlocked")).toBeVisible();
+    await first.locator("#new").click();
+    await first.locator("#name").fill("Concurrent item");
+    await first.locator("#password").fill("original-secret");
+    await first.locator("#editForm button:not([type='button'])").click();
+    await expect(first.locator("#items button")).toHaveText(/Concurrent item/);
+    const second = await browser.context.newPage();
+    await second.goto(`chrome-extension://${browser.extensionId}/manager.html`);
+    await expect(second.locator("#items button")).toHaveText(/Concurrent item/);
+    await first.locator("#items button").click();
+    await second.locator("#items button").click();
+    await expect(first.locator("#editor")).toBeVisible();
+    await expect(second.locator("#editor")).toBeVisible();
+    await first.locator("#name").fill("First manager saved");
+    await first.locator("#editForm button:not([type='button'])").click();
+    await expect(first.locator("#editor")).toBeHidden();
+    await second.locator("#name").fill("Stale manager overwrite");
+    await second.locator("#editForm button:not([type='button'])").click();
+    await expect(second.locator("#message")).toContainText(/revision|conflict|changed/i);
+    await expect(second.locator("#editor")).toBeVisible();
+    const result = JSON.parse(runPm(environment, "--json", "get", "--entry-name", "First manager saved"));
+    expect(result.data.name).toBe("First manager saved");
 });

@@ -125,7 +125,7 @@ test("picker runtime discloses destinations and requires trusted, confirmed sele
 
 test("credential prompt runtime renders metadata and submits only trusted actions", async () => {
     const env = environment([
-        "credentials", "site", "status", "name", "username", "usernameLabel", "update", "cancel"
+        "credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "update", "cancel"
     ], {
         getCredentialPromptData: {
             success: true,
@@ -152,7 +152,7 @@ test("credential prompt disables writes after an uncertain save and still allows
         getCredentialPromptData: { success: true, data: { site: "https://example.com", message: "Save?", suggestedName: "Example", username: "alice", hasAccounts: true } },
         completeCredentialPrompt: { success: false, error: "Save may still complete. Review the vault.", uncertain: true }
     };
-    const env = environment(["credentials", "site", "status", "name", "username", "usernameLabel", "add", "update", "cancel"], responses, "?token=prompt-token");
+    const env = environment(["credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "add", "update", "cancel"], responses, "?token=prompt-token");
     execute("credential_prompt.js", env.context); await new Promise(resolve => setImmediate(resolve));
     env.elements.credentials.dispatch("submit", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
     assert.equal(env.elements.add.disabled, true);

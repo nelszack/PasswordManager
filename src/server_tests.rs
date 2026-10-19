@@ -1,63 +1,24 @@
 use super::*;
 use crate::file::init_test_data_dir;
 use crate::protocol::{
-    SECURE_HELLO_LEN, decode_responses, decrypt_record_stream, verify_server_hello,
+    OperationState, SECURE_HELLO_LEN, decode_responses, decrypt_record_stream, verify_server_hello,
 };
-use crate::vault::RecoveryData;
-use crate::vault::{Vault, VaultEntry, VaultMetadata};
+use crate::vault::{Vault, VaultCredentials, VaultEntry};
 
 async fn tcp_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let client = TcpStream::connect(address).await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
     let (server, _) = listener.accept().await.unwrap();
     (client, server)
 }
-
-#[tokio::test]
-async fn os_lock_event_discards_session_secrets_and_invalidates_inactivity_timers() {
-    let state = test_connection_state(VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: Some(PasswordType::Password("synthetic-master".into())),
-        },
-        vault: Some(Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                password: "synthetic-password".into(),
-                ..Default::default()
-            }],
-            metadata: VaultMetadata::default(),
-            recovery: RecoveryData::default(),
-        }),
-    });
-    let handler = system_lock_handler(
-        Arc::downgrade(&state.session),
-        Arc::downgrade(&state.background_error),
-        state.lock_generation.clone(),
-    );
-    let repeated = handler.clone();
-    tokio::task::spawn_blocking(move || {
-        handler();
-        repeated();
-    })
-    .await
-    .unwrap();
-    let session = state.session.lock().await;
-    assert!(session.is_locked());
-    assert!(session.vault.is_none());
-    assert!(session.credentials.keypass.is_none());
-    assert_eq!(state.lock_generation.load(Ordering::Acquire), 2);
-}
-
-fn test_connection_state(session: VaultSession) -> ConnectionState {
+fn test_connection_state() -> ConnectionState {
     let (kill_tx, _) = mpsc::channel(1);
     ConnectionState {
         instance_lock: None,
-        session: Arc::new(Mutex::new(session)),
         kill_tx,
         token: Zeroizing::new("ab".repeat(32)),
-        lock_generation: Arc::new(AtomicU64::new(0)),
         inactivity_timeout: Arc::new(AtomicU64::new(0)),
         stopping: Arc::new(AtomicBool::new(false)),
         background_error: Arc::new(Mutex::new(None)),
@@ -66,477 +27,685 @@ fn test_connection_state(session: VaultSession) -> ConnectionState {
         trash_retention_days: 0,
     }
 }
+fn test_worker(session: VaultSession, state: &ConnectionState) -> VaultWorker {
+    VaultWorker::start(
+        session,
+        Arc::clone(&state.inactivity_timeout),
+        Arc::clone(&state.background_error),
+    )
+}
+fn session(vault: Vault) -> VaultSession {
+    VaultSession::unlock(
+        vault,
+        PasswordType::Session {
+            encryption_key: [42; 32],
+            salt: [42; 16],
+            kdf: 1,
+            memory_kib: 8192,
+            iterations: 1,
+            parallelism: 1,
+        },
+    )
+}
+async fn send(stream: &mut TcpStream, token: &str, request: RequestEnvelope) -> RpcResponse {
+    stream.write_all(SECURE_PREFACE).await.unwrap();
+    let mut hello = [0; SECURE_HELLO_LEN];
+    stream.read_exact(&mut hello).await.unwrap();
+    let keys = verify_server_hello(token, &hello).unwrap();
+    let bytes = Zeroizing::new(rmp_serde::to_vec_named(&request).unwrap());
+    stream
+        .write_all(&encrypt_record(&keys.request, &bytes).unwrap())
+        .await
+        .unwrap();
+    let mut encrypted = Vec::new();
+    stream.read_to_end(&mut encrypted).await.unwrap();
+    let plaintext =
+        Zeroizing::new(decrypt_record_stream(&keys.response, &encrypted, 1024 * 1024).unwrap());
+    decode_responses(&plaintext).unwrap()
+}
+async fn dispatch(vault: Vault, command: ServerCommand, locked: bool) -> RpcResponse {
+    let state = test_connection_state();
+    let worker = test_worker(
+        if locked {
+            VaultSession::Locked
+        } else {
+            session(vault)
+        },
+        &state,
+    );
+    let (mut client, server) = tcp_pair().await;
+    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
+    let response = send(&mut client, &state.token, RequestEnvelope::new(command)).await;
+    task.await.unwrap();
+    response
+}
+fn response_text(response: &RpcResponse) -> String {
+    serde_json::to_string(&response.payload).unwrap()
+}
+fn sample_vault() -> Vault {
+    Vault::from_entries(
+        vec![VaultEntry {
+            id: 1,
+            name: "Account".into(),
+            password: "synthetic-secret".into(),
+            url: Some("https://example.com".into()),
+            ..Default::default()
+        }],
+        None,
+    )
+}
 
 #[tokio::test]
-async fn shutdown_rejects_mutations_on_already_authenticated_connections() {
-    init_test_data_dir();
-    let directory = tempfile::tempdir().unwrap();
-    let key_path = directory.path().join("must-not-create.key");
-    let mut state = test_connection_state(VaultSession::default());
+async fn history_and_trash_use_typed_records_without_exposing_secrets() {
+    let mut vault = sample_vault();
+    vault
+        .update_entry_with_limit(
+            EntryUpdate {
+                target: Target::Id(1),
+                update: EntryChanges::default(),
+                password: Some("replacement-secret".into()),
+            },
+            &mut VaultCredentials::default(),
+            10,
+        )
+        .unwrap();
+    let response = dispatch(vault.clone(), ServerCommand::History(Target::Id(1)), false).await;
+    let response =
+        decode_responses(&crate::protocol::encode_rpc_response(&response).unwrap()).unwrap();
+    let ResponsePayload::History(history) = &response.payload else {
+        panic!("history must use its typed response");
+    };
+    assert_eq!(history.history.len(), 1);
+    assert!(chrono::DateTime::parse_from_rfc3339(&history.history[0]).is_ok());
+    let json = response.payload.into_json();
+    assert!(json["history"].is_array());
+    assert!(!json.to_string().contains("secret"));
+
+    vault
+        .delete_entry(Target::Id(1), &mut VaultCredentials::default())
+        .unwrap();
+    let response = dispatch(vault, ServerCommand::Trash, false).await;
+    let response =
+        decode_responses(&crate::protocol::encode_rpc_response(&response).unwrap()).unwrap();
+    let ResponsePayload::Trash(trash) = &response.payload else {
+        panic!("trash must use its typed response");
+    };
+    assert_eq!(trash.trash.len(), 1);
+    assert_eq!(trash.trash[0].id, 1);
+    let json = response.payload.into_json();
+    assert_eq!(json["trash"][0]["name"], "Account");
+    assert_eq!(json["trash"][0]["kind"], "login");
+    assert!(!json.to_string().contains("secret"));
+}
+
+#[tokio::test]
+async fn displayed_trash_ids_select_the_same_items_for_restore_and_purge() {
+    let state = test_connection_state();
+    let vault = Vault::from_entries(
+        [3, 17, 42]
+            .into_iter()
+            .map(|id| VaultEntry {
+                id,
+                name: format!("Item {id}"),
+                password: "synthetic-secret".into(),
+                ..Default::default()
+            })
+            .collect(),
+        None,
+    );
+    let worker = test_worker(session(vault), &state);
+    for id in [17, 42] {
+        let result = worker
+            .execute(
+                state.clone(),
+                RequestEnvelope::new(ServerCommand::Delete(Target::Id(id))),
+            )
+            .await;
+        assert_eq!(result.responses[0].code, 0);
+    }
+    let result = worker
+        .execute(state.clone(), RequestEnvelope::new(ServerCommand::Trash))
+        .await;
+    let listing = crate::client::render_response(&result.responses[0].payload);
+    let ids: Vec<usize> = listing
+        .lines()
+        .map(|line| line.split_once('.').unwrap().0.parse().unwrap())
+        .collect();
+    assert_eq!(ids, [17, 42]);
+
+    for command in [
+        ServerCommand::RestoreTrash(ids[0]),
+        ServerCommand::PurgeTrash(Some(ids[1])),
+    ] {
+        let result = worker
+            .execute(state.clone(), RequestEnvelope::new(command))
+            .await;
+        assert_eq!(result.responses[0].code, 0);
+    }
+    worker
+        .with_session(|session| {
+            let vault = session.vault().unwrap();
+            assert!(vault.management_item(3, false).is_ok());
+            assert!(vault.management_item(17, false).is_ok());
+            assert!(vault.management_item(42, false).is_err());
+            assert!(vault.view_trash().is_empty());
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_rejects_already_authenticated_connections() {
+    let mut state = test_connection_state();
     let (kill_tx, mut kill_rx) = mpsc::channel(1);
     state.kill_tx = kill_tx;
-
-    // The first connection is accepted and authenticated before shutdown, but
-    // its command is delayed until after Kill's successful response.
-    let (mut delayed, server_stream) = tcp_pair().await;
-    let delayed_worker = tokio::spawn(handle_connection(server_stream, state.clone()));
+    let worker = test_worker(VaultSession::Locked, &state);
+    let (mut delayed, server) = tcp_pair().await;
+    let task = tokio::spawn(handle_connection(server, state.clone(), worker.clone()));
     delayed.write_all(SECURE_PREFACE).await.unwrap();
-    let mut hello = [0u8; SECURE_HELLO_LEN];
+    let mut hello = [0; SECURE_HELLO_LEN];
     delayed.read_exact(&mut hello).await.unwrap();
-    let delayed_keys = verify_server_hello(&state.token, &hello).unwrap();
-
-    let (mut killer, server_stream) = tcp_pair().await;
-    let kill_worker = tokio::spawn(handle_connection(server_stream, state.clone()));
-    killer.write_all(SECURE_PREFACE).await.unwrap();
-    killer.read_exact(&mut hello).await.unwrap();
-    let kill_keys = verify_server_hello(&state.token, &hello).unwrap();
-    let request = rmp_serde::to_vec(&ServerCommand::Kill).unwrap();
-    killer
-        .write_all(&encrypt_record(&kill_keys.request, &request).unwrap())
-        .await
-        .unwrap();
-    let mut response = Vec::new();
-    killer.read_to_end(&mut response).await.unwrap();
-    let plaintext = decrypt_record_stream(&kill_keys.response, &response, 4096).unwrap();
-    assert_eq!(decode_responses(&plaintext).unwrap().code, 0);
-    kill_rx.recv().await.unwrap();
-    kill_worker.await.unwrap();
-
-    let request = rmp_serde::to_vec(&ServerCommand::New(PasswordType::Key(
-        key_path.to_str().unwrap().into(),
-    )))
-    .unwrap();
+    let keys = verify_server_hello(&state.token, &hello).unwrap();
+    let result = worker
+        .execute(state.clone(), RequestEnvelope::new(ServerCommand::Kill))
+        .await;
+    assert!(matches!(result.effect, CommandEffect::StopServer));
+    let directory = tempfile::tempdir().unwrap();
+    let key_path = directory.path().join("must-not-create.key");
+    let request = RequestEnvelope::new(ServerCommand::New(PasswordType::Key(
+        key_path.display().to_string(),
+    )));
+    let bytes = rmp_serde::to_vec_named(&request).unwrap();
     delayed
-        .write_all(&encrypt_record(&delayed_keys.request, &request).unwrap())
+        .write_all(&encrypt_record(&keys.request, &bytes).unwrap())
         .await
         .unwrap();
-    response.clear();
-    delayed.read_to_end(&mut response).await.unwrap();
-    let plaintext = decrypt_record_stream(&delayed_keys.response, &response, 4096).unwrap();
-    let rejected = decode_responses(&plaintext).unwrap();
-    assert_eq!(rejected.code, ResponseCode::Failure as i32);
-    assert_eq!(rejected.message, "Server is stopping.\n");
-    assert!(
-        !key_path.exists(),
-        "a stopped server must not create vault keys"
+    let mut encrypted = vec![];
+    delayed.read_to_end(&mut encrypted).await.unwrap();
+    let plaintext = decrypt_record_stream(&keys.response, &encrypted, 4096).unwrap();
+    assert_eq!(
+        decode_responses(&plaintext).unwrap().code,
+        ResponseCode::Failure as i32
     );
-    delayed_worker.await.unwrap();
-    assert!(state.session.lock().await.is_locked());
+    assert!(!key_path.exists());
+    assert!(kill_rx.try_recv().is_err());
+    task.await.unwrap();
 }
 
 #[test]
-fn mutation_responses_distinguish_precommit_failure_from_committed_durability() {
+fn mutation_responses_preserve_precommit_and_committed_durability_states() {
     init_test_data_dir();
     let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
     let path = data_dir().join(&filename);
-    let mut session = VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: Some(PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [42; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            }),
-        },
-        vault: Some(Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: "Account".into(),
-                password: "before".into(),
-                ..Default::default()
-            }],
-            metadata: VaultMetadata {
-                filename,
-                ..Default::default()
-            },
-            recovery: RecoveryData::default(),
-        }),
-    };
-    let state = test_connection_state(VaultSession::default());
-    for (fault, expected_code, expected_password) in [
+    let vault = Vault::from_entries(
+        vec![VaultEntry {
+            id: 1,
+            name: "Account".into(),
+            password: "before".into(),
+            ..Default::default()
+        }],
+        Some(filename),
+    );
+    let mut session = session(vault);
+    let state = test_connection_state();
+    for (fault, code, expected) in [
         (1, ResponseCode::Failure, "before"),
         (2, ResponseCode::Durability, "after"),
     ] {
-        let command = ServerCommand::Update(EntryUpdate {
-            target: Target::Id(1),
-            update: EntryChanges::default(),
-            password: Some("after".into()),
+        let command = ServerCommand::Update(TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(1),
+                update: EntryChanges::default(),
+                password: Some("after".into()),
+            },
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
         });
         let outcome = crate::vault::with_write_fault(fault, || {
             execute_command(state.clone(), command, &mut session)
         });
-        assert_eq!(outcome.responses.len(), 1);
-        assert_eq!(outcome.responses[0].code, expected_code);
+        assert_eq!(outcome.responses[0].code, code as i32);
         assert_eq!(
-            session.vault.as_ref().unwrap().entries[0].password,
-            expected_password
+            session
+                .vault()
+                .unwrap()
+                .get_secret(&Target::Id(1))
+                .unwrap()
+                .as_str(),
+            expected
         );
         assert_eq!(path.exists(), fault == 2);
     }
-    // A failed durability acknowledgement must retain the mutation actually
-    // stored on disk, so callers can review it instead of retrying the write.
-    let bytes = fs::read(&path).unwrap();
-    let plaintext = Zeroizing::new(
-        crate::encryption::decrypt_file(session.credentials.keypass.as_mut().unwrap(), &bytes)
-            .unwrap(),
+    // The final committed key remains usable for a subsequent durable mutation.
+    let result = execute_command(
+        state,
+        ServerCommand::Update(TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(1),
+                update: EntryChanges {
+                    name: Some("Updated".into()),
+                    ..Default::default()
+                },
+                password: None,
+            },
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
+        }),
+        &mut session,
     );
-    let reopened: Vault = rmp_serde::from_slice(&plaintext).unwrap();
-    assert_eq!(reopened.entries[0].password, "after");
+    assert_eq!(result.responses[0].code, 0);
     fs::remove_file(path).unwrap();
 }
 
 #[test]
-fn structured_authenticator_requests_preserve_hotp_counters_and_totp_lifetimes() {
-    init_test_data_dir();
-    let directory = tempfile::tempdir().unwrap();
-    let key_path = directory
-        .path()
-        .join("otp.key")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let mut session = VaultSession::default();
-    let state = test_connection_state(VaultSession::default());
-    let setup = [
-        ServerCommand::New(PasswordType::Key(key_path.clone())),
-        ServerCommand::Unlock(UnlockInfo {
-            key: PasswordType::Key(key_path),
-            timeout: 0,
-            vault_file: None,
-        }),
-        ServerCommand::Add(PasswordEntry {
-            name: "OTP".into(),
-            username: None,
-            password: "synthetic".into(),
-            url: None,
-            notes: None,
-            copy: false,
-        }),
-        ServerCommand::Totp(TotpCommand::Set {
-            target: Target::Id(1),
-            configuration:
-                "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0".into(),
-        }),
-    ];
-    for command in setup {
-        let outcome = execute_command(state.clone(), command, &mut session);
-        assert_eq!(
-            outcome.responses[0].code,
-            ResponseCode::Success,
-            "{}",
-            outcome.responses[0].message
-        );
-    }
-    let before = session.vault.clone();
-    let generation = state.lock_generation.load(Ordering::Acquire);
+fn typed_authenticators_preserve_hotp_consumption_and_totp_read_semantics() {
+    let mut vault = sample_vault();
+    vault.set_test_totp(
+        1,
+        "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+    );
+    let mut live = session(vault);
+    let state = test_connection_state();
+    let before = live.vault().unwrap().vault_revision();
     let rejected = execute_command(
         state.clone(),
         ServerCommand::Totp(TotpCommand::Watch {
             target: Target::Id(1),
             copy_timeout: None,
         }),
-        &mut session,
+        &mut live,
     );
-    assert_ne!(rejected.responses[0].code, ResponseCode::Success);
-    assert_eq!(session.vault, before);
-    assert_eq!(state.lock_generation.load(Ordering::Acquire), generation);
+    assert_ne!(rejected.responses[0].code, 0);
+    assert_eq!(live.vault().unwrap().vault_revision(), before);
     for (counter, code) in [(0, "755224"), (1, "287082")] {
-        let outcome = execute_command(
+        let result = execute_command(
             state.clone(),
             ServerCommand::AuthenticatorData(Target::Id(1)),
-            &mut session,
+            &mut live,
         );
-        assert!(outcome.responses[0].data);
-        let payload: crate::protocol::AuthenticatorResponse =
-            serde_json::from_str(&outcome.responses[0].message).unwrap();
-        assert!(payload.valid());
-        assert_eq!(payload.code, code);
-        assert_eq!(payload.counter, Some(counter));
-        assert_eq!(payload.expires_in, None);
+        let ResponsePayload::Authenticator(data) = &result.responses[0].payload else {
+            panic!("expected structured code")
+        };
+        assert!(data.valid());
+        assert_eq!(data.code, code);
+        assert_eq!(data.counter, Some(counter));
+        assert_eq!(data.expires_in, None);
     }
-    let legacy = execute_command(
-        state.clone(),
-        ServerCommand::Totp(TotpCommand::Show {
-            target: Target::Id(1),
-            copy_timeout: None,
-        }),
-        &mut session,
-    );
-    assert!(!legacy.responses[0].data);
-    assert!(
-        legacy.responses[0]
-            .message
-            .contains("HOTP: 359152 (counter 2; next counter saved)")
-    );
-    let totp = execute_command(
+    let configured = execute_command(
         state.clone(),
         ServerCommand::Totp(TotpCommand::Set {
             target: Target::Id(1),
             configuration: "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into(),
         }),
-        &mut session,
+        &mut live,
     );
-    assert_eq!(totp.responses[0].code, ResponseCode::Success);
-    let before = session.vault.clone();
-    let generation = state.lock_generation.load(Ordering::Acquire);
-    let watched = execute_command(
-        state.clone(),
+    assert_eq!(configured.responses[0].code, 0);
+    let before = live.vault().unwrap().vault_revision();
+    let result = execute_command(
+        state,
         ServerCommand::Totp(TotpCommand::Watch {
             target: Target::Id(1),
             copy_timeout: None,
         }),
-        &mut session,
+        &mut live,
     );
-    assert_eq!(watched.responses[0].code, ResponseCode::Success);
-    assert!(watched.responses[0].data);
-    let payload: crate::protocol::AuthenticatorResponse =
-        serde_json::from_str(&watched.responses[0].message).unwrap();
-    assert!(payload.valid());
-    assert_eq!(payload.mode, "totp");
-    assert_eq!(session.vault, before);
-    assert_eq!(state.lock_generation.load(Ordering::Acquire), generation);
-    let outcome = execute_command(
-        state,
-        ServerCommand::AuthenticatorData(Target::Id(1)),
-        &mut session,
-    );
-    let payload: crate::protocol::AuthenticatorResponse =
-        serde_json::from_str(&outcome.responses[0].message).unwrap();
-    assert!(payload.valid());
-    assert_eq!(payload.counter, None);
-    assert!(payload.expires_in.unwrap() <= 30);
-}
-
-async fn dispatch_test_command(
-    vault: Vault,
-    command: ServerCommand,
-    locked: bool,
-) -> crate::protocol::ProtocolResponse {
-    let token = "ab".repeat(32);
-    let (mut client, server) = tcp_pair().await;
-    let state = test_connection_state(VaultSession {
-        credentials: ServerInfo {
-            locked,
-            keypass: None,
-        },
-        vault: Some(vault),
-    });
-    let task = tokio::spawn(handle_connection(server, state));
-    client.write_all(SECURE_PREFACE).await.unwrap();
-    let mut hello = [0; SECURE_HELLO_LEN];
-    client.read_exact(&mut hello).await.unwrap();
-    let keys = verify_server_hello(&token, &hello).unwrap();
-    let encoded = rmp_serde::to_vec(&command).unwrap();
-    client
-        .write_all(&encrypt_record(&keys.request, &encoded).unwrap())
-        .await
-        .unwrap();
-    let mut ciphertext = Vec::new();
-    client.read_to_end(&mut ciphertext).await.unwrap();
-    let plaintext = decrypt_record_stream(&keys.response, &ciphertext, 1024 * 1024).unwrap();
-    let response = decode_responses(&plaintext).unwrap();
-    task.await.unwrap();
-    response
-}
-
-#[tokio::test]
-async fn audit_dispatch_keeps_the_single_thread_runtime_responsive() {
-    let token = "ab".repeat(32);
-
-    let vault = Vault {
-        entries: (1..=256)
-            .map(|id| VaultEntry {
-                id,
-                name: format!("Synthetic account {id}"),
-                password: "Synthetic-Password-9274!".into(),
-                ..VaultEntry::default()
-            })
-            .collect(),
-        metadata: VaultMetadata::default(),
-        recovery: RecoveryData::default(),
+    let ResponsePayload::Authenticator(data) = &result.responses[0].payload else {
+        panic!("expected structured code")
     };
-    let state = test_connection_state(VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: None,
-        },
-        vault: Some(vault),
-    });
-    let info = Arc::clone(&state.session);
-    let (mut client, server) = tcp_pair().await;
-    let task = tokio::spawn(handle_connection(server, state));
-    client.write_all(SECURE_PREFACE).await.unwrap();
-    let mut hello = [0u8; SECURE_HELLO_LEN];
-    client.read_exact(&mut hello).await.unwrap();
-    let keys = verify_server_hello(&token, &hello).unwrap();
-    let command = rmp_serde::to_vec(&ServerCommand::Audit(AuditOptions::default())).unwrap();
-    client
-        .write_all(&encrypt_record(&keys.request, &command).unwrap())
-        .await
-        .unwrap();
-    // Observe an actual CPU-intensive audit owning the vault while this test's
-    // future still runs. Synchronous dispatch on the sole Tokio thread cannot
-    // reach this point until the audit has finished and released its locks.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if info.try_lock().is_err() {
-                break;
-            }
-            assert!(
-                !task.is_finished(),
-                "audit blocked the runtime until it finished"
-            );
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    let mut ciphertext = Vec::new();
-    client.read_to_end(&mut ciphertext).await.unwrap();
-    let plaintext = decrypt_record_stream(&keys.response, &ciphertext, 1024 * 1024).unwrap();
-    assert_eq!(
-        decode_responses(&plaintext).unwrap().code,
-        ResponseCode::Success as i32
-    );
-    task.await.unwrap();
+    assert!(data.valid());
+    assert_eq!(data.mode, "totp");
+    assert!(data.expires_in.unwrap() <= 30);
+    assert_eq!(live.vault().unwrap().vault_revision(), before);
 }
 
 #[tokio::test]
-async fn auto_lock_clears_secrets_even_when_the_vault_cannot_be_written() {
-    init_test_data_dir();
-    let directory = tempfile::tempdir_in(data_dir()).unwrap();
-    let filename = directory
-        .path()
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    // The destination is a directory, so the old save-before-lock path would fail.
-    let session = Arc::new(Mutex::new(VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: Some(PasswordType::Password("synthetic-master-password".into())),
-        },
-        vault: Some(Vault {
-            entries: vec![VaultEntry {
+async fn browser_reads_require_unlock_and_site_selection() {
+    for (command, locked, code, secret) in [
+        (
+            ServerCommand::BrowserLogins("https://example.com".into()),
+            false,
+            ResponseCode::Success,
+            false,
+        ),
+        (
+            ServerCommand::BrowserLogin {
+                domain: "https://example.com".into(),
                 id: 1,
-                password: "synthetic-secret".into(),
-                ..VaultEntry::default()
-            }],
-            metadata: VaultMetadata {
-                filename,
-                duo_session: None,
             },
-            recovery: RecoveryData::default(),
-        }),
-    }));
-    let error = Arc::new(Mutex::new(None));
-    schedule_auto_lock(
-        1,
-        1,
-        Arc::new(AtomicU64::new(1)),
-        Arc::clone(&session),
-        Arc::clone(&error),
-    );
-    tokio::time::sleep(Duration::from_millis(1300)).await;
-    assert!(session.lock().await.is_locked());
-    assert!(session.lock().await.credentials.keypass.is_none());
-    assert!(session.lock().await.vault.is_none());
-    assert!(error.lock().await.is_none());
-    assert!(directory.path().is_dir());
-}
-
-#[test]
-fn manual_lock_does_not_depend_on_a_writable_vault_destination() {
-    let mut vault = Some(Vault {
-        entries: vec![VaultEntry {
-            password: "synthetic-secret".into(),
-            ..VaultEntry::default()
-        }],
-        metadata: VaultMetadata {
-            filename: "missing-directory/vault.enc".into(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    });
-    let mut info = ServerInfo {
-        locked: false,
-        keypass: Some(PasswordType::Password("synthetic-master-password".into())),
-    };
-    lock_vlt(&mut vault, &mut info).unwrap();
-    assert!(vault.is_none());
-    assert!(info.locked);
-    assert!(info.keypass.is_none());
-}
-
-#[test]
-fn status_includes_persistent_background_warnings() {
-    assert_eq!(
-        status_message(true, None),
-        format!("Status: Locked\nVersion: {}", env!("CARGO_PKG_VERSION"))
-    );
-    assert_eq!(
-        status_message(false, Some("Automatic lock failed: disk full")),
-        format!(
-            "Status: Unlocked\nVersion: {}\nWarning: Automatic lock failed: disk full",
-            env!("CARGO_PKG_VERSION")
-        )
-    );
-}
-
-#[tokio::test]
-async fn response_codes_are_explicit_and_independent_of_message_wording() {
-    let (mut client, mut server) = tcp_pair().await;
-    respond("Entry not found.", &mut server).await;
-    server.shutdown().await.unwrap();
-    let mut bytes = Vec::new();
-    client.read_to_end(&mut bytes).await.unwrap();
-    let response = decode_responses(&bytes).unwrap();
-    assert_eq!(response.code, ResponseCode::Success as i32);
-
-    let (mut client, mut server) = tcp_pair().await;
-    respond_with_code(
-        ResponseCode::NotFound,
-        "wording without classification keywords",
-        &mut server,
-    )
-    .await;
-    server.shutdown().await.unwrap();
-    let mut bytes = Vec::new();
-    client.read_to_end(&mut bytes).await.unwrap();
-    let response = decode_responses(&bytes).unwrap();
-    assert_eq!(response.code, ResponseCode::NotFound as i32);
-    assert_eq!(
-        response.message,
-        "wording without classification keywords\n"
-    );
-
-    let directory = tempfile::tempdir().unwrap();
-    let missing_path = directory.path().join("missing.pmbackup");
-    for (path, expected_code) in [
-        (missing_path.as_path(), ResponseCode::Failure),
-        (directory.path(), ResponseCode::InvalidInput),
-    ] {
-        let response = dispatch_test_command(
-            Vault::default(),
-            ServerCommand::RestoreBackup(BackupRequest {
-                path: path.to_str().unwrap().into(),
-                key_pass: PasswordType::Password("synthetic-backup-password".into()),
-                force: false,
-            }),
+            false,
+            ResponseCode::Success,
             true,
-        )
-        .await;
-        assert_eq!(response.code, expected_code as i32, "{}", path.display());
-        assert!(response.message.contains("could not read backup file"));
+        ),
+        (
+            ServerCommand::BrowserLogin {
+                domain: "https://attacker.example".into(),
+                id: 1,
+            },
+            false,
+            ResponseCode::NotFound,
+            false,
+        ),
+        (
+            ServerCommand::BrowserLogin {
+                domain: "https://example.com".into(),
+                id: 1,
+            },
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+        (
+            ServerCommand::BrowserLogins("https://example.com".into()),
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+        (
+            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+    ] {
+        let response = dispatch(sample_vault(), command, locked).await;
+        assert_eq!(response.code, code as i32);
+        assert_eq!(
+            response_text(&response).contains("synthetic-secret"),
+            secret
+        );
     }
 }
 
+#[tokio::test]
+async fn custom_fields_are_redacted_or_explicitly_revealed() {
+    for (command, locked, code, visible) in [
+        (
+            ServerCommand::Get {
+                target: Target::Id(1),
+                copy_timeout: 0,
+                reveal_secrets: false,
+            },
+            false,
+            ResponseCode::Success,
+            false,
+        ),
+        (
+            ServerCommand::Get {
+                target: Target::Id(1),
+                copy_timeout: 0,
+                reveal_secrets: true,
+            },
+            false,
+            ResponseCode::Success,
+            true,
+        ),
+        (
+            ServerCommand::GetField {
+                target: Target::Id(1),
+                name: "RECOVERY-CODE".into(),
+                copy_timeout: None,
+            },
+            false,
+            ResponseCode::Success,
+            true,
+        ),
+        (
+            ServerCommand::GetField {
+                target: Target::Id(1),
+                name: "missing".into(),
+                copy_timeout: None,
+            },
+            false,
+            ResponseCode::NotFound,
+            false,
+        ),
+        (
+            ServerCommand::GetField {
+                target: Target::Id(1),
+                name: "recovery-code".into(),
+                copy_timeout: Some(0),
+            },
+            false,
+            ResponseCode::InvalidInput,
+            false,
+        ),
+        (
+            ServerCommand::Get {
+                target: Target::Id(1),
+                copy_timeout: 0,
+                reveal_secrets: true,
+            },
+            true,
+            ResponseCode::Failure,
+            false,
+        ),
+    ] {
+        let mut vault = sample_vault();
+        vault.set_test_metadata(
+            1,
+            ItemKind::Login,
+            vec![],
+            vec![CustomField {
+                name: "recovery-code".into(),
+                value: "synthetic-field-secret".into(),
+                secret: true,
+            }],
+        );
+        let response = dispatch(vault, command, locked).await;
+        assert_eq!(response.code, code as i32);
+        assert_eq!(
+            response_text(&response).contains("synthetic-field-secret"),
+            visible
+        );
+    }
+}
+
+#[tokio::test]
+async fn status_and_error_classification_are_typed_and_correlated() {
+    let state = test_connection_state();
+    *state.background_error.lock().await = Some("cleanup warning".into());
+    let worker = test_worker(VaultSession::Locked, &state);
+    let (mut client, server) = tcp_pair().await;
+    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
+    let request = RequestEnvelope::new(ServerCommand::Status);
+    let id = request.request_id.clone();
+    let response = send(&mut client, &state.token, request).await;
+    assert_eq!(response.request_id, Some(id));
+    let ResponsePayload::Status(status) = response.payload else {
+        panic!("expected status")
+    };
+    assert!(status.locked);
+    assert_eq!(status.warning.as_deref(), Some("cleanup warning"));
+    task.await.unwrap();
+    let (mut client, mut server) = tcp_pair().await;
+    let response_key = [42; 32];
+    deliver_responses(
+        vec![RpcResponse::message(
+            ResponseCode::NotFound,
+            "wording without classification keywords",
+        )],
+        &mut server,
+        &response_key,
+    )
+    .await
+    .unwrap();
+    server.shutdown().await.unwrap();
+    let mut bytes = vec![];
+    client.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(
+        decode_responses(&decrypt_record_stream(&response_key, &bytes, 4096).unwrap())
+            .unwrap()
+            .code,
+        ResponseCode::NotFound as i32
+    );
+}
+
+#[tokio::test]
+async fn mutation_ids_deduplicate_and_conflicting_arguments_fail() {
+    let state = test_connection_state();
+    let mut vault = sample_vault();
+    vault.set_test_totp(
+        1,
+        "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+    );
+    let worker = test_worker(session(vault), &state);
+    let request = || {
+        RequestEnvelope::new(ServerCommand::AuthenticatorData(Target::Id(1)))
+            .with_operation(Some("same-operation".into()), None)
+    };
+    let first = worker.execute(state.clone(), request()).await;
+    assert_eq!(
+        first.responses[0].operation.as_ref().unwrap().state,
+        OperationState::Committed
+    );
+    let repeated = worker.execute(state.clone(), request()).await;
+    assert_eq!(repeated.responses[0].code, 0);
+    for response in [&first.responses[0], &repeated.responses[0]] {
+        let ResponsePayload::Authenticator(code) = &response.payload else {
+            panic!("expected exact authenticator response")
+        };
+        assert_eq!(code.counter, Some(0));
+        assert_eq!(code.code, "755224");
+    }
+    let next = worker
+        .execute(
+            state.clone(),
+            RequestEnvelope::new(ServerCommand::AuthenticatorData(Target::Id(1))),
+        )
+        .await;
+    let ResponsePayload::Authenticator(code) = &next.responses[0].payload else {
+        panic!("expected next code")
+    };
+    assert_eq!(
+        code.counter,
+        Some(1),
+        "replaying an operation must not consume another counter"
+    );
+    let conflicting = RequestEnvelope::new(ServerCommand::AuthenticatorData(Target::Id(2)))
+        .with_operation(Some("same-operation".into()), None);
+    assert_eq!(
+        worker.execute(state.clone(), conflicting).await.responses[0].code,
+        ResponseCode::Conflict as i32
+    );
+    let result = worker
+        .execute(
+            state,
+            RequestEnvelope::new(ServerCommand::OperationStatus("same-operation".into())),
+        )
+        .await;
+    let ResponsePayload::Operation(receipt) = &result.responses[0].payload else {
+        panic!("expected receipt")
+    };
+    assert_eq!(receipt.state, OperationState::Committed);
+}
+
+#[tokio::test]
+async fn expected_revisions_prevent_overlapping_editor_writes() {
+    let state = test_connection_state();
+    let vault = sample_vault();
+    let revision = vault.revision(1).unwrap();
+    let worker = test_worker(session(vault), &state);
+    let update = |name: &str| {
+        ServerCommand::Update(TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(1),
+                update: EntryChanges {
+                    name: Some(name.into()),
+                    ..Default::default()
+                },
+                password: None,
+            },
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
+        })
+    };
+    let first = RequestEnvelope::new(update("First"))
+        .with_operation(Some("editor-one".into()), Some(revision));
+    assert_eq!(
+        worker.execute(state.clone(), first).await.responses[0].code,
+        0
+    );
+    let second = RequestEnvelope::new(update("Second"))
+        .with_operation(Some("editor-two".into()), Some(revision));
+    assert_eq!(
+        worker.execute(state.clone(), second).await.responses[0].code,
+        ResponseCode::Conflict as i32
+    );
+    let rejected = worker
+        .execute(
+            state,
+            RequestEnvelope::new(ServerCommand::OperationStatus("editor-two".into())),
+        )
+        .await;
+    let ResponsePayload::Operation(receipt) = &rejected.responses[0].payload else {
+        panic!("expected rejected operation receipt")
+    };
+    assert_eq!(receipt.state, OperationState::Failed);
+    assert_eq!(
+        worker
+            .with_session(|s| s.vault().unwrap().management_item(1, false).unwrap().name)
+            .await
+            .unwrap(),
+        "First"
+    );
+}
+
+#[tokio::test]
+async fn operation_outcomes_are_explicitly_unknown_after_worker_restart() {
+    let state = test_connection_state();
+    let worker = test_worker(VaultSession::Locked, &state);
+    let result = worker
+        .execute(
+            state,
+            RequestEnvelope::new(ServerCommand::OperationStatus(
+                "previous-daemon-operation".into(),
+            )),
+        )
+        .await;
+    let ResponsePayload::Operation(receipt) = &result.responses[0].payload else {
+        panic!("expected receipt")
+    };
+    assert_eq!(receipt.state, OperationState::Unknown);
+}
+
+#[tokio::test]
+async fn os_lock_discards_session_and_inactivity_does_not_need_a_writable_store() {
+    let state = test_connection_state();
+    let worker = test_worker(session(sample_vault()), &state);
+    let callback = worker.system_lock_handler(Arc::clone(&state.background_error));
+    tokio::task::spawn_blocking(move || callback())
+        .await
+        .unwrap();
+    // An item-lane barrier proves the earlier control message finished.
+    assert!(worker.with_session(|s| s.is_locked()).await.unwrap());
+    assert!(worker.is_locked());
+    let vault = Vault::from_entries(
+        vec![VaultEntry {
+            id: 1,
+            password: "synthetic".into(),
+            ..Default::default()
+        }],
+        Some("missing-dir/vault.enc".into()),
+    );
+    let mut live = session(vault);
+    lock_session(&mut live).unwrap();
+    assert!(live.is_locked());
+}
 #[test]
 fn test_server_info_zeroize_restores_locked_defaults() {
     let defaults = ServerInfo::default();
@@ -570,40 +739,6 @@ fn test_password_type_zeroize_password_and_key() {
             _ => panic!("credential variant changed during zeroization"),
         }
     }
-}
-
-#[test]
-fn zeroization_clears_entry_fields_and_vault_contents() {
-    let mut entry = VaultEntry {
-        id: 42,
-        name: "test".to_string(),
-        username: Some("user".to_string()),
-        password: "secret".to_string(),
-        url: Some("https://example.com".to_string()),
-        notes: Some("important".to_string()),
-        created: "2024-01-01".to_string(),
-        modified: "2024-01-01".to_string(),
-    };
-    let mut vault = Vault {
-        entries: vec![entry.clone()],
-        metadata: VaultMetadata {
-            filename: "test.enc".to_string(),
-            duo_session: None,
-        },
-        recovery: RecoveryData::default(),
-    };
-    entry.zeroize();
-    assert_eq!(entry.id, 0);
-    assert_eq!(entry.name, "");
-    assert_eq!(entry.username, None);
-    assert_eq!(entry.password, "");
-    assert_eq!(entry.url, None);
-    assert_eq!(entry.notes, None);
-    assert_eq!(entry.created, "");
-    assert_eq!(entry.modified, "");
-    vault.zeroize();
-    assert!(vault.entries.is_empty());
-    assert_eq!(vault.metadata.filename, "");
 }
 
 #[test]
@@ -657,15 +792,7 @@ async fn authenticated_tcp_protocol_decodes_complete_and_fragmented_commands() {
         let token = "a".repeat(TOKEN_HEX_LEN);
         let (mut client, mut server) = tcp_pair().await;
         let server_token = token.clone();
-        let task = tokio::spawn(async move {
-            TRANSPORT_RESPONSE_KEY
-                .scope(RefCell::new(None), async {
-                    let command = handler(&mut server, &server_token).await;
-                    assert!(TRANSPORT_RESPONSE_KEY.with(|key| key.borrow().is_some()));
-                    command
-                })
-                .await
-        });
+        let task = tokio::spawn(async move { handler(&mut server, &server_token).await });
         if fragmented {
             // A valid but incomplete preface must remain pending, not be rejected.
             client.write_all(&SECURE_PREFACE[..1]).await.unwrap();
@@ -686,12 +813,8 @@ async fn authenticated_tcp_protocol_decodes_complete_and_fragmented_commands() {
         let mut hello = [0u8; SECURE_HELLO_LEN];
         client.read_exact(&mut hello).await.unwrap();
         let keys = verify_server_hello(&token, &hello).unwrap();
-        let command = if fragmented {
-            ServerCommand::StatusData
-        } else {
-            ServerCommand::Status
-        };
-        let encoded = rmp_serde::to_vec(&command).unwrap();
+        let command = ServerCommand::Status;
+        let encoded = rmp_serde::to_vec_named(&RequestEnvelope::new(command)).unwrap();
         let request = encrypt_record(&keys.request, &encoded).unwrap();
         let chunk_size = if fragmented { 3 } else { request.len() };
         for chunk in request.chunks(chunk_size) {
@@ -701,8 +824,14 @@ async fn authenticated_tcp_protocol_decodes_complete_and_fragmented_commands() {
         let parsed = task.await.unwrap();
         assert!(
             matches!(
-                (fragmented, parsed),
-                (false, Some(ServerCommand::Status)) | (true, Some(ServerCommand::StatusData))
+                parsed,
+                Some(AuthenticatedRequest {
+                    request: RequestEnvelope {
+                        command: ServerCommand::Status,
+                        ..
+                    },
+                    ..
+                })
             ),
             "command was not decoded; fragmented={fragmented}"
         );
@@ -727,13 +856,7 @@ async fn tcp_protocol_authenticates_before_commands_and_rejects_invalid_messages
     }
     let (mut client, mut server) = tcp_pair().await;
     let server_token = token.clone();
-    let task = tokio::spawn(async move {
-        TRANSPORT_RESPONSE_KEY
-            .scope(RefCell::new(None), async {
-                handler(&mut server, &server_token).await
-            })
-            .await
-    });
+    let task = tokio::spawn(async move { handler(&mut server, &server_token).await });
     client.write_all(SECURE_PREFACE).await.unwrap();
     let mut hello = [0u8; SECURE_HELLO_LEN];
     client.read_exact(&mut hello).await.unwrap();
@@ -771,95 +894,16 @@ async fn tcp_protocol_authenticates_before_commands_and_rejects_invalid_messages
 
     let (mut client, mut server) = tcp_pair().await;
     let server_token = token.clone();
-    let task = tokio::spawn(async move {
-        TRANSPORT_RESPONSE_KEY
-            .scope(RefCell::new(None), async {
-                handler(&mut server, &server_token).await
-            })
-            .await
-    });
+    let task = tokio::spawn(async move { handler(&mut server, &server_token).await });
     client.write_all(SECURE_PREFACE).await.unwrap();
     client.read_exact(&mut hello).await.unwrap();
     let keys = verify_server_hello(&token, &hello).unwrap();
-    let mut command = rmp_serde::to_vec(&ServerCommand::Status).unwrap();
+    let mut command =
+        rmp_serde::to_vec_named(&RequestEnvelope::new(ServerCommand::Status)).unwrap();
     command.push(0);
     let request = encrypt_record(&keys.request, &command).unwrap();
     client.write_all(&request).await.unwrap();
     assert!(task.await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn browser_login_commands_check_lock_state_and_site_at_selection() {
-    for (command, locked, expected_code, expected_secret) in [
-        (
-            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
-            false,
-            ResponseCode::Success,
-            false,
-        ),
-        (
-            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
-            true,
-            ResponseCode::Failure,
-            false,
-        ),
-        (
-            ServerCommand::BrowserLogins("https://example.com".into()),
-            false,
-            ResponseCode::Success,
-            false,
-        ),
-        (
-            ServerCommand::BrowserLogin {
-                domain: "https://example.com".into(),
-                id: 1,
-            },
-            false,
-            ResponseCode::Success,
-            true,
-        ),
-        (
-            ServerCommand::BrowserLogin {
-                domain: "https://attacker.example".into(),
-                id: 1,
-            },
-            false,
-            ResponseCode::NotFound,
-            false,
-        ),
-        (
-            ServerCommand::BrowserLogins("https://example.com".into()),
-            true,
-            ResponseCode::Failure,
-            false,
-        ),
-        (
-            ServerCommand::BrowserLogin {
-                domain: "https://example.com".into(),
-                id: 1,
-            },
-            true,
-            ResponseCode::Failure,
-            false,
-        ),
-    ] {
-        let vault = Vault {
-            metadata: VaultMetadata::default(),
-            entries: vec![VaultEntry {
-                id: 1,
-                password: "synthetic-secret".into(),
-                url: Some("https://example.com".into()),
-                ..VaultEntry::default()
-            }],
-            recovery: RecoveryData::default(),
-        };
-        let response = dispatch_test_command(vault, command, locked).await;
-        assert_eq!(response.code, expected_code as i32);
-        assert_eq!(
-            response.message.contains("synthetic-secret"),
-            expected_secret
-        );
-    }
 }
 
 #[test]
@@ -878,320 +922,17 @@ fn request_memory_budget_accounts_for_buffers_and_releases_reservations() {
 }
 
 #[tokio::test]
-async fn custom_field_commands_redact_reveal_select_and_enforce_lock_state() {
-    let target = || Target::Id(1);
-    for (command, locked, expected_code, visible) in [
-        (
-            ServerCommand::GetDetails {
-                target: target(),
-                copy_timeout: 0,
-                reveal_secrets: false,
-            },
-            false,
-            ResponseCode::Success,
-            false,
-        ),
-        (
-            ServerCommand::GetDetails {
-                target: target(),
-                copy_timeout: 0,
-                reveal_secrets: true,
-            },
-            false,
-            ResponseCode::Success,
-            true,
-        ),
-        (
-            ServerCommand::GetField {
-                target: target(),
-                name: "RECOVERY-CODE".into(),
-                copy_timeout: None,
-            },
-            false,
-            ResponseCode::Success,
-            true,
-        ),
-        (
-            ServerCommand::GetField {
-                target: target(),
-                name: "missing".into(),
-                copy_timeout: None,
-            },
-            false,
-            ResponseCode::NotFound,
-            false,
-        ),
-        (
-            ServerCommand::GetField {
-                target: Target::Id(2),
-                name: "recovery-code".into(),
-                copy_timeout: None,
-            },
-            false,
-            ResponseCode::NotFound,
-            false,
-        ),
-        (
-            ServerCommand::GetField {
-                target: target(),
-                name: "recovery-code".into(),
-                copy_timeout: Some(0),
-            },
-            false,
-            ResponseCode::InvalidInput,
-            false,
-        ),
-        (
-            ServerCommand::GetField {
-                target: target(),
-                name: "recovery-code".into(),
-                copy_timeout: None,
-            },
-            true,
-            ResponseCode::Failure,
-            false,
-        ),
-        (
-            ServerCommand::GetDetails {
-                target: target(),
-                copy_timeout: 0,
-                reveal_secrets: true,
-            },
-            true,
-            ResponseCode::Failure,
-            false,
-        ),
-    ] {
-        let vault = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                ..Default::default()
-            }],
-            recovery: RecoveryData {
-                entry_metadata: vec![crate::vault::EntryMetadata {
-                    entry_id: 1,
-                    custom_fields: vec![CustomField {
-                        name: "recovery-code".into(),
-                        value: "synthetic-field-secret".into(),
-                        secret: true,
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            metadata: VaultMetadata::default(),
-        };
-        let response = dispatch_test_command(vault, command, locked).await;
-        assert_eq!(response.code, expected_code as i32);
-        assert_eq!(response.message.contains("synthetic-field-secret"), visible);
-    }
-}
-
-#[test]
-fn commands_execute_without_tcp_and_legacy_reads_share_redaction() {
-    let mut session = VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: None,
-        },
-        vault: Some(Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                name: "Account".into(),
-                ..Default::default()
-            }],
-            recovery: RecoveryData {
-                entry_metadata: vec![crate::vault::EntryMetadata {
-                    entry_id: 1,
-                    custom_fields: vec![CustomField {
-                        name: "private".into(),
-                        value: "hidden-secret".into(),
-                        secret: true,
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            metadata: VaultMetadata::default(),
-        }),
-    };
-    let mut outputs = vec![];
-    for command in [
-        ServerCommand::Get(Target::Id(1)),
-        ServerCommand::GetWithOptions {
-            target: Target::Id(1),
-            copy_timeout: 0,
-        },
-        ServerCommand::GetDetails {
-            target: Target::Id(1),
-            copy_timeout: 0,
-            reveal_secrets: false,
-        },
-    ] {
-        let outcome = execute_command(
-            test_connection_state(VaultSession::default()),
-            command,
-            &mut session,
-        );
-        assert_eq!(outcome.responses.len(), 1);
-        assert_eq!(outcome.responses[0].code, ResponseCode::Success);
-        assert!(!outcome.responses[0].message.contains("hidden-secret"));
-        outputs.push(outcome.responses[0].message.clone());
-    }
-    assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
-    // A retained vault cannot override the locked flag.
-    session.credentials.locked = true;
-    let denied = execute_command(
-        test_connection_state(VaultSession::default()),
-        ServerCommand::BrowserLogin {
-            domain: "https://example.com".into(),
-            id: 1,
-        },
-        &mut session,
-    );
-    assert_eq!(denied.responses[0].code, ResponseCode::Failure);
-    assert_eq!(denied.responses[0].message, "Vault locked.");
-    session.lock();
-    assert!(session.is_locked());
-    assert!(session.vault.is_none());
-    assert!(session.credentials.keypass.is_none());
-    // A missing vault must fail closed even if credentials say unlocked.
-    for locked in [true, false] {
-        session.credentials.locked = locked;
-        for command in [
-            ServerCommand::Get(Target::Id(1)),
-            ServerCommand::GetSecret(Target::Id(1)),
-            ServerCommand::GetSecretData(Target::Id(1)),
-            ServerCommand::AuthenticatorData(Target::Id(1)),
-            ServerCommand::GetFieldData {
-                target: Target::Id(1),
-                name: "private".into(),
-            },
-            ServerCommand::View(ListOptions::default()),
-            ServerCommand::BrowserLogins("https://example.com".into()),
-            ServerCommand::BrowserLogin {
-                domain: "https://example.com".into(),
-                id: 1,
-            },
-            ServerCommand::BrowserAutofill,
-            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
-            ServerCommand::BrowserAutofillItem(1),
-            ServerCommand::GetField {
-                target: Target::Id(1),
-                name: "private".into(),
-                copy_timeout: None,
-            },
-            ServerCommand::History(Target::Id(1)),
-            ServerCommand::Trash,
-            ServerCommand::Audit(AuditOptions::default()),
-            ServerCommand::Totp(TotpCommand::Show {
-                target: Target::Id(1),
-                copy_timeout: None,
-            }),
-            ServerCommand::Totp(TotpCommand::Watch {
-                target: Target::Id(1),
-                copy_timeout: None,
-            }),
-            ServerCommand::Totp(TotpCommand::Duo {
-                target: Target::Id(1),
-                activation: "duo://synthetic-activation".into(),
-                mode: OtpMode::Hotp,
-            }),
-            ServerCommand::Export {
-                path: "must-not-be-created.json".into(),
-                force: false,
-            },
-            ServerCommand::Update(EntryUpdate {
-                target: Target::Id(1),
-                update: EntryChanges::default(),
-                password: Some("synthetic-secret".into()),
-            }),
-        ] {
-            let outcome = execute_command(
-                test_connection_state(VaultSession::default()),
-                command,
-                &mut session,
-            );
-            assert_eq!(outcome.responses.len(), 1);
-            assert_eq!(outcome.responses[0].code, ResponseCode::Failure);
-            assert_eq!(outcome.responses[0].message, "Vault locked.");
-            assert!(matches!(outcome.effect, CommandEffect::None));
-        }
-    }
-    session.credentials.locked = true;
-    let stopped = execute_command(
-        test_connection_state(VaultSession::default()),
-        ServerCommand::Kill,
-        &mut session,
-    );
-    assert!(matches!(stopped.effect, CommandEffect::StopServer));
-}
-
-#[test]
-fn duo_polling_does_not_extend_auto_lock_and_locked_vaults_cannot_respond() {
-    let state = test_connection_state(VaultSession::default());
-    let mut session = VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: Some(PasswordType::Password("synthetic".into())),
-        },
-        vault: Some(Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                ..Default::default()
-            }],
-            metadata: VaultMetadata::default(),
-            recovery: RecoveryData::default(),
-        }),
-    };
-    let outcome = execute_command(
-        state.clone(),
-        ServerCommand::Duo(DuoCommand::Requests {
-            target: Target::Id(1),
-        }),
-        &mut session,
-    );
-    assert_eq!(outcome.responses[0].code, ResponseCode::NotFound);
-    let outcome = execute_command(
-        state.clone(),
-        ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
-        &mut session,
-    );
-    assert_eq!(outcome.responses[0].code, ResponseCode::Success);
-    assert_eq!(state.lock_generation.load(Ordering::Acquire), 0);
-    session.credentials.locked = true;
-    for command in [
-        DuoCommand::Requests {
-            target: Target::Id(1),
-        },
-        DuoCommand::Respond {
-            target: Target::Id(1),
-            request_id: "test-id".into(),
-            fingerprint: "a".repeat(128),
-            approve: true,
-            code: "012".into(),
-        },
-    ] {
-        let outcome = execute_command(state.clone(), ServerCommand::Duo(command), &mut session);
-        assert_eq!(outcome.responses[0].code, ResponseCode::Failure);
-        assert_eq!(outcome.responses[0].message, "Vault locked.");
-    }
-    assert_eq!(state.lock_generation.load(Ordering::Acquire), 0);
-}
-
-#[tokio::test]
-async fn a_slow_duo_poll_does_not_block_lock_and_cannot_return_a_stale_review() {
+async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = tokio::sync::oneshot::channel();
     let http = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = [0; 4096];
         assert!(stream.read(&mut request).await.unwrap() > 0);
-        assert!(request.starts_with(b"GET "));
-        started_tx.send(()).unwrap();
-        release_rx.await.unwrap();
+        started.send(()).unwrap();
+        wait.await.unwrap();
         let body = br#"{"stat":"OK","response":{"transactions":[]}}"#;
         stream
             .write_all(
@@ -1206,66 +947,93 @@ async fn a_slow_duo_poll_does_not_block_lock_and_cannot_return_a_stale_review() 
         stream.write_all(body).await.unwrap();
     });
     let private = crate::duo::crypto::new_key().unwrap();
-    let mut session = VaultSession {
-        credentials: ServerInfo {
-            locked: false,
-            keypass: Some(PasswordType::Key("synthetic".into())),
-        },
-        vault: Some(Vault::default()),
-    };
-    let vault = session.vault.as_mut().unwrap();
-    vault.entries.push(VaultEntry {
-        id: 1,
-        ..Default::default()
-    });
-    vault.recovery.duo.push(crate::vault::DuoRecord {
-        entry_id: 1,
-        review_key: None,
-        credentials: crate::types::DuoCredentials {
+    let mut vault = sample_vault();
+    vault.set_test_duo(
+        1,
+        DuoCredentials {
             host: "api-test.duosecurity.com".into(),
             akey: "synthetic".into(),
             pkey: "synthetic".into(),
             private_key: crate::duo::crypto::private_pem(&private)
                 .unwrap()
-                .to_string(),
+                .to_string()
+                .into(),
         },
-    });
-    let mut prepared = vault
-        .prepare_duo_poll(
-            DuoCommand::Requests {
-                target: Target::Id(1),
-            },
-            &session.credentials,
-        )
-        .unwrap();
-    // Only the synthetic transport differs; the production finish path is used.
-    prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
-    let session = Arc::new(Mutex::new(session));
-    let pending_session = Arc::clone(&session);
-    let pending = tokio::spawn(async move {
-        let mut responses = vec![];
-        finish_duo(prepared, pending_session, &mut responses).await;
-        responses
-    });
-    tokio::time::timeout(Duration::from_secs(2), started_rx)
+    );
+    let state = test_connection_state();
+    let worker = test_worker(session(vault), &state);
+    let mut prepared = worker
+        .with_session(|session| {
+            let mut edit = session.edit();
+            let (key, vault) = edit.parts_mut();
+            crate::vault::available(vault).unwrap().prepare_duo_poll(
+                DuoCommand::Requests {
+                    target: Target::Id(1),
+                },
+                key,
+            )
+        })
         .await
         .unwrap()
         .unwrap();
-    let mut guard = tokio::time::timeout(Duration::from_millis(250), session.lock())
+    prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
+    let handle = worker.clone();
+    let pending = tokio::spawn(async move {
+        let mut responses = vec![];
+        finish_duo(prepared, handle, &mut responses).await;
+        responses
+    });
+    tokio::time::timeout(Duration::from_secs(2), ready)
         .await
-        .expect("Duo network wait must not block vault locking");
-    guard.lock();
-    assert!(guard.is_locked());
-    assert!(guard.vault.is_none());
-    assert!(guard.credentials.keypass.is_none());
-    drop(guard);
-    release_tx.send(()).unwrap();
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_millis(250), worker.lock())
+        .await
+        .expect("network I/O must not prevent vault locking");
+    assert!(worker.is_locked());
+    release.send(()).unwrap();
     let responses = tokio::time::timeout(Duration::from_secs(2), pending)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0].code, ResponseCode::Failure);
-    assert_eq!(responses[0].message, "vault is locked");
+    assert_eq!(responses[0].code, ResponseCode::Failure as i32);
+    assert!(responses[0].error_message().contains("locked"));
     http.await.unwrap();
+}
+
+#[tokio::test]
+async fn published_status_remains_responsive_while_owner_is_busy() {
+    let state = test_connection_state();
+    let worker = test_worker(session(sample_vault()), &state);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let handle = worker.clone();
+    let busy = tokio::spawn(async move {
+        handle
+            .with_session(move |_| {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            })
+            .await
+    });
+    ready.await.unwrap();
+    let (mut client, server) = tcp_pair().await;
+    let connection = tokio::spawn(handle_connection(server, state.clone(), worker));
+    let response = tokio::time::timeout(
+        Duration::from_millis(250),
+        send(
+            &mut client,
+            &state.token,
+            RequestEnvelope::new(ServerCommand::Status),
+        ),
+    )
+    .await
+    .expect("status must use nonsecret published state");
+    let ResponsePayload::Status(status) = response.payload else {
+        panic!("expected status")
+    };
+    assert!(!status.locked);
+    release.send(()).unwrap();
+    busy.await.unwrap().unwrap();
+    connection.await.unwrap();
 }

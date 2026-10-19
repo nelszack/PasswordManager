@@ -8,7 +8,7 @@ fn management_edits_validate_fields_and_preserve_unmodified_secrets() {
         "item": { "name": "Example", "password": null, "urls": ["https://new.example"], "removeUrls": ["https://old.example"],
             "fields": [{ "name": "environment", "value": "prod", "secret": false }] } })).unwrap();
     let command = command_for_request(&mut request).unwrap();
-    let ServerCommand::UpdateTyped(update) = command else {
+    let ServerCommand::Update(update) = command else {
         panic!("expected update")
     };
     assert!(update.entry.password.is_none());
@@ -163,9 +163,13 @@ fn native_message_round_trip_uses_native_endian_framing() {
 fn authenticator_responses_preserve_codes_and_mode_specific_lifetimes() {
     for expected in [
         json!({ "code": "287082", "expires_in": 19, "counter": null, "mode": "totp" }),
-        json!({ "code": "755224", "expires_in": null, "counter": 0, "mode": "hotp" }),
+        json!({ "code": "755224", "expires_in": null, "counter": "0", "mode": "hotp" }),
+        json!({ "code": "123456", "expires_in": null, "counter": "18446744073709551614", "mode": "hotp" }),
     ] {
-        let parsed = response_data("getTotp", expected.to_string()).unwrap();
+        let code: crate::protocol::AuthenticatorResponse =
+            serde_json::from_value(expected.clone()).unwrap();
+        assert!(code.valid());
+        let parsed = ResponsePayload::Authenticator(code).into_json();
         assert_eq!(parsed, expected, "mode {}", expected["mode"]);
     }
 }
@@ -176,19 +180,19 @@ fn malformed_authenticator_data_fails_without_exposing_code_material() {
         r#"{"code":"secret","expires_in":19,"counter":null,"mode":"totp"}"#,
         r#"{"code":"287082","expires_in":null,"counter":null,"mode":"totp"}"#,
         r#"{"code":"755224","expires_in":null,"counter":0,"mode":"unknown"}"#,
-        r#"{"code":"755224","expires_in":null,"counter":"0","mode":"hotp"}"#,
-        r#"{"code":"755224","expires_in":19,"counter":0,"mode":"hotp"}"#,
+        r#"{"code":"755224","expires_in":null,"counter":0,"mode":"hotp"}"#,
+        r#"{"code":"755224","expires_in":19,"counter":"0","mode":"hotp"}"#,
         "TOTP: 287082 (19s remaining)",
     ] {
-        let error = response_data("getTotp", payload.into()).unwrap_err();
-        assert_eq!(error, "invalid authenticator response from server");
+        let parsed = serde_json::from_str::<crate::protocol::AuthenticatorResponse>(payload);
+        assert!(parsed.is_err() || !parsed.unwrap().valid());
     }
 }
 
 #[test]
 fn native_requests_are_whitelisted_and_use_stable_ids() {
     let mut duo = NativeRequest {
-        action: "getDuoItems".into(),
+        action: NativeAction::GetDuoItems,
         domain: Some("https://api-test.duosecurity.com".into()),
         ..NativeRequest::default()
     };
@@ -196,7 +200,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
         matches!(command_for_request(&mut duo).unwrap(), ServerCommand::BrowserDuoItems(domain) if domain == "https://api-test.duosecurity.com")
     );
     let mut logins = NativeRequest {
-        action: "getLoginItems".into(),
+        action: NativeAction::GetLoginItems,
         domain: Some("https://example.com".into()),
         ..NativeRequest::default()
     };
@@ -204,7 +208,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
         matches!(command_for_request(&mut logins).unwrap(), ServerCommand::BrowserLogins(domain) if domain == "https://example.com")
     );
     let mut login = NativeRequest {
-        action: "getLoginItem".into(),
+        action: NativeAction::GetLoginItem,
         domain: Some("https://example.com".into()),
         entry_id: Some(7),
         ..NativeRequest::default()
@@ -214,7 +218,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
     );
     for id in [None, Some(0)] {
         let mut invalid = NativeRequest {
-            action: "getLoginItem".into(),
+            action: NativeAction::GetLoginItem,
             domain: Some("https://example.com".into()),
             entry_id: id,
             ..NativeRequest::default()
@@ -222,7 +226,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
         assert!(command_for_request(&mut invalid).is_err());
     }
     let mut autofill = NativeRequest {
-        action: "getAutofillItems".into(),
+        action: NativeAction::GetAutofillItems,
         ..NativeRequest::default()
     };
     assert!(matches!(
@@ -231,7 +235,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
     ));
 
     let mut selected_autofill = NativeRequest {
-        action: "getAutofillItem".into(),
+        action: NativeAction::GetAutofillItem,
         entry_id: Some(9),
         ..NativeRequest::default()
     };
@@ -241,7 +245,7 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
     ));
 
     let mut request = NativeRequest {
-        action: "getTotp".into(),
+        action: NativeAction::GetTotp,
         entry_id: Some(17),
         ..NativeRequest::default()
     };
@@ -250,11 +254,10 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
         ServerCommand::AuthenticatorData(Target::Id(17))
     ));
 
-    let mut unsupported = NativeRequest {
-        action: "export".into(),
-        ..NativeRequest::default()
-    };
-    assert!(command_for_request(&mut unsupported).is_err());
+    assert!(serde_json::from_value::<NativeRequest>(json!({"id":1,"action":"export"})).is_err());
+    assert!(
+        serde_json::from_value::<NativeRequest>(json!({"id":1,"action":"getCredentials"})).is_err()
+    );
 }
 
 #[test]
@@ -286,7 +289,7 @@ fn native_bridge_rejects_oversized_and_truncated_frames() {
 #[test]
 fn native_bridge_rejects_control_characters_and_oversized_fields() {
     let mut newline = NativeRequest {
-        action: "saveCredentials".into(),
+        action: NativeAction::SaveCredentials,
         domain: Some("https://example.com\nforged".into()),
         username: Some("alice".into()),
         password: Some("secret".into()),
@@ -296,7 +299,7 @@ fn native_bridge_rejects_control_characters_and_oversized_fields() {
     assert!(command_for_request(&mut newline).is_err());
 
     let mut oversized = NativeRequest {
-        action: "getCredentials".into(),
+        action: NativeAction::GetLoginItems,
         domain: Some("x".repeat(2049)),
         ..NativeRequest::default()
     };
@@ -395,7 +398,9 @@ fn native_mutations_report_committed_durability_as_uncertain() {
             stream.read_exact(&mut ciphertext).unwrap();
             let request = decrypt_record(&keys.request, &header[..24], &ciphertext).unwrap();
             assert!(matches!(
-                rmp_serde::from_slice::<ServerCommand>(&request).unwrap(),
+                rmp_serde::from_slice::<RequestEnvelope>(&request)
+                    .unwrap()
+                    .command,
                 ServerCommand::Delete(Target::Id(7))
             ));
             // Identical wording proves uncertainty follows the authenticated
@@ -411,7 +416,9 @@ fn native_mutations_report_committed_durability_as_uncertain() {
             &client,
             NativeRequest {
                 id: 77,
-                action: "managerDelete".into(),
+                action: NativeAction::ManagerDelete,
+                operation_id: Some("test-delete-77".into()),
+                expected_revision: Some(1),
                 entry_id: Some(7),
                 ..Default::default()
             },
@@ -448,13 +455,17 @@ fn native_mutations_report_committed_durability_as_uncertain() {
 #[test]
 fn native_status_requires_and_preserves_structured_server_state() {
     let status = crate::protocol::ServerStatus::new(false, Some("Lock failed".into()));
-    let output = serde_json::to_string(&status).unwrap();
-    let parsed = response_data("status", output).unwrap();
+    let parsed = ResponsePayload::Status(status).into_json();
     assert_eq!(parsed["locked"], false);
     assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(parsed["warning"], "Lock failed");
-    assert!(response_data("status", "Status: Unlocked".into()).is_err());
-    assert!(response_data("status", r#"{"locked":"false","version":"0.1.0"}"#.into()).is_err());
+    assert!(serde_json::from_str::<crate::protocol::ServerStatus>("Status: Unlocked").is_err());
+    assert!(
+        serde_json::from_str::<crate::protocol::ServerStatus>(
+            r#"{"locked":"false","version":"0.1.0"}"#
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -483,4 +494,28 @@ fn duo_decisions_require_exact_identifiers_boolean_and_bounded_code() {
     denied["approve"] = json!(false);
     let mut request: NativeRequest = serde_json::from_value(denied).unwrap();
     assert!(command_for_request(&mut request).is_err());
+}
+
+#[test]
+fn native_policy_rejects_cross_operation_fields_and_requires_reviewed_revisions() {
+    for request in [
+        json!({"id":1,"action":"status","password":"must-not-appear"}),
+        json!({"id":1,"action":"managerDelete","entryId":1,"operationId":"delete-one"}),
+        json!({"id":1,"action":"managerAdd","item":{"name":"Example"}}),
+        json!({"id":1,"action":"getTotp","entryId":0,"operationId":"otp-one"}),
+    ] {
+        let request: NativeRequest = serde_json::from_value(request).unwrap();
+        let error = request.validate().unwrap_err();
+        assert!(!error.contains("must-not-appear"));
+    }
+    let request:NativeRequest=serde_json::from_value(json!({"id":1,"action":"managerDelete","entryId":1,"operationId":"delete-one","expectedRevision":3})).unwrap();
+    request.validate().unwrap();
+    let mut request: NativeRequest = serde_json::from_value(
+        json!({"id":2,"action":"operationStatus","operationId":"delete-one"}),
+    )
+    .unwrap();
+    request.validate().unwrap();
+    assert!(
+        matches!(command_for_request(&mut request).unwrap(),ServerCommand::OperationStatus(id) if id=="delete-one")
+    );
 }

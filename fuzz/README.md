@@ -27,8 +27,9 @@ cargo +nightly fuzz run imports -- -max_total_time=600 -max_len=65536
   a mutated ciphertext or authenticated header. It never runs Argon2 against
   attacker-chosen parameters, so KDF resource-limit tests remain in the Rust suite.
 - `native_messages` parses native-message framing, validates JSON requests into
-  commands without delivering them, and parses MessagePack commands and response
-  frames. Inputs contain no live authentication material.
+  commands without delivering them, and parses versioned MessagePack request
+  envelopes and typed responses. Configuration-loading unlock/copy adapters stop
+  after wire validation. Inputs contain no live authentication material.
 - `imports` runs the CSV and portable JSON parsers on UTF-8 inputs and drops their
   secret-bearing records after parsing.
 

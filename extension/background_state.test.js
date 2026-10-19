@@ -2,18 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const state = require("./background_state.js");
 
-test("legacy and structured server status preserve explicit lock state and warnings", () => {
-    // server warnings remain attached to otherwise healthy status
-    {
-        assert.deepEqual(
-            state.parseServerStatus("Status: Locked\nVersion: 0.1.0"),
-            { locked: true, serverVersion: "0.1.0" }
-        );
-        assert.deepEqual(
-            state.parseServerStatus("Status: Unlocked\nVersion: 0.1.0\nWarning: Automatic lock failed: disk full"),
-            { locked: false, serverVersion: "0.1.0", error: "Automatic lock failed: disk full" }
-        );
-    }
+test("structured server status preserves explicit lock state and warnings", () => {
     // structured status uses explicit fields even when warning text mentions locks
     {
         assert.deepEqual(state.parseServerStatus({ locked: false, version: "0.1.0", warning: "Previous lock failed" }),
@@ -24,30 +13,16 @@ test("legacy and structured server status preserve explicit lock state and warni
             { locked: true, serverVersion: "0.1.0" });
         for (const value of [null, [], 1, {}, { locked: "false", version: "0.1.0" },
             { locked: false, version: "" }, { locked: false, version: 1 },
-            { locked: false, version: "0.1.0", warning: 1 }, "unlocked", "Status: unavailable\nVersion: 0.1.0"]) {
+            { locked: false, version: "0.1.0", warning: 1 }, "unlocked", "Status: Locked\nVersion: 0.1.0"]) {
             assert.throws(() => state.parseServerStatus(value), /Invalid server status/);
         }
     }
 });
 
-test("component version mismatches identify every installed version", () => {
-    assert.equal(state.versionError({
-        running: true,
-        extensionVersion: "0.1.0",
-        nativeVersion: "0.1.0",
-        serverVersion: "0.1.0"
-    }), null);
-    assert.equal(state.versionError({
-        running: true,
-        extensionVersion: "0.2.0",
-        nativeVersion: "0.1.0",
-        serverVersion: "0.1.0"
-    }), "Version mismatch: extension 0.2.0, native host 0.1.0, password manager 0.1.0. Update all Password Manager components together.");
-    assert.match(state.versionError({
-        running: true,
-        extensionVersion: "0.1.0",
-        nativeVersion: "0.1.0"
-    }), /password manager version unavailable/);
+test("protocol compatibility is independent of package release versions", () => {
+    assert.equal(state.versionError({ extensionVersion: "0.2.0", nativeVersion: "0.1.0", serverVersion: "0.3.0", protocolVersion: 1, extensionProtocolVersion: 1 }), null);
+    assert.match(state.versionError({ protocolVersion: 2, extensionProtocolVersion: 1 }), /Incompatible native protocol/);
+    assert.match(state.versionError({ extensionProtocolVersion: 1 }), /Incompatible native protocol/);
 });
 
 test("every server state has stable badge semantics", () => {

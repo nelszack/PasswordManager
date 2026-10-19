@@ -3,6 +3,44 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+// CLI presentation traits live in this adapter, outside domain definitions.
+macro_rules! cli_values {
+    ($ty:ty, $($variant:path => ($name:literal, $help:literal)),+ $(,)?) => {
+        impl ValueEnum for $ty {
+            fn value_variants<'a>() -> &'a [Self] { &[$($variant),+] }
+            fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+                Some(match self { $($variant => clap::builder::PossibleValue::new($name).help($help)),+ })
+            }
+        }
+    };
+}
+cli_values!(ItemKind,
+    ItemKind::Login => ("login", "Website or application credentials"),
+    ItemKind::SecureNote => ("secure-note", "Free-form confidential text"),
+    ItemKind::PaymentCard => ("payment-card", "Payment-card details"),
+    ItemKind::Identity => ("identity", "Personal identity or contact information"),
+    ItemKind::Wifi => ("wifi", "Wireless network credentials"),
+    ItemKind::SoftwareLicense => ("software-license", "Software product key and license details"),
+    ItemKind::SshKey => ("ssh-key", "SSH private key or connection details"),
+    ItemKind::ApiSecret => ("api-secret", "API token, client secret, or service credential"),
+);
+cli_values!(SortField,
+    SortField::Id => ("id", "Stable numeric entry ID"),
+    SortField::Name => ("name", "Item name, compared case-insensitively"),
+    SortField::Created => ("created", "Creation time"),
+    SortField::Modified => ("modified", "Last modification time"),
+    SortField::PasswordAge => ("password-age", "Age of the current password"),
+);
+cli_values!(crate::types::ConflictPolicy,
+    crate::types::ConflictPolicy::Skip => ("skip", "Keep the existing item"),
+    crate::types::ConflictPolicy::Replace => ("replace", "Replace the existing item"),
+    crate::types::ConflictPolicy::KeepBoth => ("keep-both", "Import a separate item with a distinct name"),
+);
+cli_values!(crate::types::OtpMode,
+    crate::types::OtpMode::Hotp => ("hotp", "Counter-based code"),
+    crate::types::OtpMode::Totp => ("totp", "Time-based code"),
+);
 #[derive(Parser, Debug)]
 #[command(
     name = "pm",
@@ -181,7 +219,7 @@ pub enum CliCommands {
     Trash,
     /// Restore a trashed entry to the active vault.
     Restore {
-        /// 1-based position shown by the latest `pm trash` listing.
+        /// Stable entry ID shown by `pm trash`.
         #[arg(long)]
         id: usize,
     },
@@ -380,6 +418,13 @@ pub enum CliCommands {
         #[arg(long)]
         check: bool,
     },
+    /// Regenerate browser protocol validators and command policies.
+    #[command(hide = true)]
+    GenerateCommandContract {
+        /// Fail if the checked-in contract differs instead of rewriting it.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -428,11 +473,11 @@ pub enum BackupCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Restore a complete backup as the vault associated with its password/key.
+    /// Restore a complete backup as a new, independently selected vault.
     ///
     /// Restore validates the entire backup before writing a vault.
     #[command(
-        after_help = "Examples:\n  pm backup restore --path vault.pmbackup\n  pm backup restore --path vault.pmbackup --key ./backup.key --force"
+        after_help = "Examples:\n  pm backup restore --path vault.pmbackup\n  pm backup restore --path vault.pmbackup --key ./backup.key"
     )]
     Restore {
         /// Encrypted backup file to restore.
@@ -441,9 +486,6 @@ pub enum BackupCommands {
         /// Decrypt with a key file instead of a backup password.
         #[arg(long = "key", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
-        /// Replace an existing vault associated with the backup password/key.
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -481,7 +523,8 @@ pub struct ConfigArgs {
             "unlock_timeout",
             "password_history_limit",
             "trash_retention_days",
-            "server_port"
+            "server_port",
+            "default_vault"
         ]
     )]
     pub reset: bool,
@@ -513,6 +556,9 @@ pub struct ConfigArgs {
     /// Set the default loopback port used by the server and client.
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
     pub server_port: Option<u16>,
+    /// Opaque vault ID selected by default when unlocking (from pm vaults).
+    #[arg(long)]
+    pub default_vault: Option<String>,
 }
 
 impl ConfigArgs {
@@ -527,6 +573,25 @@ impl ConfigArgs {
             || self.password_history_limit.is_some()
             || self.trash_retention_days.is_some()
             || self.server_port.is_some()
+            || self.default_vault.is_some()
+    }
+}
+
+impl From<ConfigArgs> for crate::config::ConfigChanges {
+    fn from(args: ConfigArgs) -> Self {
+        Self {
+            reset: args.reset,
+            genpass_length: args.genpass_length,
+            genpass_stats: args.genpass_stats,
+            genpass_copy: args.genpass_copy,
+            password_copy: args.password_copy,
+            clipboard_timeout: args.clipboard_timeout,
+            unlock_timeout: args.unlock_timeout,
+            password_history_limit: args.password_history_limit,
+            trash_retention_days: args.trash_retention_days,
+            server_port: args.server_port,
+            default_vault: args.default_vault,
+        }
     }
 }
 
@@ -649,6 +714,9 @@ pub struct DeleteArgs {
     /// Permanently delete the entire encrypted vault.
     #[arg(long, conflicts_with_all = ["id","entry_name"], required_unless_present_any=["id", "entry_name" ])]
     pub vault: bool,
+    /// Select the .enc filename from `pm vaults`; otherwise use the default vault.
+    #[arg(long, requires = "vault")]
+    pub vault_file: Option<String>,
     /// Key file for deleting a key-based vault; otherwise prompts for its password.
     #[arg(long, requires = "vault", value_hint = ValueHint::FilePath)]
     pub key: Option<String>,
@@ -661,7 +729,7 @@ pub struct DeleteArgs {
 
 #[derive(Args, Debug)]
 pub struct PurgeArgs {
-    /// 1-based position of a trashed entry in the latest `pm trash` listing.
+    /// Stable entry ID of a trashed entry shown by `pm trash`.
     #[arg(long, conflicts_with = "all", required_unless_present = "all")]
     pub id: Option<usize>,
     /// Permanently erase every entry in trash.
@@ -837,7 +905,7 @@ impl From<UpdateArgs> for crate::types::EntryChanges {
             name: args.name,
             username: args.username,
             url: args.url,
-            notes: args.notes,
+            notes: args.notes.map(Into::into),
         }
     }
 }

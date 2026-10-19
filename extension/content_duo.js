@@ -1,12 +1,14 @@
 // Detection only asks the background to check. Request details and decisions
 // stay in extension pages; verification numbers are never extracted from this page.
-(function () {
-    let activeSince = 0, checking = false, timer;
+const PasswordManagerDuoDetection = require("./duo_detection.js");
+module.exports.create = function create() {
+    let activeSince = 0, checking = false, timer, disposed = false;
     function active() {
         return document.visibilityState !== "hidden"
             && PasswordManagerDuoDetection.challenge(document.body?.innerText, location.href);
     }
     function check() {
+        if (disposed) return;
         clearTimeout(timer);
         if (!active()) {
             activeSince = 0;
@@ -20,13 +22,18 @@
         chrome.runtime.sendMessage({ action: "observeDuoChallenge" }, () => {
             void chrome.runtime.lastError;
             checking = false;
-            timer = setTimeout(check, 5000);
+            if (!disposed) timer = setTimeout(check, 5000);
         });
     }
-    chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    const listener = (message, _sender, respond) => {
         if (message.action === "getDuoChallengeState") respond({ active: active() });
-    });
+    };
+    chrome.runtime.onMessage.addListener(listener);
     document.addEventListener("visibilitychange", check);
     window.addEventListener("pagehide", () => clearTimeout(timer));
     check();
-})();
+    return { dispose() {
+        disposed = true; clearTimeout(timer); document.removeEventListener("visibilitychange", check);
+        chrome.runtime.onMessage.removeListener(listener);
+    } };
+};

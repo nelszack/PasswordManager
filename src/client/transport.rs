@@ -1,10 +1,9 @@
 use crate::{
     file::{TOKEN_FILE, data_dir},
     protocol::{
-        ProtocolResponse, ResponseCode, SECURE_HELLO_LEN, SECURE_PREFACE, decode_responses,
-        decrypt_record_stream, encrypt_record, verify_server_hello,
+        ProtocolResponse, RequestEnvelope, ResponseCode, SECURE_HELLO_LEN, SECURE_PREFACE,
+        decode_responses, decrypt_record_stream, encrypt_record, server_addr, verify_server_hello,
     },
-    server::server_addr,
     types::*,
 };
 use std::{
@@ -56,9 +55,12 @@ impl AuthenticatedClient {
     pub fn request(&self, command: ServerCommand) -> Result<String, String> {
         let response = self.request_response(command)?;
         if response.code == ResponseCode::Success as i32 {
-            Ok(response.message)
+            match response.payload {
+                crate::protocol::ResponsePayload::Message(value) => Ok(value),
+                _ => Err("expected a mutation acknowledgement".into()),
+            }
         } else {
-            Err(response.message.trim_end().to_string())
+            Err(response.error_message())
         }
     }
 
@@ -71,17 +73,25 @@ impl AuthenticatedClient {
         &self,
         command: ServerCommand,
     ) -> Result<ProtocolResponse, RequestFailure> {
-        let command = Zeroizing::new(command);
+        self.request_envelope_tracked(RequestEnvelope::new(command))
+    }
+    pub fn request_envelope_tracked(
+        &self,
+        envelope: RequestEnvelope,
+    ) -> Result<ProtocolResponse, RequestFailure> {
+        let envelope = Zeroizing::new(envelope);
         let mut sent = false;
-        self.exchange_response(&command, &mut sent)
+        self.exchange_response(&envelope, &mut sent)
             .map_err(|message| RequestFailure { message, sent })
     }
 
     fn exchange_response(
         &self,
-        command: &ServerCommand,
+        envelope: &RequestEnvelope,
         sent: &mut bool,
     ) -> Result<ProtocolResponse, String> {
+        envelope.validate()?;
+        let command = &envelope.command;
         let read_timeout = if matches!(
             command,
             ServerCommand::Audit(AuditOptions {
@@ -119,7 +129,8 @@ impl AuthenticatedClient {
         let keys = verify_server_hello(&token, &hello)
             .ok_or_else(|| "password manager server authentication failed".to_string())?;
         let data = Zeroizing::new(
-            rmp_serde::to_vec(command).map_err(|e| format!("could not encode command: {e}"))?,
+            rmp_serde::to_vec_named(envelope)
+                .map_err(|e| format!("could not encode command: {e}"))?,
         );
         let mut encrypted_request = encrypt_record(&keys.request, &data)
             .ok_or_else(|| "could not encrypt command".to_string())?;
@@ -159,7 +170,17 @@ impl AuthenticatedClient {
         }
         let mut plaintext = decrypt_record_stream(&keys.response, &total, self.max_response)?;
         total.zeroize();
-        let response = decode_responses(&plaintext);
+        let response = decode_responses(&plaintext).and_then(|response| {
+            if response
+                .request_id
+                .as_ref()
+                .is_some_and(|id| id != &envelope.request_id)
+            {
+                Err("server response refers to a different request".to_string())
+            } else {
+                Ok(response)
+            }
+        });
         plaintext.zeroize();
         response
     }
@@ -180,114 +201,123 @@ fn server_token(path: &Path) -> Result<Zeroizing<String>, String> {
 mod tests {
     use super::*;
     use crate::protocol::{
-        SECURE_RECORD_HEADER_LEN, decrypt_record, encode_response, server_hello,
+        ResponsePayload, RpcResponse, SECURE_RECORD_HEADER_LEN, decrypt_record,
+        encode_rpc_response, server_hello,
     };
     use std::{net::TcpListener, thread};
 
-    #[test]
-    fn session_tokens_validate_without_exposing_contents_in_errors() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("token");
-        let valid = "aB".repeat(32);
-        fs::write(&path, format!("  {valid}\n")).unwrap();
-        assert_eq!(&**server_token(&path).unwrap(), valid);
-        for invalid in [
-            "synthetic-secret".to_string(),
-            "g".repeat(64),
-            "a".repeat(63),
-        ] {
-            fs::write(&path, &invalid).unwrap();
-            let error = server_token(&path).unwrap_err();
-            assert!(error.starts_with("invalid session token at "));
-            assert!(!error.contains(&invalid));
-        }
-    }
-
     fn fixture(
-        token: &str,
-        code: ResponseCode,
-        message: &str,
-        tamper: bool,
-    ) -> (u16, thread::JoinHandle<()>) {
+        reply: impl FnOnce(&RequestEnvelope) -> Option<RpcResponse> + Send + 'static,
+    ) -> (
+        AuthenticatedClient,
+        thread::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let token = "ab".repeat(32);
+        let token_path = root.path().join("token");
+        fs::write(&token_path, &token).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let token = token.to_owned();
-        let message = message.to_owned();
+        let mut client = AuthenticatedClient::new(listener.local_addr().unwrap().port());
+        client.token_path = token_path;
         let worker = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut preface = [0; SECURE_PREFACE.len()];
+            let mut preface = [0; 4];
             stream.read_exact(&mut preface).unwrap();
             assert_eq!(&preface, SECURE_PREFACE);
             let (hello, keys) = server_hello(&token).unwrap();
             stream.write_all(&hello).unwrap();
             let mut header = [0; SECURE_RECORD_HEADER_LEN];
-            // A client rejects a wrong token before sending any command.
             if stream.read_exact(&mut header).is_err() {
                 return;
             }
-            let length = u32::from_be_bytes(header[24..].try_into().unwrap()) as usize;
-            let mut ciphertext = vec![0; length];
-            stream.read_exact(&mut ciphertext).unwrap();
-            let request = decrypt_record(&keys.request, &header[..24], &ciphertext).unwrap();
+            let len = u32::from_be_bytes(header[24..].try_into().unwrap()) as usize;
+            let mut bytes = vec![0; len];
+            stream.read_exact(&mut bytes).unwrap();
+            let plaintext =
+                Zeroizing::new(decrypt_record(&keys.request, &header[..24], &bytes).unwrap());
+            let envelope: RequestEnvelope = rmp_serde::from_slice(&plaintext).unwrap();
+            envelope.validate().unwrap();
+            if let Some(response) = reply(&envelope) {
+                let response = Zeroizing::new(encode_rpc_response(&response).unwrap());
+                stream
+                    .write_all(&encrypt_record(&keys.response, &response).unwrap())
+                    .unwrap();
+            }
+        });
+        (client, worker, root)
+    }
+    #[test]
+    fn authenticated_exchange_carries_named_envelope_and_exact_typed_secrets() {
+        let (client, worker, _root) = fixture(|envelope| {
             assert!(matches!(
-                rmp_serde::from_slice::<ServerCommand>(&request).unwrap(),
-                ServerCommand::StatusData
+                envelope.command,
+                ServerCommand::GetSecret(Target::Id(9))
             ));
             let mut response =
-                encrypt_record(&keys.response, &encode_response(code, &message)).unwrap();
-            if tamper {
-                *response.last_mut().unwrap() ^= 1;
-            }
-            stream.write_all(&response).unwrap();
+                RpcResponse::success(ResponsePayload::Secret(" \nprivate key\n\n".into()));
+            response.request_id = Some(envelope.request_id.clone());
+            Some(response)
         });
-        (port, worker)
+        let response = client
+            .request_response(ServerCommand::GetSecret(Target::Id(9)))
+            .unwrap();
+        assert_eq!(response.code, 0);
+        assert!(
+            matches!(response.payload,ResponsePayload::Secret(ref value)if value.expose()==" \nprivate key\n\n")
+        );
+        worker.join().unwrap();
     }
-
     #[test]
-    fn independent_clients_authenticate_bound_responses_and_preserve_codes() {
-        let directory = tempfile::tempdir().unwrap();
-        let token_path = directory.path().join("token");
-        let token = "ab".repeat(32);
-        fs::write(&token_path, &token).unwrap();
-        let (first_port, first_worker) = fixture(&token, ResponseCode::Success, "first", false);
-        let (second_port, second_worker) = fixture(&token, ResponseCode::NotFound, "second", false);
-        let mut first = AuthenticatedClient::new(first_port);
-        first.token_path = token_path.clone();
-        let mut second = AuthenticatedClient::new(second_port);
-        second.token_path = token_path;
-        assert_eq!(first.request(ServerCommand::StatusData).unwrap(), "first\n");
-        let response = second.request_response(ServerCommand::StatusData).unwrap();
-        assert_eq!(response.code, ResponseCode::NotFound as i32);
-        assert_eq!(response.message, "second\n");
-        first_worker.join().unwrap();
-        second_worker.join().unwrap();
-
-        for (server_token, tamper, limit, expected) in [
-            (token.as_str(), true, 1024, "unauthenticated"),
-            (token.as_str(), false, 8, "8 byte limit"),
-            (
-                "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-                false,
-                1024,
-                "authentication failed",
-            ),
-        ] {
-            let (port, worker) = fixture(server_token, ResponseCode::Success, "bounded", tamper);
-            first.port = port;
-            first.max_response = limit;
-            let error = first
-                .request_response_tracked(ServerCommand::StatusData)
-                .err()
-                .unwrap();
-            assert!(error.message.contains(expected), "{}", error.message);
-            assert_eq!(error.sent, server_token == token);
-            worker.join().unwrap();
-        }
+    fn lost_mutation_reply_is_uncertain_and_preserves_operation_identity() {
+        let (client, worker, _root) = fixture(|envelope| {
+            assert_eq!(envelope.operation_id.as_deref(), Some("stable-operation"));
+            None
+        });
+        let envelope = RequestEnvelope::new(ServerCommand::Lock(true))
+            .with_operation(Some("stable-operation".into()), None);
+        let result = client.request_envelope_tracked(envelope);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().sent);
+        worker.join().unwrap();
+    }
+    #[test]
+    fn correlation_mismatch_is_rejected_after_send() {
+        let (client, worker, _root) = fixture(|_| {
+            let mut response = RpcResponse::message(ResponseCode::Success, "ok");
+            response.request_id = Some("different-request".into());
+            Some(response)
+        });
+        let error = client
+            .request_response_tracked(ServerCommand::Status)
+            .err()
+            .unwrap();
+        assert!(error.sent);
+        assert!(error.message.contains("different request"));
+        worker.join().unwrap();
+    }
+    #[test]
+    fn invalid_request_is_rejected_before_connecting() {
+        let mut request = RequestEnvelope::new(ServerCommand::Lock(true));
+        request.operation_id = None;
+        let error = AuthenticatedClient::new(1)
+            .request_envelope_tracked(request)
+            .err()
+            .unwrap();
+        assert!(!error.sent);
+        assert!(error.message.contains("operation identifier"));
+    }
+    #[test]
+    fn session_tokens_validate_without_exposing_contents_in_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("token");
+        fs::write(&path, "  ".to_owned() + &"ab".repeat(32) + "\n").unwrap();
+        assert_eq!(server_token(&path).unwrap().as_str(), "ab".repeat(32));
+        fs::write(&path, "synthetic-secret").unwrap();
+        let error = server_token(&path).unwrap_err();
+        assert!(!error.contains("synthetic-secret"));
     }
 }

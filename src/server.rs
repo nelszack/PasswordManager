@@ -2,8 +2,8 @@ use crate::{
     clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, set_private_perms, sync_parent},
     protocol::{
-        ResponseCode, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record,
-        encode_data_response, encode_response, encrypt_record, server_hello,
+        RequestEnvelope, ResponseCode, ResponsePayload, RpcResponse, SECURE_PREFACE,
+        SECURE_RECORD_HEADER_LEN, decrypt_record, encrypt_record, server_hello,
     },
     types::*,
     vault::{Vault, VaultSession, create_vault, delete_vault, restore_encrypted_backup},
@@ -11,7 +11,6 @@ use crate::{
 use rand::RngExt;
 use serde::Deserialize;
 use std::{
-    cell::RefCell,
     fs,
     io::{Cursor, Write},
     path::Path,
@@ -31,24 +30,20 @@ use tokio::{
 use zeroize::{Zeroize, Zeroizing};
 
 mod commands;
-pub(crate) mod presentation;
 use commands::execute_command;
 mod outcome;
 mod response;
 use response::deliver_responses;
-pub use response::{respond, respond_with_code};
+mod worker;
+use worker::VaultWorker;
 mod session_token;
 use session_token::*;
 mod instance_lock;
 mod system_lock;
 use instance_lock::acquire_server_lock;
 
+pub use crate::protocol::{DEFAULT_PORT, server_addr};
 pub use crate::vault::VaultCredentials as ServerInfo;
-pub const DEFAULT_PORT: u16 = 7878;
-
-pub fn server_addr(port: u16) -> std::net::SocketAddr {
-    ([127, 0, 0, 1], port).into()
-}
 
 #[cfg(test)]
 const TOKEN_HEX_LEN: usize = 64;
@@ -68,12 +63,6 @@ fn reserve_request_memory(
     budget.try_acquire_many(u32::try_from(kib).ok()?).ok()
 }
 
-struct BufferedResponse {
-    code: ResponseCode,
-    message: String,
-    data: bool,
-}
-
 #[derive(Default)]
 enum CommandEffect {
     #[default]
@@ -84,21 +73,16 @@ enum CommandEffect {
     DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
 }
 
-impl Drop for BufferedResponse {
-    fn drop(&mut self) {
-        self.message.zeroize();
-    }
-}
-
-tokio::task_local! {
-    static TRANSPORT_RESPONSE_KEY: RefCell<Option<Zeroizing<[u8; 32]>>>;
+struct AuthenticatedRequest {
+    request: RequestEnvelope,
+    response_key: Zeroizing<[u8; 32]>,
 }
 pub fn is_running(port: u16) -> bool {
     crate::client::AuthenticatedClient::probe(port)
-        .request_response(ServerCommand::StatusData)
+        .request_response(ServerCommand::Status)
         .is_ok_and(|response| {
             response.code == ResponseCode::Success as i32
-                && serde_json::from_str::<crate::protocol::ServerStatus>(&response.message).is_ok()
+                && matches!(response.payload, ResponsePayload::Status(_))
         })
 }
 
@@ -107,17 +91,6 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.ct_eq(b).into()
-}
-
-fn status_message(locked: bool, warning: Option<&str>) -> String {
-    format!(
-        "Status: {}\nVersion: {}{}",
-        if locked { "Locked" } else { "Unlocked" },
-        env!("CARGO_PKG_VERSION"),
-        warning
-            .map(|warning| format!("\nWarning: {warning}"))
-            .unwrap_or_default()
-    )
 }
 
 pub fn start(port: u16) -> Result<String, String> {
@@ -185,65 +158,6 @@ pub fn start(port: u16) -> Result<String, String> {
     Ok(format!("Server started (PID {pid})"))
 }
 
-fn schedule_auto_lock(
-    time: u64,
-    generation: u64,
-    lock_generation: Arc<AtomicU64>,
-    session: Arc<Mutex<VaultSession>>,
-    background_error: Arc<Mutex<Option<String>>>,
-) {
-    if time == 0 {
-        return;
-    }
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(time)).await;
-        if lock_generation.load(Ordering::Acquire) != generation {
-            return;
-        }
-        let mut session = session.lock_owned().await;
-        let result = tokio::task::spawn_blocking(move || {
-            if lock_generation.load(Ordering::Acquire) == generation && !session.is_locked() {
-                Some(lock_session(&mut session))
-            } else {
-                None
-            }
-        })
-        .await;
-        let warning = match result {
-            Ok(Some(Ok(()))) => None,
-            Ok(Some(Err(error))) => Some(format!("Automatic lock failed: {error}")),
-            Ok(None) => return,
-            Err(error) => Some(format!("Automatic lock worker failed: {error}")),
-        };
-        if let Some(message) = warning.as_deref() {
-            eprintln!("{message}");
-        }
-        *background_error.lock().await = warning;
-    });
-}
-fn system_lock_handler(
-    session: std::sync::Weak<Mutex<VaultSession>>,
-    background_error: std::sync::Weak<Mutex<Option<String>>>,
-    generation: Arc<AtomicU64>,
-) -> Arc<dyn Fn() + Send + Sync> {
-    Arc::new(move || {
-        let Some(session) = session.upgrade() else {
-            return;
-        };
-        generation.fetch_add(1, Ordering::AcqRel);
-        let mut session = session.blocking_lock();
-        if session.is_locked() {
-            return;
-        }
-        let warning = lock_session(&mut session)
-            .err()
-            .map(|error| format!("System lock cleanup warning: {error}"));
-        if let Some(error) = background_error.upgrade() {
-            *error.blocking_lock() = warning;
-        }
-    })
-}
-
 pub async fn server(
     port: u16,
     password_history_limit: usize,
@@ -259,16 +173,16 @@ pub async fn server(
     let mut token = rotate_token_file(&token_path)
         .map_err(|error| format!("could not initialize server: {error}"))?;
 
-    let session = Arc::new(Mutex::new(VaultSession::default()));
-    let lock_generation = Arc::new(AtomicU64::new(0));
     let inactivity_timeout = Arc::new(AtomicU64::new(0));
     let stopping = Arc::new(AtomicBool::new(false));
     let background_error = Arc::new(Mutex::new(None));
-    let system_lock = system_lock::Monitor::start(system_lock_handler(
-        Arc::downgrade(&session),
-        Arc::downgrade(&background_error),
-        Arc::clone(&lock_generation),
-    ));
+    let worker = VaultWorker::start(
+        VaultSession::default(),
+        Arc::clone(&inactivity_timeout),
+        Arc::clone(&background_error),
+    );
+    let system_lock =
+        system_lock::Monitor::start(worker.system_lock_handler(Arc::clone(&background_error)));
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
 
@@ -285,10 +199,8 @@ pub async fn server(
                 };
                 let state = ConnectionState {
                     instance_lock: Some(Arc::clone(&instance_lock)),
-                    session: Arc::clone(&session),
                     kill_tx: kill_tx.clone(),
                     token: token.clone(),
-                    lock_generation: Arc::clone(&lock_generation),
                     inactivity_timeout: Arc::clone(&inactivity_timeout),
                     stopping: Arc::clone(&stopping),
                     background_error: Arc::clone(&background_error),
@@ -300,15 +212,17 @@ pub async fn server(
                     Ok(permit) => permit,
                     Err(_) => break,
                 };
+                let connection_worker = worker.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_connection(stream, state).await;
+                    handle_connection(stream, state, connection_worker).await;
                 });
             }
         }
     }
+    stopping.store(true, Ordering::Release);
     system_lock.stop();
-    session.lock().await.lock();
+    worker.lock().await;
     let _ = crate::clipboard::clear_owned();
     remove_token_file_if_current(&token_path, &token);
     token.zeroize();
@@ -320,10 +234,8 @@ struct ConnectionState {
     // Accepted commands retain directory ownership through blocking work and
     // response delivery, even if the listener has already stopped.
     instance_lock: Option<Arc<fs::File>>,
-    session: Arc<Mutex<VaultSession>>,
     kill_tx: mpsc::Sender<()>,
     token: Zeroizing<String>,
-    lock_generation: Arc<AtomicU64>,
     inactivity_timeout: Arc<AtomicU64>,
     stopping: Arc<AtomicBool>,
     background_error: Arc<Mutex<Option<String>>>,
@@ -332,70 +244,91 @@ struct ConnectionState {
     trash_retention_days: u64,
 }
 
-async fn handle_connection(mut stream: TcpStream, state: ConnectionState) {
-    TRANSPORT_RESPONSE_KEY
-        .scope(RefCell::new(None), async move {
-            let _instance_lock = state.instance_lock.clone();
-            let Ok(Some(command)) =
-                tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &state.token)).await
-            else {
-                return;
-            };
-            let kill_tx = state.kill_tx.clone();
-            let duo_session = Arc::clone(&state.session);
-            // Wait for vault ownership asynchronously. Only its current owner
-            // occupies a blocking worker; the connection limit bounds the queue.
-            let mut session = Arc::clone(&state.session).lock_owned().await;
-            let result =
-                tokio::task::spawn_blocking(move || execute_command(state, command, &mut session))
-                    .await;
-            let mut outcome = match result {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    eprintln!("Vault command worker failed: {error}");
-                    return;
-                }
-            };
-            let stop_server = matches!(&outcome.effect, CommandEffect::StopServer);
-            let effect = std::mem::take(&mut outcome.effect);
-            if let CommandEffect::Duo(prepared) = effect {
-                finish_duo(*prepared, duo_session, &mut outcome.responses).await;
-            } else if let CommandEffect::DuoEnrollment(prepared) = effect {
-                finish_duo_enrollment(*prepared, duo_session, &mut outcome.responses).await;
-            } else if let CommandEffect::Audit(snapshot, check_breaches) = effect {
-                // Network calls run after releasing the vault session.
-                let audit = snapshot.audit(check_breaches).await;
-                let code = if audit.incomplete {
-                    ResponseCode::Failure
-                } else {
-                    ResponseCode::Success
-                };
-                outcome::respond_with_code(
-                    code,
-                    &presentation::audit(&audit.report),
-                    &mut outcome.responses,
-                );
+async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker: VaultWorker) {
+    let _instance_lock = state.instance_lock.clone();
+    let Ok(Some(AuthenticatedRequest {
+        request,
+        response_key,
+    })) = tokio::time::timeout(CLIENT_IO_TIMEOUT, handler(&mut stream, &state.token)).await
+    else {
+        return;
+    };
+    let operation_id = request.operation_id.clone();
+    let request_id = request.request_id.clone();
+    let kill_tx = state.kill_tx.clone();
+    let mut result =
+        if matches!(request.command, ServerCommand::Status) && request.validate().is_ok() {
+            // Status is nonsecret published state; it remains responsive while
+            // the owner finishes a filesystem commit or derives a key.
+            let warnings = [
+                state.background_error.lock().await.clone(),
+                state
+                    .system_lock
+                    .as_deref()
+                    .and_then(system_lock::Monitor::warning),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+            outcome::CommandOutcome {
+                responses: vec![RpcResponse::success(ResponsePayload::Status(
+                    crate::protocol::ServerStatus::new(worker.is_locked(), warning),
+                ))],
+                effect: CommandEffect::None,
             }
-            deliver_responses(outcome.responses, &mut stream).await;
-            let _ = stream.flush().await;
-            let _ = stream.shutdown().await;
-            if stop_server {
-                let _ = kill_tx.send(()).await;
-            }
-        })
-        .await;
+        } else {
+            worker.execute(state, request).await
+        };
+    let stop_server = matches!(result.effect, CommandEffect::StopServer);
+    let effect = std::mem::take(&mut result.effect);
+    let external = !matches!(effect, CommandEffect::None | CommandEffect::StopServer);
+    match effect {
+        CommandEffect::Duo(prepared) => {
+            finish_duo(*prepared, worker.clone(), &mut result.responses).await
+        }
+        CommandEffect::DuoEnrollment(prepared) => {
+            finish_duo_enrollment(*prepared, worker.clone(), &mut result.responses).await
+        }
+        CommandEffect::Audit(snapshot, check_breaches) => {
+            let audit = snapshot.audit(check_breaches).await;
+            let code = if audit.incomplete {
+                ResponseCode::Failure
+            } else {
+                ResponseCode::Success
+            };
+            outcome::respond_payload(
+                code,
+                ResponsePayload::Audit(audit.report),
+                &mut result.responses,
+            );
+        }
+        _ => {}
+    }
+    if external && let Some(id) = operation_id {
+        result.responses = worker.complete(id, result.responses).await;
+    }
+    for response in &mut result.responses {
+        response.request_id = Some(request_id.clone());
+    }
+    if let Err(error) = deliver_responses(result.responses, &mut stream, &response_key).await {
+        eprintln!("Could not deliver authenticated response: {error}");
+    }
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+    if stop_server {
+        let _ = kill_tx.send(()).await;
+    }
 }
 
 async fn finish_duo_enrollment(
     prepared: crate::vault::PreparedDuoEnrollment,
-    session: Arc<Mutex<VaultSession>>,
-    responses: &mut Vec<BufferedResponse>,
+    worker: VaultWorker,
+    responses: &mut Vec<RpcResponse>,
 ) {
-    // Activation is blocking I/O, but no live vault guard or old credentials
-    // leave the preparation worker. Lock and auto-lock remain available.
     let result = tokio::task::spawn_blocking(move || {
-        let result = prepared.enroll();
-        (prepared, result)
+        let material = prepared.enroll();
+        (prepared, material)
     })
     .await;
     let (prepared, material) = match result {
@@ -410,39 +343,35 @@ async fn finish_duo_enrollment(
         }
         Err(_) => {
             outcome::respond_failure(
-                "Duo enrollment worker failed; check device enrollment before retrying.",
+                "Duo enrollment worker failed; check enrollment before retrying.",
                 responses,
             );
             return;
         }
     };
-    let mut guard = session.lock_owned().await;
-    let result = tokio::task::spawn_blocking(move || {
-        let (key, vault) = guard.parts_mut();
-        crate::vault::available(vault)
-            .and_then(|v| v.finish_duo_enrollment(&prepared, material, key))
-    })
-    .await;
+    let result = worker
+        .with_session(move |session| {
+            let mut edit = session.edit();
+            let (key, vault) = edit.parts_mut();
+            crate::vault::available(vault)
+                .and_then(|v| v.finish_duo_enrollment(&prepared, material, key))
+        })
+        .await;
     match result {
         Ok(Ok(output)) => outcome::respond_domain_result(Ok(output), responses),
         Ok(Err(error)) => outcome::respond_domain_error_with_context(
             &error,
-            &format!(
-                "Duo enrolled but saving reported an error: {error}. Check device enrollment before retrying."
-            ),
+            &format!("Duo enrolled but saving failed: {error}. Check enrollment before retrying."),
             responses,
         ),
-        Err(_) => outcome::respond_failure(
-            "Duo enrollment save worker failed; check device enrollment before retrying.",
-            responses,
-        ),
+        Err(error) => outcome::respond_failure(&error, responses),
     }
 }
 
 async fn finish_duo(
     prepared: crate::vault::PreparedDuoPoll,
-    session: Arc<Mutex<VaultSession>>,
-    responses: &mut Vec<BufferedResponse>,
+    worker: VaultWorker,
+    responses: &mut Vec<RpcResponse>,
 ) {
     let crate::vault::PreparedDuoPoll { request, review } = prepared;
     let body = match request.execute().await {
@@ -452,19 +381,19 @@ async fn finish_duo(
             return;
         }
     };
-    let mut guard = Arc::clone(&session).lock_owned().await;
-    let result = tokio::task::spawn_blocking(move || {
-        let (key, vault) = guard.parts_mut();
-        let result =
-            crate::vault::available(vault).and_then(|v| v.finish_duo_poll(&review, &body, key));
-        // Drop the live guard and all response/code material before network I/O.
-        result
-    })
-    .await;
+    let result = worker
+        .with_session(move |session| {
+            let mut edit = session.edit();
+            let (key, vault) = edit.parts_mut();
+            crate::vault::available(vault).and_then(|v| v.finish_duo_poll(&review, &body, key))
+        })
+        .await;
     match result {
-        Ok(Ok(crate::vault::DuoPollResult::Requests(output))) => {
-            outcome::respond_domain_result(Ok(output), responses)
-        }
+        Ok(Ok(crate::vault::DuoPollResult::Requests(output))) => outcome::respond_payload(
+            ResponseCode::Success,
+            ResponsePayload::DuoRequests(output),
+            responses,
+        ),
         Ok(Ok(crate::vault::DuoPollResult::Decision(request))) => {
             let result = (*request)
                 .execute()
@@ -476,14 +405,11 @@ async fn finish_duo(
             );
         }
         Ok(Err(error)) => outcome::respond_domain_error(&error, responses),
-        Err(_) => outcome::respond_failure(
-            "Duo request review failed; no decision was sent.",
-            responses,
-        ),
+        Err(error) => outcome::respond_failure(&error, responses),
     }
 }
 
-async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
+async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<AuthenticatedRequest> {
     handle_tcp_with_budget(message, token, &REQUEST_MEMORY).await
 }
 
@@ -491,7 +417,7 @@ async fn handle_tcp_with_budget(
     message: &mut TcpStream,
     token: &str,
     budget: &Semaphore,
-) -> Option<ServerCommand> {
+) -> Option<AuthenticatedRequest> {
     let mut preface = [0u8; SECURE_PREFACE.len()];
     if message.read_exact(&mut preface).await.is_err() || &preface != SECURE_PREFACE {
         return None;
@@ -516,20 +442,20 @@ async fn handle_tcp_with_budget(
     let mut buf = decrypt_record(&keys.request, &record_header[..24], &ciphertext)?;
     ciphertext.zeroize();
     drop(ciphertext);
-    TRANSPORT_RESPONSE_KEY.with(|key| {
-        *key.borrow_mut() = Some(Zeroizing::new(keys.response));
-    });
     let parsed = {
         let mut cursor = Cursor::new(buf.as_slice());
         let mut deserializer = rmp_serde::Deserializer::new(&mut cursor);
-        ServerCommand::deserialize(&mut deserializer)
+        RequestEnvelope::deserialize(&mut deserializer)
             .ok()
             .filter(|_| cursor.position() == buf.len() as u64)
     };
     buf.zeroize();
-    parsed
+    parsed.map(|request| AuthenticatedRequest {
+        request,
+        response_key: Zeroizing::new(keys.response),
+    })
 }
-async fn handler(message: &mut TcpStream, token: &str) -> Option<ServerCommand> {
+async fn handler(message: &mut TcpStream, token: &str) -> Option<AuthenticatedRequest> {
     // TCP does not preserve write boundaries. handle_tcp reads the complete
     // preface under the connection's handshake timeout before validating it.
     handle_tcp(message, token).await
@@ -550,8 +476,12 @@ fn lock_vlt(
 }
 
 fn lock_session(session: &mut VaultSession) -> Result<(), crate::vault::VaultError> {
-    let (credentials, vault) = session.parts_mut();
-    lock_vlt(vault, credentials)
+    session.lock();
+    crate::clipboard::clear_owned().map_err(|error| {
+        crate::vault::VaultError::Persistence(format!(
+            "vault locked, but clipboard cleanup failed: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]

@@ -38,68 +38,41 @@ struct PortableRevisionRef<'a> {
 
 impl Vault {
     pub fn export(&self, path: String, force: bool) -> Result<(), VaultError> {
-        if std::path::Path::new(&path)
+        if Path::new(&path)
             .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
         {
-            let metadata_by_id: HashMap<_, _> = self
-                .recovery
-                .entry_metadata
-                .iter()
-                .map(|record| (record.entry_id, record))
-                .collect();
-            let totp_by_id: HashMap<_, _> = self
-                .recovery
-                .totp
-                .iter()
-                .map(|record| (record.entry_id, record))
-                .collect();
-            let mut history_by_id: HashMap<usize, Vec<&PasswordRevision>> = HashMap::new();
-            for revision in &self.recovery.password_history {
-                history_by_id
-                    .entry(revision.entry_id)
-                    .or_default()
-                    .push(revision);
-            }
             let items = self
-                .entries
-                .iter()
-                .map(|entry| {
-                    let metadata = metadata_by_id.get(&entry.id).copied();
+                .active_items()
+                .map(|item| {
+                    let e = &item.entry;
+                    let m = &item.metadata;
                     PortableItemRef {
-                        id: entry.id,
-                        name: &entry.name,
-                        username: entry.username.as_deref(),
-                        password: &entry.password,
-                        url: entry.url.as_deref(),
-                        notes: entry.notes.as_deref(),
-                        created: &entry.created,
-                        modified: &entry.modified,
-                        kind: metadata.map_or(ItemKind::Login, |record| record.kind),
-                        additional_urls: metadata
-                            .map_or(&[][..], |record| record.additional_urls.as_slice()),
-                        custom_fields: metadata
-                            .map_or(&[][..], |record| record.custom_fields.as_slice()),
-                        password_changed: metadata
-                            .and_then(|record| record.password_changed.as_deref()),
-                        password_history: history_by_id
-                            .get(&entry.id)
-                            .into_iter()
-                            .flatten()
-                            .map(|revision| PortableRevisionRef {
-                                password: &revision.password,
-                                changed: &revision.changed,
+                        id: e.id,
+                        name: &e.name,
+                        username: e.username.as_deref(),
+                        password: e.password.as_str(),
+                        url: e.url.as_deref(),
+                        notes: e.notes.as_ref().map(|s| s.as_str()),
+                        created: &e.created,
+                        modified: &e.modified,
+                        kind: m.kind,
+                        additional_urls: &m.additional_urls,
+                        custom_fields: &m.custom_fields,
+                        password_changed: m.password_changed.as_ref().map(Timestamp::as_str),
+                        password_history: item
+                            .history
+                            .iter()
+                            .map(|r| PortableRevisionRef {
+                                password: r.password.as_str(),
+                                changed: &r.changed,
                             })
                             .collect(),
-                        duo: self
-                            .recovery
-                            .duo
-                            .iter()
-                            .find(|r| r.entry_id == entry.id)
-                            .map(|r| &r.credentials),
-                        totp: totp_by_id
-                            .get(&entry.id)
-                            .map(|record| record.configuration.as_str()),
+                        totp: item
+                            .authenticator
+                            .as_ref()
+                            .map(|a| a.configuration.as_str()),
+                        duo: item.duo.as_ref().map(|d| &d.credentials),
                     }
                 })
                 .collect();
@@ -111,22 +84,20 @@ impl Vault {
             };
             let mut encoded = Zeroizing::new(Vec::new());
             serde_json::to_writer_pretty(&mut *encoded, &export)
-                .map_err(|e| format!("could not encode JSON export: {e}"))?;
-            let result = persist_private_file(Path::new(&path), &encoded, force)
-                .map_err(|e| e.context(format!("could not create export file {path:?}")));
-            return result;
+                .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")))?;
+            return persist_private_file(Path::new(&path), &encoded, force);
         }
-        let mut wtr = csv::Writer::from_writer(Vec::new());
-        for i in &self.entries {
-            wtr.serialize(i)
-                .map_err(|e| format!("could not write export file {path:?}: {e}"))?;
+        let mut writer = csv::Writer::from_writer(Vec::new());
+        for entry in self.active_entries() {
+            writer
+                .serialize(entry)
+                .map_err(|e| VaultError::Persistence(e.to_string()))?;
         }
-        let mut encoded = wtr
-            .into_inner()
-            .map_err(|e| format!("could not finish export file {path:?}: {}", e.error()))?;
-        let result = persist_private_file(Path::new(&path), &encoded, force)
-            .map_err(|e| e.context(format!("could not create export file {path:?}")));
-        encoded.zeroize();
-        result
+        let encoded = Zeroizing::new(
+            writer
+                .into_inner()
+                .map_err(|e| VaultError::Persistence(e.to_string()))?,
+        );
+        persist_private_file(Path::new(&path), &encoded, force)
     }
 }

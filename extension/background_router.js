@@ -1,22 +1,37 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundRouter = {
-    create({ chrome, security, relay, nativeRequest, refreshStatus, pickers, prompts, pendingCredentials, duo }) {
-        const pendingRelays = new Map();
+    create({ chrome, security, contract, nativeRequest, reconcile, pendingOperations = () => [], acknowledgeUnknown, startup = Promise.resolve(), refreshStatus, pickers, prompts, pendingCredentials, duo }) {
         function sendAction(action, fields, sendResponse, refreshAfter = false) {
             nativeRequest(action, fields)
                 .then(response => {
                     sendResponse(response.success
-                        ? { success: true, data: response.data }
-                        : { success: false, error: response.error, uncertain: Boolean(response.uncertain) });
+                        ? { success: true, data: response.data, operation: response.operation }
+                        : { success: false, error: response.error, uncertain: Boolean(response.uncertain), operationId: response.operationId, operationAction: response.operationAction, code: response.code });
                     if (refreshAfter) refreshStatus();
                 })
                 .catch(error => {
-                    sendResponse({ success: false, error: error.message, uncertain: Boolean(error.uncertain) });
+                    sendResponse({ success: false, error: error.message, uncertain: Boolean(error.uncertain), operationId: error.operationId, operationAction: error.operationAction });
                     if (refreshAfter) refreshStatus();
                 });
         }
 
-        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        function handleRequest(request, sender, sendResponse) {
+            if (!request || typeof request !== "object" || typeof request.action !== "string") {
+                sendResponse({ success: false, error: "Invalid extension request" }); return false;
+            }
+            if (request.action === "acknowledgeUnknownOperation") {
+                const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("manager.html"));
+                if (!trusted || request.inspected !== true || typeof request.operationId !== "string") { sendResponse({ success: false, error: "Invalid operation acknowledgement" }); return false; }
+                try { sendResponse(acknowledgeUnknown(request.operationId)); }
+                catch (error) { sendResponse({ success: false, error: error.message }); }
+                return false;
+            }
+            if (request.action === "reconcileOperation") {
+                const trusted = ["manager.html", "credential_prompt.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
+                if (!trusted || typeof request.operationId !== "string") { sendResponse({ success: false, error: "Invalid operation review" }); return false; }
+                reconcile(request.operationId).then(sendResponse).catch(error => sendResponse({ success: false, error: error.message }));
+                return true;
+            }
             const duoActions = { observeDuoChallenge: "observe", getDuoPromptData: "data", completeDuoPrompt: "complete" };
             if (Object.hasOwn(duoActions, request.action)) {
                 duo[duoActions[request.action]](request, sender).then(sendResponse)
@@ -25,20 +40,24 @@ const PasswordManagerBackgroundRouter = {
             }
             if (typeof request.action === "string" && request.action.startsWith("manager")) {
                 const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("manager.html"));
-                const allowed = ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "managerDuoRequests", "managerDuoRespond"];
-                if (!trusted || !allowed.includes(request.action)) {
+                const policy = contract.operations[request.action];
+                if (!trusted || !policy?.allowedSenders.includes("manager")) {
                     sendResponse({ success: false, error: "Invalid vault management request" });
                     return false;
                 }
-                const fields = { requestId: request.requestId, fingerprint: request.fingerprint, approve: request.approve, verificationCode: request.verificationCode, entryId: request.entryId, query: request.query, reveal: request.reveal,
-                    vaultFile: request.vaultFile, password: request.password, keyPath: request.keyPath, item: request.item };
-                sendAction(request.action, fields, sendResponse, !["managerVaults", "managerList", "managerItem", "managerCopy", "managerDuoRequests"].includes(request.action));
+                const { action, ...fields } = request;
+                sendAction(action, fields, sendResponse, policy.mutates);
+
                 return true;
             }
             if (request.action === "openCredentialPrompt") {
                 prompts.open(request, sender)
                     .then(sendResponse)
                     .catch(error => sendResponse({ success: false, error: error.message }));
+                return true;
+            }
+            if (request.action === "reviewCredentialPrompt") {
+                prompts.review(request, sender).then(sendResponse).catch(error => sendResponse({ success: false, error: error.message }));
                 return true;
             }
             if (request.action === "getCredentialPromptData") {
@@ -48,7 +67,7 @@ const PasswordManagerBackgroundRouter = {
             if (request.action === "completeCredentialPrompt") {
                 prompts.complete(request, sender)
                     .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message, uncertain: Boolean(error.uncertain) }));
+                    .catch(error => sendResponse({ success: false, error: error.message, uncertain: Boolean(error.uncertain), operationId: error.operationId, operationAction: error.operationAction }));
                 return true;
             }
             if (request.action === "openSecurePicker") {
@@ -69,69 +88,13 @@ const PasswordManagerBackgroundRouter = {
             }
             if (request.action === "getStatus") {
                 refreshStatus()
-                    .then(sendResponse)
+                    .then(status => sendResponse({ ...status, pendingOperations: pendingOperations() }))
                     .catch(error => sendResponse({
                         native: false,
                         running: false,
                         locked: false,
                         error: error.message
                     }));
-                return true;
-            }
-            if (request.action === "getCredentials") {
-                const domain = security.senderOrigin(sender);
-                if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
-                else sendAction("getLoginItems", { domain }, sendResponse);
-                return true;
-            }
-            if (request.action === "saveCredentials") {
-                const domain = security.senderOrigin(sender);
-                if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
-                else sendAction("saveCredentials", {
-                    domain,
-                    username: request.username,
-                    password: request.password,
-                    name: request.name
-                }, sendResponse, true);
-                return true;
-            }
-            if (request.action === "updateCredentials") {
-                const domain = security.senderOrigin(sender);
-                if (!domain) sendResponse({ success: false, error: "Invalid page origin" });
-                else sendAction("updateCredentials", {
-                    domain,
-                    username: request.username,
-                    password: request.password,
-                    name: request.name,
-                    entryId: request.id
-                }, sendResponse, true);
-                return true;
-            }
-            if (request.action === "getRelayedCredentials") {
-                const authorizedRelay = relay.authorizeCredentialRequest(
-                    request, sender, pendingRelays
-                );
-                if (!authorizedRelay) sendResponse({ success: false, error: "Invalid credential relay" });
-                else sendAction("getLoginItems", { domain: authorizedRelay.domain }, sendResponse);
-                return true;
-            }
-            if (request.action === "saveRelayedCredentials"
-                || request.action === "updateRelayedCredentials") {
-                const authorizedRelay = relay.authorizeCredentialRequest(
-                    request, sender, pendingRelays, true
-                );
-                if (!authorizedRelay) {
-                    sendResponse({ success: false, error: "Invalid credential relay" });
-                } else {
-                    const update = request.action === "updateRelayedCredentials";
-                    sendAction(update ? "updateCredentials" : "saveCredentials", {
-                        domain: authorizedRelay.domain,
-                        username: request.username,
-                        password: request.password,
-                        name: request.name,
-                        ...(update ? { entryId: request.id } : {})
-                    }, sendResponse, true);
-                }
                 return true;
             }
             if (request.action === "setPendingCredentials") {
@@ -147,52 +110,24 @@ const PasswordManagerBackgroundRouter = {
                 return true;
             }
             if (request.action === "lockVault") {
+                const trusted = ["popup.html", "manager.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
+                if (!trusted || !contract.operations.lock.allowedSenders.some(role => ["popup", "manager"].includes(role))) { sendResponse({ success: false, error: "Invalid lock request" }); return false; }
                 pickers.invalidate();
+                prompts.invalidate();
                 duo.invalidate();
                 sendAction("lock", {}, sendResponse, true);
                 return true;
             }
-            if (request.action === "relayToParent") {
-                const route = relay.requestRoute(request.data, sender);
-                if (route) {
-                    pendingRelays.set(
-                        relay.relayKey(route.tabId, request.data.token),
-                        {
-                            sourceFrameId: sender.frameId,
-                            domain: request.data.domain,
-                            expiresAt: Date.now() + 5 * 60_000
-                        }
-                    );
-                    chrome.tabs.sendMessage(
-                        route.tabId,
-                        route.message,
-                        { frameId: route.frameId },
-                        () => void chrome.runtime.lastError
-                    );
-                    sendResponse({ ok: true });
-                } else {
-                    sendResponse({ ok: false });
-                }
-                return false;
-            }
-            if (request.action === "relayLoginResult") {
-                const route = relay.resultRoute(request, sender);
-                if (route) {
-                    chrome.tabs.sendMessage(
-                        route.tabId,
-                        route.message,
-                        { frameId: route.frameId },
-                        () => void chrome.runtime.lastError
-                    );
-                    sendResponse({ ok: true });
-                } else {
-                    sendResponse({ ok: false });
-                }
-                return false;
-            }
+            sendResponse({ success: false, error: "Unsupported extension request" });
+            return false;
+        }
+        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+            startup.then(() => handleRequest(request, sender, sendResponse))
+                .catch(error => sendResponse({ success: false, error: error.message }));
+            return true;
         });
 
-        return { cleanupExpired: () => relay.cleanupExpired(pendingRelays) };
+        return {};
     }
 };
 

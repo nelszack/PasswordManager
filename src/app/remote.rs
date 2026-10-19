@@ -1,3 +1,4 @@
+use super::output::Output;
 use password_manager::{
     cli::{BackupCommands, CliCommands, DeleteArgs, EntryArgs, TotpCommands},
     client, config,
@@ -37,7 +38,7 @@ fn custom_fields(
         parsed.retain(|existing: &CustomField| !existing.name.eq_ignore_ascii_case(name));
         parsed.push(CustomField {
             name: name.to_string(),
-            value: value.to_string(),
+            value: value.to_string().into(),
             secret: false,
         });
     }
@@ -51,30 +52,30 @@ fn custom_fields(
         parsed.retain(|existing| !existing.name.eq_ignore_ascii_case(name));
         parsed.push(CustomField {
             name: name.to_string(),
-            value,
+            value: value.into(),
             secret: true,
         });
     }
     Ok(parsed)
 }
 
-fn resolved_new_key(path: String) -> PasswordType {
+fn resolved_new_key(path: String, console: &Output) -> PasswordType {
     PasswordType::Key(
         resolve_new_key_path(&path)
-            .unwrap_or_else(|error| client::exit_error(&format!("invalid key path: {error}"), 2)),
+            .unwrap_or_else(|error| console.exit_error(&format!("invalid key path: {error}"), 2)),
     )
 }
 
-fn resolved_key(path: String) -> PasswordType {
+fn resolved_key(path: String, console: &Output) -> PasswordType {
     PasswordType::Key(
         resolve_key_path(&path)
-            .unwrap_or_else(|error| client::exit_error(&format!("invalid key path: {error}"), 2)),
+            .unwrap_or_else(|error| console.exit_error(&format!("invalid key path: {error}"), 2)),
     )
 }
 
-fn resolved_file(path: String) -> String {
+fn resolved_file(path: String, console: &Output) -> String {
     if path.is_empty() {
-        client::exit_error("file path cannot be empty", 2);
+        console.exit_error("file path cannot be empty", 2);
     }
     std::path::absolute(&path)
         .map_err(|error| format!("could not resolve file path: {error}"))
@@ -83,16 +84,17 @@ fn resolved_file(path: String) -> String {
                 .into_string()
                 .map_err(|_| "file path must contain valid Unicode".to_string())
         })
-        .unwrap_or_else(|error| client::exit_error(&error, 2))
+        .unwrap_or_else(|error| console.exit_error(&error, 2))
 }
 
 pub(super) async fn run(
     command: CliCommands,
     conf: &config::Config,
     client: &client::AuthenticatedClient,
+    console: &Output,
 ) {
     match command {
-        CliCommands::Duo { command } => super::duo::run(command, client),
+        CliCommands::Duo { command } => super::duo::run(command, client, console),
         CliCommands::Totp {
             command:
                 TotpCommands::Show {
@@ -106,18 +108,24 @@ pub(super) async fn run(
                 client,
                 target_type(target),
                 copy.then_some(copy_time.unwrap_or(conf.clipboard.timeout)),
+                console,
             )
             .await;
-            client::finish_watch();
+            console.finish_watch();
             if let Err(error) = result {
-                client::exit_error(&error, 1);
+                console.exit_error(&error, 1);
             }
         }
-        command => client.send_command(prepare_command(command, conf)),
+        command => {
+            if let Err(code) = console.send_command(client, prepare_command(command, conf, console))
+            {
+                std::process::exit(code);
+            }
+        }
     }
 }
 
-fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand {
+fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output) -> ServerCommand {
     match command {
         CliCommands::Lock => ServerCommand::Lock(true),
 
@@ -129,17 +137,17 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             if let Some(name) = &vault_file
                 && let Err(error) = vault::validate_vault_filename(name)
             {
-                client::exit_error(&error.to_string(), 2);
+                console.exit_error(&error.to_string(), 2);
             }
             ServerCommand::Unlock(UnlockInfo {
-                vault_file,
+                vault_file: vault_file.or(conf.unlock.vault_id.clone()),
                 key: if let Some(k) = key {
-                    resolved_key(k)
+                    resolved_key(k, console)
                 } else {
                     PasswordType::Password(
                         rpassword::prompt_password("Enter master password: ").unwrap_or_else(
                             |error| {
-                                client::exit_error(&format!("could not read password: {error}"), 1)
+                                console.exit_error(&format!("could not read password: {error}"), 1)
                             },
                         ),
                     )
@@ -150,12 +158,12 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
         CliCommands::Status => ServerCommand::Status,
         CliCommands::Kill => ServerCommand::Kill,
         CliCommands::New { key_path } => ServerCommand::New(if let Some(kp) = key_path {
-            resolved_new_key(kp)
+            resolved_new_key(kp, console)
         } else {
             PasswordType::Password(prompt_for_new_master_password())
         }),
         CliCommands::Rekey { key_path } => ServerCommand::Rekey(if let Some(kp) = key_path {
-            resolved_new_key(kp)
+            resolved_new_key(kp, console)
         } else {
             PasswordType::Password(prompt_for_new_master_password())
         }),
@@ -173,12 +181,12 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             no_copy,
         } => {
             if matches!(kind, types::ItemKind::Identity) && generate_password {
-                client::exit_error("identity items do not have a primary secret to generate", 2);
+                console.exit_error("identity items do not have a primary secret to generate", 2);
             }
             let custom_fields = match custom_fields(fields, secret_fields) {
                 Ok(fields) => fields,
                 Err(error) => {
-                    client::exit_error(&error, 2);
+                    console.exit_error(&error, 2);
                 }
             };
             let mut urls = url.into_iter();
@@ -190,14 +198,14 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             } else {
                 make_password(conf.genpass.length)
             };
-            ServerCommand::AddTypedWithOptions {
+            ServerCommand::Add {
                 entry: types::TypedEntry {
                     entry: PasswordEntry {
                         name,
                         username,
-                        password,
+                        password: password.into(),
                         url: primary_url,
-                        notes,
+                        notes: notes.map(Into::into),
                         copy: if !copy && !no_copy {
                             kind == types::ItemKind::Login && conf.copy.passwords
                         } else {
@@ -216,6 +224,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             id,
             entry_name,
             vault,
+            vault_file,
             key,
             keep_key,
         }) => match (id, entry_name, vault) {
@@ -223,11 +232,12 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             (None, Some(n), _) => ServerCommand::Delete(Target::Name(n)),
             (None, None, true) => ServerCommand::Delete(Target::Vault {
                 key: if let Some(k) = key {
-                    resolved_key(k)
+                    resolved_key(k, console)
                 } else {
                     PasswordType::Password(prompt_for_password())
                 },
                 keep_key,
+                vault_file: vault_file.or(conf.unlock.vault_id.clone()),
             }),
             _ => unreachable!("clap requires exactly one delete target"),
         },
@@ -237,7 +247,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             name: args.name,
             username: args.username,
             url: args.url,
-            notes: args.notes,
+            notes: args.notes.map(Into::into),
             list: args.list.into(),
         }),
         CliCommands::History { target } => ServerCommand::History(target_type(target)),
@@ -263,25 +273,21 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                 match rpassword::prompt_password("Base32 TOTP secret or TOTP/HOTP otpauth URI: ") {
                     Ok(configuration) => ServerCommand::Totp(TotpCommand::Set {
                         target: target_type(target),
-                        configuration,
+                        configuration: configuration.into(),
                     }),
-                    Err(error) => client::exit_error(
-                        &format!("could not read TOTP configuration: {error}"),
-                        1,
-                    ),
+                    Err(error) => console
+                        .exit_error(&format!("could not read TOTP configuration: {error}"), 1),
                 }
             }
             TotpCommands::Duo { target, mode } => {
                 match rpassword::prompt_password("Duo activation link (HTTPS or duo://): ") {
                     Ok(activation) => ServerCommand::Totp(TotpCommand::Duo {
                         target: target_type(target),
-                        activation,
+                        activation: activation.into(),
                         mode,
                     }),
-                    Err(error) => client::exit_error(
-                        &format!("could not read Duo activation link: {error}"),
-                        1,
-                    ),
+                    Err(error) => console
+                        .exit_error(&format!("could not read Duo activation link: {error}"), 1),
                 }
             }
             TotpCommands::Show {
@@ -303,24 +309,20 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                 key_path,
                 force,
             } => ServerCommand::Backup(BackupRequest {
-                path: resolved_file(path),
+                path: resolved_file(path, console),
                 key_pass: key_path.map_or_else(
                     || PasswordType::Password(prompt_for_new_master_password()),
-                    resolved_key,
+                    |path| resolved_key(path, console),
                 ),
                 force,
             }),
-            BackupCommands::Restore {
-                path,
-                key_path,
-                force,
-            } => {
+            BackupCommands::Restore { path, key_path } => {
                 let key_pass = key_path.map_or_else(
                     || {
                         PasswordType::Password(
                             rpassword::prompt_password("Backup password: ").unwrap_or_else(
                                 |error| {
-                                    client::exit_error(
+                                    console.exit_error(
                                         &format!("could not read backup password: {error}"),
                                         1,
                                     )
@@ -328,12 +330,12 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                             ),
                         )
                     },
-                    resolved_key,
+                    |path| resolved_key(path, console),
                 );
                 ServerCommand::RestoreBackup(BackupRequest {
-                    path: resolved_file(path),
+                    path: resolved_file(path, console),
                     key_pass,
-                    force,
+                    force: false,
                 })
             }
         },
@@ -355,13 +357,13 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             let set_fields = match custom_fields(metadata.fields, metadata.secret_fields) {
                 Ok(fields) => fields,
                 Err(error) => {
-                    client::exit_error(&error, 2);
+                    console.exit_error(&error, 2);
                 }
             };
-            ServerCommand::UpdateTyped(types::TypedUpdate {
+            ServerCommand::Update(types::TypedUpdate {
                 entry: EntryUpdate {
                     target: target_type(target),
-                    password,
+                    password: password.map(Into::into),
                     update: add.into(),
                 },
                 kind: metadata.kind,
@@ -389,15 +391,16 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
                         copy_timeout: Some(conf.clipboard.timeout),
                     }
                 } else {
-                    ServerCommand::GetFieldData {
+                    ServerCommand::GetField {
+                        copy_timeout: None,
                         target: target_type(target),
                         name,
                     }
                 }
             } else if password_only {
-                ServerCommand::GetSecretData(target_type(target))
+                ServerCommand::GetSecret(target_type(target))
             } else {
-                ServerCommand::GetDetails {
+                ServerCommand::Get {
                     target: target_type(target),
                     copy_timeout: conf.clipboard.timeout,
                     reveal_secrets,
@@ -405,7 +408,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             }
         }
         CliCommands::Export { path, force } => ServerCommand::Export {
-            path: resolved_file(path),
+            path: resolved_file(path, console),
             force,
         },
 
@@ -417,18 +420,18 @@ fn prepare_command(command: CliCommands, conf: &config::Config) -> ServerCommand
             conflicts,
         } => {
             if !new && key_path.is_some() {
-                client::exit_error("--key can only be used together with --new", 2);
+                console.exit_error("--key can only be used together with --new", 2);
             }
             let keypass = if preview || !new {
                 None
             } else {
                 Some(match key_path {
-                    Some(path) => resolved_new_key(path),
+                    Some(path) => resolved_new_key(path, console),
                     None => PasswordType::Password(prompt_for_new_master_password()),
                 })
             };
             ServerCommand::Import(ImportRequest {
-                path: resolved_file(path),
+                path: resolved_file(path, console),
                 new,
                 key_pass: keypass,
                 preview,
@@ -460,8 +463,8 @@ mod tests {
         ])
         .unwrap();
         let conf = config::Config::default();
-        let command = prepare_command(cli.command.unwrap(), &conf);
-        let ServerCommand::UpdateTyped(update) = &command else {
+        let command = prepare_command(cli.command.unwrap(), &conf, &Output::default());
+        let ServerCommand::Update(update) = &command else {
             panic!("expected typed update");
         };
         assert_eq!(update.entry.update.name.as_deref(), Some("Renamed"));
@@ -469,8 +472,8 @@ mod tests {
         assert_eq!(secret.len(), conf.genpass.length as usize);
         assert!(!format!("{command:?}").contains(secret));
         let wire = serde_json::to_value(&update.entry).unwrap();
-        assert_eq!(wire["update"]["password"], true);
-        assert_eq!(wire["update"]["generate_password"], false);
+        assert_eq!(wire["password"].as_str(), Some(secret.as_str()));
+        assert!(wire["update"].get("generate_password").is_none());
     }
 
     #[test]
@@ -480,7 +483,7 @@ mod tests {
         let mut conf = config::Config::default();
         conf.clipboard.timeout = 42;
         assert!(matches!(
-            prepare_command(cli.command.unwrap(), &conf),
+            prepare_command(cli.command.unwrap(), &conf, &Output::default()),
             ServerCommand::GetField {
                 target: Target::Id(3),
                 copy_timeout: Some(42),

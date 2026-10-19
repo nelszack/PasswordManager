@@ -31,8 +31,8 @@ const PasswordManagerBackgroundPending = {
         function set(request, sender, sendResponse) {
             const key = security.pendingStorageKey(sender), domain = security.senderOrigin(sender);
             const pending = request?.pending;
-            if (!key || !domain || !pending || typeof pending.password !== "string"
-                || pending.password.length > 65536 || typeof (pending.username ?? "") !== "string" || (pending.username || "").length > 4096) {
+            if (!key || !domain || !pending || "password" in pending
+                || typeof pending.username !== "string" || !pending.username || pending.username.length > 4096) {
                 sendResponse({ success: false, error: "Invalid pending credentials" }); return;
             }
             const record = records.create(pending, domain);
@@ -49,7 +49,7 @@ const PasswordManagerBackgroundPending = {
             respond(ordered(key, async () => {
                 const result = await storage("get", key);
                 const pending = memory.get(key) || result?.[key] || null;
-                // Do not return a secret until durable session removal succeeds.
+                // Consume once across document and worker lifetimes.
                 await storage("remove", key);
                 memory.delete(key);
                 return { success: true, pending: records.usable(pending, domain) ? pending : null };

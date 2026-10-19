@@ -2,8 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const native = require("./background_native.js");
 const protocol = require("./native_protocol.js");
+const { nativeFields, nativeData } = require("./test_fixtures.cjs");
 
-function environment() {
+function environment(options = {}) {
     const ports = [], timers = new Map();
     let timerId = 0, invalidations = 0, connectError, postError;
     const chrome = { runtime: { connectNative() {
@@ -15,13 +16,23 @@ function environment() {
         };
         ports.push(port); return port;
     } } };
-    const bridge = native.create({ chrome, protocol,
+    const bridge = native.create({ chrome, protocol, contract: require("./command_contract.js"), crypto: require("node:crypto").webcrypto, idleTimeoutMs: 0, ...options,
         onDisconnect() { invalidations++; },
         setTimeout(fn, ms) { timers.set(++timerId, { fn, ms }); return timerId; },
         clearTimeout(id) { timers.delete(id); }
     });
+    const request = bridge.request;
+    bridge.request = (action, fields = {}) => {
+        const defaults = nativeFields(action);
+        return request(action, { ...defaults, ...fields, ...(fields.item ? { item: { ...defaults.item, ...fields.item } } : {}) });
+    };
     function answer(port, index = -1, extra = {}) {
-        port.receive({ id: port.requests.at(index).id, success: true, data: {}, ...extra });
+        const request = port.requests.at(index);
+        const data = nativeData(request.action);
+        if (request.action === "operationStatus" && extra.data) extra = { ...extra, data: { revision: null, ...extra.data } };
+        const response = { id: request.id, protocolVersion: 1, success: true, data, ...extra };
+        if (request.operationId && response.success) response.operation = { operationId: request.operationId, state: "committed", revision: null };
+        port.receive(response);
     }
     return { bridge, ports, timers, chrome, answer,
         expire(id) { const timer = timers.get(id); timers.delete(id); timer.fn(); },
@@ -35,9 +46,9 @@ test("lock and status have a control host independent of ordinary work and Duo",
     const env = environment();
     const save = env.bridge.request("managerUpdate", { item: { password: "synthetic" } });
     const duo = env.bridge.request("managerDuoRequests");
-    assert.equal(env.timers.get(2).ms, 60_000);
+    assert.equal(env.timers.get(2).ms, 65_000);
     const lock = env.bridge.request("lock");
-    assert.equal(env.timers.get(3).ms, 7000);
+    assert.equal(env.timers.get(3).ms, 15000);
     assert.equal(env.ports.length, 3);
     env.answer(env.ports[2]); await lock;
     const status = env.bridge.request("status");
@@ -117,7 +128,8 @@ test("a lost native reply reports uncertainty even before the browser deadline",
     const env = environment();
     const save = env.bridge.request("managerDelete");
     env.answer(env.ports[0], 0, { success: false, error: "Reply lost", uncertain: true });
-    assert.deepEqual(await save, { id: 1, success: false, data: {}, error: "Reply lost", uncertain: true });
+    assert.equal((await save).uncertain, true);
+    assert.equal(env.bridge.unresolved().length, 1);
 });
 
 test("read timeouts and failures before sending are safe to retry", async () => {
@@ -145,4 +157,86 @@ test("native queues are bounded and request metadata cannot be overridden", asyn
     env.ports[0].disconnect();
     await Promise.all([activeRejection, ...rejections]);
     assert.equal(env.timers.size, 0);
+});
+
+test("a silent live host is disconnected at a bounded recovery deadline without replaying its mutation", async () => {
+    const env = environment();
+    const mutation = env.bridge.request("managerAdd", { item: { name: "Example" } });
+    const rejected = assert.rejects(mutation, error => error.uncertain && typeof error.operationId === "string");
+    const operationId = env.ports[0].requests[0].operationId;
+    env.expire(1); await rejected;
+    const queued = env.bridge.request("managerList");
+    const queuedRejected = assert.rejects(queued, /recovery deadline/);
+    env.expire(2); await queuedRejected;
+    assert.equal(env.ports[0].requests.length, 1);
+    assert.deepEqual(env.bridge.unresolved(), [{ operationId, action: "managerAdd" }]);
+    const review = env.bridge.reconcile(operationId);
+    env.answer(env.ports[1], 0, { data: { state: "pending", operationId } });
+    await review;
+    await assert.rejects(env.bridge.request("managerDelete", { entryId: 1 }), error => error.uncertain && error.operationId === operationId);
+    const finished = env.bridge.reconcile(operationId);
+    env.answer(env.ports[1], 1, { data: { state: "committed", operationId, revision: 1 } });
+    await finished;
+    const next = env.bridge.request("managerDelete", { entryId: 1 });
+    assert.equal(env.ports.length, 3);
+    env.answer(env.ports[2]); await next;
+    assert.equal(env.bridge.unresolved().length, 0);
+});
+
+test("idle native connections close without invalidating current decisions and reopen on demand", async () => {
+    const env = environment({ idleTimeoutMs: 20_000 });
+    const read = env.bridge.request("managerList"); env.answer(env.ports[0]); await read;
+    assert.equal(env.timers.get(2).ms, 20_000);
+    env.expire(2);
+    assert.equal(env.invalidations(), 0);
+    const next = env.bridge.request("managerList");
+    assert.equal(env.ports.length, 2); env.answer(env.ports[1]); await next;
+});
+
+test("worker restart retains only operation identities and requires reconciliation before another write", async () => {
+    const stored = { pmUnresolvedOperations: [{ operationId: "save-before-crash", action: "managerAdd" }] };
+    const session = {
+        get(key, callback) { callback({ [key]: structuredClone(stored[key]) }); },
+        set(value, callback) { Object.assign(stored, structuredClone(value)); callback(); }
+    };
+    const env = environment();
+    // Instantiate a fresh bridge against browser-owned session storage.
+    const bridge = native.create({ chrome: { ...env.chrome, storage: { session } }, protocol,
+        contract: require("./command_contract.js"), crypto: require("node:crypto").webcrypto,
+        onDisconnect() {}, setTimeout, clearTimeout, idleTimeoutMs: 0 });
+    await assert.rejects(bridge.request("managerAdd", { item: { name: "Another" } }), /reconciled/);
+    assert.equal(env.ports.length, 0);
+    const review = bridge.reconcile("save-before-crash");
+    const request = env.ports[0].requests[0];
+    env.ports[0].receive({ id: request.id, protocolVersion: 1, success: true, data: { state: "failed", operationId: "save-before-crash", revision: null } });
+    await review;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(stored.pmUnresolvedOperations, []);
+});
+
+test("a committed HOTP result with a full-width counter returns its code without entering recovery", async () => {
+    const env = environment();
+    const code = env.bridge.request("getTotp", { entryId: 1 });
+    env.answer(env.ports[0], 0, { data: { mode: "hotp", code: "123456", expires_in: null, counter: "18446744073709551614" } });
+    const response = await code;
+    assert.equal(response.data.counter, "18446744073709551614");
+    assert.equal(response.data.code, "123456");
+    assert.deepEqual(env.bridge.unresolved(), []);
+});
+
+test("unknown operation outcomes require an explicit acknowledgement and pending operations cannot be acknowledged", async () => {
+    const env = environment();
+    const mutation = env.bridge.request("managerAdd", { item: { name: "Example" } });
+    const rejected = assert.rejects(mutation, error => error.uncertain);
+    const operationId = env.ports[0].requests[0].operationId;
+    env.expire(1); await rejected;
+    assert.throws(() => env.bridge.acknowledgeUnknown(operationId), /reviewed unknown/);
+    let review = env.bridge.reconcile(operationId);
+    env.answer(env.ports[1], 0, { data: { state: "pending", operationId } }); await review;
+    assert.throws(() => env.bridge.acknowledgeUnknown(operationId), /reviewed unknown/);
+    review = env.bridge.reconcile(operationId);
+    env.answer(env.ports[1], 1, { data: { state: "unknown", operationId } }); await review;
+    assert.equal(env.bridge.acknowledgeUnknown(operationId).success, true);
+    assert.equal(env.bridge.unresolved().length, 0);
+    assert.equal(env.ports[0].requests.length, 1, "acknowledgement does not replay the original mutation");
 });

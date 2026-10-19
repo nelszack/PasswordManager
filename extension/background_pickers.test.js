@@ -31,7 +31,7 @@ function environment(username = "alice") {
         async nativeRequest(action) {
             calls.push(action);
             return { success: true, data: action === "getLoginItem"
-                ? JSON.stringify({ username, password: "synthetic-secret" }) : '[{"id":1,"name":"Example"}]' };
+                ? { username, password: "synthetic-secret" } : [{id:1,name:"Example"}] };
         }
     });
     const sender = { tab: { id: 1 }, frameId: 3, documentId: "original-document", url: "https://example.com" };

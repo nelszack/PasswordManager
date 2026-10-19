@@ -1,5 +1,6 @@
+use super::output::Output;
 use password_manager::{
-    client::{self, AuthenticatedClient},
+    client::AuthenticatedClient,
     protocol::AuthenticatorResponse,
     types::{ServerCommand, Target, TotpCommand},
 };
@@ -11,12 +12,16 @@ fn fetch(
     target: &Target,
     copy_timeout: Option<u8>,
 ) -> Result<AuthenticatorResponse, String> {
-    let response = Zeroizing::new(client.request(ServerCommand::Totp(TotpCommand::Watch {
+    let response = client.request_response(ServerCommand::Totp(TotpCommand::Watch {
         target: target.clone(),
         copy_timeout,
-    }))?);
-    let code: AuthenticatorResponse = serde_json::from_str(&response)
-        .map_err(|_| "invalid TOTP watch response; restart the server after updating pm")?;
+    }))?;
+    if response.code != 0 {
+        return Err(response.error_message());
+    }
+    let password_manager::protocol::ResponsePayload::Authenticator(code) = response.payload else {
+        return Err("invalid TOTP watch response".into());
+    };
     if !code.valid() || code.mode != "totp" || code.expires_in == Some(0) {
         return Err("invalid TOTP watch response".into());
     }
@@ -27,6 +32,7 @@ pub(super) async fn watch(
     client: &AuthenticatedClient,
     target: Target,
     copy_timeout: Option<u8>,
+    console: &Output,
 ) -> Result<(), String> {
     let stop = tokio::signal::ctrl_c();
     tokio::pin!(stop);
@@ -35,17 +41,17 @@ pub(super) async fn watch(
         // Fetch from the vault on every tick so locking or removing the entry
         // stops the watch. This command does not extend the auto-lock deadline.
         let mut code = fetch(client, &target, None)?;
-        if copy_timeout.is_some() && code.code != *previous {
+        if copy_timeout.is_some() && code.code.expose() != previous.as_str() {
             code = fetch(client, &target, copy_timeout)?;
         }
         previous.zeroize();
         previous.push_str(&code.code);
         let output = Zeroizing::new(format!(
             "TOTP: {} ({}s remaining)",
-            code.code,
+            code.code.expose(),
             code.expires_in.expect("validated TOTP lifetime")
         ));
-        if let Err(error) = client::print_watch(&output) {
+        if let Err(error) = console.print_watch_data(&code, &output) {
             return if error.kind() == std::io::ErrorKind::BrokenPipe {
                 Ok(())
             } else {

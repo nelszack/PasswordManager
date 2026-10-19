@@ -1,77 +1,303 @@
 use super::*;
 
+const DOCUMENT_VERSION: u16 = 2;
+#[derive(Debug, Clone, PartialEq)]
+pub enum VaultStore {
+    Detached,
+    Memory,
+    File {
+        directory: std::path::PathBuf,
+        filename: String,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultDocument {
+    schema_version: u16,
+    vault_id: [u8; 16],
+    next_item_id: u64,
+    revision: u64,
+    items: Vec<ItemDocument>,
+}
+#[derive(Serialize)]
+struct VaultDocumentRef<'a> {
+    schema_version: u16,
+    vault_id: [u8; 16],
+    next_item_id: u64,
+    revision: u64,
+    items: Vec<ItemDocumentRef<'a>>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryDocument {
+    name: String,
+    username: Option<String>,
+    password: SecretString,
+    url: Option<String>,
+    notes: Option<SecretString>,
+    created: Timestamp,
+    modified: Timestamp,
+}
+#[derive(Serialize)]
+struct EntryDocumentRef<'a> {
+    name: &'a str,
+    username: Option<&'a str>,
+    password: &'a SecretString,
+    url: Option<&'a str>,
+    notes: Option<&'a SecretString>,
+    created: &'a Timestamp,
+    modified: &'a Timestamp,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ItemDocument {
+    id: ItemId,
+    revision: u64,
+    entry: EntryDocument,
+    metadata: EntryMetadata,
+    history: Vec<PasswordRevision>,
+    authenticator: Option<SecretString>,
+    duo: Option<DuoCredentials>,
+    lifecycle: Lifecycle,
+}
+#[derive(Serialize)]
+struct ItemDocumentRef<'a> {
+    id: ItemId,
+    revision: u64,
+    entry: EntryDocumentRef<'a>,
+    metadata: &'a EntryMetadata,
+    history: &'a [PasswordRevision],
+    authenticator: Option<&'a SecretString>,
+    duo: Option<&'a DuoCredentials>,
+    lifecycle: &'a Lifecycle,
+}
+pub(super) fn encode_document(
+    data: &VaultData,
+    overlay: Option<(&VaultData, &HashSet<ItemId>)>,
+) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let mut items: BTreeMap<ItemId, &Item> =
+        data.items.iter().map(|(id, item)| (*id, item)).collect();
+    let (next_item_id, revision) = if let Some((staged, selected)) = overlay {
+        for id in selected {
+            items.remove(id);
+        }
+        items.extend(staged.items.iter().map(|(id, item)| (*id, item)));
+        (staged.next_item_id, staged.revision)
+    } else {
+        (data.next_item_id, data.revision)
+    };
+    let document = VaultDocumentRef {
+        schema_version: DOCUMENT_VERSION,
+        vault_id: data.vault_id,
+        next_item_id,
+        revision,
+        items: items
+            .into_iter()
+            .map(|(id, item)| {
+                let e = &item.entry;
+                ItemDocumentRef {
+                    id,
+                    revision: item.revision,
+                    entry: EntryDocumentRef {
+                        name: &e.name,
+                        username: e.username.as_deref(),
+                        password: &e.password,
+                        url: e.url.as_deref(),
+                        notes: e.notes.as_ref(),
+                        created: &e.created,
+                        modified: &e.modified,
+                    },
+                    metadata: &item.metadata,
+                    history: &item.history,
+                    authenticator: item.authenticator.as_ref().map(|a| &a.configuration),
+                    duo: item.duo.as_ref().map(|d| &d.credentials),
+                    lifecycle: &item.lifecycle,
+                }
+            })
+            .collect(),
+    };
+    // Named fields make the durable schema independent of Rust field order.
+    let mut bytes = Zeroizing::new(Vec::new());
+    rmp_serde::encode::write_named(&mut *bytes, &document)
+        .map_err(|e| VaultError::Persistence(format!("could not encode vault document: {e}")))?;
+    Ok(bytes)
+}
+pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
+    let document: VaultDocument = rmp_serde::from_slice(bytes).map_err(|e| {
+        VaultError::Validation(format!("authenticated vault document is invalid: {e}"))
+    })?;
+    if document.schema_version != DOCUMENT_VERSION {
+        return Err(VaultError::Validation("unsupported vault document schema; export development vaults with their original binary".into()));
+    }
+    if document.vault_id == [0; 16] {
+        return Err(VaultError::Validation(
+            "vault document identity cannot be zero".into(),
+        ));
+    }
+    if document.revision > MAX_ITEM_ID {
+        return Err(VaultError::Validation(
+            "vault revision exceeds the supported range".into(),
+        ));
+    }
+    let mut data = VaultData {
+        items: BTreeMap::new(),
+        vault_id: document.vault_id,
+        next_item_id: document.next_item_id,
+        revision: document.revision,
+    };
+    for item in document.items {
+        let id = item.id.public()?;
+        if item.revision == 0 || item.revision > MAX_ITEM_ID {
+            return Err(VaultError::Validation(
+                "item revision must be a positive safe integer".into(),
+            ));
+        }
+        if let Some(ref credentials) = item.duo {
+            crate::duo::validate_credentials(credentials)?;
+        }
+        let authenticator = item
+            .authenticator
+            .as_ref()
+            .map(|a| Authenticator::parse(a))
+            .transpose()?;
+        let e = item.entry;
+        let value = Item {
+            entry: VaultEntry {
+                id,
+                name: e.name,
+                username: e.username,
+                password: e.password,
+                url: e.url,
+                notes: e.notes,
+                created: e.created,
+                modified: e.modified,
+            },
+            revision: item.revision,
+            metadata: item.metadata,
+            history: item.history,
+            authenticator,
+            duo: item.duo.map(|credentials| DuoRecord {
+                credentials,
+                review_key: None,
+            }),
+            lifecycle: item.lifecycle,
+        };
+        if data.items.insert(item.id, value).is_some() {
+            return Err(VaultError::Validation(
+                "duplicate item ID in vault document".into(),
+            ));
+        }
+    }
+    let highest = data.items.keys().next_back().map_or(0, |id| id.0);
+    if data.next_item_id == 0 || data.next_item_id <= highest || data.next_item_id > MAX_ITEM_ID + 1
+    {
+        return Err(VaultError::Validation(
+            "invalid next item ID in vault document".into(),
+        ));
+    }
+    Ok(data)
+}
+impl VaultStore {
+    pub(super) fn commit_overlay(
+        &self,
+        live: &VaultData,
+        staged: &VaultData,
+        selected: &HashSet<ItemId>,
+        credentials: &mut VaultCredentials,
+    ) -> Result<(), VaultError> {
+        if matches!(self, Self::Memory) {
+            return Ok(());
+        }
+        if credentials.locked {
+            return Err(VaultError::Locked);
+        }
+        let key = credentials.keypass.as_mut().ok_or(VaultError::Locked)?;
+        let Self::File {
+            directory,
+            filename,
+        } = self
+        else {
+            return Err(VaultError::Persistence("vault has no durable store".into()));
+        };
+        let mut plaintext = encode_document(live, Some((staged, selected)))?;
+        validate_encrypted_size(plaintext.len(), 0, active_vault_limit(), "vault")?;
+        let mut candidate = key.clone();
+        let ciphertext =
+            try_encrypt_file_in_place(&mut candidate, std::mem::take(&mut *plaintext))?;
+        let result = persist_ciphertext(directory, filename, &ciphertext);
+        if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
+            *key = candidate;
+        }
+        result
+    }
+}
+fn active_vault_limit() -> u64 {
+    #[cfg(test)]
+    {
+        TEST_MAX_VAULT_BYTES.get()
+    }
+    #[cfg(not(test))]
+    {
+        MAX_VAULT_BYTES
+    }
+}
 impl Vault {
     pub fn rekey(
         &mut self,
-        server_info: &mut VaultCredentials,
+        credentials: &mut VaultCredentials,
         mut new_key: PasswordType,
     ) -> Result<(), VaultError> {
-        if let PasswordType::Password(password) = &new_key
-            && let Err(error) = validate_new_password(password)
+        if !matches!(self.store, VaultStore::Memory)
+            && (credentials.locked || credentials.keypass.is_none())
         {
-            new_key.zeroize();
-            return Err((error.to_string()).into());
+            return Err(VaultError::Locked);
         }
-        if let PasswordType::Key(path) = &new_key
-            && new_key_file_path(path)?.exists()
-        {
-            return Err(VaultError::Conflict(
-                "the new key file already exists".to_string(),
-            ));
+        let next_revision = self
+            .data
+            .revision
+            .checked_add(1)
+            .filter(|value| *value <= MAX_ITEM_ID)
+            .ok_or_else(|| VaultError::Conflict("vault revision exhausted".into()))?;
+        if let PasswordType::Password(password) = &new_key {
+            validate_new_password(password).map_err(|e| VaultError::Validation(e.into()))?;
         }
-        let generated_key_path = match &new_key {
+        let generated = match &new_key {
             PasswordType::Key(path) => Some(new_key_file_path(path)?),
             _ => None,
         };
-        if generated_key_path.is_some() {
-            let mut key = try_gen_master_key(&mut new_key, true)?;
-            key.zeroize();
-        } else if let Some((_, mut existing)) = lookup_vault(&mut new_key, None)? {
-            existing.zeroize();
-            return Err(VaultError::Conflict(
-                "a vault already exists for the new password".to_string(),
-            ));
+        if let Some(path) = &generated {
+            if path.exists() {
+                return Err(VaultError::Conflict("new key file already exists".into()));
+            }
+            let mut material = try_gen_master_key(&mut new_key, true)?;
+            material.zeroize();
         }
-        // Keep the same random filename. One atomic replacement is the commit
-        // point: recovery sees either the old ciphertext or the new ciphertext.
+        let staged = VaultData {
+            items: BTreeMap::new(),
+            vault_id: self.data.vault_id,
+            next_item_id: self.data.next_item_id,
+            revision: next_revision,
+        };
         let mut replacement = VaultCredentials {
             locked: false,
             keypass: Some(new_key),
         };
-        let result = write_vault(self, &mut replacement);
-        if result.as_ref().is_err_and(|error| !error.committed()) {
-            if let Some(path) = generated_key_path {
-                let _ = fs::remove_file(path);
-            }
-            replacement.zeroize();
-            return result;
+        let result =
+            self.store
+                .commit_overlay(&self.data, &staged, &HashSet::new(), &mut replacement);
+        if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
+            self.data.revision = next_revision;
+            credentials.keypass = replacement.keypass.take();
+        } else if let Some(path) = generated {
+            let _ = fs::remove_file(path);
         }
-        if let Some(mut old_key) = server_info.keypass.take() {
-            old_key.zeroize();
-        }
-        server_info.keypass = replacement.keypass.take();
-        replacement.zeroize();
-        result?;
-        Ok(())
+        result
     }
-
-    pub fn lock_vault(&self, key_pass: &mut VaultCredentials) -> Result<(), VaultError> {
-        // Every mutation is persisted before it succeeds. Locking must not
-        // depend on storage availability or leave keys resident after an I/O error.
-        key_pass.zeroize();
+    pub fn lock_vault(&self, key: &mut VaultCredentials) -> Result<(), VaultError> {
+        key.zeroize();
         Ok(())
     }
 }
-
-pub(super) fn random_vault_filename() -> String {
-    loop {
-        let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
-        if !data_dir().join(&filename).exists() {
-            return filename;
-        }
-    }
-}
-
 /// List opaque vault IDs without opening or decrypting their contents.
 pub fn list_vaults() -> Result<Vec<String>, VaultError> {
     list_vaults_in(&data_dir())
@@ -121,104 +347,70 @@ pub(super) fn lookup_vault(
     lookup_vault_in(&data_dir(), key_pass, selected)
 }
 
-fn lookup_vault_in(
+pub(super) fn lookup_vault_in(
     directory: &Path,
     key_pass: &mut PasswordType,
     selected: Option<&str>,
 ) -> Result<Option<(String, Vault)>, VaultError> {
-    if let PasswordType::Key(path) = key_pass {
-        let mut key = try_gen_master_key(&mut PasswordType::Key(path.clone()), false)
-            .map_err(VaultError::Persistence)?;
-        key.zeroize();
+    if matches!(key_pass, PasswordType::Key(_)) {
+        let _material =
+            Zeroizing::new(try_gen_master_key(key_pass, false).map_err(VaultError::Persistence)?);
     }
-    let candidates = match selected {
+    let filename = match selected {
         Some(name) => {
             validate_vault_filename(name)?;
-            vec![name.to_owned()]
+            name.to_owned()
         }
-        None => list_vaults_in(directory)?,
+        None => {
+            let names = list_vaults_in(directory)?;
+            match names.as_slice() {
+                [] => return Ok(None),
+                [name] => name.clone(),
+                _ => {
+                    return Err(VaultError::InvalidInput(
+                        "multiple vaults exist; select a vault ID explicitly".into(),
+                    ));
+                }
+            }
+        }
     };
-    for filename in candidates {
-        let path = directory.join(&filename);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if selected.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(VaultError::NotFound(format!(
-                    "vault {filename:?} does not exist"
-                )));
-            }
-            Err(error) => {
-                return Err(VaultError::Persistence(format!(
-                    "could not inspect vault {filename:?}: {error}"
-                )));
-            }
-        };
-        if !metadata.file_type().is_file() || metadata.len() > MAX_VAULT_BYTES {
-            if selected.is_none() {
-                continue;
-            }
-            return Err(VaultError::Validation(format!(
-                "vault {filename:?} must be a regular file within the 128 MiB limit"
-            )));
+    let path = directory.join(&filename);
+    let metadata = fs::symlink_metadata(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            VaultError::NotFound(format!("vault {filename:?} does not exist"))
+        } else {
+            VaultError::Persistence(e.to_string())
         }
-        // Bound the actual read too, in case the file grew after metadata().
-        let mut contents = Vec::new();
-        let read = fs::File::open(&path)
-            .and_then(|file| file.take(MAX_VAULT_BYTES + 1).read_to_end(&mut contents));
-        match read {
-            Ok(_) => {}
-            Err(error) if selected.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => {
-                return Err(VaultError::Persistence(format!(
-                    "could not read vault {filename:?}: {error}"
-                )));
-            }
-        }
-        if contents.len() as u64 > MAX_VAULT_BYTES {
-            return Err(VaultError::Validation(format!(
-                "vault {filename:?} exceeds the 128 MiB limit"
-            )));
-        }
-        if let Err(error) = crate::encryption::validate_vault_header(&contents) {
-            if selected.is_none() {
-                continue;
-            }
-            return Err(VaultError::Validation(format!(
-                "vault {filename:?}: {error}"
-            )));
-        }
-        let Some(decrypted) = decrypt_file(key_pass, &contents) else {
-            if selected.is_none() {
-                continue;
-            }
-            return Err(VaultError::Validation(format!(
-                "vault {filename:?}: incorrect password/key or modified encrypted contents"
-            )));
-        };
-        let decrypted = Zeroizing::new(decrypted);
-        let mut vault: Vault = rmp_serde::from_slice(&decrypted).map_err(|error| {
-            VaultError::Validation(format!(
-                "vault {filename:?} authenticated but its data is invalid: {error}"
-            ))
-        })?;
-        if let Err(error) = validate_backup_vault(&mut vault) {
-            vault.zeroize();
-            return Err(error.context(format!("vault {filename:?} contains invalid records")));
-        }
-        vault.metadata.filename = filename.clone();
-        return Ok(Some((filename, vault)));
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(VaultError::Validation(
+            "vault must be a regular file".into(),
+        ));
     }
-    Ok(None)
-}
-
-#[cfg(test)]
-pub(super) fn find_vault(key_pass: &mut PasswordType) -> Option<(String, Vault)> {
-    lookup_vault(key_pass, None).ok().flatten()
+    let contents = crate::file::read_bounded_file(&path, MAX_VAULT_BYTES)
+        .map_err(|e| VaultError::Persistence(format!("could not read vault {filename:?}: {e}")))?;
+    crate::encryption::validate_vault_header(&contents)
+        .map_err(|e| VaultError::Validation(e.into()))?;
+    let mut candidate = key_pass.clone();
+    let plaintext = Zeroizing::new(decrypt_file(&mut candidate, &contents).ok_or_else(|| {
+        VaultError::Validation("incorrect password/key or modified encrypted contents".into())
+    })?);
+    let data = decode_document(&plaintext)?;
+    *key_pass = candidate;
+    Ok(Some((
+        filename.clone(),
+        Vault {
+            data,
+            store: VaultStore::File {
+                directory: directory.to_owned(),
+                filename: filename.clone(),
+            },
+            metadata: VaultMetadata {
+                filename,
+                duo_session: None,
+            },
+        },
+    )))
 }
 
 #[cfg(test)]
@@ -265,117 +457,119 @@ pub(crate) fn with_write_fault<T>(fault: u8, operation: impl FnOnce() -> T) -> T
 }
 
 pub(crate) fn create_vault(
-    vlt: &mut Option<Vault>,
-    server_info: &mut VaultCredentials,
+    vault: &mut Option<Vault>,
+    credentials: &mut VaultCredentials,
     lock: bool,
 ) -> Result<(), VaultError> {
-    if let Some(PasswordType::Password(password)) = server_info.keypass.as_ref()
-        && let Err(error) = validate_new_password(password)
-    {
-        server_info.zeroize();
-        return Err((error.to_string()).into());
+    let key = credentials.keypass.as_mut().ok_or(VaultError::Locked)?;
+    if let PasswordType::Password(password) = key {
+        validate_new_password(password).map_err(|e| VaultError::Validation(e.into()))?;
     }
-    let generated_key_path = match server_info.keypass.as_ref() {
-        Some(PasswordType::Key(path)) if !new_key_file_path(path)?.exists() => {
-            Some(new_key_file_path(path)?)
-        }
+    let generated = match key {
+        PasswordType::Key(path) => Some(new_key_file_path(path)?),
         _ => None,
     };
-    if matches!(server_info.keypass, Some(PasswordType::Key(_))) {
-        let mut key = try_gen_master_key(server_info.keypass.as_mut().unwrap(), true)?;
-        key.zeroize();
-    } else if let Some((_, mut existing)) =
-        lookup_vault(server_info.keypass.as_mut().unwrap(), None)?
-    {
-        existing.zeroize();
-        server_info.zeroize();
-        return Err(VaultError::Conflict(
-            "A vault file with this password already exists.".to_string(),
-        ));
+    if generated.is_some() {
+        let mut material = try_gen_master_key(key, true)?;
+        material.zeroize();
     }
-    let fname = random_vault_filename();
-    let file_path = data_dir().join(&fname);
-    if file_exists(&file_path) {
-        if let Some(path) = generated_key_path {
-            let _ = fs::remove_file(path);
+    let mut data = VaultData {
+        vault_id: rand::random(),
+        ..VaultData::default()
+    };
+    let filename = loop {
+        let name = format!("{}.enc", hex::encode(data.vault_id));
+        if !data_dir().join(&name).exists() {
+            break name;
         }
-        return Err(VaultError::Conflict(
-            "A vault file with this key already exists.".to_string(),
-        ));
-    }
-    *vlt = Some(Vault {
-        entries: Vec::new(),
+        data.vault_id = rand::random();
+    };
+    let created = Vault {
+        data,
+        store: VaultStore::File {
+            directory: data_dir(),
+            filename: filename.clone(),
+        },
         metadata: VaultMetadata {
-            filename: fname.clone(),
+            filename,
             duo_session: None,
         },
-        recovery: RecoveryData::default(),
-    });
-    if let Err(error) = write_vault(
-        vlt.as_ref().expect("vault was just initialized"),
-        server_info,
-    ) {
+    };
+    let result = write_vault(&created, credentials);
+    if let Err(error) = result {
         if !error.committed()
-            && let Some(path) = generated_key_path
+            && let Some(path) = generated
         {
             let _ = fs::remove_file(path);
         }
-        vlt.zeroize();
-        server_info.zeroize();
+        credentials.zeroize();
         return Err(error);
     }
     if lock {
-        vlt.zeroize();
-        server_info.zeroize();
+        credentials.zeroize();
+    } else {
+        *vault = Some(created);
+        credentials.locked = false;
     }
     Ok(())
 }
-pub(super) fn write_vault(vlt: &Vault, key_pass: &mut VaultCredentials) -> Result<(), VaultError> {
-    if key_pass.keypass.is_none() {
-        // This permits detached in-memory vault values used by callers and tests;
-        // the running server never mutates a vault without an active key.
+pub(super) fn write_vault(
+    vault: &Vault,
+    credentials: &mut VaultCredentials,
+) -> Result<(), VaultError> {
+    if matches!(vault.store, VaultStore::Memory) {
         return Ok(());
     }
-    write_vault_with_key(vlt, key_pass.keypass.as_mut().unwrap())
+    write_vault_with_key(
+        vault,
+        credentials.keypass.as_mut().ok_or(VaultError::Locked)?,
+    )
 }
-
 pub(super) fn write_vault_with_key(
-    vlt: &Vault,
-    key_pass: &mut PasswordType,
+    vault: &Vault,
+    key: &mut PasswordType,
 ) -> Result<(), VaultError> {
-    #[cfg(test)]
-    let max_bytes = TEST_MAX_VAULT_BYTES.get();
-    #[cfg(not(test))]
-    let max_bytes = MAX_VAULT_BYTES;
-    write_vault_with_limit(vlt, key_pass, max_bytes)
+    write_vault_with_limit(vault, key, active_vault_limit())
 }
-
 #[cfg(test)]
-thread_local! {
-    static TEST_MAX_VAULT_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(MAX_VAULT_BYTES) };
-}
-
+thread_local! {static TEST_MAX_VAULT_BYTES:std::cell::Cell<u64>=const {std::cell::Cell::new(MAX_VAULT_BYTES)};}
 fn write_vault_with_limit(
     vlt: &Vault,
     key_pass: &mut PasswordType,
     max_bytes: u64,
 ) -> Result<(), VaultError> {
-    let fname = vlt.metadata.filename.clone();
-    let file_path = data_dir().join(&fname);
-    let mut buf = Zeroizing::new(
-        run_blocking_io(|| rmp_serde::to_vec(&vlt))
-            .map_err(|e| VaultError::Persistence(format!("could not encode vault: {e}")))?,
-    );
+    let VaultStore::File {
+        directory,
+        filename,
+    } = &vlt.store
+    else {
+        return match vlt.store {
+            VaultStore::Memory => Ok(()),
+            _ => Err(VaultError::Persistence("vault has no durable store".into())),
+        };
+    };
+    let mut buf = encode_document(&vlt.data, None)?;
     validate_encrypted_size(buf.len(), 0, max_bytes, "vault")?;
-    let mut txt = try_encrypt_file_in_place(key_pass, std::mem::take(&mut *buf))?;
-    let result = run_blocking_io(|| {
-        let mut temporary = NamedTempFile::new_in(data_dir()).map_err(|e| {
+    let mut candidate = key_pass.clone();
+    let txt = try_encrypt_file_in_place(&mut candidate, std::mem::take(&mut *buf))?;
+    let result = persist_ciphertext(directory, filename, &txt);
+    if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
+        *key_pass = candidate;
+    }
+    result
+}
+
+fn persist_ciphertext(directory: &Path, filename: &str, txt: &[u8]) -> Result<(), VaultError> {
+    validate_vault_filename(filename)?;
+    let file_path = directory.join(filename);
+    run_blocking_io(|| {
+        let mut temporary = NamedTempFile::new_in(directory).map_err(|e| {
             VaultError::Persistence(format!("could not create vault temp file: {e}"))
         })?;
         set_private_perms(temporary.path()).map_err(|e| {
             VaultError::Persistence(format!("could not protect vault temp file: {e}"))
         })?;
-        temporary.write_all(&txt).map_err(|e| {
+        temporary.write_all(txt).map_err(|e| {
             VaultError::Persistence(format!("could not write encrypted vault: {e}"))
         })?;
         temporary
@@ -396,9 +590,7 @@ fn write_vault_with_limit(
             ))
         })?;
         Ok(())
-    });
-    txt.zeroize();
-    result
+    })
 }
 
 pub(super) fn validate_encrypted_size(
@@ -485,12 +677,11 @@ pub(crate) fn unlock_selected_vault(
     Ok(vault)
 }
 
-#[cfg(test)]
-pub(super) fn unlock_vault(key_pass: &mut VaultCredentials) -> Option<Vault> {
-    unlock_selected_vault(key_pass, None).ok()
-}
-
-pub(crate) fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), VaultError> {
+pub(crate) fn delete_vault(
+    mut key: PasswordType,
+    keep_key: bool,
+    selected: Option<&str>,
+) -> Result<(), VaultError> {
     let data = data_dir();
     let key_to_remove = match &key {
         PasswordType::Key(path) if !keep_key => Some(path.clone()),
@@ -501,7 +692,7 @@ pub(crate) fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), 
     {
         return Err(("key file does not exist or is not a regular file".to_string()).into());
     }
-    let (filename, mut vault) = lookup_vault(&mut key, None)?
+    let (filename, mut vault) = lookup_vault(&mut key, selected)?
         .ok_or_else(|| "could not delete vault (is the key correct?)".to_string())?;
     vault.zeroize();
     fs::remove_file(data.join(filename)).map_err(|e| {
@@ -522,49 +713,41 @@ pub(crate) fn delete_vault(mut key: PasswordType, keep_key: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn oversized_mutation_rolls_back_and_keeps_the_saved_vault_and_key() {
-        let (mut vault, mut info) = stored_vault();
-        let before = vault.clone();
-        let path = data_dir().join(&vault.metadata.filename);
-        let ciphertext = fs::read(&path).unwrap();
-        struct RestoreLimit(u64);
-        impl Drop for RestoreLimit {
-            fn drop(&mut self) {
-                TEST_MAX_VAULT_BYTES.set(self.0);
-            }
+    fn session(byte: u8) -> PasswordType {
+        PasswordType::Session {
+            encryption_key: [byte; 32],
+            salt: [7; 16],
+            kdf: 1,
+            memory_kib: 8192,
+            iterations: 1,
+            parallelism: 1,
         }
-        let _restore = RestoreLimit(TEST_MAX_VAULT_BYTES.replace(ciphertext.len() as u64));
-        let result = vault.transaction(TransactionScope::Entry(1), &mut info, |vault| {
-            vault.entries[0].notes = Some("x".repeat(1024));
-            Ok((true, ()))
-        });
-        assert!(matches!(result, Err(VaultError::Validation(_))));
-        assert_eq!(vault, before);
-        assert_eq!(fs::read(&path).unwrap(), ciphertext);
-        let mut key = session(42);
-        let (_, reopened) = lookup_vault_in(&data_dir(), &mut key, Some(&vault.metadata.filename))
-            .unwrap()
-            .unwrap();
-        assert_eq!(reopened.entries, before.entries);
-        let mut replacement = PasswordType::Password("new-master-password-for-size-test".into());
-        assert!(write_vault_with_limit(&vault, &mut replacement, 1).is_err());
-        assert!(
-            matches!(replacement, PasswordType::Password(ref password) if password == "new-master-password-for-size-test")
-        );
-        assert_eq!(fs::read(&path).unwrap(), ciphertext);
-        // A file exactly at the limit remains writable and reopenable.
-        write_vault_with_limit(
-            &vault,
-            info.keypass.as_mut().unwrap(),
-            ciphertext.len() as u64,
-        )
-        .unwrap();
     }
-
+    fn stored() -> (tempfile::TempDir, Vault, VaultCredentials) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut vault = Vault::from_entries(
+            vec![VaultEntry {
+                id: 1,
+                name: "Example".into(),
+                password: "before".into(),
+                ..Default::default()
+            }],
+            None,
+        );
+        vault.metadata.filename = "vault.enc".into();
+        vault.store = VaultStore::File {
+            directory: directory.path().to_owned(),
+            filename: "vault.enc".into(),
+        };
+        let mut credentials = VaultCredentials {
+            locked: false,
+            keypass: Some(session(42)),
+        };
+        write_vault(&vault, &mut credentials).unwrap();
+        (directory, vault, credentials)
+    }
     #[test]
-    fn size_validation_includes_header_tag_and_backup_prefix() {
+    fn size_limits_include_authenticated_encryption_and_backup_overhead() {
         let overhead = crate::encryption::ENCRYPTED_FILE_OVERHEAD as u64;
         assert!(validate_encrypted_size(10, 0, overhead + 10, "vault").is_ok());
         assert!(validate_encrypted_size(10, 0, overhead + 9, "vault").is_err());
@@ -572,200 +755,95 @@ mod tests {
         assert!(validate_encrypted_size(10, 9, overhead + 18, "backup").is_err());
         assert!(validate_encrypted_size(usize::MAX, 9, u64::MAX, "backup").is_err());
     }
-
-    fn session(byte: u8) -> PasswordType {
-        PasswordType::Session {
-            encryption_key: [byte; 32],
-            salt: [byte; 16],
-            kdf: 1,
-            memory_kib: 8192,
-            iterations: 1,
-            parallelism: 1,
-        }
-    }
-
-    fn stored_vault() -> (Vault, VaultCredentials) {
-        crate::file::init_test_data_dir();
-        let vault = Vault {
-            entries: vec![VaultEntry {
-                id: 1,
-                password: "before".into(),
-                ..Default::default()
-            }],
-            metadata: VaultMetadata {
-                filename: random_vault_filename(),
-                duo_session: None,
-            },
-            recovery: RecoveryData::default(),
-        };
-        let mut info = VaultCredentials {
-            locked: false,
-            keypass: Some(session(42)),
-        };
-        write_vault(&vault, &mut info).unwrap();
-        (vault, info)
-    }
-
     #[test]
-    fn hotp_counter_tracks_atomic_commit_even_when_directory_sync_fails() {
-        let (mut vault, mut info) = stored_vault();
-        vault
-            .set_totp(
-                Target::Id(1),
-                "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
-                &mut info,
-            )
-            .unwrap();
-        for (fault, expected_counter) in [(1, 0), (2, 1)] {
-            let result = with_write_fault(fault, || vault.current_otp(Target::Id(1), &mut info));
-            let error = result.err().unwrap();
-            assert_eq!(error.committed(), fault == 2);
-            assert!(
-                vault.recovery.totp[0]
-                    .configuration
-                    .ends_with(&format!("counter={expected_counter}"))
-            );
-            let (_, reopened) = lookup_vault_in(
-                &data_dir(),
-                &mut session(42),
-                Some(&vault.metadata.filename),
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(reopened.recovery.totp, vault.recovery.totp);
+    fn oversized_staged_change_and_rekey_leave_file_key_and_live_state_unchanged() {
+        let (directory, mut vault, mut credentials) = stored();
+        let before = vault.clone();
+        let bytes = fs::read(directory.path().join("vault.enc")).unwrap();
+        struct Restore(u64);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TEST_MAX_VAULT_BYTES.set(self.0);
+            }
         }
-        // The committed-but-unreturned code was consumed, so the next request
-        // uses counter 1, rather than repeating counter 0.
+        let _restore = Restore(TEST_MAX_VAULT_BYTES.replace(bytes.len() as u64));
+        let result = vault.transaction(TransactionScope::Entry(1), &mut credentials, |v| {
+            v.item_mut(1).unwrap().entry.notes = Some("x".repeat(1024).into());
+            Ok((true, ()))
+        });
+        assert!(matches!(result, Err(VaultError::Validation(_))));
+        assert_eq!(vault, before);
+        assert_eq!(fs::read(directory.path().join("vault.enc")).unwrap(), bytes);
+        let mut replacement = PasswordType::Password("Cedar-Lantern-Quartz-9274!".into());
+        assert!(write_vault_with_limit(&vault, &mut replacement, 1).is_err());
+        assert!(matches!(replacement, PasswordType::Password(_)));
+        write_vault_with_limit(
+            &vault,
+            credentials.keypass.as_mut().unwrap(),
+            bytes.len() as u64,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn rekey_adopts_new_key_only_after_atomic_replace_including_uncertain_durability() {
+        let (directory, mut vault, mut credentials) = stored();
+        let key_path = directory.path().join("replacement.key");
+        let replacement = PasswordType::Key(key_path.display().to_string());
+        let before = fs::read(directory.path().join("vault.enc")).unwrap();
+        let error =
+            with_write_fault(1, || vault.rekey(&mut credentials, replacement.clone())).unwrap_err();
+        assert!(!error.committed());
+        assert!(!key_path.exists());
         assert_eq!(
-            *vault.current_otp(Target::Id(1), &mut info).unwrap().code,
-            "287082"
+            fs::read(directory.path().join("vault.enc")).unwrap(),
+            before
         );
-    }
-
-    #[test]
-    fn write_failures_before_and_after_commit_keep_memory_and_disk_consistent() {
-        let (mut vault, mut info) = stored_vault();
-        let path = data_dir().join(&vault.metadata.filename);
-        for (fault, expected) in [(1, "before"), (2, "after")] {
-            let result = with_write_fault(fault, || {
-                vault.transaction(TransactionScope::Entry(1), &mut info, |vault| {
-                    vault.entries[0].password = "after".into();
-                    Ok((true, ()))
-                })
-            });
-            let error = result.unwrap_err();
-            assert_eq!(error.committed(), fault == 2);
-            assert_eq!(vault.entries[0].password, expected);
-            let bytes = fs::read(&path).unwrap();
-            let plaintext = Zeroizing::new(decrypt_file(&mut session(42), &bytes).unwrap());
-            let mut stored: Vault = rmp_serde::from_slice(&plaintext).unwrap();
-            assert_eq!(stored.entries[0].password, expected);
-            stored.zeroize();
-        }
-        // A later write and restart recover the committed state normally.
-        write_vault(&vault, &mut info).unwrap();
-        let (_, mut restarted) = lookup_vault(&mut session(42), Some(&vault.metadata.filename))
-            .unwrap()
-            .unwrap();
-        assert_eq!(restarted.entries, vault.entries);
-        restarted.zeroize();
-        vault.zeroize();
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn interrupted_rekey_has_one_vault_and_only_the_committed_key_works() {
-        let (mut vault, mut info) = stored_vault();
-        let path = data_dir().join(&vault.metadata.filename);
-        let directory = tempfile::tempdir().unwrap();
-        let new_key_path = directory.path().join("replacement.key");
-        let replacement = PasswordType::Key(new_key_path.display().to_string());
-        let before = fs::read(&path).unwrap();
-        let result = with_write_fault(1, || vault.rekey(&mut info, replacement.clone()));
-        assert!(!result.unwrap_err().committed());
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(!new_key_path.exists());
-        assert!(decrypt_file(&mut session(42), &before).is_some());
-
-        let result = with_write_fault(2, || vault.rekey(&mut info, replacement.clone()));
-        assert!(result.unwrap_err().committed());
-        assert_eq!(data_dir().join(&vault.metadata.filename), path);
-        assert!(new_key_path.exists());
-        let after = fs::read(&path).unwrap();
-        assert!(decrypt_file(&mut session(42), &after).is_none());
-        let mut key = replacement;
-        let plaintext = Zeroizing::new(decrypt_file(&mut key, &after).unwrap());
-        assert_eq!(
-            rmp_serde::from_slice::<Vault>(&plaintext).unwrap().entries,
-            vault.entries
-        );
-        // The running session adopted the committed new key even though sync failed.
-        assert!(decrypt_file(info.keypass.as_mut().unwrap(), &after).is_some());
-        write_vault(&vault, &mut info).unwrap();
-        fs::remove_file(path).unwrap();
-        vault.zeroize();
-        info.zeroize();
-    }
-
-    #[test]
-    fn creation_keeps_a_generated_key_when_the_vault_has_committed() {
-        crate::file::init_test_data_dir();
-        let directory = tempfile::tempdir().unwrap();
-        let key_path = directory.path().join("creation.key");
-        let mut info = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Key(key_path.display().to_string())),
-        };
-        let mut vault = None;
-        let error = with_write_fault(2, || create_vault(&mut vault, &mut info, false)).unwrap_err();
+        let error =
+            with_write_fault(2, || vault.rekey(&mut credentials, replacement.clone())).unwrap_err();
         assert!(error.committed());
         assert!(key_path.exists());
-        assert!(vault.is_none());
-        assert!(info.keypass.is_none());
-        let (filename, mut reopened) =
-            lookup_vault(&mut PasswordType::Key(key_path.display().to_string()), None)
-                .unwrap()
-                .unwrap();
-        reopened.zeroize();
-        fs::remove_file(data_dir().join(filename)).unwrap();
+        let after = fs::read(directory.path().join("vault.enc")).unwrap();
+        assert!(decrypt_file(&mut session(42), &after).is_none());
+        let plaintext = Zeroizing::new(decrypt_file(&mut replacement.clone(), &after).unwrap());
+        assert_eq!(decode_document(&plaintext).unwrap(), vault.data);
+        assert!(decrypt_file(credentials.keypass.as_mut().unwrap(), &after).is_some());
+        write_vault(&vault, &mut credentials).unwrap();
     }
-
     #[test]
-    fn selected_lookup_skips_unrelated_files_and_reports_structural_errors() {
-        let directory = tempfile::tempdir().unwrap();
-        let vault = Vault {
-            metadata: VaultMetadata {
-                filename: "selected.enc".into(),
-                duo_session: None,
-            },
-            entries: Vec::new(),
-            recovery: RecoveryData::default(),
-        };
-        let plaintext = rmp_serde::to_vec(&vault).unwrap();
-        let ciphertext = try_encrypt_file_in_place(&mut session(42), plaintext).unwrap();
-        fs::write(directory.path().join("selected.enc"), &ciphertext).unwrap();
-        fs::write(directory.path().join("unrelated.enc"), b"broken").unwrap();
-        let (name, mut opened) =
-            lookup_vault_in(directory.path(), &mut session(42), Some("selected.enc"))
-                .unwrap()
-                .unwrap();
-        assert_eq!(name, "selected.enc");
-        opened.zeroize();
-        assert!(matches!(
-            lookup_vault_in(directory.path(), &mut session(42), Some("missing.enc")),
-            Err(VaultError::NotFound(_))
-        ));
-        let invalid =
-            lookup_vault_in(directory.path(), &mut session(42), Some("unrelated.enc")).unwrap_err();
-        assert!(invalid.to_string().contains("truncated"));
-        let wrong_key =
-            lookup_vault_in(directory.path(), &mut session(43), Some("selected.enc")).unwrap_err();
+    fn selected_lookup_checks_structure_authentication_and_independent_document_schema() {
+        let (directory, vault, _) = stored();
+        let valid = fs::read(directory.path().join("vault.enc")).unwrap();
+        fs::write(directory.path().join("broken.enc"), b"broken").unwrap();
         assert!(
-            wrong_key
-                .to_string()
-                .contains("incorrect password/key or modified")
+            lookup_vault_in(directory.path(), &mut session(42), None).is_err(),
+            "selection is required with multiple identities"
         );
-        let mut future = ciphertext;
+        assert_eq!(
+            lookup_vault_in(directory.path(), &mut session(42), Some("vault.enc"))
+                .unwrap()
+                .unwrap()
+                .1
+                .data,
+            vault.data
+        );
+        assert!(lookup_vault_in(directory.path(), &mut session(43), Some("vault.enc")).is_err());
+        assert!(lookup_vault_in(directory.path(), &mut session(42), Some("broken.enc")).is_err());
+        for name in [
+            "../vault.enc",
+            "/vault.enc",
+            "x\\vault.enc",
+            "C:vault.enc",
+            "vault",
+            "",
+        ] {
+            assert!(lookup_vault_in(directory.path(), &mut session(42), Some(name)).is_err());
+        }
+        let mut tampered = valid.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        fs::write(directory.path().join("tampered.enc"), tampered).unwrap();
+        assert!(lookup_vault_in(directory.path(), &mut session(42), Some("tampered.enc")).is_err());
+        let mut future = valid;
         future[8] = 99;
         fs::write(directory.path().join("future.enc"), future).unwrap();
         assert!(
@@ -774,116 +852,97 @@ mod tests {
                 .to_string()
                 .contains("unsupported")
         );
-        for name in [
-            "../selected.enc",
-            "/selected.enc",
-            "x\\selected.enc",
-            "C:selected.enc",
-            "selected",
-            "",
-        ] {
-            assert!(matches!(
-                lookup_vault_in(directory.path(), &mut session(42), Some(name)),
-                Err(VaultError::InvalidInput(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn selected_lookup_reports_unreadable_keys_and_authenticated_invalid_records() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut missing_key =
-            PasswordType::Key(directory.path().join("missing.key").display().to_string());
-        assert!(matches!(
-            lookup_vault_in(directory.path(), &mut missing_key, None),
-            Err(VaultError::Persistence(_))
-        ));
-        let ciphertext =
-            try_encrypt_file_in_place(&mut session(42), b"not a vault".to_vec()).unwrap();
-        fs::write(directory.path().join("invalid.enc"), ciphertext).unwrap();
-        assert!(
-            lookup_vault_in(directory.path(), &mut session(42), Some("invalid.enc"))
-                .unwrap_err()
-                .to_string()
-                .contains("authenticated")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn selected_lookup_rejects_symlinks_and_lists_only_regular_files() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(directory.path().join("b.enc"), b"synthetic").unwrap();
-        fs::write(directory.path().join("a.enc"), b"synthetic").unwrap();
-        std::os::unix::fs::symlink(
-            directory.path().join("b.enc"),
-            directory.path().join("link.enc"),
+        let mut document: serde_json::Value =
+            rmp_serde::from_slice(&encode_document(&vault.data, None).unwrap()).unwrap();
+        document["schema_version"] = 99.into();
+        let future = try_encrypt_file_in_place(
+            &mut session(42),
+            rmp_serde::to_vec_named(&document).unwrap(),
         )
         .unwrap();
-        fs::create_dir(directory.path().join("directory.enc")).unwrap();
-        assert_eq!(
-            list_vaults_in(directory.path()).unwrap(),
-            ["a.enc", "b.enc"]
+        fs::write(directory.path().join("schema.enc"), future).unwrap();
+        assert!(
+            lookup_vault_in(directory.path(), &mut session(42), Some("schema.enc"))
+                .unwrap_err()
+                .to_string()
+                .contains("schema")
         );
+    }
+    #[test]
+    fn document_validation_rejects_duplicates_zero_ids_unsafe_counters_and_invalid_authenticators()
+    {
+        let (_directory, vault, _) = stored();
+        let bytes = encode_document(&vault.data, None).unwrap();
+        let original: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        for kind in 0..5 {
+            let mut doc = original.clone();
+            match kind {
+                0 => {
+                    let item = doc["items"][0].clone();
+                    doc["items"].as_array_mut().unwrap().push(item);
+                }
+                1 => doc["items"][0]["id"] = 0.into(),
+                2 => doc["next_item_id"] = 1.into(),
+                3 => doc["items"][0]["authenticator"] = "invalid seed".into(),
+                _ => doc["items"][0]["entry"]["created"] = "yesterday".into(),
+            }
+            assert!(
+                decode_document(&rmp_serde::to_vec_named(&doc).unwrap()).is_err(),
+                "invalid document {kind}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_files_are_private_and_symlinks_are_never_selected() {
+        use std::os::unix::fs::PermissionsExt;
+        let (directory, _, _) = stored();
+        let path = directory.path().join("vault.enc");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::os::unix::fs::symlink(&path, directory.path().join("link.enc")).unwrap();
+        fs::create_dir(directory.path().join("directory.enc")).unwrap();
+        assert_eq!(list_vaults_in(directory.path()).unwrap(), vec!["vault.enc"]);
         assert!(lookup_vault_in(directory.path(), &mut session(42), Some("link.enc")).is_err());
     }
-
     #[test]
     fn rekey_process_crash_helper() {
-        let Ok(key_path) = std::env::var("PM_TEST_REKEY_CRASH_KEY") else {
+        let Ok(directory) = std::env::var("PM_TEST_REKEY_CRASH_DATA") else {
             return;
         };
-        let fault: u8 = std::env::var("PM_TEST_REKEY_CRASH_STAGE")
+        let key_path = std::env::var("PM_TEST_REKEY_CRASH_KEY").unwrap();
+        let fault = std::env::var("PM_TEST_REKEY_CRASH_STAGE")
             .unwrap()
             .parse()
             .unwrap();
-        let (mut vault, mut info) = {
-            let mut key = session(42);
-            let (_, vault) = lookup_vault(&mut key, Some("crash.enc")).unwrap().unwrap();
-            (
-                vault,
-                VaultCredentials {
-                    locked: false,
-                    keypass: Some(key),
-                },
-            )
+        let (_, mut vault) =
+            lookup_vault_in(Path::new(&directory), &mut session(42), Some("vault.enc"))
+                .unwrap()
+                .unwrap();
+        let mut credentials = VaultCredentials {
+            locked: false,
+            keypass: Some(session(42)),
         };
         with_write_fault(fault, || {
-            vault.rekey(&mut info, PasswordType::Key(key_path))
+            vault.rekey(&mut credentials, PasswordType::Key(key_path))
         })
         .unwrap();
         panic!("crash injection did not exit");
     }
-
     #[test]
-    fn abrupt_process_exit_during_rekey_leaves_a_complete_old_or_new_vault() {
+    fn abrupt_process_exit_during_rekey_leaves_one_complete_old_or_new_document() {
         for (fault, code) in [(3, 71), (4, 72)] {
-            let directory = tempfile::tempdir().unwrap();
-            let data = directory.path().join("data");
-            fs::create_dir(&data).unwrap();
+            let (directory, vault, _) = stored();
+            let original = fs::read(directory.path().join("vault.enc")).unwrap();
             let key_path = directory.path().join("replacement.key");
-            let vault = Vault {
-                entries: vec![VaultEntry {
-                    id: 1,
-                    password: "synthetic-secret".into(),
-                    ..Default::default()
-                }],
-                metadata: VaultMetadata {
-                    filename: "crash.enc".into(),
-                    duo_session: None,
-                },
-                recovery: RecoveryData::default(),
-            };
-            let ciphertext =
-                try_encrypt_file_in_place(&mut session(42), rmp_serde::to_vec(&vault).unwrap())
-                    .unwrap();
-            fs::write(data.join("crash.enc"), &ciphertext).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "vault::persistence::tests::rekey_process_crash_helper",
                 ])
-                .env(crate::file::DATA_DIR_ENV, &data)
+                .env("PM_TEST_REKEY_CRASH_DATA", directory.path())
                 .env("PM_TEST_REKEY_CRASH_KEY", &key_path)
                 .env("PM_TEST_REKEY_CRASH_STAGE", fault.to_string())
                 .output()
@@ -894,21 +953,37 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(list_vaults_in(&data).unwrap(), ["crash.enc"]);
-            let mut old_key = session(42);
-            let mut new_key = PasswordType::Key(key_path.display().to_string());
+            assert_eq!(list_vaults_in(directory.path()).unwrap(), vec!["vault.enc"]);
             let reopened = if fault == 3 {
-                assert_eq!(fs::read(data.join("crash.enc")).unwrap(), ciphertext);
-                assert!(lookup_vault_in(&data, &mut new_key, Some("crash.enc")).is_err());
-                lookup_vault_in(&data, &mut old_key, Some("crash.enc"))
+                assert_eq!(
+                    fs::read(directory.path().join("vault.enc")).unwrap(),
+                    original
+                );
+                assert!(
+                    lookup_vault_in(
+                        directory.path(),
+                        &mut PasswordType::Key(key_path.display().to_string()),
+                        Some("vault.enc")
+                    )
+                    .is_err()
+                );
+                lookup_vault_in(directory.path(), &mut session(42), Some("vault.enc"))
             } else {
-                assert!(lookup_vault_in(&data, &mut old_key, Some("crash.enc")).is_err());
-                lookup_vault_in(&data, &mut new_key, Some("crash.enc"))
-            }
-            .unwrap()
-            .unwrap()
-            .1;
-            assert_eq!(reopened.entries, vault.entries);
+                assert!(
+                    lookup_vault_in(directory.path(), &mut session(42), Some("vault.enc")).is_err()
+                );
+                lookup_vault_in(
+                    directory.path(),
+                    &mut PasswordType::Key(key_path.display().to_string()),
+                    Some("vault.enc"),
+                )
+            };
+            let reopened = reopened.unwrap().unwrap().1;
+            assert_eq!(reopened.data.items, vault.data.items);
+            assert_eq!(
+                reopened.data.revision,
+                vault.data.revision + u64::from(fault == 4)
+            );
         }
     }
 }

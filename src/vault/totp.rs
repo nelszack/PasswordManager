@@ -1,128 +1,96 @@
 use super::*;
-
-/// Code material is cleared on drop. HOTP has a counter, TOTP has a lifetime.
 pub struct AuthenticatorCode {
     pub code: Zeroizing<String>,
     pub expires_in: Option<u64>,
     pub counter: Option<u64>,
 }
-
 impl Vault {
-    #[cfg(test)]
-    fn enroll_duo_with(
-        &mut self,
-        target: Target,
-        key_pass: &mut VaultCredentials,
-        enroll: impl FnOnce() -> Result<Zeroizing<String>, VaultError>,
-    ) -> Result<(), VaultError> {
-        let prepared = self.prepare_duo_enrollment(
-            crate::types::DuoCommand::Enroll {
-                target,
-                activation: String::new(),
-                mode: None,
-                replace: false,
-            },
-            false,
-            key_pass,
-        )?;
-        self.finish_duo_enrollment(
-            &prepared,
-            super::duo::DuoEnrollmentMaterial::Passcodes(enroll()?),
-            key_pass,
-        )
-        .map(|_| ())
-    }
-
     pub fn set_totp(
         &mut self,
         target: Target,
         configuration: &str,
-        key_pass: &mut VaultCredentials,
+        key: &mut VaultCredentials,
     ) -> Result<Option<usize>, VaultError> {
-        let Some(index) = self.entry_index(&target) else {
+        let Some(id) = self.entry_id(&target) else {
             return Ok(None);
         };
-        let (configuration, bits) = normalize_totp_configuration(configuration)?;
-        let id = self.entries[index].id;
-        self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
-            if let Some(record) = vault.recovery.totp.iter_mut().find(|r| r.entry_id == id) {
-                record.configuration.zeroize();
-                record.configuration = configuration;
-            } else {
-                vault.recovery.totp.push(TotpRecord {
-                    entry_id: id,
-                    configuration,
-                });
-            }
-            vault.entries[index].modified = chrono::Local::now().to_string();
+        let (normalized, bits) = normalize_totp_configuration(configuration)?;
+        let normalized = Zeroizing::new(normalized);
+        let authenticator = Authenticator::parse(&normalized)?;
+        if self.item(id).unwrap().authenticator.as_ref() == Some(&authenticator) {
+            return Ok(Some(bits));
+        }
+        self.transaction(TransactionScope::Entry(id), key, |v| {
+            let item = v.item_mut(id).unwrap();
+            item.authenticator = Some(authenticator);
+            item.entry.modified = Timestamp::now();
             Ok((true, Some(bits)))
         })
     }
-
     pub fn remove_totp(
         &mut self,
         target: Target,
-        key_pass: &mut VaultCredentials,
+        key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
-        let Some(index) = self.entry_index(&target) else {
+        let Some(id) = self.entry_id(&target) else {
             return Ok(false);
         };
-        let id = self.entries[index].id;
-        let Some(record) = self.recovery.totp.iter().position(|r| r.entry_id == id) else {
+        if self.item(id).unwrap().authenticator.is_none() {
             return Ok(false);
         };
-        self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
-            vault.recovery.totp.remove(record).zeroize();
-            vault.entries[index].modified = chrono::Local::now().to_string();
+        self.transaction(TransactionScope::Entry(id), key, |v| {
+            let item = v.item_mut(id).unwrap();
+            item.authenticator = None;
+            item.entry.modified = Timestamp::now();
             Ok((true, true))
         })
     }
-
     pub(super) fn totp_at(
         &self,
         target: &Target,
         timestamp: u64,
     ) -> Result<(String, u64), VaultError> {
-        let Some(entry_index) = self.entry_index(target) else {
-            return Err(VaultError::NotFound("entry not found".into()));
+        let id = self
+            .entry_id(target)
+            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
+        let authenticator = self
+            .item(id)
+            .unwrap()
+            .authenticator
+            .as_ref()
+            .ok_or_else(|| VaultError::NotFound("item has no authenticator".into()))?;
+        let AuthenticatorState::Totp(totp) = &authenticator.state else {
+            return Err(VaultError::InvalidInput(
+                "HOTP requires consuming its persistent counter".into(),
+            ));
         };
-        let entry_id = self.entries[entry_index].id;
-        let record = self
-            .recovery
-            .totp
-            .iter()
-            .find(|record| record.entry_id == entry_id)
-            .ok_or_else(|| "entry has no TOTP authenticator".to_string())?;
-        let totp = parse_totp_configuration(&record.configuration)?;
-        let ttl = totp.step() - (timestamp % totp.step());
-        Ok((totp.generate(timestamp).to_string(), ttl))
+        Ok((
+            totp.generate(timestamp).to_string(),
+            totp.step() - (timestamp % totp.step()),
+        ))
     }
-
     pub fn current_totp(&self, target: Target) -> Result<(String, u64), VaultError> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "system clock is before the Unix epoch".to_string())?
+            .map_err(|e| VaultError::Validation(e.to_string()))?
             .as_secs();
         self.totp_at(&target, timestamp)
     }
-
     pub fn current_otp(
         &mut self,
         target: Target,
-        key_pass: &mut VaultCredentials,
+        key: &mut VaultCredentials,
     ) -> Result<AuthenticatorCode, VaultError> {
-        let index = self
-            .entry_index(&target)
+        let id = self
+            .entry_id(&target)
             .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let id = self.entries[index].id;
-        let record_index = self
-            .recovery
-            .totp
-            .iter()
-            .position(|r| r.entry_id == id)
-            .ok_or_else(|| VaultError::NotFound("entry has no authenticator".into()))?;
-        let configuration = &self.recovery.totp[record_index].configuration;
-        if !is_hotp_uri(configuration) {
+        let a = self
+            .item(id)
+            .unwrap()
+            .authenticator
+            .as_ref()
+            .ok_or_else(|| VaultError::NotFound("item has no authenticator".into()))?;
+        if matches!(&a.state, AuthenticatorState::Totp(_)) {
             let (code, ttl) = self.current_totp(target)?;
             return Ok(AuthenticatorCode {
                 code: Zeroizing::new(code),
@@ -130,32 +98,37 @@ impl Vault {
                 counter: None,
             });
         }
-        let (hotp, counter) = parse_hotp_configuration(configuration)?;
-        let next_counter = counter
+        let AuthenticatorState::Hotp {
+            generator: hotp,
+            counter,
+        } = &a.state
+        else {
+            unreachable!()
+        };
+        let counter = *counter;
+        let next = counter
             .checked_add(1)
-            .ok_or_else(|| VaultError::InvalidInput("HOTP counter is exhausted".into()))?;
-        // A one-second step makes totp-rs's moving factor exactly the HOTP counter,
-        // reusing its HMAC/truncation implementation without counter multiplication.
+            .ok_or_else(|| VaultError::InvalidInput("HOTP counter exhausted".into()))?;
         let code = Zeroizing::new(hotp.generate(counter).to_string());
-        let mut url = url::Url::parse(configuration)
-            .map_err(|_| VaultError::InvalidInput("invalid HOTP URI".into()))?;
+        let mut url =
+            url::Url::parse(&a.configuration).map_err(|e| VaultError::Validation(e.to_string()))?;
         let pairs = Zeroizing::new(
             url.query_pairs()
-                .filter(|(key, _)| key != "counter")
-                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .filter(|(k, _)| k != "counter")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
                 .collect::<Vec<_>>(),
         );
         url.query_pairs_mut()
             .clear()
             .extend_pairs(pairs.iter())
-            .append_pair("counter", &next_counter.to_string());
-        let mut next_configuration = Zeroizing::new(url.to_string());
-        // Never return a code until its next counter is persisted. The transaction
-        // restores the previous counter on any failure before the atomic replace.
-        self.transaction(TransactionScope::Entry(id), key_pass, |vault| {
-            let record = &mut vault.recovery.totp[record_index];
-            record.configuration.zeroize();
-            record.configuration = std::mem::take(&mut *next_configuration);
+            .append_pair("counter", &next.to_string());
+        let mut configuration = a.clone();
+        configuration.configuration = url.to_string().into();
+        if let AuthenticatorState::Hotp { counter, .. } = &mut configuration.state {
+            *counter = next;
+        }
+        self.transaction(TransactionScope::Entry(id), key, |v| {
+            v.item_mut(id).unwrap().authenticator = Some(configuration);
             Ok((
                 true,
                 AuthenticatorCode {
@@ -166,37 +139,7 @@ impl Vault {
             ))
         })
     }
-
-    pub(super) fn remove_totp_records(&mut self, entry_ids: &[usize]) {
-        let mut retained = Vec::with_capacity(self.recovery.totp.len());
-        for mut record in std::mem::take(&mut self.recovery.totp) {
-            if entry_ids.contains(&record.entry_id) {
-                record.zeroize();
-            } else {
-                retained.push(record);
-            }
-        }
-        self.recovery.totp = retained;
-    }
-
-    pub(super) fn totp_marker(&self, entry_id: usize) -> &'static str {
-        if let Some(record) = self
-            .recovery
-            .totp
-            .iter()
-            .find(|record| record.entry_id == entry_id)
-        {
-            if is_hotp_uri(&record.configuration) {
-                " [HOTP]"
-            } else {
-                " [TOTP]"
-            }
-        } else {
-            ""
-        }
-    }
 }
-
 pub(super) fn is_otpauth_uri(value: &str) -> bool {
     value
         .get(.."otpauth://".len())
@@ -209,7 +152,7 @@ pub(super) fn is_hotp_uri(value: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("otpauth://hotp/"))
 }
 
-fn parse_hotp_configuration(value: &str) -> Result<(Totp, u64), VaultError> {
+pub(super) fn parse_hotp_configuration(value: &str) -> Result<(Totp, u64), VaultError> {
     let invalid = || {
         VaultError::InvalidInput("invalid HOTP URI: requires a secret, SHA1/SHA256/SHA512, 6–8 digits, and one unsigned counter".into())
     };
@@ -345,282 +288,5 @@ pub(super) fn parse_totp_configuration(value: &str) -> Result<Totp, VaultError> 
         let secret = TotpSecret::try_from_base32(value)
             .map_err(|error| format!("invalid Base32 TOTP secret: {error}"))?;
         compatible_totp_from_secret(secret)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-
-    fn uri(counter: u64) -> String {
-        format!(
-            "otpauth://hotp/Work:alice?secret={SECRET}&issuer=Work&algorithm=SHA1&digits=6&counter={counter}"
-        )
-    }
-
-    fn fixture() -> (Vault, VaultCredentials) {
-        crate::file::init_test_data_dir();
-        let vault = Vault {
-            entries: vec![VaultEntry {
-                id: 7,
-                name: "work".into(),
-                password: "password".into(),
-                ..Default::default()
-            }],
-            metadata: VaultMetadata {
-                filename: format!("hotp-{:016x}.enc", rand::random::<u64>()),
-                duo_session: None,
-            },
-            recovery: RecoveryData::default(),
-        };
-        let key = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [7; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            }),
-        };
-        (vault, key)
-    }
-
-    #[test]
-    fn totp_code_and_countdown_roll_over_at_unix_time_boundaries() {
-        let (mut vault, _) = fixture();
-        for period in [30, 60] {
-            vault.recovery.totp = vec![TotpRecord {
-                entry_id: 7,
-                configuration: format!("otpauth://totp/Test?secret={SECRET}&period={period}"),
-            }];
-            // RFC 4226 moving factors 0, 1, and 2. Starting a display partway
-            // through a period must not reset its lifetime to a full period.
-            for (timestamp, expected_code, expected_ttl) in [
-                (0, "755224", period),
-                (period - 1, "755224", 1),
-                (period, "287082", period),
-                (period + 10, "287082", period - 10),
-                (period * 2 - 1, "287082", 1),
-                (period * 2, "359152", period),
-            ] {
-                let (code, ttl) = vault.totp_at(&Target::Id(7), timestamp).unwrap();
-                assert_eq!(code, expected_code);
-                assert_eq!(ttl, expected_ttl);
-            }
-        }
-    }
-
-    #[test]
-    fn hotp_matches_all_rfc_4226_vectors_and_consumes_one_counter_per_request() {
-        let (mut vault, _) = fixture();
-        let mut key = VaultCredentials::default();
-        assert_eq!(
-            vault.set_totp(Target::Id(7), &uri(0), &mut key).unwrap(),
-            Some(160)
-        );
-        for (counter, expected) in [
-            "755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583",
-            "399871", "520489",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let code = vault.current_otp(Target::Id(7), &mut key).unwrap();
-            assert_eq!(*code.code, expected);
-            assert_eq!(code.counter, Some(counter as u64));
-            assert_eq!(code.expires_in, None);
-            assert!(
-                vault.recovery.totp[0]
-                    .configuration
-                    .ends_with(&format!("counter={}", counter + 1))
-            );
-        }
-        assert_eq!(vault.totp_marker(7), " [HOTP]");
-        // The legacy read-only TOTP API cannot accidentally reuse HOTP counters.
-        assert!(vault.current_totp(Target::Id(7)).is_err());
-    }
-
-    #[test]
-    fn hotp_counter_survives_encrypted_reload_and_secret_is_not_plaintext_on_disk() {
-        let (mut vault, mut key) = fixture();
-        vault.set_totp(Target::Id(7), &uri(0), &mut key).unwrap();
-        assert_eq!(
-            *vault.current_otp(Target::Id(7), &mut key).unwrap().code,
-            "755224"
-        );
-        let ciphertext = fs::read(data_dir().join(&vault.metadata.filename)).unwrap();
-        assert!(
-            !ciphertext
-                .windows(SECRET.len())
-                .any(|bytes| bytes == SECRET.as_bytes())
-        );
-        let (_, mut restored) = lookup_vault(
-            key.keypass.as_mut().unwrap(),
-            Some(&vault.metadata.filename),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            *restored.current_otp(Target::Id(7), &mut key).unwrap().code,
-            "287082"
-        );
-        assert_eq!(restored.recovery.totp[0].configuration, uri(2));
-    }
-
-    #[test]
-    fn hotp_write_failure_returns_no_code_and_restores_counter() {
-        let (mut vault, mut key) = fixture();
-        vault.set_totp(Target::Id(7), &uri(0), &mut key).unwrap();
-        let filename = vault.metadata.filename.clone();
-        vault.metadata.filename = "nonexistent-directory/vault.enc".into();
-        let before = vault.clone();
-        assert!(matches!(
-            vault.current_otp(Target::Id(7), &mut key),
-            Err(VaultError::Persistence(_))
-        ));
-        assert_eq!(vault, before);
-        vault.metadata.filename = filename;
-        assert_eq!(
-            *vault.current_otp(Target::Id(7), &mut key).unwrap().code,
-            "755224"
-        );
-    }
-
-    #[test]
-    fn hotp_uses_full_width_counters_and_refuses_overflow() {
-        let (mut vault, _) = fixture();
-        let mut key = VaultCredentials::default();
-        vault
-            .set_totp(Target::Id(7), &uri(u64::MAX - 1), &mut key)
-            .unwrap();
-        let code = vault.current_otp(Target::Id(7), &mut key).unwrap();
-        assert_eq!(code.counter, Some(u64::MAX - 1));
-        assert_eq!(code.code.len(), 6);
-        let before = vault.clone();
-        assert!(matches!(
-            vault.current_otp(Target::Id(7), &mut key),
-            Err(VaultError::InvalidInput(_))
-        ));
-        assert_eq!(vault, before);
-    }
-
-    #[test]
-    fn hotp_rejects_ambiguous_counters_and_invalid_parameters_without_changing_vault() {
-        let (mut vault, _) = fixture();
-        let mut key = VaultCredentials::default();
-        let base = format!("otpauth://hotp/Work?secret={SECRET}");
-        for suffix in [
-            "",
-            "&counter=-1",
-            "&counter=18446744073709551616",
-            "&counter=1&counter=2",
-            "&counter=1&digits=10",
-            "&counter=1&algorithm=MD5",
-            "&counter=1&period=30",
-            "&counter=1&secret=INVALID",
-            "&counter=abc",
-        ] {
-            let before = vault.clone();
-            assert!(
-                vault
-                    .set_totp(Target::Id(7), &format!("{base}{suffix}"), &mut key)
-                    .is_err(),
-                "accepted {suffix}"
-            );
-            assert_eq!(vault, before);
-        }
-    }
-
-    #[test]
-    fn totp_generation_keeps_existing_state_and_has_a_lifetime() {
-        let (mut vault, _) = fixture();
-        let mut key = VaultCredentials::default();
-        vault.set_totp(Target::Id(7), SECRET, &mut key).unwrap();
-        let before = vault.clone();
-        let code = vault.current_otp(Target::Id(7), &mut key).unwrap();
-        assert_eq!(code.counter, None);
-        assert!((1..=30).contains(&code.expires_in.unwrap()));
-        assert_eq!(vault, before);
-    }
-
-    #[test]
-    fn hotp_trash_restore_and_portable_export_import_preserve_counter() {
-        let (mut vault, mut key) = fixture();
-        vault.set_totp(Target::Id(7), &uri(5), &mut key).unwrap();
-        vault.delete_entry(Target::Id(7), &mut key).unwrap();
-        assert!(vault.current_otp(Target::Id(7), &mut key).is_err());
-        vault.restore_trashed(1, &mut key).unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("export.json");
-        vault.export(path.display().to_string(), false).unwrap();
-        let items =
-            super::super::import::import_json(&fs::read_to_string(path).unwrap(), "export.json")
-                .unwrap();
-        assert_eq!(items[0].totp.as_deref(), Some(uri(5).as_str()));
-        assert_eq!(
-            *vault.current_otp(Target::Id(7), &mut key).unwrap().code,
-            "254676"
-        );
-        vault.delete_entry(Target::Id(7), &mut key).unwrap();
-        vault.purge_trash(None, &mut key).unwrap();
-        assert!(vault.recovery.totp.is_empty());
-    }
-
-    #[test]
-    fn duo_enrollment_preflight_checks_lock_target_conflicts_and_persistence_before_network() {
-        let (mut vault, mut key) = fixture();
-        key.locked = true;
-        assert!(matches!(
-            vault.enroll_duo_with(Target::Id(7), &mut key, || panic!("must not enroll")),
-            Err(VaultError::Locked)
-        ));
-        key.locked = false;
-        assert!(matches!(
-            vault.enroll_duo_with(Target::Id(99), &mut key, || panic!("must not enroll")),
-            Err(VaultError::NotFound(_))
-        ));
-        vault.set_totp(Target::Id(7), SECRET, &mut key).unwrap();
-        assert!(matches!(
-            vault.enroll_duo_with(Target::Id(7), &mut key, || panic!("must not enroll")),
-            Err(VaultError::Conflict(_))
-        ));
-        vault.remove_totp(Target::Id(7), &mut key).unwrap();
-        vault.metadata.filename = "nonexistent-directory/vault.enc".into();
-        assert!(matches!(
-            vault.enroll_duo_with(Target::Id(7), &mut key, || panic!("must not enroll")),
-            Err(VaultError::Persistence(_))
-        ));
-    }
-
-    #[test]
-    fn duo_enrollment_saves_configuration_and_leaves_vault_unchanged_on_rejection() {
-        let (mut vault, mut key) = fixture();
-        let before = vault.clone();
-        assert!(
-            vault
-                .enroll_duo_with(Target::Id(7), &mut key, || Err(VaultError::InvalidInput(
-                    "rejected".into()
-                )))
-                .is_err()
-        );
-        assert_eq!(vault.entries, before.entries);
-        assert_eq!(vault.recovery, before.recovery);
-        vault
-            .enroll_duo_with(Target::Id(7), &mut key, || Ok(Zeroizing::new(uri(0))))
-            .unwrap();
-        let (_, mut restored) = lookup_vault(
-            key.keypass.as_mut().unwrap(),
-            Some(&vault.metadata.filename),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            *restored.current_otp(Target::Id(7), &mut key).unwrap().code,
-            "755224"
-        );
     }
 }

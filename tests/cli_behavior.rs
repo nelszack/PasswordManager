@@ -441,7 +441,7 @@ fn running_native_host_does_not_lock_the_build_executable() {
     });
     // Wait for a response so the host is definitely running, then keep its
     // stdin open to reproduce the browser's persistent native connection.
-    let request = br#"{"id":1,"action":"unsupported"}"#;
+    let request = br#"{"id":1,"action":"status"}"#;
     let sent = child
         .stdin
         .as_mut()
@@ -577,20 +577,28 @@ fn file_commands_resolve_client_paths_and_preserve_application_files() {
     assert_protected_output_destinations(root.path(), port, &key);
     assert!(run(root.path(), port, &["lock"]).status.success());
     let restored = from_client(&[
+        "--json",
         "backup",
         "restore",
         "--path",
         "vault.pmbackup",
         "--key",
         key.to_str().unwrap(),
-        "--force",
     ]);
     assert!(restored.status.success(), "{restored:?}");
+    let receipt: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let restored_id = receipt["data"]["vaultFile"].as_str().unwrap();
     assert!(
         run(
             root.path(),
             port,
-            &["unlock", "--key", key.to_str().unwrap()]
+            &[
+                "unlock",
+                "--vault-file",
+                restored_id,
+                "--key",
+                key.to_str().unwrap()
+            ]
         )
         .status
         .success()
@@ -838,10 +846,9 @@ fn config_and_completion_commands_persist_in_an_isolated_home() {
         .unwrap();
     assert!(displayed.status.success());
     let json: serde_json::Value = serde_json::from_slice(&displayed.stdout).unwrap();
-    let output = json["output"].as_str().unwrap();
-    assert!(output.contains("length = 24"));
-    assert!(output.contains("copy = false"));
-    assert!(output.contains("port = 49123"));
+    assert_eq!(json["data"]["genpass"]["length"], 24);
+    assert_eq!(json["data"]["genpass"]["copy"], false);
+    assert_eq!(json["data"]["server"]["port"], 49123);
 
     let completion = root.path().join("pm.bash");
     let generated = isolated_pm(root.path())
@@ -915,7 +922,7 @@ fn machine_readable_secrets_preserve_whitespace_empty_values_and_unicode() {
             let structured = run(root.path(), port, &args);
             assert!(structured.status.success());
             let data: serde_json::Value = serde_json::from_slice(&structured.stdout).unwrap();
-            assert_eq!(data["output"], *secret);
+            assert_eq!(data["data"], *secret);
         }
     }
 }
@@ -1024,7 +1031,11 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
                 if json {
                     let value: serde_json::Value = serde_json::from_str(line).unwrap();
                     assert_eq!(value["ok"], true);
-                    value["output"].as_str().unwrap().to_string()
+                    format!(
+                        "TOTP: {} ({}s remaining)",
+                        value["data"]["code"].as_str().unwrap(),
+                        value["data"]["expires_in"].as_u64().unwrap()
+                    )
                 } else {
                     assert!(!line.contains('\x1b'));
                     line.to_string()
@@ -1148,6 +1159,20 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         String::from_utf8_lossy(&updated.stderr)
     );
 
+    let history = run(
+        root.path(),
+        port,
+        &["--json", "history", "--entry-name", "example"],
+    );
+    assert!(history.status.success());
+    let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(history["ok"], true);
+    assert_eq!(history["data"]["history"].as_array().unwrap().len(), 1);
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(history["data"]["history"][0].as_str().unwrap())
+            .is_ok()
+    );
+
     let json_export = root.path().join("vault.json");
     let csv_export = root.path().join("vault.csv");
     for path in [&json_export, &csv_export] {
@@ -1184,6 +1209,16 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
             .success()
     );
     assert!(run(root.path(), port, &["trash"]).status.success());
+    let trash = run(root.path(), port, &["--json", "trash"]);
+    assert!(trash.status.success());
+    let trash: serde_json::Value = serde_json::from_slice(&trash.stdout).unwrap();
+    assert_eq!(trash["ok"], true);
+    assert_eq!(trash["data"]["trash"].as_array().unwrap().len(), 1);
+    assert_eq!(trash["data"]["trash"][0]["id"], 1);
+    assert_eq!(trash["data"]["trash"][0]["name"], "example");
+    assert_eq!(trash["data"]["trash"][0]["kind"], "login");
+    assert!(trash["data"]["trash"][0].get("password").is_none());
+    assert!(trash["data"]["trash"][0].get("notes").is_none());
 
     let imported = isolated_pm(root.path())
         .args(["--port", &port.to_string(), "import", "--path"])
@@ -1236,16 +1271,14 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         );
         let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(
-            output["output"]
-                .as_str()
-                .unwrap()
+            output["data"]
+                .to_string()
                 .contains("synthetic-custom-secret"),
             visible
         );
         assert!(
-            !output["output"]
-                .as_str()
-                .unwrap()
+            !output["data"]
+                .to_string()
                 .contains(&String::from_utf8_lossy(&secret.stdout).to_string())
         );
     }
@@ -1294,16 +1327,30 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
 
     assert!(run(root.path(), port, &["lock"]).status.success());
     let restored = isolated_pm(root.path())
-        .args(["--port", &port.to_string(), "backup", "restore", "--path"])
+        .args([
+            "--json",
+            "--port",
+            &port.to_string(),
+            "backup",
+            "restore",
+            "--path",
+        ])
         .arg(&backup)
         .arg("--key")
         .arg(&key)
-        .arg("--force")
         .output_timeout("pm backup restore");
     assert!(restored.status.success());
-
+    let receipt: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let restored_id = receipt["data"]["vaultFile"].as_str().unwrap();
     let unlocked = isolated_pm(root.path())
-        .args(["--port", &port.to_string(), "unlock", "--key"])
+        .args([
+            "--port",
+            &port.to_string(),
+            "unlock",
+            "--vault-file",
+            restored_id,
+            "--key",
+        ])
         .arg(&key)
         .args(["--timeout", "0"])
         .output_timeout("pm unlock restored backup");
@@ -1330,6 +1377,93 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
 }
 
 #[test]
+fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    assert!(run(root.path(), port, &["start"]).status.success());
+    let _guard = ServerGuard {
+        root: root.path().into(),
+        port,
+        active: true,
+    };
+    let keys: Vec<_> = (0..3)
+        .map(|i| root.path().join(format!("vault-{i}.key")))
+        .collect();
+    let mut ids = Vec::new();
+    for key in &keys {
+        assert!(
+            run(root.path(), port, &["new", "--key", key.to_str().unwrap()])
+                .status
+                .success()
+        );
+        let listed = run(root.path(), port, &["--json", "vaults"]);
+        let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        let added = listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|id| !ids.iter().any(|saved: &String| saved == id))
+            .unwrap()
+            .to_owned();
+        ids.push(added);
+    }
+    assert!(
+        run(root.path(), port, &["config", "--default-vault", &ids[0]])
+            .status
+            .success()
+    );
+    // Explicit selection overrides the default, and authentication cannot select
+    // a different vault or remove its key file on failure.
+    let wrong_key = run(
+        root.path(),
+        port,
+        &[
+            "delete",
+            "--vault",
+            "--vault-file",
+            &ids[1],
+            "--key",
+            keys[0].to_str().unwrap(),
+        ],
+    );
+    assert!(!wrong_key.status.success());
+    assert!(keys.iter().all(|key| key.is_file()));
+    assert!(
+        ids.iter()
+            .all(|id| root.path().join("data").join(id).is_file())
+    );
+    let deleted = run(
+        root.path(),
+        port,
+        &[
+            "delete",
+            "--vault",
+            "--vault-file",
+            &ids[1],
+            "--key",
+            keys[1].to_str().unwrap(),
+            "--keep-key",
+        ],
+    );
+    assert!(deleted.status.success(), "{deleted:?}");
+    assert!(keys[1].is_file());
+    assert!(!root.path().join("data").join(&ids[1]).exists());
+    assert!(root.path().join("data").join(&ids[0]).is_file());
+    // The configured default still selects the right file with two vaults left.
+    let deleted = run(
+        root.path(),
+        port,
+        &["delete", "--vault", "--key", keys[0].to_str().unwrap()],
+    );
+    assert!(deleted.status.success(), "{deleted:?}");
+    assert!(!keys[0].exists());
+    assert!(!root.path().join("data").join(&ids[0]).exists());
+    assert!(root.path().join("data").join(&ids[2]).is_file());
+    assert!(keys[2].is_file());
+}
+
+#[test]
 fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
@@ -1341,8 +1475,8 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
         .output_timeout("pm vaults before server startup");
     assert!(initial.status.success());
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&initial.stdout).unwrap()["output"],
-        ""
+        serde_json::from_slice::<serde_json::Value>(&initial.stdout).unwrap()["data"],
+        serde_json::json!([])
     );
 
     assert!(run(root.path(), port, &["start"]).status.success());
@@ -1357,7 +1491,7 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
             .success()
     );
     let listed = run(root.path(), port, &["--json", "vaults"]);
-    let first_id = serde_json::from_slice::<serde_json::Value>(&listed.stdout).unwrap()["output"]
+    let first_id = serde_json::from_slice::<serde_json::Value>(&listed.stdout).unwrap()["data"][0]
         .as_str()
         .unwrap()
         .to_owned();
@@ -1460,6 +1594,23 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
     );
     assert_eq!(damaged.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&damaged.stderr).contains("truncated encrypted vault header"));
+    let vaults = run(root.path(), port, &["--json", "vaults"]);
+    let vaults: serde_json::Value = serde_json::from_slice(&vaults.stdout).unwrap();
+    let second_id = vaults["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|id| *id != first_id)
+        .unwrap();
+    let ambiguous = run(root.path(), port, &["unlock", "--key", &second_key]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("select a vault ID"));
+    assert!(
+        run(root.path(), port, &["config", "--default-vault", second_id])
+            .status
+            .success()
+    );
     assert!(
         run(root.path(), port, &["unlock", "--key", &second_key])
             .status

@@ -1,12 +1,30 @@
 use super::*;
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserLogin {
+    pub id: usize,
+    pub revision: u64,
+    pub name: String,
+    pub username: Option<String>,
+    pub password: SecretString,
+    pub has_totp: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutofillItem {
+    pub id: usize,
+    pub revision: u64,
+    pub name: String,
+    pub kind: ItemKind,
+    pub username: Option<String>,
+    pub primary_secret: SecretString,
+    pub custom_fields: Vec<CustomField>,
+}
 impl Vault {
-    pub(crate) fn browser_duo_items_json(&self, origin: &str) -> String {
+    pub fn browser_duo_items(&self, origin: &str) -> Vec<ItemSummary> {
         let Ok(url) = url::Url::parse(origin) else {
-            return "[]".into();
+            return vec![];
         };
         let Some(host) = url.host_str() else {
-            return "[]".into();
+            return vec![];
         };
         if url.scheme() != "https"
             || url.port_or_known_default() != Some(443)
@@ -14,177 +32,62 @@ impl Vault {
             || url.password().is_some()
             || !crate::duo::valid_host(host, "api-")
         {
-            return "[]".into();
+            return vec![];
         }
-        // A Duo-hosted challenge may follow an SSO login with a different saved
-        // account. Match its exact issuer without releasing device credentials.
-        let ids: HashSet<_> = self
-            .recovery
-            .duo
-            .iter()
-            .filter(|record| record.credentials.host.eq_ignore_ascii_case(host))
-            .map(|record| record.entry_id)
-            .collect();
-        let items: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|entry| ids.contains(&entry.id))
-            .map(|entry| json!({"id": entry.id, "name": entry.name, "has_duo": true}))
-            .collect();
-        serde_json::to_string(&items).expect("Duo summaries are serializable")
+        self.active_items()
+            .filter(|i| {
+                i.duo
+                    .as_ref()
+                    .is_some_and(|d| d.credentials.host.eq_ignore_ascii_case(host))
+            })
+            .map(|i| self.summary(i))
+            .collect()
     }
-
-    pub(crate) fn browser_logins_json(&self, domain: &str) -> String {
+    pub fn browser_logins(&self, domain: &str) -> Vec<ItemSummary> {
         let Some(requested) = parse_site(domain, false) else {
-            return "[]".into();
+            return vec![];
         };
-        let metadata_by_id: HashMap<_, _> = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .map(|record| (record.entry_id, record))
-            .collect();
-        let totp_ids: HashSet<_> = self
-            .recovery
-            .totp
-            .iter()
-            .map(|record| record.entry_id)
-            .collect();
-        let duo_ids: HashSet<_> = self
-            .recovery
-            .duo
-            .iter()
-            .map(|record| record.entry_id)
-            .collect();
-        let items = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                login_matches_site(entry, metadata_by_id.get(&entry.id).copied(), &requested)
-            })
-            .map(|entry| {
-                json!({
-                    "id": entry.id,
-                    "name": entry.name,
-                    "username": entry.username,
-                    "has_totp": totp_ids.contains(&entry.id),
-                    "has_duo": duo_ids.contains(&entry.id),
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::to_string(&items).expect("login summaries are serializable")
+        self.active_items()
+            .filter(|i| login_matches_site(&i.entry, Some(&i.metadata), &requested))
+            .map(|i| self.summary(i))
+            .collect()
     }
-
-    pub(crate) fn browser_login_json(&self, domain: &str, id: usize) -> Option<String> {
+    pub fn browser_login(&self, domain: &str, id: usize) -> Option<BrowserLogin> {
         let requested = parse_site(domain, false)?;
-        let entry = self.entries.iter().find(|entry| entry.id == id)?;
-        let metadata = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .find(|record| record.entry_id == id);
-        if !login_matches_site(entry, metadata, &requested) {
+        let item = self.item(id).filter(|i| i.active())?;
+        if !login_matches_site(&item.entry, Some(&item.metadata), &requested) {
             return None;
         }
-        Some(
-            serde_json::to_string(&BrowserLogin {
-                id: entry.id,
-                name: &entry.name,
-                username: entry.username.as_deref(),
-                password: &entry.password,
-                has_totp: self
-                    .recovery
-                    .totp
-                    .iter()
-                    .any(|record| record.entry_id == id),
-            })
-            .expect("browser login is serializable"),
-        )
+        Some(BrowserLogin {
+            id,
+            revision: item.revision,
+            name: item.entry.name.clone(),
+            username: item.entry.username.clone(),
+            password: item.entry.password.clone(),
+            has_totp: item.authenticator.is_some(),
+        })
     }
-
-    pub(crate) fn browser_autofill_json(&self) -> String {
-        let metadata_by_id: HashMap<_, _> = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .map(|record| (record.entry_id, record))
-            .collect();
-        let items = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let kind = metadata_by_id
-                    .get(&entry.id)
-                    .map_or(ItemKind::Login, |metadata| metadata.kind);
-                matches!(kind, ItemKind::PaymentCard | ItemKind::Identity).then(|| {
-                    json!({
-                        "id": entry.id,
-                        "name": entry.name,
-                        "kind": kind,
-                        "username": entry.username,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::to_string(&items).expect("browser autofill items are serializable")
+    pub fn browser_autofill(&self) -> Vec<ItemSummary> {
+        self.active_items()
+            .filter(|i| matches!(i.metadata.kind, ItemKind::PaymentCard | ItemKind::Identity))
+            .map(|i| self.summary(i))
+            .collect()
     }
-
-    pub(crate) fn browser_autofill_item_json(&self, id: usize) -> Option<String> {
-        let entry = self.entries.iter().find(|entry| entry.id == id)?;
-        let kind = self.item_kind(entry.id);
-        if !matches!(kind, ItemKind::PaymentCard | ItemKind::Identity) {
-            return None;
-        }
-        Some(
-            serde_json::to_string(&AutofillItem {
-                id: entry.id,
-                name: &entry.name,
-                kind,
-                username: entry.username.as_deref(),
-                primary_secret: &entry.password,
-                custom_fields: self.custom_fields(entry.id),
-            })
-            .expect("autofill item is serializable"),
-        )
+    pub fn browser_autofill_item(&self, id: usize) -> Option<AutofillItem> {
+        let item = self.item(id).filter(|i| {
+            i.active() && matches!(i.metadata.kind, ItemKind::PaymentCard | ItemKind::Identity)
+        })?;
+        Some(AutofillItem {
+            id,
+            revision: item.revision,
+            name: item.entry.name.clone(),
+            kind: item.metadata.kind,
+            username: item.entry.username.clone(),
+            primary_secret: item.entry.password.clone(),
+            custom_fields: item.metadata.custom_fields.clone(),
+        })
     }
 }
-
-pub(super) fn url_match_json(
-    entries: &[VaultEntry],
-    totp_records: &[TotpRecord],
-    metadata: &[EntryMetadata],
-    url: &str,
-) -> Option<String> {
-    let requested = parse_site(url, false)?;
-    let metadata_by_id: HashMap<_, _> = metadata
-        .iter()
-        .map(|record| (record.entry_id, record))
-        .collect();
-    let totp_ids: HashSet<_> = totp_records.iter().map(|record| record.entry_id).collect();
-    let mut results = Vec::new();
-    for e in entries {
-        let item_metadata = metadata_by_id.get(&e.id).copied();
-        if item_metadata.is_some_and(|record| record.kind != ItemKind::Login) {
-            continue;
-        }
-        let matches = login_matches_site(e, item_metadata, &requested);
-        if matches {
-            results.push(BrowserLogin {
-                id: e.id,
-                username: Some(e.username.as_deref().unwrap_or("None")),
-                password: &e.password,
-                name: &e.name,
-                has_totp: totp_ids.contains(&e.id),
-            });
-        }
-    }
-    if results.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&results).expect("matching logins are serializable"))
-    }
-}
-
 fn login_matches_site(
     entry: &VaultEntry,
     metadata: Option<&EntryMetadata>,
@@ -278,23 +181,4 @@ fn saved_matches_site(saved_url: &str, requested: &Site) -> bool {
             && requested.host.ends_with(&format!(".{}", saved.host));
     }
     saved.host == requested.host
-}
-
-// Borrow secrets during serialization instead of creating plaintext copies in JSON values.
-#[derive(Serialize)]
-struct BrowserLogin<'a> {
-    id: usize,
-    name: &'a str,
-    username: Option<&'a str>,
-    password: &'a str,
-    has_totp: bool,
-}
-#[derive(Serialize)]
-struct AutofillItem<'a> {
-    id: usize,
-    name: &'a str,
-    kind: ItemKind,
-    username: Option<&'a str>,
-    primary_secret: &'a str,
-    custom_fields: &'a [CustomField],
 }

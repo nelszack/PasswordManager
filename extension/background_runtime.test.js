@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { summary, nativeFields, nativeData } = require("./test_fixtures.cjs");
 
 function loadWorker(context) {
     const execute = name => {
@@ -13,7 +14,7 @@ function loadWorker(context) {
     execute("background.js");
 }
 
-function securityEnvironment() {
+function securityEnvironment({ orphanWindows = [] } = {}) {
     let listener, nativeListener, disconnect;
     let now = Date.now();
     let deliveryError = null;
@@ -21,9 +22,9 @@ function securityEnvironment() {
     let holdLogin = false, heldLoginResponse;
     let holdCredentials = false, heldCredentialResponse;
     let holdSave = false, heldSaveResponse, removedWindowListener;
-    let credentialResponse = { success: true, data: JSON.stringify([
-        { id: 1, name: "Personal", username: "alice", has_totp: true }
-    ]) };
+    let credentialResponse = { success: true, data: [
+        summary()
+    ] };
     const requests = [], deliveries = [], removed = [], created = [], badge = [], responses = new Map();
     const sessionData = {};
     const event = capture => ({ addListener(fn) { capture?.(fn); } });
@@ -44,16 +45,13 @@ function securityEnvironment() {
                     onDisconnect: event(fn => disconnect = fn),
                     postMessage(request) {
                         requests.push(request);
-                        const response = { id: request.id, success: true, nativeVersion: "0.1.0" };
-                        if (request.action === "status") response.data = `Status: ${locked ? "Locked" : "Unlocked"}\nVersion: 0.1.0`;
+                        const response = { id: request.id, protocolVersion: 1, success: true, nativeVersion: "0.1.0" };
+                        if (request.action === "status") response.data = { locked, version: "0.1.0", warning: null };
                         else if (locked) Object.assign(response, { success: false, error: "Vault locked." });
                         else if (request.action === "getLoginItems") Object.assign(response, credentialResponse);
-                        else if (request.action === "getAutofillItems") response.data = JSON.stringify([
-                            { id: 2, name: "Visa", kind: "payment-card" }
-                        ]);
-                        else if (request.action === "getAutofillItem") response.data = JSON.stringify({ id: 2, primary_secret: "synthetic-card" });
-                        else response.data = JSON.stringify({ id: 1, username: "alice", password: "synthetic-secret" });
+                        else response.data = nativeData(request.action);
                         if (responses.has(request.action)) Object.assign(response, responses.get(request.action));
+                        if (request.operationId && response.success) response.operation = { operationId: request.operationId, state: "committed", revision: null };
                         if (holdLogin && request.action === "getLoginItem") heldLoginResponse = response;
                         else if (holdCredentials && request.action === "getLoginItems") heldCredentialResponse = response;
                         else if (holdSave && ["saveCredentials", "updateCredentials"].includes(request.action)) heldSaveResponse = response;
@@ -75,6 +73,7 @@ function securityEnvironment() {
             }
         },
         windows: {
+            getAll(_options, callback) { callback(orphanWindows); },
             create(options, callback) { created.push(options); callback({ id: 42 }); },
             remove(id, callback) { removed.push(id); callback?.(); },
             onRemoved: event(fn => removedWindowListener = fn)
@@ -83,7 +82,7 @@ function securityEnvironment() {
     const context = vm.createContext({
         chrome, URL, TextEncoder, crypto: require("node:crypto").webcrypto,
         Date: class extends Date { static now() { return now; } },
-        setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, queueMicrotask
+        setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, clearInterval() {}, queueMicrotask
     });
     loadWorker(context);
     const sender = { url: origin, tab: { id: 7, url: origin }, frameId: 0, documentId: "original-document" };
@@ -125,7 +124,7 @@ test("vault management cannot be called by websites, content scripts, or other e
             assert.equal(env.requests.length, before);
         }
         const before = env.requests.length;
-        assert.equal((await env.message({ action, entryId: 1 }, manager)).success, true);
+        assert.equal((await env.message({ action, ...nativeFields(action) }, manager)).success, true);
         assert.equal(env.requests.slice(before).filter(request => request.action === action).length, 1);
     }
     assert.equal((await env.message({ action: "managerUnknown" }, manager)).success, false);
@@ -141,80 +140,30 @@ test("background worker starts, publishes status, and rejects untrusted credenti
         { url: "file:///tmp/untrusted.html", tab: { id: 7 } }
     );
     assert.equal(response.success, false);
-    assert.equal(response.error, "Invalid page origin");
+    assert.equal(response.error, "Unsupported extension request");
     assert.equal(env.requests.length, before);
 });
 
 test("pending navigation records use trusted origins and can be consumed only once through the router", async () => {
     const env = securityEnvironment();
-    const stored = await env.message({ action: "setPendingCredentials", pending: { username: "alice", password: "synthetic" } });
+    const stored = await env.message({ action: "setPendingCredentials", pending: { username: "alice" } });
     assert.equal(stored.success, true);
     const consumed = await env.message({ action: "consumePendingCredentials" });
     assert.equal(consumed.pending.domain, "https://shop.example");
     assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
-    await env.message({ action: "setPendingCredentials", pending: { username: "alice", password: "synthetic" } });
+    await env.message({ action: "setPendingCredentials", pending: { username: "alice" } });
     assert.equal((await env.message({ action: "clearPendingCredentials" })).success, true);
     assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
 });
 
-test("page saves use browser sender metadata and expose uncertain outcomes without claiming success", async () => {
+test("obsolete direct writes and iframe relay commands have no extension authority", async () => {
     const env = securityEnvironment();
-    for (const action of ["saveCredentials", "updateCredentials"]) {
-        const invalid = await env.message({ action }, { tab: { id: 7 }, url: "file:///tmp/untrusted" });
-        assert.equal(invalid.success, false);
-        env.setNativeResponse(action, { success: false, error: "Response lost. Review the vault.", uncertain: true });
-        const result = await env.message({ action, domain: "https://forged.example", username: "alice", password: "synthetic", id: 7 });
-        assert.equal(result.success, false);
-        assert.equal(result.uncertain, true);
-        const request = env.requests.findLast(request => request.action === action);
-        assert.equal(request.domain, "https://shop.example");
+    await new Promise(resolve => setImmediate(resolve));
+    const before = env.requests.length;
+    for (const action of ["getCredentials", "saveCredentials", "updateCredentials", "getRelayedCredentials", "saveRelayedCredentials", "updateRelayedCredentials", "relayToParent", "relayLoginResult"]) {
+        assert.equal((await env.message({ action, username: "alice", id: 1 })).success, false);
     }
-});
-
-test("credential relays enforce tab, frame, token, origin, and single-use writes", async () => {
-    for (const action of ["saveRelayedCredentials", "updateRelayedCredentials"]) {
-        const env = securityEnvironment();
-        await new Promise(resolve => setImmediate(resolve));
-        const token = require("node:crypto").randomUUID();
-        const child = { ...env.sender, url: "https://embedded.example/login", frameId: 3 };
-        const relayRequest = { action: "relayToParent", data: {
-            token, domain: "https://embedded.example", username: "alice", password: "synthetic-secret"
-        } };
-        const forged = await env.message({ ...relayRequest, data: {
-            ...relayRequest.data, domain: "https://forged.example"
-        } }, child);
-        assert.equal(forged.ok, false);
-        assert.equal((await env.message(relayRequest, child)).ok, true);
-        const lookup = { action: "getRelayedCredentials", token, sourceFrameId: 3, domain: "https://forged.example" };
-        const before = env.requests.length;
-        for (const [request, sender] of [
-            [lookup, child],
-            [lookup, { ...env.sender, tab: { id: 8 } }],
-            [{ ...lookup, token: require("node:crypto").randomUUID() }, env.sender]
-        ]) {
-            const rejected = await env.message(request, sender);
-            assert.equal(rejected.success, false);
-            assert.equal(rejected.error, "Invalid credential relay");
-        }
-        assert.equal(env.requests.length, before);
-        assert.equal((await env.message(lookup)).success, true);
-        assert.equal(env.requests.at(-1).domain, "https://embedded.example");
-
-        const write = { ...lookup, action, username: "alice", password: "synthetic-new-secret", id: 1 };
-        assert.equal((await env.message(write)).success, true);
-        const forwarded = env.requests.find(request => request.action === (
-            action === "saveRelayedCredentials" ? "saveCredentials" : "updateCredentials"
-        ));
-        assert.equal(forwarded.domain, "https://embedded.example");
-        if (action === "updateRelayedCredentials") assert.equal(forwarded.entryId, 1);
-        const writes = env.requests.filter(request => ["saveCredentials", "updateCredentials"].includes(request.action)).length;
-        assert.equal((await env.message(write)).success, false);
-        assert.equal(env.requests.filter(request => ["saveCredentials", "updateCredentials"].includes(request.action)).length, writes);
-
-        assert.equal((await env.message(relayRequest, child)).ok, true);
-        assert.equal((await env.message({ ...lookup, sourceFrameId: 4 })).success, false);
-        assert.equal((await env.message(write)).success, false);
-    }
+    assert.equal(env.requests.length, before);
 });
 
 test("picker fetches only the selected login and targets the originating document", async () => {
@@ -367,7 +316,7 @@ test("automatic prompts wait for lookup and open only with an available vault", 
         { name: "disconnected host", response: { success: false, error: "Native messaging host disconnected" } },
         { name: "timed out host", response: { success: false, error: "Native messaging request timed out" } },
         { name: "invalid JSON", response: { success: true, data: "not-json" } },
-        { name: "invalid item list", response: { success: true, data: "{}" } },
+        { name: "invalid item list", response: { success: true, data: {} } },
         { name: "locked vault", locked: true }
     ];
     for (const scenario of cases) {
@@ -379,7 +328,7 @@ test("automatic prompts wait for lookup and open only with an available vault", 
             if (scenario.hold) env.holdCredentials();
             const opening = env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
             assert.equal(env.created.length, 0);
-            if (scenario.hold) env.releaseCredentials();
+            if (scenario.hold) { await new Promise(resolve => setImmediate(resolve)); env.releaseCredentials(); }
             const result = await opening;
             assert.equal(result.success, true);
             if (scenario.opens) assert.ok(result.token);
@@ -401,24 +350,15 @@ test("automatic prompts use summaries and never compare unselected vault passwor
         const sender = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "credential_prompt.html") };
         const data = await env.message({ action: "getCredentialPromptData", token: result.token }, sender);
         assert.equal(JSON.stringify(data).includes(password), false);
-        assert.deepEqual(JSON.parse(JSON.stringify(data.data.updateTarget)), { id: 1, name: "Personal" });
+        assert.deepEqual(JSON.parse(JSON.stringify(data.data.updateTarget)), { id: 1, revision: 1, name: "Personal" });
     }
-    for (const response of [{ success: false, error: "Not found." }, { success: true, data: "[]" }]) {
+    for (const response of [{ success: false, error: "Not found." }, { success: true, data: [] }]) {
         const env = securityEnvironment(); env.setCredentialResponse(response);
         const result = await env.message({ action: "openCredentialPrompt", username: "alice", password: "new-secret" });
         assert.ok(result.token); assert.equal(env.created.length, 1);
     }
 });
 
-test("legacy page lookups deliver only summaries, never unselected passwords", async () => {
-    const env = securityEnvironment();
-    const result = await env.message({ action: "getCredentials", domain: "https://attacker.example" });
-    assert.equal(result.success, true);
-    assert.equal(JSON.stringify(result).includes("password"), false);
-    const lookup = env.requests.find(r => r.action === "getLoginItems");
-    assert.equal(lookup.domain, env.sender.url);
-    assert.equal(env.requests.some(r => r.action === "getCredentials" || r.action === "getLoginItem"), false);
-});
 
 test("a completing save survives window closure and status invalidation without duplicating the write", async () => {
     const env = securityEnvironment();
@@ -428,6 +368,7 @@ test("a completing save survives window closure and status invalidation without 
     const request = { action: "completeCredentialPrompt", token: opened.token,
         selection: { action: "update", name: "Personal", username: "alice" } };
     const saving = env.message(request, sender);
+    await new Promise(resolve => setImmediate(resolve));
     const duplicate = await env.message(request, sender);
     assert.equal(duplicate.success, false);
     assert.match(duplicate.error, /already in progress/);
@@ -439,4 +380,31 @@ test("a completing save survives window closure and status invalidation without 
     assert.equal((await saving).success, true);
     assert.equal(env.requests.filter(request => request.action === "updateCredentials").length, 1);
     assert.equal(env.deliveries.at(-1).message.result.action, "update");
+});
+
+test("a fresh worker closes orphan decision windows and rejects their tokens before accepting new work", async () => {
+    const prefix = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
+    const env = securityEnvironment({ orphanWindows: [
+        { id: 91, tabs: [{ url: `${prefix}picker.html?token=old-picker` }] },
+        { id: 92, tabs: [{ url: `${prefix}credential_prompt.html?token=old-save` }] },
+        { id: 93, tabs: [{ url: `${prefix}duo_prompt.html?token=old-duo` }] },
+        { id: 94, tabs: [{ url: `${prefix}manager.html` }] },
+        { id: 95, tabs: [{ url: "https://example.com/picker.html" }] }
+    ] });
+    const response = await env.message({ action: "getSecurePickerData", token: "old-picker" }, env.pickerSender);
+    assert.equal(response.success, false); assert.deepEqual(env.removed, [91, 92, 93]);
+    const token = await env.open();
+    assert.equal((await env.message({ action: "getSecurePickerData", token }, env.pickerSender)).success, true);
+});
+
+test("only the manager may acknowledge unknown outcomes and content scripts cannot request a native lock", async () => {
+    const env = securityEnvironment();
+    const before = env.requests.length;
+    for (const sender of [env.sender, env.pickerSender]) {
+        assert.equal((await env.message({ action: "acknowledgeUnknownOperation", operationId: "unknown-save", inspected: true }, sender)).success, false);
+        assert.equal((await env.message({ action: "lockVault" }, sender)).success, false);
+    }
+    assert.equal(env.requests.length, before);
+    const manager = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "manager.html") };
+    assert.equal((await env.message({ action: "acknowledgeUnknownOperation", operationId: "unchecked", inspected: true }, manager)).success, false);
 });

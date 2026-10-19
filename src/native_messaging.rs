@@ -16,6 +16,11 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::protocol::{
+    OperationReceipt, OperationState, RequestEnvelope, ResponsePayload,
+    native_contract::NativeAction,
+};
+use crate::secret::SecretString;
 use crate::types::EntryChanges;
 
 const HOST_NAME: &str = "com.myproject.password_manager";
@@ -26,15 +31,20 @@ const HOST_BINARY_NAME: &str = "pm-native-host.exe";
 const MAX_NATIVE_MESSAGE: usize = 1024 * 1024;
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct NativeRequest {
     id: u64,
-    action: String,
+    action: NativeAction,
+    #[serde(default, rename = "operationId")]
+    operation_id: Option<String>,
+    #[serde(default, rename = "expectedRevision")]
+    expected_revision: Option<u64>,
     #[serde(default)]
     domain: Option<String>,
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
-    password: Option<String>,
+    password: Option<SecretString>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default, rename = "entryId")]
@@ -46,7 +56,7 @@ struct NativeRequest {
     #[serde(default)]
     query: Option<String>,
     #[serde(default)]
-    reveal: bool,
+    reveal: Option<bool>,
     #[serde(default)]
     item: Option<ManagementInput>,
     #[serde(default, rename = "requestId")]
@@ -56,7 +66,7 @@ struct NativeRequest {
     #[serde(default)]
     approve: Option<bool>,
     #[serde(default, rename = "verificationCode")]
-    verification_code: Option<String>,
+    verification_code: Option<SecretString>,
 }
 
 #[derive(Deserialize, Default)]
@@ -66,13 +76,13 @@ struct ManagementInput {
     #[serde(default)]
     username: String,
     #[serde(default)]
-    password: Option<String>,
+    password: Option<SecretString>,
     #[serde(default)]
     kind: crate::types::ItemKind,
     #[serde(default)]
     urls: Vec<String>,
     #[serde(default)]
-    notes: String,
+    notes: SecretString,
     #[serde(default)]
     fields: Vec<crate::types::CustomField>,
     #[serde(default, rename = "removeFields")]
@@ -91,6 +101,60 @@ impl Zeroize for ManagementInput {
         self.fields.zeroize();
         self.remove_fields.zeroize();
         self.remove_urls.zeroize();
+    }
+}
+
+impl NativeRequest {
+    fn validate(&self) -> Result<(), String> {
+        let policy = self.action.policy();
+        let supplied = [
+            ("operationId", self.operation_id.is_some()),
+            ("expectedRevision", self.expected_revision.is_some()),
+            ("domain", self.domain.is_some()),
+            ("username", self.username.is_some()),
+            ("password", self.password.is_some()),
+            ("name", self.name.is_some()),
+            ("entryId", self.entry_id.is_some()),
+            ("vaultFile", self.vault_file.is_some()),
+            ("keyPath", self.key_path.is_some()),
+            ("query", self.query.is_some()),
+            ("reveal", self.reveal.is_some()),
+            ("item", self.item.is_some()),
+            ("requestId", self.request_id.is_some()),
+            ("fingerprint", self.fingerprint.is_some()),
+            ("approve", self.approve.is_some()),
+            ("verificationCode", self.verification_code.is_some()),
+        ];
+        if self.id == 0 || self.id > 9_007_199_254_740_991 {
+            return Err("invalid native request identifier".into());
+        }
+        for (field, present) in supplied {
+            if present
+                && !(policy.required_fields.contains(&field)
+                    || policy.optional_fields.contains(&field)
+                    || policy.mutates && field == "operationId")
+            {
+                return Err("unexpected field for native operation".into());
+            }
+        }
+        for required in policy.required_fields {
+            if !supplied
+                .iter()
+                .any(|(field, present)| field == required && *present)
+            {
+                return Err("missing field for native operation".into());
+            }
+        }
+        if policy.mutates && self.operation_id.is_none() {
+            return Err("mutations require an operation identifier".into());
+        }
+        if self
+            .entry_id
+            .is_some_and(|id| id == 0 || id as u64 > 9_007_199_254_740_991)
+        {
+            return Err("invalid item identifier".into());
+        }
+        Ok(())
     }
 }
 
@@ -121,12 +185,20 @@ struct NativeResponse {
     success: bool,
     #[serde(rename = "nativeVersion")]
     native_version: String,
+    #[serde(rename = "protocolVersion")]
+    protocol_version: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     uncertain: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<OperationReceipt>,
+    #[serde(rename = "operationId", skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<i32>,
 }
 
 impl Zeroize for NativeResponse {
@@ -159,9 +231,13 @@ impl NativeResponse {
             id,
             success: true,
             native_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
             data: Some(data),
             error: None,
             uncertain: false,
+            operation: None,
+            operation_id: None,
+            code: None,
         }
     }
 
@@ -170,9 +246,13 @@ impl NativeResponse {
             id,
             success: false,
             native_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
             data: None,
             error: Some(error.into()),
             uncertain: false,
+            operation: None,
+            operation_id: None,
+            code: None,
         }
     }
 }
@@ -434,46 +514,52 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
 
 fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> NativeResponse {
     let id = request.id;
+    let operation_id = request.operation_id.clone();
     let mut uncertain = false;
-    let mut committed = false;
-    let result = if request.action == "managerVaults" {
-        crate::vault::list_vaults()
-            .map(|vaults| json!(vaults))
-            .map_err(|e| e.to_string())
-    } else {
-        command_for_request(&mut request)
-            .and_then(|command| {
-                client
-                    .request_response_tracked(command)
-                    .map_err(|error| {
-                        uncertain = error.sent && mutating_action(&request.action);
-                        error.message
-                    })
-                    .and_then(|response| {
-                        if response.code == crate::protocol::ResponseCode::Success as i32 {
-                            Ok(response.message)
-                        } else {
-                            committed =
-                                response.code == crate::protocol::ResponseCode::Durability as i32;
-                            uncertain = committed && mutating_action(&request.action);
-                            Err(response.message.trim_end().to_string())
+    let mut receipt = None;
+    let mut error_code = None;
+    let result = (|| {
+        request.validate()?;
+        if request.action == NativeAction::ManagerVaults {
+            crate::vault::list_vaults()
+                .map(|vaults| json!(vaults))
+                .map_err(|e| e.to_string())
+        } else {
+            command_for_request(&mut request).and_then(|command| {
+            let envelope=RequestEnvelope::new(command).with_operation(operation_id.clone(),request.expected_revision);
+            envelope.validate()?;
+            if matches!(request.action,NativeAction::ManagerUpdate|NativeAction::ManagerDelete|NativeAction::UpdateCredentials) && request.expected_revision.is_none() {
+                return Err("item edits require the revision that was reviewed".into());
+            }
+            client.request_envelope_tracked(envelope).map_err(|e| {
+                uncertain=e.sent && request.action.policy().mutates;e.message
+            }).and_then(|response|{
+                receipt=response.operation.clone();
+                if let ResponsePayload::Operation(operation)=&response.payload && request.action.policy().mutates {
+                        receipt=Some(operation.clone());
+                        if matches!(operation.state,OperationState::Pending|OperationState::Unknown) {
+                            uncertain=true;return Err("Operation outcome is unresolved. Review before another change.".into());
                         }
-                    })
+                        if operation.state==OperationState::Failed {return Err("The previous operation failed. Refresh before retrying.".into());}
+                }
+                if response.code!=0 {
+                    error_code=Some(response.code);
+                    uncertain=response.code==crate::protocol::ResponseCode::Durability as i32 && request.action.policy().mutates;
+                    return Err(if response.code==crate::protocol::ResponseCode::Durability as i32 {format!("{} The operation committed; durability could not be confirmed.",response.error_message())}else{response.error_message()});
+                }
+                Ok(response.payload.into_json())
             })
-            .and_then(|output| response_data(&request.action, output))
-    };
+        })
+        }
+    })();
     request.zeroize();
-    match result {
+    let mut response = match result {
         Ok(data) => NativeResponse::success(id, data),
         Err(error) => {
             let mut response = NativeResponse::error(
                 id,
-                if uncertain && committed {
-                    format!("{error}. The operation committed. Review the vault before retrying.")
-                } else if uncertain {
-                    format!(
-                        "{error}. The operation may still complete. Review the vault before retrying."
-                    )
+                if uncertain {
+                    format!("{error}. Review the operation outcome before retrying.")
                 } else {
                     error
                 },
@@ -481,28 +567,19 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
             response.uncertain = uncertain;
             response
         }
-    }
-}
-
-fn mutating_action(action: &str) -> bool {
-    matches!(
-        action,
-        "managerUnlock"
-            | "managerAdd"
-            | "managerUpdate"
-            | "managerDelete"
-            | "managerCopy"
-            | "saveCredentials"
-            | "updateCredentials"
-            | "getTotp"
-            | "managerDuoRespond"
-            | "lock"
-    )
+    };
+    response.code = error_code;
+    response.operation = receipt;
+    response.operation_id = operation_id;
+    response
 }
 
 fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, String> {
     match request.action.as_str() {
-        "status" => Ok(ServerCommand::StatusData),
+        "status" => Ok(ServerCommand::Status),
+        "operationStatus" => Ok(ServerCommand::OperationStatus(
+            request.operation_id.clone().ok_or("missing operation ID")?,
+        )),
         "managerUnlock" => {
             let config =
                 crate::config::try_read_config(&crate::file::config_dir().join("config.toml"))?;
@@ -513,7 +590,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 crate::types::PasswordType::Key(crate::file::resolve_key_path(&path)?)
             } else {
                 crate::types::PasswordType::Password(required(
-                    request.password.take(),
+                    request.password.take().map(SecretString::expose_owned),
                     "master password",
                     64 * 1024,
                 )?)
@@ -524,7 +601,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             Ok(ServerCommand::Unlock(crate::types::UnlockInfo {
                 key,
                 timeout: config.unlock.timeout,
-                vault_file: request.vault_file.take(),
+                vault_file: request.vault_file.take().or(config.unlock.vault_id),
             }))
         }
         "managerList" => Ok(ServerCommand::ManagementList(crate::types::SearchFilter {
@@ -568,12 +645,12 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 request_id: id,
                 fingerprint,
                 approve,
-                code: code.to_string(),
+                code: code.expose().to_owned().into(),
             }))
         }
         "managerItem" => Ok(ServerCommand::ManagementItem {
             id: management_id(request)?,
-            reveal: request.reveal,
+            reveal: request.reveal.unwrap_or(false),
         }),
         "managerCopy" => {
             let config =
@@ -585,11 +662,6 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
         }
         "managerDelete" => Ok(ServerCommand::Delete(Target::Id(management_id(request)?))),
         "managerAdd" | "managerUpdate" => management_save(request),
-        "getCredentials" => Ok(ServerCommand::Get(Target::Url(required(
-            request.domain.take(),
-            "domain",
-            2048,
-        )?))),
         "getAutofillItems" => Ok(ServerCommand::BrowserAutofill),
         "getLoginItems" => Ok(ServerCommand::BrowserLogins(required(
             request.domain.take(),
@@ -618,56 +690,61 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
         ))),
-        "saveCredentials" => Ok(ServerCommand::Add(PasswordEntry {
-            name: required(request.name.take(), "name", 4096)?,
-            username: Some(optional_text(request.username.take(), "username", 4096)?),
-            password: required(request.password.take(), "password", 64 * 1024)?,
-            url: Some(required(request.domain.take(), "domain", 2048)?),
-            notes: None,
-            copy: false,
-        })),
+        "saveCredentials" => Ok(ServerCommand::Add {
+            entry: crate::types::TypedEntry {
+                entry: PasswordEntry {
+                    name: required(request.name.take(), "name", 4096)?,
+                    username: Some(optional_text(request.username.take(), "username", 4096)?),
+                    password: required(
+                        request.password.take().map(SecretString::expose_owned),
+                        "password",
+                        64 * 1024,
+                    )?
+                    .into(),
+                    url: Some(required(request.domain.take(), "domain", 2048)?),
+                    notes: None,
+                    copy: false,
+                },
+                kind: crate::types::ItemKind::Login,
+                additional_urls: vec![],
+                custom_fields: vec![],
+            },
+            copy_timeout: 0,
+        }),
         "updateCredentials" => {
             let entry_id = request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?;
-            Ok(ServerCommand::Update(EntryUpdate {
-                target: Target::Id(entry_id),
-                update: EntryChanges {
-                    name: None,
-                    username: Some(optional_text(request.username.take(), "username", 4096)?),
-                    url: Some(required(request.domain.take(), "domain", 2048)?),
-                    notes: None,
+            Ok(ServerCommand::Update(crate::types::TypedUpdate {
+                entry: EntryUpdate {
+                    target: Target::Id(entry_id),
+                    update: EntryChanges {
+                        name: None,
+                        username: Some(optional_text(request.username.take(), "username", 4096)?),
+                        url: Some(required(request.domain.take(), "domain", 2048)?),
+                        notes: None,
+                    },
+                    password: Some(
+                        required(
+                            request.password.take().map(SecretString::expose_owned),
+                            "password",
+                            64 * 1024,
+                        )?
+                        .into(),
+                    ),
                 },
-                password: Some(required(request.password.take(), "password", 64 * 1024)?),
+                kind: None,
+                add_url: vec![],
+                remove_url: vec![],
+                clear_urls: false,
+                set_fields: vec![],
+                remove_fields: vec![],
+                clear_fields: false,
             }))
         }
         "lock" => Ok(ServerCommand::Lock(true)),
         _ => Err("unsupported native messaging action".to_string()),
     }
-}
-
-fn response_data(action: &str, mut output: String) -> Result<Value, String> {
-    let result = if matches!(action, "managerList" | "managerItem" | "managerDuoRequests") {
-        serde_json::from_str(&output).map_err(|_| "invalid management response".to_string())
-    } else if action == "status" {
-        serde_json::from_str::<crate::protocol::ServerStatus>(&output)
-            .map(|status| json!(status))
-            .map_err(|error| format!("invalid server status response: {error}"))
-    } else if action == "getTotp" {
-        serde_json::from_str::<crate::protocol::AuthenticatorResponse>(&output)
-            .map_err(|_| "invalid authenticator response from server".to_string())
-            .and_then(|data| {
-                if data.valid() {
-                    Ok(json!(&data))
-                } else {
-                    Err("invalid authenticator response from server".to_string())
-                }
-            })
-    } else {
-        Ok(Value::String(output.trim().to_string()))
-    };
-    output.zeroize();
-    result
 }
 
 fn management_id(request: &NativeRequest) -> Result<usize, String> {
@@ -711,7 +788,7 @@ fn management_save(request: &mut NativeRequest) -> Result<ServerCommand, String>
     }
     let urls = std::mem::take(&mut item.urls);
     if request.action == "managerAdd" {
-        Ok(ServerCommand::AddTypedWithOptions {
+        Ok(ServerCommand::Add {
             entry: TypedEntry {
                 entry: PasswordEntry {
                     name: std::mem::take(&mut item.name),
@@ -729,7 +806,7 @@ fn management_save(request: &mut NativeRequest) -> Result<ServerCommand, String>
         })
     } else {
         // A blank editor password is sent as null, preserving the current secret.
-        Ok(ServerCommand::UpdateTyped(TypedUpdate {
+        Ok(ServerCommand::Update(TypedUpdate {
             entry: EntryUpdate {
                 target: Target::Id(management_id(request)?),
                 update: EntryChanges {
@@ -759,7 +836,15 @@ mod tests;
 pub(crate) fn fuzz_message(data: &[u8]) {
     if let Ok(Some(mut payload)) = read_message(&mut std::io::Cursor::new(data)) {
         if let Ok(mut request) = serde_json::from_slice::<NativeRequest>(&payload) {
-            if let Ok(mut command) = command_for_request(&mut request) {
+            // Unlock/copy adapters load user configuration. Fuzz their wire
+            // validation without allowing a parser harness to touch live files.
+            if request.validate().is_ok()
+                && !matches!(
+                    request.action,
+                    NativeAction::ManagerUnlock | NativeAction::ManagerCopy
+                )
+                && let Ok(mut command) = command_for_request(&mut request)
+            {
                 command.zeroize();
             }
             request.zeroize();

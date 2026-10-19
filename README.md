@@ -255,7 +255,7 @@ Use `--reveal-secrets` to display secret custom-field values, or `--field NAME`
 to print one custom field by its case-insensitive name. Add `--copy` to copy that
 field without printing its value; this requires a nonzero clipboard timeout and
 reports clipboard failures. These field options do not copy the primary secret.
-`--json` wraps the same output and respects the selected reveal option.
+`--json` returns structured data and respects the selected reveal option.
 
 ```bash
 pm get --id 3 --reveal-secrets
@@ -305,10 +305,9 @@ pm purge --id 1
 pm purge --all
 ```
 
-`restore` and `purge --id` use the **1-based positions** shown by the latest
-`pm trash` listing, rather than active entries' stable IDs. These positions change
-when trash items are restored or purged; list the trash again before selecting
-another item. Purging is permanent.
+`restore` and `purge --id` use the **stable entry IDs** shown by `pm trash`.
+These IDs remain unchanged when other trash items are restored or purged.
+Purging is permanent.
 
 Trash retention can optionally purge old items whenever a vault is unlocked.
 It is disabled by default; configure a number of days to enable it.
@@ -323,6 +322,9 @@ To permanently delete an entire vault, supply its password or key:
 # Prompt for the vault's master password
 pm delete --vault
 
+# Select a vault explicitly when multiple vaults exist
+pm delete --vault --vault-file VAULT_ID.enc
+
 # Delete a key-based vault and its key file
 pm delete --vault --key ./keys/vault.key
 
@@ -332,7 +334,8 @@ pm delete --vault --key ./keys/vault.key --keep-key
 
 Whole-vault deletion cannot be restored. A supplied key file is removed only
 after it has successfully opened the matching vault and that vault has been
-deleted.
+deleted. Deletion uses `--vault-file`, then the configured default vault, or the
+only vault when exactly one exists. It never searches vaults by password.
 
 ### Password History
 
@@ -408,7 +411,9 @@ HOTP URIs must include an unsigned `counter` parameter, for example
 SHA-256, or SHA-512 and six to eight digits. Each `pm totp show` or browser
 authenticator selection generates the code at the saved counter and atomically
 saves the next counter in the encrypted vault **before returning the code**.
-HOTP output shows the consumed counter rather than a countdown. Request codes
+HOTP output shows the consumed counter rather than a countdown. JSON and browser
+API responses represent the counter as a decimal string so the
+full unsigned 64-bit range survives JavaScript parsing. Request codes
 when you intend to use them: repeatedly generating unused codes can move beyond
 the provider's acceptance window. Restoring an older backup or importing an old
 export also restores its counter and may require provider resynchronization.
@@ -685,14 +690,16 @@ pm backup create --path vault.pmbackup --force
 # The server must be running with the current vault locked
 pm lock
 pm backup restore --path vault.pmbackup
-pm unlock
+pm unlock --vault-file ID_PRINTED_BY_RESTORE
 ```
 
 Use `--key /absolute/path/to/backup.key` on both commands to use an existing
 external key file instead of a password. Keep that key separately; it is not
-embedded in the backup. Restore writes the complete backup as the
-vault associated with its backup password or key. If that destination vault
-already exists, restoration requires `--force`.
+embedded in the backup. Restore writes a new vault with an independent identity
+and prints its filename. Select that ID when unlocking it with the backup
+credential. Existing vaults are preserved; restoration does not infer a
+destination from a matching password. `--force` applies to backup creation,
+where it explicitly replaces an existing backup file.
 
 Backup files use a versioned format and XChaCha20-Poly1305 authenticated
 encryption with a fresh nonce and, for passwords, a fresh Argon2id salt. They
@@ -838,7 +845,9 @@ unchanged.
 ### Structured and Scripted Output
 
 Public commands accept global `--json` and `--quiet` flags. JSON output
-uses a stable object containing `ok` plus either `output` or `error`. Transport,
+uses an object containing `ok` plus `data` for records or `error` for failures;
+local display-only commands such as password generation use `output`. Mutation
+responses also include an operation receipt. Transport,
 vault, and availability failures exit with status 1; CLI or local-input errors
 use status 2; missing records use status 3; and conflicts use status 4. Quiet
 mode still prints errors. Retrieve only a primary secret without clipboard
@@ -1081,22 +1090,35 @@ their existing site-scoped permissions.
 
 ## Architecture
 
-- `src/main.rs` and `src/app/` - CLI initialization, local commands, and conversion to server requests
-- `src/server.rs` and `src/server/` - Authenticated local server, command handling, and output rendering
-- `src/client.rs` and `src/client/transport.rs` - CLI output and shared authenticated client with explicit connection settings
+- `src/main.rs` and `src/app/` - CLI initialization, explicit output settings, local commands, and conversion to server requests
+- `src/server.rs` and `src/server/` - Authenticated connections, a bounded vault worker, command handling, and external effects
+- `src/client.rs` and `src/client/transport.rs` - Authenticated Result-returning client with explicit connection settings
+- `src/client/presentation.rs` - Human-readable rendering of typed response records
 - `src/native_messaging.rs` - Chrome native host protocol and registration
-- `src/vault.rs` and `src/vault/` - Vault records, mutations, recovery, import/export, and persistence
+- `src/vault.rs` and `src/vault/` - Complete item aggregates, staged mutations, import/export, and versioned document storage
+- `src/secret.rs` - Redacted secret fields that wipe their contents on drop
 - `src/encryption.rs` - Encryption/decryption utilities
 - `src/password.rs` - Password generation and strength checking
 - `src/cli.rs` - CLI argument parsing
 - `src/config.rs` - Configuration management
 - `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - Application paths, key-path validation, private permissions, and atomic file writes
-- `src/protocol.rs` - Authenticated encrypted local transport
+- `src/protocol.rs` and `src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
 - `src/lib.rs` - Shared production library used by the CLI and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
 - `docs/commands.template.html` - Static layout used by the command-reference generator
 - `extension/` - Browser extension (Chrome/Chromium)
+
+See the [architecture review](docs/architecture-review.md) for the reasoning behind
+the domain, protocol, and session refactor.
+
+Vault IDs identify files; credentials authenticate the selected vault. When there
+is one vault, `pm unlock` selects it. With multiple vaults, use `--vault-file ID`
+or set `pm config --default-vault ID`. Independent vaults can share a credential.
+The internal protocol and vault document formats changed during development;
+older binaries and vault files need a verified portable export/import using the
+original binary. Upgrade the CLI, native host and extension together. Future
+runtime compatibility uses protocol versions rather than matching package versions.
 
 ### Clipboard behavior
 
@@ -1205,11 +1227,11 @@ Rust build caches are saved on `main` and restored by pull requests, reducing
 duplicate cache storage without skipping checks. Default-feature builds remain
 covered by the browser integration and release jobs.
 
-Fixed MessagePack fixtures in `tests/fixtures/server_commands.json` guard
-command indices and positional fields for installed clients. New data commands
-are appended to the protocol and preserve exact secret payloads; the native
-host receives structured OTP codes, counters, and lifetimes independently of
-CLI wording. Existing commands retain their response format.
+Protocol tests check explicit operation tags, named fields, version rejection,
+request correlation, and exact secret payloads. The native host receives typed
+records, OTP codes, counters, and lifetimes independently of CLI wording. Remote
+`--json` results expose records in `data`; config, vault listings and TOTP watch
+also expose structured data.
 
 Dependency changes are scanned against the RustSec advisory database and
 reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
@@ -1238,8 +1260,8 @@ git push origin v0.1.0
 ```
 
 The CLI/package version in `Cargo.toml` is the release version and must match
-the browser manifest's `version_name`, which is used for runtime compatibility
-checks. The manifest's numeric `version` remains an independent extension-package
+the browser manifest's `version_name` for release packaging. Runtime compatibility
+uses the protocol version. The manifest's numeric `version` remains an independent extension-package
 revision because browser stores require monotonically increasing revisions.
 
 Then open the **Release** workflow in GitHub Actions, choose **Run workflow**,
@@ -1258,46 +1280,69 @@ publish them.
 ## Development
 
 Vault logic lives in `src/vault/`, grouped by entries, queries, recovery, OTP, Duo,
-imports, exports, backups, and persistence. Read operations return domain records;
-`src/server/presentation.rs` renders CLI output, and `src/server/response.rs`
-handles encrypted protocol delivery. Command handlers run on a blocking worker
-and return explicit responses and effects through `src/server/outcome.rs`, which
-maps domain errors to response codes. Duo network waits and breach checks run
-after releasing the live vault mutex. Push I/O carries already signed requests
-without the RSA private key; decisions recheck the live unlock session after
-fetching current requests. Enrollment saves also check the session and item state.
-Audit calculations return secret-free
-structured findings; presentation renders their CLI output. Native clients
-use structured server status; the CLI retains its human-readable status output.
+imports, exports, backups, and persistence. Each complete item owns its metadata,
+secret history, authenticators, Duo enrollment, revision, and active/trash state.
+The encrypted `VaultDocument` has its own schema version and vault identity;
+paths, keys and runtime review tokens are excluded from it.
 
-The server owns one `VaultSession` containing the live vault and credentials,
-protected by one mutex. Vault persistence uses domain-owned credentials and does
-not depend on server state. CLI-only update flags are converted into domain
-changes before transport; a compatibility adapter preserves the existing
-MessagePack update representation.
+Mutations stage affected complete items and serialize a combined document view.
+Live state changes only when atomic file replacement commits. A failure before
+replacement discards the staged data; a directory-sync failure afterward adopts
+committed state and keys and reports uncertain durability. Imports stage a bulk
+change. Secret fields wipe on drop, including validation and early-return paths.
+Memory-only mutation tests use an explicit memory store; missing credentials
+cannot silently turn a persistent write into a memory-only success.
 
-Vault mutations share `src/vault/transaction.rs`. Individual edits snapshot only
-the affected entry and recovery records; imports snapshot the full state. A
-failure before atomic replacement restores the snapshot; a directory-sync failure
-after replacement keeps committed memory and keys and reports uncertain durability.
-Temporary secrets are wiped on drop. Import previews and execution share a plan
-based on non-secret fields.
+The daemon's bounded worker owns `VaultSession::Locked` or a complete unlocked
+vault with cached encryption material. It prioritizes lock/shutdown control work,
+uses one inactivity deadline, and publishes nonsecret status independently of
+long operations. A filesystem commit already in progress must finish at its safe
+boundary before locking. Duo and breach network waits run outside the owner;
+Duo finalization rechecks the unlock session and item revision. Connections carry
+an explicit response encryption key, with no plaintext-response fallback.
 
-The extension's `background.js` wires separate services for native requests,
-status monitoring, pending credential storage, pickers, save prompts, and message
-routing. Each service owns its lifecycle state and receives explicit dependencies.
-Picker cancellation on locking/disconnect remains distinct from save operations
-that are already completing.
+The protocol uses versioned envelopes, explicit operation tags and named fields.
+Domain reads return records; `src/client/presentation.rs` formats human output,
+and the native host only adapts browser framing and validated operations. CLI
+output settings are explicit values in the executable; reusable clients return
+results instead of terminating the process.
 
-Native requests queue in the worker, with independent control, item, and Duo
-hosts. A timed-out sent request keeps its position until the host replies or
-disconnects, so a queued review cannot overtake it. Pending navigation records
-serialize storage operations per tab, are consumed once, and are removed on
-expiration or tab closure. Alarm cleanup removes expired session records after
-a worker restart.
+Mutation IDs deduplicate requests within a running daemon, with up to 256 retained
+results and a 64 KiB limit on each cached result. Large reads/reports retain only
+a receipt. Expected item revisions reject stale manager edits. Receipts distinguish
+pending, committed, failed, unknown, and committed-but-durability-uncertain states.
+Locking discards cached secret responses while retaining nonsecret receipts.
+Receipts are not durable across daemon restarts or unlimited retention. An unknown
+outcome requires state inspection and explicit acknowledgement in the manager;
+a pending operation cannot be acknowledged. Neither reconnect nor acknowledgement
+replays an uncertain write. Remote Duo effects can remain uncertain even when the
+local vault is healthy.
 
-The extension's `content.js` initializes the page integration. The manifest loads
-separate scripts for messaging, controls, password generation, typed autofill,
-DOM observation, and credential capture, in the same isolated browser world.
+The extension keeps dependency-injected background services for native requests,
+status, navigation context, pickers, prompts and message routing. Only trusted
+extension decisions authorize saves and selected-secret release. Nonsecret
+username navigation context and unresolved operation IDs/actions use session
+storage; secret decision windows are invalidated on worker restart. Idle status
+uses a one-minute alarm, with two-second polling while extension UI is open.
+Native lanes close when idle and reconnect after a bounded silent-port deadline.
 
-See [Testing](#testing) for prerequisites and the checks used by CI.
+Content and manager entrypoints use explicit modules. A per-document/root
+controller captures credentials from supported nested open shadow roots and
+cleans up its observers and listeners. Closed shadow roots are not supported.
+After editing frontend modules, regenerate the checked-in bundles:
+
+```bash
+npm run build:extension
+```
+
+The dependency-free build writes `content_runtime.js` and `manager_runtime.js`;
+unit tests, browser tests and shared validation check that they are current.
+Browser operation policies, runtime validators and TypeScript declarations come
+from `src/protocol/native_contract.rs` and its template. Regenerate them with:
+
+```bash
+cargo run -- generate-command-contract
+cargo run -- generate-command-contract --check
+```
+
+See [Testing](#testing) for prerequisites and CI checks.

@@ -17,12 +17,7 @@
             if (/^not found\.?$/i.test(error)) return [];
             throw new Error(error);
         }
-        let accounts;
-        try {
-            accounts = JSON.parse(response.data);
-        } catch (_) {
-            throw new Error("Invalid credential response");
-        }
+        const accounts = response.data;
         if (!Array.isArray(accounts)) throw new Error("Invalid credential response");
         return accounts;
     }
@@ -60,7 +55,7 @@
             username: String(username || ""),
             askForUsername: !username,
             updateTarget: updateTarget
-                ? { id: updateTarget.id, name: String(updateTarget.name || "") }
+                ? { id: updateTarget.id, ...(updateTarget.revision === undefined ? {} : { revision: updateTarget.revision }), name: String(updateTarget.name || "") }
                 : null
         };
     }
@@ -87,7 +82,9 @@
             if (!Number.isSafeInteger(entryId) || entryId <= 0) {
                 throw new Error("No credential is available to update");
             }
+            delete fields.name;
             fields.entryId = entryId;
+            fields.expectedRevision = pending.data.updateTarget.revision;
         }
         return { action, fields };
     }

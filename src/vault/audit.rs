@@ -180,30 +180,12 @@ async fn fetch_breached_prefix(
 
 impl Vault {
     pub(crate) fn audit_snapshot(&self, options: &AuditOptions) -> AuditSnapshot {
-        let metadata_by_id: HashMap<_, _> = self
-            .recovery
-            .entry_metadata
-            .iter()
-            .map(|record| (record.entry_id, record))
-            .collect();
-        let totp_ids: HashSet<_> = self
-            .recovery
-            .totp
-            .iter()
-            .map(|record| record.entry_id)
-            .collect();
         let now = chrono::Utc::now();
         let entries = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                metadata_by_id
-                    .get(&entry.id)
-                    .is_none_or(|metadata| metadata.kind == ItemKind::Login)
-            })
+            .active_entries()
+            .filter(|entry| self.item_kind(entry.id) == ItemKind::Login)
             .map(|entry| {
-                let changed = self
-                    .password_changed_with_metadata(entry, metadata_by_id.get(&entry.id).copied());
+                let changed = self.password_changed_with_metadata(entry, self.metadata(entry.id));
                 AuditEntrySnapshot {
                     id: entry.id,
                     name: entry.name.clone(),
@@ -214,7 +196,8 @@ impl Vault {
                         .stale_days
                         .is_some_and(|days| password_is_stale_at(changed, days, now)),
                     password_changed: changed.to_string(),
-                    missing_totp: options.require_totp && !totp_ids.contains(&entry.id),
+                    missing_totp: options.require_totp
+                        && self.item(entry.id).unwrap().authenticator.is_none(),
                     identity: (
                         entry
                             .url
@@ -464,8 +447,8 @@ mod tests {
             "synthetic-breached-password",
             "synthetic-unchecked-password",
         ];
-        let vault = Vault {
-            entries: passwords
+        let vault = Vault::from_entries(
+            passwords
                 .iter()
                 .enumerate()
                 .map(|(index, password)| VaultEntry {
@@ -475,9 +458,8 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
-            metadata: VaultMetadata::default(),
-            recovery: RecoveryData::default(),
-        };
+            None,
+        );
         let snapshot = vault.audit_snapshot(&AuditOptions::default());
         let check = BreachCheck {
             matches: HashMap::from([(password_hash(passwords[0]), 42)]),
@@ -488,7 +470,7 @@ mod tests {
         assert!(outcome.incomplete);
         assert_eq!(outcome.report.breached[0].0.id, 1);
         assert_eq!(outcome.report.unchecked[0].id, 2);
-        let rendered = crate::server::presentation::audit(&outcome.report);
+        let rendered = crate::client::presentation::audit(&outcome.report);
         assert!(rendered.contains("Breached password: 1. Account 1 (seen 42 times)"));
         assert!(rendered.contains("Unchecked breach status: 2. Account 2"));
         assert!(rendered.contains("1 of 2 login entries checked successfully"));

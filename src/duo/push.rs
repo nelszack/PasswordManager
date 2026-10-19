@@ -646,7 +646,7 @@ mod tests {
             host: "api-test.duosecurity.com".into(),
             akey: "account".into(),
             pkey: "device".into(),
-            private_key: crypto::private_pem(&key).unwrap().to_string(),
+            private_key: crypto::private_pem(&key).unwrap().to_string().into(),
         };
         validate_credentials(&c).unwrap();
         let form = encoded(&BTreeMap::from([

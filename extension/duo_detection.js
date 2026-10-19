@@ -1,7 +1,7 @@
 (function (root, factory) {
     const api = factory();
-    root.PasswordManagerDuoDetection = api;
     if (typeof module === "object" && module.exports) module.exports = api;
+    else root.PasswordManagerDuoDetection = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
     function duoOrigin(value) {
         try {

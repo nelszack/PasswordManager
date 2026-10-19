@@ -1,12 +1,9 @@
-#[cfg(test)]
-use crate::encryption::{PRODUCTION_KDF_PARAMETERS, try_encrypt_file, with_test_kdf_parameters};
+use crate::secret::SecretString;
 use crate::{
     encryption::{
         decrypt_file, try_encrypt_file_in_place, try_gen_master_key, validate_new_password,
     },
-    file::{
-        data_dir, file_exists, key_file_path, new_key_file_path, set_private_perms, sync_parent,
-    },
+    file::{data_dir, key_file_path, new_key_file_path, set_private_perms, sync_parent},
     types::{
         AuditOptions, ConflictPolicy, CustomField, DuoCredentials, EntryChanges, EntryUpdate,
         ItemKind, ListOptions, PasswordEntry, PasswordType, SearchFilter, SortField, Target,
@@ -17,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha1::{Digest, Sha1};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::Path,
@@ -27,8 +24,6 @@ use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::{Zeroize, Zeroizing};
 
 mod session;
-#[cfg(test)]
-use VaultCredentials as ServerInfo;
 pub(crate) use session::available;
 pub use session::{VaultCredentials, VaultSession};
 mod error;
@@ -41,8 +36,11 @@ pub use totp::AuthenticatorCode;
 
 mod browser;
 mod management;
+pub use browser::{AutofillItem, BrowserLogin};
+pub use management::{
+    HistoryPage, ItemDetail, ItemField, ItemPage, ItemSummary, TrashPage, TrashSummary,
+};
 mod query;
-use backup::validate_backup_vault;
 use browser::hostname;
 #[cfg(test)]
 use browser::hosts_match;
@@ -52,16 +50,13 @@ mod entries;
 mod export;
 
 mod persistence;
+pub use persistence::VaultStore;
 pub(crate) use persistence::unlock_selected_vault;
 #[cfg(test)]
 pub(crate) use persistence::with_write_fault;
 pub(crate) use persistence::{create_vault, delete_vault};
-#[cfg(test)]
-use persistence::{find_vault, unlock_vault};
 pub use persistence::{list_vaults, validate_vault_filename};
-use persistence::{
-    lookup_vault, persist_private_file, random_vault_filename, write_vault, write_vault_with_key,
-};
+use persistence::{persist_private_file, write_vault, write_vault_with_key};
 mod transaction;
 use transaction::TransactionScope;
 
@@ -71,11 +66,6 @@ pub struct EntryView<'a> {
     pub metadata: Option<&'a EntryMetadata>,
     pub has_totp: bool,
     pub urls: Vec<&'a str>,
-}
-
-pub enum EntryOutput<'a> {
-    Details(EntryView<'a>),
-    SiteLogins(Zeroizing<String>),
 }
 
 pub struct TrashView<'a> {
@@ -89,14 +79,14 @@ pub(crate) struct AuditOutcome {
 }
 
 /// Public audit findings contain labels and counts, never password hashes or secrets.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditLabel {
     pub id: usize,
     pub name: String,
     pub username: Option<String>,
     pub password_changed: String,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReport {
     pub total: usize,
     pub healthy: usize,
@@ -125,186 +115,237 @@ mod audit;
 
 mod import;
 
+/// A fixed-width, nonzero identity in the durable domain. Public adapters perform
+/// checked conversion to their presentation ID; zero is never a valid item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct ItemId(u64);
+const MAX_ITEM_ID: u64 = 9_007_199_254_740_991;
+impl TryFrom<u64> for ItemId {
+    type Error = &'static str;
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == 0 || value > MAX_ITEM_ID {
+            Err("item ID must be a positive safe integer")
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+impl From<ItemId> for u64 {
+    fn from(value: ItemId) -> u64 {
+        value.0
+    }
+}
+impl ItemId {
+    fn from_public(value: usize) -> Result<Self, VaultError> {
+        Self::try_from(
+            u64::try_from(value)
+                .map_err(|_| VaultError::InvalidInput("item ID is out of range".into()))?,
+        )
+        .map_err(|e| VaultError::InvalidInput(e.into()))
+    }
+    fn public(self) -> Result<usize, VaultError> {
+        usize::try_from(self.0).map_err(|_| {
+            VaultError::Validation("item ID exceeds this platform's supported range".into())
+        })
+    }
+}
+
+/// Validated UTC timestamp, kept in canonical RFC3339 form for borrowed views.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct Timestamp(String);
+impl Timestamp {
+    pub fn now() -> Self {
+        Self(chrono::Utc::now().to_rfc3339())
+    }
+    pub fn parse(value: &str) -> Result<Self, VaultError> {
+        parse_entry_timestamp(value)
+            .map(|v| Self(v.to_rfc3339()))
+            .ok_or_else(|| VaultError::Validation("invalid item timestamp".into()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl Default for Timestamp {
+    fn default() -> Self {
+        Self("1970-01-01T00:00:00+00:00".into())
+    }
+}
+impl std::ops::Deref for Timestamp {
+    type Target = String;
+    fn deref(&self) -> &String {
+        &self.0
+    }
+}
+impl std::fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[cfg(test)]
+impl From<String> for Timestamp {
+    fn from(value: String) -> Self {
+        Self::parse(&value).expect("valid fixture timestamp")
+    }
+}
+#[cfg(test)]
+impl From<&str> for Timestamp {
+    fn from(value: &str) -> Self {
+        Self::parse(value).expect("valid fixture timestamp")
+    }
+}
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+impl Zeroize for Timestamp {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct VaultEntry {
     pub id: usize,
     pub name: String,
     pub username: Option<String>,
-    pub password: String,
+    pub password: SecretString,
     pub url: Option<String>,
-    pub notes: Option<String>,
-    pub created: String,
-    pub modified: String,
+    pub notes: Option<SecretString>,
+    pub created: Timestamp,
+    pub modified: Timestamp,
 }
-
 impl std::fmt::Debug for VaultEntry {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VaultEntry")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultEntry")
             .field("id", &self.id)
             .field("name", &self.name)
             .field("username", &self.username)
             .field("password", &"<redacted>")
-            .field("url", &self.url)
             .field("notes", &self.notes.as_ref().map(|_| "<redacted>"))
             .field("created", &self.created)
             .field("modified", &self.modified)
             .finish()
     }
 }
-
-#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone, zeroize::Zeroize)]
 pub struct PasswordRevision {
-    pub entry_id: usize,
-    pub password: String,
-    pub changed: String,
+    pub password: SecretString,
+    pub changed: Timestamp,
 }
-
-impl std::fmt::Debug for PasswordRevision {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PasswordRevision")
-            .field("entry_id", &self.entry_id)
-            .field("password", &"<redacted>")
-            .field("changed", &self.changed)
-            .finish()
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
-pub struct TrashedEntry {
-    pub entry: VaultEntry,
-    pub history: Vec<PasswordRevision>,
-    pub deleted: String,
-}
-
-impl std::fmt::Debug for TrashedEntry {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TrashedEntry")
-            .field("entry", &self.entry)
-            .field("history", &self.history)
-            .field("deleted", &self.deleted)
-            .finish()
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
-pub struct TotpRecord {
-    pub entry_id: usize,
-    pub configuration: String,
-}
-
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
 pub struct EntryMetadata {
-    pub entry_id: usize,
     pub kind: ItemKind,
     pub additional_urls: Vec<String>,
-    pub password_changed: Option<String>,
+    pub password_changed: Option<Timestamp>,
     pub custom_fields: Vec<CustomField>,
 }
-
-struct MetadataUpdate<'a> {
-    kind: Option<ItemKind>,
-    add_urls: &'a [String],
-    remove_urls: &'a [String],
-    clear_urls: bool,
-    primary_url: Option<&'a str>,
-    password_changed: bool,
-    set_fields: &'a [CustomField],
-    remove_fields: &'a [String],
-    clear_fields: bool,
-}
-
-impl std::fmt::Debug for TotpRecord {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TotpRecord")
-            .field("entry_id", &self.entry_id)
-            .field("configuration", &"<redacted>")
-            .finish()
+impl Zeroize for EntryMetadata {
+    fn zeroize(&mut self) {
+        self.additional_urls.zeroize();
+        self.password_changed.zeroize();
+        self.custom_fields.zeroize();
     }
 }
-
-#[derive(Serialize, Deserialize, Default, PartialEq, Clone, zeroize::Zeroize)]
+#[derive(
+    Serialize, Deserialize, Default, PartialEq, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
 pub struct DuoRecord {
-    pub entry_id: usize,
     pub credentials: DuoCredentials,
-    /// Ephemeral review MAC key, discarded when the vault locks; never exported.
     #[serde(skip)]
     pub(crate) review_key: Option<[u8; 32]>,
 }
 impl std::fmt::Debug for DuoRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DuoRecord")
-            .field("entry_id", &self.entry_id)
-            .finish_non_exhaustive()
+        f.debug_struct("DuoRecord").finish_non_exhaustive()
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
-pub struct RecoveryData {
-    pub password_history: Vec<PasswordRevision>,
-    pub trash: Vec<TrashedEntry>,
-    pub next_entry_id: usize,
-    pub totp: Vec<TotpRecord>,
-    pub entry_metadata: Vec<EntryMetadata>,
-    #[serde(default)]
-    pub duo: Vec<DuoRecord>,
+/// Validated at ingestion; durable text is a transport representation only.
+#[derive(Debug, Clone, PartialEq)]
+struct Authenticator {
+    configuration: SecretString,
+    state: AuthenticatorState,
 }
-
-impl Zeroize for PasswordRevision {
-    fn zeroize(&mut self) {
-        self.entry_id.zeroize();
-        self.password.zeroize();
-        self.changed.zeroize();
-        *self = Self::default();
+#[derive(Debug, Clone, PartialEq)]
+enum AuthenticatorState {
+    Totp(Totp),
+    Hotp { generator: Totp, counter: u64 },
+}
+impl Authenticator {
+    fn parse(value: &str) -> Result<Self, VaultError> {
+        let (configuration, _) = totp::normalize_totp_configuration(value)?;
+        let mut configuration = Zeroizing::new(configuration);
+        let state = if totp::is_hotp_uri(&configuration) {
+            let (generator, counter) = totp::parse_hotp_configuration(&configuration)?;
+            AuthenticatorState::Hotp { generator, counter }
+        } else {
+            AuthenticatorState::Totp(totp::parse_totp_configuration(&configuration)?)
+        };
+        Ok(Self {
+            configuration: std::mem::take(&mut *configuration).into(),
+            state,
+        })
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum Lifecycle {
+    Active,
+    Trashed { deleted_at: Timestamp },
+}
+#[derive(Debug, Clone, PartialEq)]
+struct Item {
+    entry: VaultEntry,
+    revision: u64,
+    metadata: EntryMetadata,
+    history: Vec<PasswordRevision>,
+    authenticator: Option<Authenticator>,
+    duo: Option<DuoRecord>,
+    lifecycle: Lifecycle,
+}
+impl Item {
+    fn active(&self) -> bool {
+        matches!(self.lifecycle, Lifecycle::Active)
+    }
+    fn new(entry: VaultEntry, metadata: EntryMetadata) -> Self {
+        Self {
+            entry,
+            revision: 0,
+            metadata,
+            history: Vec::new(),
+            authenticator: None,
+            duo: None,
+            lifecycle: Lifecycle::Active,
+        }
+    }
+}
+/// Pure domain state: no paths, keys, runtime handles, or storage operations.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
+pub struct VaultData {
+    items: BTreeMap<ItemId, Item>,
+    vault_id: [u8; 16],
+    next_item_id: u64,
+    revision: u64,
+}
+impl Default for VaultData {
+    fn default() -> Self {
+        Self {
+            items: BTreeMap::new(),
+            vault_id: [0; 16],
+            next_item_id: 1,
+            revision: 0,
+        }
     }
 }
 
-impl Zeroize for TrashedEntry {
-    fn zeroize(&mut self) {
-        self.entry.zeroize();
-        self.history.zeroize();
-        self.deleted.zeroize();
-        *self = Self::default();
-    }
-}
-
-impl Zeroize for TotpRecord {
-    fn zeroize(&mut self) {
-        self.entry_id.zeroize();
-        self.configuration.zeroize();
-        *self = Self::default();
-    }
-}
-
-impl Zeroize for RecoveryData {
-    fn zeroize(&mut self) {
-        self.password_history.zeroize();
-        self.trash.zeroize();
-        self.next_entry_id.zeroize();
-        self.totp.zeroize();
-        self.entry_metadata.zeroize();
-        self.duo.zeroize();
-        *self = Self::default();
-    }
-}
-
-impl Zeroize for EntryMetadata {
-    fn zeroize(&mut self) {
-        self.entry_id.zeroize();
-        self.additional_urls.zeroize();
-        self.password_changed.zeroize();
-        self.custom_fields.zeroize();
-        *self = Self::default();
-    }
-}
-#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
+#[derive(Default, PartialEq, Clone)]
 pub struct VaultMetadata {
     pub filename: String,
-    /// Ephemeral enrollment review key; never saved, exported, or logged.
-    #[serde(skip)]
     pub(crate) duo_session: Option<[u8; 32]>,
 }
 impl std::fmt::Debug for VaultMetadata {
@@ -318,18 +359,130 @@ impl Zeroize for VaultMetadata {
     fn zeroize(&mut self) {
         self.filename.zeroize();
         self.duo_session.zeroize();
-        *self = Self::default();
     }
 }
-
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
-pub struct Vault {
-    pub entries: Vec<VaultEntry>,
-    pub metadata: VaultMetadata,
-    pub recovery: RecoveryData,
+impl Drop for VaultMetadata {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
-
-#[derive(Debug, Default, PartialEq, Eq)]
+/// Runtime handle. Only the store knows the durable location; no runtime fields
+/// are part of VaultDocument. A default handle is deliberately not writable.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(test, derive(Clone))]
+pub struct Vault {
+    data: VaultData,
+    store: VaultStore,
+    pub metadata: VaultMetadata,
+}
+impl Default for Vault {
+    fn default() -> Self {
+        Self {
+            data: VaultData::default(),
+            store: VaultStore::Detached,
+            metadata: VaultMetadata::default(),
+        }
+    }
+}
+impl Vault {
+    pub fn memory() -> Self {
+        Self {
+            data: VaultData {
+                vault_id: rand::random(),
+                ..VaultData::default()
+            },
+            store: VaultStore::Memory,
+            ..Self::default()
+        }
+    }
+    fn item(&self, id: usize) -> Option<&Item> {
+        self.data.items.get(&ItemId::from_public(id).ok()?)
+    }
+    fn item_mut(&mut self, id: usize) -> Option<&mut Item> {
+        self.data.items.get_mut(&ItemId::from_public(id).ok()?)
+    }
+    fn active_items(&self) -> impl Iterator<Item = &Item> {
+        self.data.items.values().filter(|i| i.active())
+    }
+    fn active_entries(&self) -> impl Iterator<Item = &VaultEntry> {
+        self.active_items().map(|i| &i.entry)
+    }
+    fn entry_id(&self, target: &Target) -> Option<usize> {
+        match target {
+            Target::Id(id) => self.item(*id).filter(|i| i.active()).map(|i| i.entry.id),
+            Target::Name(name) => self
+                .active_entries()
+                .find(|e| e.name == *name)
+                .map(|e| e.id),
+            _ => None,
+        }
+    }
+    fn metadata(&self, id: usize) -> Option<&EntryMetadata> {
+        self.item(id).map(|i| &i.metadata)
+    }
+    fn item_kind(&self, id: usize) -> ItemKind {
+        self.metadata(id).map_or(ItemKind::Login, |m| m.kind)
+    }
+    fn all_urls<'a>(&'a self, entry: &'a VaultEntry) -> impl Iterator<Item = &'a str> {
+        entry.url.as_deref().into_iter().chain(
+            self.metadata(entry.id)
+                .into_iter()
+                .flat_map(|m| m.additional_urls.iter().map(String::as_str)),
+        )
+    }
+    fn custom_fields(&self, id: usize) -> &[CustomField] {
+        self.metadata(id)
+            .map_or(&[], |m| m.custom_fields.as_slice())
+    }
+    pub fn revision(&self, id: usize) -> Option<u64> {
+        self.item(id).map(|i| i.revision)
+    }
+    pub fn item_revision(&self, id: usize) -> Option<u64> {
+        self.revision(id)
+    }
+    pub fn vault_id(&self) -> [u8; 16] {
+        self.data.vault_id
+    }
+    pub fn vault_revision(&self) -> u64 {
+        self.data.revision
+    }
+    pub fn check_revision(&self, id: usize, expected: u64) -> Result<(), VaultError> {
+        let revision = self
+            .revision(id)
+            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
+        if revision != expected {
+            Err(VaultError::Conflict(format!(
+                "item revision changed: expected {expected}, current {revision}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+    fn view(&self, item: &Item) -> EntryView<'_> {
+        self.view_id(item.entry.id).expect("item is part of vault")
+    }
+    fn view_id(&self, id: usize) -> Option<EntryView<'_>> {
+        let item = self.item(id)?;
+        Some(EntryView {
+            entry: &item.entry,
+            metadata: Some(&item.metadata),
+            has_totp: item.authenticator.is_some(),
+            urls: self.all_urls(&item.entry).collect(),
+        })
+    }
+}
+struct MetadataUpdate<'a> {
+    kind: Option<ItemKind>,
+    add_urls: &'a [String],
+    remove_urls: &'a [String],
+    clear_urls: bool,
+    primary_url: Option<&'a str>,
+    password_changed: bool,
+    set_fields: &'a [CustomField],
+    remove_fields: &'a [String],
+    clear_fields: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ImportReport {
     pub total: usize,
     pub added: usize,
@@ -388,26 +541,26 @@ struct PortableItem {
     id: usize,
     name: String,
     username: Option<String>,
-    password: String,
+    password: SecretString,
     url: Option<String>,
-    notes: Option<String>,
-    created: String,
-    modified: String,
+    notes: Option<SecretString>,
+    created: Timestamp,
+    modified: Timestamp,
     #[serde(rename = "type")]
     kind: ItemKind,
     additional_urls: Vec<String>,
     custom_fields: Vec<CustomField>,
-    password_changed: Option<String>,
+    password_changed: Option<Timestamp>,
     password_history: Vec<PortableRevision>,
-    totp: Option<String>,
+    totp: Option<SecretString>,
     #[serde(default)]
     duo: Option<DuoCredentials>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PortableRevision {
-    password: String,
-    changed: String,
+    password: SecretString,
+    changed: Timestamp,
 }
 
 impl Zeroize for PortableRevision {
@@ -451,9 +604,9 @@ struct ImportedItem {
     kind: ItemKind,
     additional_urls: Vec<String>,
     custom_fields: Vec<CustomField>,
-    password_changed: Option<String>,
+    password_changed: Option<Timestamp>,
     password_history: Vec<PortableRevision>,
-    totp: Option<String>,
+    totp: Option<SecretString>,
     duo: Option<DuoCredentials>,
 }
 
@@ -492,41 +645,7 @@ impl ImportedItem {
     }
 }
 
-impl std::fmt::Display for ImportReport {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "Import {}: {} parsed, {} added, {} replaced, {} kept with a new name, {} skipped.",
-            if self.preview { "preview" } else { "finished" },
-            self.total,
-            self.added,
-            self.replaced,
-            self.renamed,
-            self.skipped
-        )?;
-        if self.unsupported > 0 || self.loss_count > 0 {
-            write!(
-                formatter,
-                " {} unsupported items, {} data-loss warnings.",
-                self.unsupported, self.loss_count
-            )?;
-            for loss in &self.losses {
-                write!(formatter, "\nWarning: {loss}")?;
-            }
-            if self.loss_count > self.losses.len() {
-                write!(
-                    formatter,
-                    "\n{} additional warnings omitted.",
-                    self.loss_count - self.losses.len()
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
-
 const BACKUP_MAGIC: &[u8; 8] = b"PMBACKUP";
-const BACKUP_VERSION: u8 = 1;
 const MAX_BACKUP_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_VAULT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
@@ -563,155 +682,87 @@ fn password_is_stale_at(changed: &str, days: u64, now: chrono::DateTime<chrono::
     now.signed_duration_since(changed) >= threshold
 }
 
-#[derive(Serialize)]
-struct BackupEnvelopeRef<'a> {
-    version: u8,
-    created: String,
-    vault: &'a Vault,
-}
-
-#[derive(Deserialize)]
-struct BackupEnvelope {
-    version: u8,
-    created: String,
-    vault: Vault,
-}
-
-impl Vault {
-    fn ensure_next_entry_id(&mut self) -> Result<(), VaultError> {
-        let highest_id = self
-            .entries
-            .iter()
-            .map(|entry| entry.id)
-            .chain(self.recovery.trash.iter().map(|trashed| trashed.entry.id))
-            .max()
-            .unwrap_or(0);
-        if self.recovery.next_entry_id <= highest_id {
-            self.recovery.next_entry_id = highest_id
-                .checked_add(1)
-                .ok_or_else(|| "entry ID space is exhausted".to_string())?;
-        }
-        if self.recovery.next_entry_id == 0 {
-            self.recovery.next_entry_id = 1;
-        }
-        Ok(())
-    }
-
-    fn allocate_entry_id(&mut self) -> Result<usize, VaultError> {
-        self.ensure_next_entry_id()?;
-        self.allocate_validated_entry_id()
-    }
-
-    // Bulk imports validate the counter once inside the rollback transaction.
-    fn allocate_validated_entry_id(&mut self) -> Result<usize, VaultError> {
-        let id = self.recovery.next_entry_id;
-        self.recovery.next_entry_id = id
-            .checked_add(1)
-            .ok_or_else(|| "entry ID space is exhausted".to_string())?;
-        Ok(id)
-    }
-
-    fn entry_index(&self, target: &Target) -> Option<usize> {
-        match target {
-            Target::Id(id) => self.entries.iter().position(|entry| entry.id == *id),
-            Target::Name(name) => self.entries.iter().position(|entry| entry.name == *name),
-            Target::Url(_) | Target::Vault { .. } => None,
-        }
-    }
-
-    fn metadata(&self, entry_id: usize) -> Option<&EntryMetadata> {
-        self.recovery
-            .entry_metadata
-            .iter()
-            .find(|record| record.entry_id == entry_id)
-    }
-
-    fn item_kind(&self, entry_id: usize) -> ItemKind {
-        self.metadata(entry_id)
-            .map_or(ItemKind::Login, |record| record.kind)
-    }
-
-    fn all_urls<'a>(&'a self, entry: &'a VaultEntry) -> impl Iterator<Item = &'a str> {
-        entry.url.as_deref().into_iter().chain(
-            self.metadata(entry.id)
-                .into_iter()
-                .flat_map(|record| record.additional_urls.iter().map(String::as_str)),
-        )
-    }
-
-    #[cfg(test)]
-    fn password_changed<'a>(&'a self, entry: &'a VaultEntry) -> &'a str {
-        self.metadata(entry.id)
-            .and_then(|record| record.password_changed.as_deref())
-            .unwrap_or(&entry.created)
-    }
-
-    #[cfg(test)]
-    fn password_is_stale(&self, entry: &VaultEntry, days: u64) -> bool {
-        let changed = self.password_changed(entry);
-        password_is_stale_at(changed, days, chrono::Utc::now())
-    }
-
-    fn custom_fields(&self, entry_id: usize) -> &[CustomField] {
-        self.metadata(entry_id)
-            .map_or(&[], |record| record.custom_fields.as_slice())
-    }
-
-    fn remove_metadata_records(&mut self, entry_ids: &[usize]) {
-        let mut retained = Vec::with_capacity(self.recovery.entry_metadata.len());
-        for mut record in std::mem::take(&mut self.recovery.entry_metadata) {
-            if entry_ids.contains(&record.entry_id) {
-                record.zeroize();
-            } else {
-                retained.push(record);
-            }
-        }
-        self.recovery.entry_metadata = retained;
-    }
-}
-
-impl Zeroize for Vault {
-    fn zeroize(&mut self) {
-        self.entries.zeroize();
-        self.metadata.zeroize();
-        self.recovery.zeroize();
-    }
-}
 impl Zeroize for VaultEntry {
     fn zeroize(&mut self) {
-        self.created.zeroize();
-        self.id.zeroize();
-        self.modified.zeroize();
         self.name.zeroize();
-        self.notes.zeroize();
+        self.username.zeroize();
         self.password.zeroize();
         self.url.zeroize();
-        self.username.zeroize();
-        *self = Self::default();
+        self.notes.zeroize();
+        self.created.zeroize();
+        self.modified.zeroize();
+        self.id.zeroize();
     }
 }
-
+impl Zeroize for Vault {
+    fn zeroize(&mut self) {
+        self.data.items.clear();
+        self.metadata.zeroize();
+        self.data.next_item_id = 1;
+        self.data.revision = 0;
+    }
+}
 #[cfg(test)]
 #[path = "vault_tests.rs"]
 mod test;
-
-impl Drop for Vault {
-    fn drop(&mut self) {
-        self.entries.zeroize();
-        self.metadata.zeroize();
-        self.recovery.zeroize();
-    }
-}
-
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_imports(text: &str) {
-    for mut items in [
+    for items in [
         import::import_csv(text, "synthetic.csv"),
         import::import_json(text, "synthetic.json"),
     ]
     .into_iter()
     .flatten()
     {
-        items.zeroize();
+        drop(items);
+    }
+}
+
+#[cfg(test)]
+impl Vault {
+    pub(crate) fn from_entries(entries: Vec<VaultEntry>, filename: Option<String>) -> Self {
+        let mut vault = Self::memory();
+        for mut entry in entries {
+            if entry.id == 0 {
+                entry.id = vault.data.next_item_id as usize;
+            }
+            let id = ItemId::from_public(entry.id).expect("valid fixture ID");
+            vault.data.next_item_id = vault.data.next_item_id.max(id.0 + 1);
+            let mut item = Item::new(entry, EntryMetadata::default());
+            item.revision = 1;
+            vault.data.items.insert(id, item);
+        }
+        if let Some(filename) = filename {
+            vault.metadata.filename = filename.clone();
+            vault.store = VaultStore::File {
+                directory: data_dir(),
+                filename,
+            };
+        }
+        vault
+    }
+    pub(crate) fn set_test_totp(&mut self, id: usize, value: &str) {
+        self.item_mut(id).unwrap().authenticator =
+            Some(Authenticator::parse(value).expect("valid fixture authenticator"));
+    }
+    pub(crate) fn set_test_metadata(
+        &mut self,
+        id: usize,
+        kind: ItemKind,
+        urls: Vec<String>,
+        fields: Vec<CustomField>,
+    ) {
+        self.item_mut(id).unwrap().metadata = EntryMetadata {
+            kind,
+            additional_urls: urls,
+            password_changed: None,
+            custom_fields: fields,
+        };
+    }
+    pub(crate) fn set_test_duo(&mut self, id: usize, credentials: DuoCredentials) {
+        self.item_mut(id).unwrap().duo = Some(DuoRecord {
+            credentials,
+            review_key: None,
+        });
     }
 }

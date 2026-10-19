@@ -85,6 +85,7 @@ Supplying no options displays the effective configuration. Boolean settings acce
         <dt><code>--password-history-limit &lt;PASSWORD_HISTORY_LIMIT&gt;</code></dt><dd>Maximum prior passwords retained per entry; zero disables history</dd>
         <dt><code>--trash-retention-days &lt;TRASH_RETENTION_DAYS&gt;</code></dt><dd>Automatically purge trash older than this many days; zero disables it</dd>
         <dt><code>--server-port &lt;SERVER_PORT&gt;</code></dt><dd>Set the default loopback port used by the server and client</dd>
+        <dt><code>--default-vault &lt;DEFAULT_VAULT&gt;</code></dt><dd>Opaque vault ID selected by default when unlocking (from pm vaults)</dd>
       </dl>
     </section>
     <section class="command" id="pm-unlock">
@@ -155,6 +156,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID to move to encrypted trash</dd>
         <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Exact entry name to move to encrypted trash</dd>
         <dt><code>--vault</code></dt><dd>Permanently delete the entire encrypted vault</dd>
+        <dt><code>--vault-file &lt;VAULT_FILE&gt;</code></dt><dd>Select the .enc filename from `pm vaults`; otherwise use the default vault</dd>
         <dt><code>--key &lt;KEY&gt;</code></dt><dd>Key file for deleting a key-based vault; otherwise prompts for its password</dd>
         <dt><code>--keep-key</code></dt><dd>Preserve the key file after deleting its vault.
 
@@ -190,7 +192,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <p>Restore a trashed entry to the active vault</p>
       <pre><code>Usage: pm restore --id &lt;ID&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>1-based position shown by the latest `pm trash` listing</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID shown by `pm trash`</dd>
       </dl>
     </section>
     <section class="command" id="pm-purge">
@@ -198,7 +200,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <p>Permanently erase one or all trashed entries</p>
       <pre><code>Usage: pm purge [OPTIONS]</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>1-based position of a trashed entry in the latest `pm trash` listing</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID of a trashed entry shown by `pm trash`</dd>
         <dt><code>--all</code></dt><dd>Permanently erase every entry in trash</dd>
       </dl>
     </section>
@@ -344,14 +346,13 @@ Without `--key`, prompts for a dedicated backup password. The backup includes re
     </section>
     <section class="command" id="pm-backup-restore">
       <h2><code>pm backup restore</code></h2>
-      <p>Restore a complete backup as the vault associated with its password/key.
+      <p>Restore a complete backup as a new, independently selected vault.
 
 Restore validates the entire backup before writing a vault.</p>
       <pre><code>Usage: pm backup restore [OPTIONS] --path &lt;PATH&gt;</code></pre>
       <dl class="flags">
         <dt><code>--path &lt;PATH&gt;</code></dt><dd>Encrypted backup file to restore</dd>
         <dt><code>--key &lt;KEY_PATH&gt;</code></dt><dd>Decrypt with a key file instead of a backup password</dd>
-        <dt><code>--force</code></dt><dd>Replace an existing vault associated with the backup password/key</dd>
       </dl>
     </section>
     <section class="command" id="pm-new">

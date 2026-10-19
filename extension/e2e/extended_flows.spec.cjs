@@ -73,7 +73,11 @@ function fixture(pathname, port) {
             const host = document.createElement("section");
             host.id = "shadowHost";
             const root = host.attachShadow({ mode: "open" });
-            root.innerHTML = '<form><input id="shadowUser" autocomplete="username"><input id="shadowPassword" type="password" autocomplete="current-password"></form>';
+            const nested = document.createElement("article");
+            const inner = nested.attachShadow({ mode: "open" });
+            inner.innerHTML = '<form><input id="shadowUser" autocomplete="username"><input id="shadowPassword" type="password" autocomplete="current-password"><button type="submit">Sign in</button></form>';
+            inner.querySelector("form").addEventListener("submit", event => event.preventDefault());
+            root.append(nested);
             mount.appendChild(host);
         }, 100);
     `);
@@ -351,6 +355,21 @@ test.describe("extended credential flows", () => {
         await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
     });
 
+    test("nested open shadow forms fill selected credentials and capture a changed-password save", async () => {
+        await page.goto(`${origin}/dynamic-shadow`);
+        const picker = await openPicker(browser.context, page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await picker.getByRole("button", { name: /Bob/ }).click();
+        await expect(page.locator("#shadowUser")).toHaveValue("bob@example.com");
+        await expect(page.locator("#shadowPassword")).toHaveValue("bob-password");
+        await page.locator("#shadowPassword").fill("shadow-new-password");
+        const prompt = await openPrompt(browser.context, page.getByRole("button", { name: "Sign in", exact: true }));
+        await expect(prompt.locator("#credentials")).toBeVisible();
+        await expect(prompt.locator("#username")).toHaveValue("bob@example.com");
+        await prompt.locator("#update").click();
+        const save = await waitForNativeRequest(browser.nativeLog, request => request.action === "updateCredentials" && request.password === "shadow-new-password");
+        expect(save.domain).toBe(origin); expect(save.expectedRevision).toBeGreaterThan(0);
+    });
+
     test("hidden forms and reinserted inputs regain picker and generator controls", async () => {
         await page.goto(`${origin}/dynamic-controls`);
         const pickers = page.getByRole("button", { name: "Choose saved credentials" });
@@ -500,5 +519,55 @@ test.describe("native-host failures", () => {
                 await new Promise(resolve => server.close(resolve));
             }
         });
+    }
+});
+
+test("a save with a lost native reply is reconciled by operation ID without a second write", async () => {
+    test.setTimeout(45_000);
+    test.skip(process.platform !== "linux");
+    const server = await startServer();
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const browser = await launchExtension({ mode: "lost-save" });
+    try {
+        const page = browser.context.pages()[0] || await browser.context.newPage();
+        await page.goto(`${origin}/simple`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await page.locator("#username").fill("reconcile@example.com");
+        await page.locator("#password").fill("accepted-before-reply-loss");
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
+        await expect(prompt.locator("#credentials")).toBeVisible();
+        await prompt.locator("#add").click();
+        await expect(prompt.locator("#reviewOutcome")).toBeVisible({ timeout: 20_000 });
+        await expect(prompt.locator("#add")).toBeDisabled();
+        await prompt.locator("#reviewOutcome").click();
+        await expect.poll(() => prompt.isClosed()).toBe(true);
+        const requests = readNativeRequests(browser.nativeLog);
+        const writes = requests.filter(request => request.action === "saveCredentials");
+        expect(writes).toHaveLength(1);
+        expect(requests.find(request => request.action === "operationStatus").operationId).toBe(writes[0].operationId);
+    } finally {
+        await browser.close(); await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test("stopping the extension worker closes orphan secret decisions on its next start", async () => {
+    test.skip(process.platform !== "linux");
+    const server = await startServer();
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const browser = await launchExtension({ accounts: [{ id: 1, name: "Example", username: "alice", password: "synthetic", domain: origin }] });
+    try {
+        const page = browser.context.pages()[0] || await browser.context.newPage();
+        await page.goto(`${origin}/simple`);
+        const picker = await openPicker(browser.context, page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await expect(picker.getByRole("button", { name: /Example/ })).toBeVisible();
+        const cdp = await browser.context.newCDPSession(page);
+        await cdp.send("ServiceWorker.enable");
+        await cdp.send("ServiceWorker.stopAllWorkers");
+        const popup = await browser.context.newPage();
+        await popup.goto(`chrome-extension://${browser.extensionId}/popup.html`);
+        await expect.poll(() => picker.isClosed()).toBe(true);
+        expect(readNativeRequests(browser.nativeLog).filter(request => request.action === "getLoginItem")).toHaveLength(0);
+    } finally {
+        await browser.close(); await new Promise(resolve => server.close(resolve));
     }
 });
