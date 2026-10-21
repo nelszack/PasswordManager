@@ -106,7 +106,9 @@ impl Zeroize for ServerCommand {
             Self::Totp(command) => command.zeroize(),
             Self::Duo(command) => command.zeroize(),
             Self::BrowserLogins(origin) | Self::BrowserDuoItems(origin) => origin.zeroize(),
-            Self::BrowserLogin { domain, .. } => domain.zeroize(),
+            Self::BrowserLogin { domain, .. } | Self::BrowserAuthenticatorData { domain, .. } => {
+                domain.zeroize()
+            }
             Self::RestorePassword { target, .. } => target.zeroize(),
             _ => {}
         }
@@ -177,6 +179,10 @@ pub enum ServerCommand {
     },
     Duo(DuoCommand),
     AuthenticatorData(Target),
+    BrowserAuthenticatorData {
+        domain: String,
+        id: usize,
+    },
     BrowserDuoItems(String),
     OperationStatus(String),
 }
@@ -224,6 +230,8 @@ impl ServerCommand {
                 | Self::Status
                 | Self::OperationStatus(_)
                 | Self::BrowserDuoItems(_)
+                | Self::BrowserLogins(_)
+                | Self::BrowserAutofill
                 | Self::Duo(DuoCommand::Requests { .. })
                 | Self::Totp(TotpCommand::Watch { .. })
         )
@@ -272,6 +280,7 @@ impl ServerCommand {
                 Self::ManagementItem { id, .. }
                 | Self::ManagementCopy { id, .. }
                 | Self::BrowserLogin { id, .. }
+                | Self::BrowserAuthenticatorData { id, .. }
                 | Self::BrowserAutofillItem(id) => Some(*id),
                 _ => None,
             },

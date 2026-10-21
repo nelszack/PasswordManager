@@ -44,6 +44,7 @@ var PasswordManagerBackgroundState = (() => {
         return left?.native === right?.native
             && left?.running === right?.running
             && left?.locked === right?.locked
+            && left?.sessionId === right?.sessionId
             && left?.error === right?.error
             && left?.versionError === right?.versionError
             && left?.extensionVersion === right?.extensionVersion

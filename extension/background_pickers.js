@@ -43,22 +43,25 @@ const PasswordManagerBackgroundPickers = {
         }
 
         async function loadSecurePickerItems(kind, domain) {
-            let items;
+            let items, response;
             if (kind === "login" || kind === "totp") {
-                items = parseNativeItems(await nativeRequest("getLoginItems", { domain }));
+                response = await nativeRequest("getLoginItems", { domain });
+                items = parseNativeItems(response);
                 if (kind === "totp") items = items.filter(item => item?.has_totp === true);
             } else {
-                items = parseNativeItems(await nativeRequest("getAutofillItems"));
+                response = await nativeRequest("getAutofillItems");
+                items = parseNativeItems(response);
                 items = items.filter(item => item?.kind === kind);
             }
             const summaries = items.map(item => ({
                 id: item.id,
+                revision: item.revision,
                 name: String(item.name || ""),
                 username: String(item.username || ""),
                 kind,
                 has_duo: item.has_duo === true
             })).filter(item => Number.isSafeInteger(item.id) && item.id > 0);
-            return { items: summaries, summaries };
+            return { items: summaries, summaries, sessionId: protocol.sessionId(response) };
         }
 
         function discardPicker(token, closeWindow = true) {
@@ -132,9 +135,10 @@ const PasswordManagerBackgroundPickers = {
                     pending.windowId = window.id;
                     pickerWindows.set(window.id, token);
                     loadSecurePickerItems(kind, domain)
-                        .then(({ items, summaries }) => {
+                        .then(({ items, summaries, sessionId }) => {
                             const pending = pendingPickers.get(token);
                             if (!pending) return;
+                            pending.sessionId = sessionId;
                             pending.items = items;
                             pending.summaries = summaries;
                             pending.loading = false;
@@ -179,10 +183,11 @@ const PasswordManagerBackgroundPickers = {
             // Lock/disconnect invalidation also cancels selections awaiting native I/O.
             let payload;
             let filledLogin;
+            const binding = { expectedSession: pending.sessionId, expectedRevision: selected.revision };
             try {
                 if (pending.kind === "login") {
                     const response = await nativeRequest("getLoginItem", {
-                        domain: pending.domain, entryId: selected.id
+                        domain: pending.domain, entryId: selected.id, ...binding
                     });
                     if (!response.success) throw new Error(response.error || "Login unavailable");
                     payload = response.data;
@@ -193,11 +198,11 @@ const PasswordManagerBackgroundPickers = {
                         expiresAt: Date.now() + filledLoginLifetime
                     };
                 } else if (pending.kind === "totp") {
-                    const response = await nativeRequest("getTotp", { entryId: selected.id });
+                    const response = await nativeRequest("getTotp", { domain: pending.domain, entryId: selected.id, ...binding });
                     if (!response.success) throw new Error(response.error || "TOTP unavailable");
                     payload = response.data;
                 } else {
-                    const response = await nativeRequest("getAutofillItem", { entryId: selected.id });
+                    const response = await nativeRequest("getAutofillItem", { entryId: selected.id, ...binding });
                     if (!response.success) throw new Error(response.error || "Autofill item unavailable");
                     payload = response.data;
                 }
@@ -222,7 +227,7 @@ const PasswordManagerBackgroundPickers = {
                         { documentId: pending.documentId }
                     );
                     if (filledLogin && epoch === generation) onLoginSelected?.({
-                        sender: { tab: { id: pending.tabId }, url: pending.domain }, accounts: [selected]
+                        sender: { tab: { id: pending.tabId }, url: pending.domain }, accounts: [{ ...selected, sessionId: pending.sessionId }]
                     });
                 } catch (error) {
                     if (filledLogin && filledLogins.get(key) === filledLogin) filledLogins.delete(key);

@@ -127,17 +127,7 @@ fn duo_interaction_requires_a_terminal_and_visible_request_review() {
             "{args:?}: {message}"
         );
     }
-    let started = run(root.path(), port, &["start"]);
-    assert!(
-        started.status.success(),
-        "{}",
-        String::from_utf8_lossy(&started.stderr)
-    );
-    let _server = ServerGuard {
-        root: root.path().to_path_buf(),
-        port,
-        active: true,
-    };
+    let _server = ServerGuard::start(root.path(), port);
     // A successful start already verifies the authenticated server is ready.
     for args in [
         vec!["duo", "watch", "--id", "1", "--interactive"],
@@ -470,16 +460,23 @@ struct ServerGuard {
     active: bool,
 }
 
+impl ServerGuard {
+    fn start(root: &Path, port: u16) -> Self {
+        let output = run(root, port, &["start"]);
+        assert!(output.status.success(), "pm start failed: {output:?}");
+        Self {
+            root: root.into(),
+            port,
+            active: true,
+        }
+    }
+}
+
 #[test]
 fn servers_on_different_ports_cannot_share_a_data_directory() {
     let root = tempfile::tempdir().unwrap();
     let first_port = unused_port();
-    assert!(run(root.path(), first_port, &["start"]).status.success());
-    let _first = ServerGuard {
-        root: root.path().into(),
-        port: first_port,
-        active: true,
-    };
+    let _first = ServerGuard::start(root.path(), first_port);
     let token_path = root.path().join("data/session.key");
     let token = std::fs::read(&token_path).unwrap();
     assert!(run(root.path(), first_port, &["start"]).status.success());
@@ -496,16 +493,7 @@ fn servers_on_different_ports_cannot_share_a_data_directory() {
     }
 
     let independent = tempfile::tempdir().unwrap();
-    assert!(
-        run(independent.path(), second_port, &["start"])
-            .status
-            .success()
-    );
-    let _second = ServerGuard {
-        root: independent.path().into(),
-        port: second_port,
-        active: true,
-    };
+    let _second = ServerGuard::start(independent.path(), second_port);
     assert!(
         run(independent.path(), second_port, &["status"])
             .status
@@ -684,12 +672,7 @@ fn assert_protected_output_destinations(root: &Path, port: u16, key: &Path) {
 fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
-    assert!(run(root.path(), port, &["start"]).status.success());
-    let _server = ServerGuard {
-        root: root.path().to_path_buf(),
-        port,
-        active: true,
-    };
+    let _server = ServerGuard::start(root.path(), port);
     let key = root.path().join("vault.key");
     for args in [
         vec!["new", "--key", key.to_str().unwrap()],
@@ -865,12 +848,7 @@ fn machine_readable_secrets_preserve_whitespace_empty_values_and_unicode() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
     let key = root.path().join("vault.key");
-    assert!(run(root.path(), port, &["start"]).status.success());
-    let _server = ServerGuard {
-        root: root.path().into(),
-        port,
-        active: true,
-    };
+    let _server = ServerGuard::start(root.path(), port);
     for command in ["new", "unlock"] {
         let output = run(
             root.path(),
@@ -932,12 +910,7 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
     let key = root.path().join("vault.key");
-    assert!(run(root.path(), port, &["start"]).status.success());
-    let _server = ServerGuard {
-        root: root.path().into(),
-        port,
-        active: true,
-    };
+    let _server = ServerGuard::start(root.path(), port);
     for command in ["new", "unlock"] {
         assert!(
             run(
@@ -1072,17 +1045,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     let port = unused_port();
     let key = root.path().join("vault.key");
 
-    let started = run(root.path(), port, &["start"]);
-    assert!(
-        started.status.success(),
-        "pm start failed: {}",
-        String::from_utf8_lossy(&started.stderr)
-    );
-    let mut server = ServerGuard {
-        root: root.path().to_path_buf(),
-        port,
-        active: true,
-    };
+    let mut server = ServerGuard::start(root.path(), port);
 
     let created = isolated_pm(root.path())
         .args(["--port", &port.to_string(), "new", "--key"])
@@ -1174,15 +1137,13 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     );
 
     let json_export = root.path().join("vault.json");
-    let csv_export = root.path().join("vault.csv");
-    for path in [&json_export, &csv_export] {
-        let exported = isolated_pm(root.path())
-            .args(["--port", &port.to_string(), "export", "--path"])
-            .arg(path)
-            .output_timeout("pm export");
-        assert!(exported.status.success());
-        assert!(path.is_file());
-    }
+    // Generated passwords can start with characters that CSV deliberately rejects.
+    let exported = isolated_pm(root.path())
+        .args(["--port", &port.to_string(), "export", "--path"])
+        .arg(&json_export)
+        .output_timeout("pm export");
+    assert!(exported.status.success(), "{exported:?}");
+    assert!(json_export.is_file());
 
     // Portable imports let the executable exercise secret fields without a TTY prompt.
     let mut portable: serde_json::Value =
@@ -1380,12 +1341,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
 fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
-    assert!(run(root.path(), port, &["start"]).status.success());
-    let _guard = ServerGuard {
-        root: root.path().into(),
-        port,
-        active: true,
-    };
+    let _guard = ServerGuard::start(root.path(), port);
     let keys: Vec<_> = (0..3)
         .map(|i| root.path().join(format!("vault-{i}.key")))
         .collect();
@@ -1479,12 +1435,7 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
         serde_json::json!([])
     );
 
-    assert!(run(root.path(), port, &["start"]).status.success());
-    let _guard = ServerGuard {
-        root: root.path().into(),
-        port,
-        active: true,
-    };
+    let _guard = ServerGuard::start(root.path(), port);
     assert!(
         run(root.path(), port, &["new", "--key", &first_key])
             .status

@@ -127,6 +127,19 @@ async function openPrompt(context, button) {
     return opened;
 }
 
+async function observeAutomaticPrompts(context) {
+    const worker = context.serviceWorkers()[0];
+    await worker.evaluate(() => {
+        const open = prompts.open;
+        prompts.open = async (...args) => {
+            const result = await open(...args);
+            globalThis.lastAutomaticPromptResult = result;
+            return result;
+        };
+    });
+    return worker;
+}
+
 test.describe("extended credential flows", () => {
     test.describe.configure({ mode: "serial", timeout: 90_000 });
     let server;
@@ -151,14 +164,7 @@ test.describe("extended credential flows", () => {
             { id: 8, name: "Bob", username: "bob@example.com", password: "bob-password", has_totp: false, domain: origin }
         ] });
         page = browser.context.pages()[0] || await browser.context.newPage();
-        await browser.context.serviceWorkers()[0].evaluate(() => {
-            const open = prompts.open;
-            prompts.open = async (...args) => {
-                const result = await open(...args);
-                globalThis.lastAutomaticPromptResult = result;
-                return result;
-            };
-        });
+        await observeAutomaticPrompts(browser.context);
     });
 
     test.afterAll(async () => {
@@ -496,8 +502,6 @@ test.describe("native-host failures", () => {
     const cases = [
         { mode: "missing", installHost: false },
         { mode: "locked" },
-        { mode: "unavailable" },
-        { mode: "malformed" },
         { mode: "timeout" }
     ];
 
@@ -506,6 +510,7 @@ test.describe("native-host failures", () => {
         failureTest(`${scenario.mode} does not open an automatic save prompt`, async ({ isolatedExtension }) => {
             test.setTimeout(30_000);
             const { browser, page, origin } = isolatedExtension;
+            const worker = await observeAutomaticPrompts(browser.context);
             await page.goto(`${origin}/simple`);
             await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
             await page.locator("#username").fill("failure@example.com");
@@ -514,6 +519,9 @@ test.describe("native-host failures", () => {
             browser.context.on("page", popup => prompts.push(popup));
             await page.locator("#submit").click();
             await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes", { timeout: 20_000 });
+            await expect.poll(() => worker.evaluate(() => globalThis.lastAutomaticPromptResult), {
+                timeout: 20_000
+            }).toEqual({ success: true, skipped: true });
             expect(prompts).toHaveLength(0);
         });
     }

@@ -68,6 +68,7 @@ test("prompt descriptions use usernames and never make password comparisons", ()
 test("completion builds only authorized add and update operations", () => {
     const pending = {
         domain: "https://login.example.com",
+        sessionId: "a".repeat(64),
         username: "alice",
         password: "secret",
         data: { updateTarget: { id: 7, name: "Personal" } }
@@ -78,6 +79,7 @@ test("completion builds only authorized add and update operations", () => {
         action: "add",
         fields: {
             domain: pending.domain,
+            expectedSession: pending.sessionId,
             username: "alice@example.com",
             password: "secret",
             name: "New account"

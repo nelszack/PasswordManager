@@ -652,7 +652,10 @@ Historical backups and filesystem snapshots still use their original credentials
 Relative import, export, and backup paths are resolved from the directory where
 you run the CLI, independently of where the background server was started.
 Exports and backups must be saved outside the application's data and configuration
-directories. `--force` cannot override this protection.
+directories. `--force` cannot override this protection. CSV exports reject cells
+that could be interpreted as spreadsheet formulas, including formula-leading
+passwords; export to a `.json` file to preserve those values exactly. The rejected
+CSV export leaves any existing destination unchanged.
 
 For a complete backup that preserves entries, stable IDs, item types, additional
 URLs, custom fields, password-age metadata, password history, trash, TOTP/HOTP

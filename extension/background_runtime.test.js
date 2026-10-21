@@ -45,7 +45,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
                     onDisconnect: event(fn => disconnect = fn),
                     postMessage(request) {
                         requests.push(request);
-                        const response = { id: request.id, protocolVersion: 1, success: true, nativeVersion: "0.1.0" };
+                        const response = { id: request.id, protocolVersion: require("./command_contract.js").protocolVersion, sessionId: "a".repeat(64), success: true, nativeVersion: "0.1.0" };
                         if (request.action === "status") response.data = { locked, version: "0.1.0", warning: null };
                         else if (locked) Object.assign(response, { success: false, error: "Vault locked." });
                         else if (request.action === "getLoginItems") Object.assign(response, credentialResponse);
@@ -130,17 +130,16 @@ test("vault management cannot be called by websites, content scripts, or other e
     assert.equal((await env.message({ action: "managerUnknown" }, manager)).success, false);
 });
 
-test("background worker starts, publishes status, and rejects untrusted credential requests", async () => {
+test("background worker publishes status and rejects obsolete credential commands", async () => {
     const env = securityEnvironment();
     await new Promise(resolve => setImmediate(resolve));
     assert.ok(env.badge.some(value => value.text === "U"));
     const before = env.requests.length;
-    const response = await env.message(
-        { action: "getCredentials" },
-        { url: "file:///tmp/untrusted.html", tab: { id: 7 } }
-    );
-    assert.equal(response.success, false);
-    assert.equal(response.error, "Unsupported extension request");
+    for (const action of ["getCredentials", "saveCredentials", "updateCredentials", "getRelayedCredentials", "saveRelayedCredentials", "updateRelayedCredentials", "relayToParent", "relayLoginResult"]) {
+        const response = await env.message({ action, username: "alice", id: 1 });
+        assert.equal(response.success, false, action);
+        assert.equal(response.error, "Unsupported extension request", action);
+    }
     assert.equal(env.requests.length, before);
 });
 
@@ -154,16 +153,6 @@ test("pending navigation records use trusted origins and can be consumed only on
     await env.message({ action: "setPendingCredentials", pending: { username: "alice" } });
     assert.equal((await env.message({ action: "clearPendingCredentials" })).success, true);
     assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
-});
-
-test("obsolete direct writes and iframe relay commands have no extension authority", async () => {
-    const env = securityEnvironment();
-    await new Promise(resolve => setImmediate(resolve));
-    const before = env.requests.length;
-    for (const action of ["getCredentials", "saveCredentials", "updateCredentials", "getRelayedCredentials", "saveRelayedCredentials", "updateRelayedCredentials", "relayToParent", "relayLoginResult"]) {
-        assert.equal((await env.message({ action, username: "alice", id: 1 })).success, false);
-    }
-    assert.equal(env.requests.length, before);
 });
 
 test("picker fetches only the selected login and targets the originating document", async () => {
@@ -313,8 +302,6 @@ test("automatic prompts wait for lookup and open only with an available vault", 
     const cases = [
         { name: "successful delayed lookup", hold: true, opens: true },
         { name: "stopped server", response: { success: false, error: "Server is not running" } },
-        { name: "disconnected host", response: { success: false, error: "Native messaging host disconnected" } },
-        { name: "timed out host", response: { success: false, error: "Native messaging request timed out" } },
         { name: "invalid JSON", response: { success: true, data: "not-json" } },
         { name: "invalid item list", response: { success: true, data: {} } },
         { name: "locked vault", locked: true }

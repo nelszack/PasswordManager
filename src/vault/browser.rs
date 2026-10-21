@@ -52,6 +52,11 @@ impl Vault {
             .map(|i| self.summary(i))
             .collect()
     }
+    pub(crate) fn browser_login_revision(&self, origin: &str, id: usize) -> Option<u64> {
+        let requested = parse_site(origin, false)?;
+        let item = self.item(id).filter(|item| item.active())?;
+        login_matches_site(&item.entry, Some(&item.metadata), &requested).then_some(item.revision)
+    }
     pub fn browser_login(&self, domain: &str, id: usize) -> Option<BrowserLogin> {
         let requested = parse_site(domain, false)?;
         let item = self.item(id).filter(|i| i.active())?;

@@ -5,7 +5,7 @@
     if (typeof module === "object" && module.exports) module.exports = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
-    const protocolVersion = 1;
+    const protocolVersion = 2;
     const operations = Object.freeze({
   "getAutofillItem": {
     "mutates": false,
@@ -15,7 +15,9 @@
       "background"
     ],
     "requiredFields": [
-      "entryId"
+      "entryId",
+      "expectedRevision",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "autofill"
@@ -53,7 +55,9 @@
     ],
     "requiredFields": [
       "domain",
-      "entryId"
+      "entryId",
+      "expectedRevision",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "login"
@@ -79,7 +83,10 @@
       "background"
     ],
     "requiredFields": [
-      "entryId"
+      "domain",
+      "entryId",
+      "expectedRevision",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "authenticator"
@@ -106,7 +113,8 @@
       "background"
     ],
     "requiredFields": [
-      "item"
+      "item",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "message"
@@ -120,7 +128,8 @@
       "background"
     ],
     "requiredFields": [
-      "entryId"
+      "entryId",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "message"
@@ -135,7 +144,8 @@
     ],
     "requiredFields": [
       "entryId",
-      "expectedRevision"
+      "expectedRevision",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "message"
@@ -149,7 +159,8 @@
       "background"
     ],
     "requiredFields": [
-      "entryId"
+      "entryId",
+      "expectedSession"
     ],
     "optionalFields": [],
     "resultShape": "duoArray"
@@ -166,7 +177,8 @@
       "entryId",
       "requestId",
       "fingerprint",
-      "approve"
+      "approve",
+      "expectedSession"
     ],
     "optionalFields": [
       "verificationCode"
@@ -182,7 +194,8 @@
       "background"
     ],
     "requiredFields": [
-      "entryId"
+      "entryId",
+      "expectedSession"
     ],
     "optionalFields": [
       "reveal"
@@ -230,6 +243,7 @@
     "requiredFields": [
       "entryId",
       "expectedRevision",
+      "expectedSession",
       "item"
     ],
     "optionalFields": [],
@@ -272,7 +286,8 @@
     "requiredFields": [
       "domain",
       "password",
-      "name"
+      "name",
+      "expectedSession"
     ],
     "optionalFields": [
       "username"
@@ -301,7 +316,8 @@
       "domain",
       "entryId",
       "password",
-      "expectedRevision"
+      "expectedRevision",
+      "expectedSession"
     ],
     "optionalFields": [
       "username"
@@ -356,6 +372,7 @@
             let valid;
             switch (key) {
                 case "operationId": valid = identifier(value); break;
+                case "expectedSession": valid = text(value) && /^[a-fA-F0-9]{64}$/.test(value); break;
                 case "entryId": valid = positive(value); break;
                 case "expectedRevision": valid = integer(value); break;
                 case "item": valid = validManagementInput(value); break;

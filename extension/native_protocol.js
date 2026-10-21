@@ -16,6 +16,7 @@
             || (response.success && response.uncertain)) {
             throw new Error("Invalid native host response");
         }
+        if (response.sessionId != null) sessionId(response);
         if (response.success) {
             if (!("data" in response)) throw new Error("Invalid native host response");
         } else if (typeof response.error !== "string" || !response.error.trim()) {
@@ -38,5 +39,11 @@
         return items;
     }
 
-    return { validateResponse, parseItems };
+    function sessionId(response) {
+        if (typeof response?.sessionId !== "string" || !/^[a-fA-F0-9]{64}$/.test(response.sessionId)) {
+            throw new Error("Unlock session unavailable; refresh and reopen the selection");
+        }
+        return response.sessionId;
+    }
+    return { validateResponse, parseItems, sessionId };
 });

@@ -133,7 +133,7 @@ pub fn decrypt_record_stream(
     Ok(plaintext)
 }
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const DEFAULT_PORT: u16 = 7878;
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()
@@ -157,6 +157,8 @@ pub struct RequestEnvelope {
     pub request_id: String,
     pub operation_id: Option<String>,
     pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub expected_session: Option<String>,
     pub command: crate::types::ServerCommand,
 }
 impl RequestEnvelope {
@@ -168,6 +170,7 @@ impl RequestEnvelope {
                 .is_mutation()
                 .then(|| hex::encode(rand::random::<[u8; 16]>())),
             expected_revision: None,
+            expected_session: None,
             command,
         }
     }
@@ -186,6 +189,24 @@ impl RequestEnvelope {
                 "unsupported protocol version {}; expected {}",
                 self.protocol_version, PROTOCOL_VERSION
             ));
+        }
+        if matches!(
+            self.command,
+            crate::types::ServerCommand::BrowserLogin { .. }
+                | crate::types::ServerCommand::BrowserAutofillItem(_)
+                | crate::types::ServerCommand::BrowserAuthenticatorData { .. }
+        ) && (self.expected_session.is_none() || self.expected_revision.is_none())
+        {
+            return Err(
+                "browser selections require the reviewed unlock session and item revision".into(),
+            );
+        }
+        if self
+            .expected_session
+            .as_ref()
+            .is_some_and(|id| id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err("invalid unlock session identifier".into());
         }
         for id in std::iter::once(&self.request_id).chain(self.operation_id.iter()) {
             if id.is_empty()
@@ -333,6 +354,8 @@ pub struct RpcResponse {
     pub protocol_version: u16,
     #[serde(default)]
     pub request_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub code: i32,
     pub payload: ResponsePayload,
     pub operation: Option<OperationReceipt>,
@@ -342,6 +365,7 @@ impl RpcResponse {
         Self {
             protocol_version: PROTOCOL_VERSION,
             request_id: None,
+            session_id: None,
             code: code as i32,
             payload,
             operation: None,
@@ -382,15 +406,6 @@ pub type ProtocolResponse = RpcResponse;
 pub fn encode_rpc_response(response: &RpcResponse) -> Result<Vec<u8>, String> {
     rmp_serde::to_vec_named(response).map_err(|_| "could not encode server response".into())
 }
-pub fn encode_response(code: ResponseCode, message: &str) -> Vec<u8> {
-    encode_rpc_response(&RpcResponse::message(code, message)).expect("message is serializable")
-}
-pub fn encode_data_response(message: &str) -> Vec<u8> {
-    encode_rpc_response(&RpcResponse::success(ResponsePayload::Secret(
-        message.into(),
-    )))
-    .expect("secret is serializable")
-}
 pub fn decode_responses(bytes: &[u8]) -> Result<RpcResponse, String> {
     use serde::Deserialize;
     let mut cursor = std::io::Cursor::new(bytes);
@@ -420,7 +435,7 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn hotp_counters_preserve_full_u64_in_json_and_typed_messagepack() {
+    fn authenticator_responses_preserve_codes_lifetimes_and_full_u64_counters() {
         for counter in [0, (1 << 53) - 1, 1 << 53, u64::MAX] {
             let authenticator = AuthenticatorResponse {
                 code: "123456".into(),
@@ -428,10 +443,14 @@ mod tests {
                 counter: Some(counter),
                 mode: "hotp".into(),
             };
+            assert!(authenticator.valid());
             let json = serde_json::to_value(&authenticator).unwrap();
             assert_eq!(json["counter"], counter.to_string());
+            assert_eq!(json["code"], "123456");
+            assert_eq!(json["mode"], "hotp");
+            assert!(json["expires_in"].is_null());
             assert_eq!(
-                serde_json::from_value::<AuthenticatorResponse>(json)
+                serde_json::from_value::<AuthenticatorResponse>(json.clone())
                     .unwrap()
                     .counter,
                 Some(counter)
@@ -441,7 +460,7 @@ mod tests {
             assert_eq!(wire["counter"].as_u64(), Some(counter));
             let response = RpcResponse::success(ResponsePayload::Authenticator(authenticator));
             let decoded = decode_responses(&encode_rpc_response(&response).unwrap()).unwrap();
-            assert_eq!(decoded.payload.into_json()["counter"], counter.to_string());
+            assert_eq!(decoded.payload.into_json(), json);
         }
         let totp = AuthenticatorResponse {
             code: "123456".into(),
@@ -449,13 +468,17 @@ mod tests {
             counter: None,
             mode: "totp".into(),
         };
-        let json = serde_json::to_value(&totp).unwrap();
-        assert!(json["counter"].is_null());
-        assert_eq!(
+        assert!(totp.valid());
+        let json = serde_json::json!({
+            "code": "123456", "expires_in": 30, "counter": null, "mode": "totp"
+        });
+        let response = RpcResponse::success(ResponsePayload::Authenticator(totp));
+        let decoded = decode_responses(&encode_rpc_response(&response).unwrap()).unwrap();
+        assert_eq!(decoded.payload.into_json(), json);
+        assert!(
             serde_json::from_value::<AuthenticatorResponse>(json)
                 .unwrap()
-                .counter,
-            None
+                .valid()
         );
     }
 
@@ -484,8 +507,13 @@ mod tests {
     proptest! {
         #[test]
         fn secret_payloads_preserve_every_byte(secret in ".{0,2048}") {
-            let response=decode_responses(&encode_data_response(&secret)).unwrap();
-            match response.payload { ResponsePayload::Secret(value)=>prop_assert_eq!(value.expose(),secret), _=>prop_assert!(false) }
+            let original = RpcResponse::success(ResponsePayload::Secret(secret.as_str().into()));
+            let encoded = encode_rpc_response(&original).unwrap();
+            let response = decode_responses(&encoded).unwrap();
+            match response.payload {
+                ResponsePayload::Secret(value) => prop_assert_eq!(value.expose(), secret),
+                _ => prop_assert!(false, "expected a typed secret payload"),
+            }
         }
         #[test]
         fn arbitrary_responses_never_panic(bytes in proptest::collection::vec(any::<u8>(),0..4096)) {
@@ -497,8 +525,11 @@ mod tests {
         let mut response = RpcResponse::message(ResponseCode::Success, "one");
         response.protocol_version += 1;
         assert!(decode_responses(&encode_rpc_response(&response).unwrap()).is_err());
-        let mut encoded = encode_response(ResponseCode::Success, "one");
-        encoded.extend(encode_response(ResponseCode::Success, "two"));
+        let mut encoded =
+            encode_rpc_response(&RpcResponse::message(ResponseCode::Success, "one")).unwrap();
+        encoded.extend(
+            encode_rpc_response(&RpcResponse::message(ResponseCode::Success, "two")).unwrap(),
+        );
         assert!(decode_responses(&encoded).is_err());
     }
     #[test]

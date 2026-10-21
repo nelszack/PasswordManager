@@ -140,11 +140,25 @@ impl Owner {
                 "Server is stopping.",
             ));
         }
+        if request
+            .expected_session
+            .as_ref()
+            .is_some_and(|expected| self.session.session_id().as_ref() != Some(expected))
+        {
+            return one(RpcResponse::message(
+                ResponseCode::Conflict,
+                "Unlock session changed; reopen the selection before continuing",
+            ));
+        }
         let operation_id = request.operation_id.take();
         let fingerprint = operation_id.as_ref().map(|_| {
             let bytes = Zeroizing::new(
-                rmp_serde::to_vec_named(&(&request.command, request.expected_revision))
-                    .expect("commands serialize"),
+                rmp_serde::to_vec_named(&(
+                    &request.command,
+                    request.expected_revision,
+                    &request.expected_session,
+                ))
+                .expect("commands serialize"),
             );
             *blake3::keyed_hash(&self.fingerprint_key, &bytes).as_bytes()
         });
@@ -189,24 +203,38 @@ impl Owner {
             }) {
                 return one(RpcResponse::message(ResponseCode::Conflict, error));
             }
-            if let Some(expected) = request.expected_revision {
-                let actual = request.command.revision_target().and_then(|target| {
-                    self.session.vault().and_then(|v| v.target_revision(target))
-                });
-                if actual != Some(expected) {
-                    let mut rejected = one(RpcResponse::message(
-                        ResponseCode::Conflict,
-                        "Item changed since it was opened; reload it before saving",
-                    ));
+        }
+        if let Some(expected) = request.expected_revision {
+            let actual = self.session.vault().and_then(|vault| {
+                request
+                    .command
+                    .revision_target()
+                    .and_then(|target| vault.target_revision(target))
+                    .or_else(|| {
+                        request
+                            .command
+                            .target_id()
+                            .and_then(|id| vault.revision(id))
+                    })
+            });
+            if actual != Some(expected) {
+                let mut rejected = one(RpcResponse::message(
+                    ResponseCode::Conflict,
+                    "Item changed since it was opened; reopen it before continuing",
+                ));
+                if let Some(id) = operation_id.as_ref() {
                     self.complete(id, &mut rejected.responses, false);
-                    return rejected;
                 }
+                return rejected;
             }
         }
         let before = self.session.epoch();
         let mut result = execute_command(state, request.command, &mut self.session);
         if before != self.session.epoch() || self.session.is_locked() {
             self.clear_results();
+        }
+        for response in &mut result.responses {
+            response.session_id = self.session.session_id();
         }
         if let Some(id) = operation_id {
             if matches!(
@@ -235,7 +263,7 @@ fn one(response: RpcResponse) -> outcome::CommandOutcome {
 pub(super) struct VaultWorker {
     normal: mpsc::Sender<Job>,
     control: mpsc::Sender<Job>,
-    locked: watch::Receiver<bool>,
+    locked: watch::Receiver<Option<String>>,
 }
 impl VaultWorker {
     pub fn start(
@@ -245,7 +273,7 @@ impl VaultWorker {
     ) -> Self {
         let (normal_tx, mut normal) = mpsc::channel::<Job>(QUEUE_CAPACITY);
         let (control_tx, mut control) = mpsc::channel::<Job>(CONTROL_CAPACITY);
-        let (locked_tx, locked) = watch::channel(session.is_locked());
+        let (locked_tx, locked) = watch::channel(session.session_id());
         tokio::spawn(async move {
             let mut owner = Some(Owner::new(session));
             let mut deadline: Option<tokio::time::Instant> = None;
@@ -261,11 +289,11 @@ impl VaultWorker {
                             current.clear_results();
                             (current,result)
                         }).await;
-                        let Ok((returned,result))=result else { locked_tx.send_replace(true); break };
+                        let Ok((returned,result))=result else { locked_tx.send_replace(None); break };
                         owner=Some(returned);
                         let warning=result.err().map(|e|format!("Automatic lock cleanup warning: {e}"));
                         *background.lock().await=warning;
-                        locked_tx.send_replace(true);
+                        locked_tx.send_replace(None);
                         deadline=None;
                         continue;
                     },
@@ -288,12 +316,12 @@ impl VaultWorker {
                         ResponseCode::Failure,
                         "Vault worker failed; session discarded",
                     )));
-                    locked_tx.send_replace(true);
+                    locked_tx.send_replace(None);
                     break;
                 };
                 let locked = returned.session.is_locked();
+                locked_tx.send_replace(returned.session.session_id());
                 owner = Some(returned);
-                locked_tx.send_replace(locked);
                 if locked {
                     deadline = None;
                 } else if activity {
@@ -314,8 +342,16 @@ impl VaultWorker {
             locked,
         }
     }
+    #[cfg(test)]
     pub fn is_locked(&self) -> bool {
-        self.locked.has_changed().is_err() || *self.locked.borrow()
+        self.session_id().is_none()
+    }
+    pub fn session_id(&self) -> Option<String> {
+        if self.locked.has_changed().is_err() {
+            None
+        } else {
+            self.locked.borrow().clone()
+        }
     }
     async fn submit(
         &self,

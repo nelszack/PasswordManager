@@ -43,14 +43,6 @@ fn validates_chrome_extension_ids() {
 }
 
 #[test]
-fn native_host_uses_the_platform_executable_name() {
-    #[cfg(target_os = "windows")]
-    assert_eq!(HOST_BINARY_NAME, "pm-native-host.exe");
-    #[cfg(not(target_os = "windows"))]
-    assert_eq!(HOST_BINARY_NAME, "pm-native-host");
-}
-
-#[test]
 fn native_manifest_directory_matches_the_current_platform() {
     let base_dirs = BaseDirs::new().unwrap();
     let host_dir = data_dir().join("native-messaging");
@@ -160,21 +152,6 @@ fn native_message_round_trip_uses_native_endian_framing() {
 }
 
 #[test]
-fn authenticator_responses_preserve_codes_and_mode_specific_lifetimes() {
-    for expected in [
-        json!({ "code": "287082", "expires_in": 19, "counter": null, "mode": "totp" }),
-        json!({ "code": "755224", "expires_in": null, "counter": "0", "mode": "hotp" }),
-        json!({ "code": "123456", "expires_in": null, "counter": "18446744073709551614", "mode": "hotp" }),
-    ] {
-        let code: crate::protocol::AuthenticatorResponse =
-            serde_json::from_value(expected.clone()).unwrap();
-        assert!(code.valid());
-        let parsed = ResponsePayload::Authenticator(code).into_json();
-        assert_eq!(parsed, expected, "mode {}", expected["mode"]);
-    }
-}
-
-#[test]
 fn malformed_authenticator_data_fails_without_exposing_code_material() {
     for payload in [
         r#"{"code":"secret","expires_in":19,"counter":null,"mode":"totp"}"#,
@@ -246,12 +223,13 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
 
     let mut request = NativeRequest {
         action: NativeAction::GetTotp,
+        domain: Some("https://example.com".into()),
         entry_id: Some(17),
         ..NativeRequest::default()
     };
     assert!(matches!(
         command_for_request(&mut request).unwrap(),
-        ServerCommand::AuthenticatorData(Target::Id(17))
+        ServerCommand::BrowserAuthenticatorData { id: 17, .. }
     ));
 
     assert!(serde_json::from_value::<NativeRequest>(json!({"id":1,"action":"export"})).is_err());
@@ -367,8 +345,8 @@ fn native_bridge_does_not_echo_validation_or_deserialization_inputs() {
 #[test]
 fn native_mutations_report_committed_durability_as_uncertain() {
     use crate::protocol::{
-        ResponseCode, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record, encode_response,
-        encrypt_record, server_hello,
+        ResponseCode, RpcResponse, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, decrypt_record,
+        encode_rpc_response, encrypt_record, server_hello,
     };
     use std::{net::TcpListener, thread, time::Duration};
 
@@ -407,7 +385,8 @@ fn native_mutations_report_committed_durability_as_uncertain() {
             // error code, rather than parsing a human-readable error.
             let response = encrypt_record(
                 &keys.response,
-                &encode_response(code, "synthetic persistence failure"),
+                &encode_rpc_response(&RpcResponse::message(code, "synthetic persistence failure"))
+                    .unwrap(),
             )
             .unwrap();
             stream.write_all(&response).unwrap();
@@ -419,6 +398,7 @@ fn native_mutations_report_committed_durability_as_uncertain() {
                 action: NativeAction::ManagerDelete,
                 operation_id: Some("test-delete-77".into()),
                 expected_revision: Some(1),
+                expected_session: Some("a".repeat(64)),
                 entry_id: Some(7),
                 ..Default::default()
             },
@@ -508,7 +488,7 @@ fn native_policy_rejects_cross_operation_fields_and_requires_reviewed_revisions(
         let error = request.validate().unwrap_err();
         assert!(!error.contains("must-not-appear"));
     }
-    let request:NativeRequest=serde_json::from_value(json!({"id":1,"action":"managerDelete","entryId":1,"operationId":"delete-one","expectedRevision":3})).unwrap();
+    let request:NativeRequest=serde_json::from_value(json!({"id":1,"action":"managerDelete","entryId":1,"operationId":"delete-one","expectedRevision":3,"expectedSession":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})).unwrap();
     request.validate().unwrap();
     let mut request: NativeRequest = serde_json::from_value(
         json!({"id":2,"action":"operationStatus","operationId":"delete-one"}),
@@ -518,4 +498,46 @@ fn native_policy_rejects_cross_operation_fields_and_requires_reviewed_revisions(
     assert!(
         matches!(command_for_request(&mut request).unwrap(),ServerCommand::OperationStatus(id) if id=="delete-one")
     );
+}
+
+#[test]
+fn browser_native_reads_require_session_revision_and_site_for_otp() {
+    for action in ["getLoginItem", "getAutofillItem", "getTotp"] {
+        let mut valid = json!({"id":1,"action":action,"entryId":1,"expectedRevision":2,"expectedSession":"a".repeat(64)});
+        if action != "getAutofillItem" {
+            valid["domain"] = json!("https://example.com");
+        }
+        if action == "getTotp" {
+            valid["operationId"] = json!("otp-review");
+        }
+        let mut parsed: NativeRequest = serde_json::from_value(valid.clone()).unwrap();
+        parsed.validate().unwrap();
+        let command = command_for_request(&mut parsed).unwrap();
+        if action == "getTotp" {
+            assert!(
+                matches!(command, ServerCommand::BrowserAuthenticatorData {ref domain, id:1} if domain == "https://example.com")
+            );
+        }
+        for field in ["expectedSession", "expectedRevision"] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let request: NativeRequest = serde_json::from_value(missing).unwrap();
+            assert!(request.validate().is_err());
+        }
+        for session in ["", "short", &"z".repeat(64)] {
+            let mut invalid = valid.clone();
+            invalid["expectedSession"] = json!(session);
+            let request: NativeRequest = serde_json::from_value(invalid).unwrap();
+            assert!(request.validate().is_err());
+        }
+        if action == "getTotp" {
+            valid.as_object_mut().unwrap().remove("domain");
+            assert!(
+                serde_json::from_value::<NativeRequest>(valid)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
 }

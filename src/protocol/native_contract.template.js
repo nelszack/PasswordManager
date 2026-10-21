@@ -54,6 +54,7 @@
             let valid;
             switch (key) {
                 case "operationId": valid = identifier(value); break;
+                case "expectedSession": valid = text(value) && /^[a-fA-F0-9]{64}$/.test(value); break;
                 case "entryId": valid = positive(value); break;
                 case "expectedRevision": valid = integer(value); break;
                 case "item": valid = validManagementInput(value); break;

@@ -49,7 +49,8 @@ const PasswordManagerBackgroundStatus = {
         }
 
         function publishStatus(status) {
-            if (!status.native || !status.running || status.locked) {
+            if (!status.native || !status.running || status.locked
+                || cachedStatus?.sessionId && cachedStatus.sessionId !== status.sessionId) {
                 invalidate();
             }
             setBadge(status);
@@ -78,6 +79,7 @@ const PasswordManagerBackgroundStatus = {
                 const status = {
                     native: true,
                     running: true,
+                    sessionId: response.sessionId || null,
                     extensionVersion: version,
                     nativeVersion: response.nativeVersion,
                     protocolVersion: response.protocolVersion, extensionProtocolVersion: protocolVersion,

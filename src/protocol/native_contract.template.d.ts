@@ -24,4 +24,4 @@ export const protocolVersion: __PROTOCOL_VERSION__;
 export const operations: Readonly<Record<NativeAction, NativePolicy>>;
 export function validateRequest<K extends NativeAction>(action: K, fields: NativeRequests[K]): NativeRequests[K];
 export function validateResult<K extends NativeAction>(action: K, data: unknown): NativeResults[K];
-export type NativeResponse<K extends NativeAction> = { id: number; protocolVersion: number; nativeVersion: string; success: true; data: NativeResults[K]; operation?: OperationReceipt; operationId?: string } | { id: number; protocolVersion: number; nativeVersion: string; success: false; error: string; uncertain?: boolean; operationId?: string; operation?: OperationReceipt; code?: number };
+export type NativeResponse<K extends NativeAction> = { id: number; protocolVersion: number; nativeVersion: string; sessionId?: string; success: true; data: NativeResults[K]; operation?: OperationReceipt; operationId?: string } | { id: number; protocolVersion: number; nativeVersion: string; sessionId?: string; success: false; error: string; uncertain?: boolean; operationId?: string; operation?: OperationReceipt; code?: number };

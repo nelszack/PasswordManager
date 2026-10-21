@@ -154,10 +154,6 @@ pub fn sync_parent(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn file_exists(file_path: impl AsRef<Path>) -> bool {
-    file_path.as_ref().exists()
-}
-
 /// Export and backup destinations must not replace application-owned files.
 /// Resolve parent symlinks and existing destination symlinks before checking.
 pub(crate) fn validate_external_output_path(path: &Path) -> io::Result<()> {
@@ -298,7 +294,6 @@ pub(crate) fn init_test_data_dir() {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs::File;
     use tempfile::TempDir;
 
     #[cfg(target_os = "windows")]
@@ -341,16 +336,6 @@ mod test {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-    }
-
-    #[test]
-    fn file_exists_recognizes_files_directories_and_missing_paths() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test_file.txt");
-        File::create(&file_path).unwrap();
-        assert!(file_exists(&file_path));
-        assert!(file_exists(temp_dir.path()));
-        assert!(!file_exists(temp_dir.path().join("missing")));
     }
 
     #[cfg(unix)]

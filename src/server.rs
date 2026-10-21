@@ -271,10 +271,13 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
             .flatten()
             .collect::<Vec<_>>();
             let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+            let session_id = worker.session_id();
+            let mut response = RpcResponse::success(ResponsePayload::Status(
+                crate::protocol::ServerStatus::new(session_id.is_none(), warning),
+            ));
+            response.session_id = session_id;
             outcome::CommandOutcome {
-                responses: vec![RpcResponse::success(ResponsePayload::Status(
-                    crate::protocol::ServerStatus::new(worker.is_locked(), warning),
-                ))],
+                responses: vec![response],
                 effect: CommandEffect::None,
             }
         } else {

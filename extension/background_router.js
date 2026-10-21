@@ -5,7 +5,7 @@ const PasswordManagerBackgroundRouter = {
             nativeRequest(action, fields)
                 .then(response => {
                     sendResponse(response.success
-                        ? { success: true, data: response.data, operation: response.operation }
+                        ? { success: true, data: response.data, operation: response.operation, sessionId: response.sessionId }
                         : { success: false, error: response.error, uncertain: Boolean(response.uncertain), operationId: response.operationId, operationAction: response.operationAction, code: response.code });
                     if (refreshAfter) refreshStatus();
                 })

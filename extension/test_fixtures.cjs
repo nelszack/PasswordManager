@@ -4,7 +4,7 @@ const summary = (fields = {}) => ({ id: 1, revision: 1, name: "Personal", userna
     urls: ["https://shop.example"], has_totp: true, has_duo: false, ...fields });
 const detail = (fields = {}) => ({ ...summary(), notes: null, password: null, has_secret: true,
     fields: [], created: "2026-01-01T00:00:00Z", modified: "2026-01-01T00:00:00Z", ...fields });
-function nativeFields(action) {
+function baseNativeFields(action) {
     const item = { name: "Example", kind: "login", username: "alice", password: "synthetic", notes: "", urls: [], fields: [] };
     switch (action) {
         case "managerAdd": return { item };
@@ -19,6 +19,14 @@ function nativeFields(action) {
         case "updateCredentials": return { domain: "https://shop.example", username: "alice", password: "synthetic", entryId: 1, expectedRevision: 1 };
         default: return {};
     }
+}
+const sessionId = "a".repeat(64);
+function nativeFields(action) {
+    const fields = baseNativeFields(action);
+    if (["managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "managerDuoRequests", "managerDuoRespond", "getLoginItem", "getAutofillItem", "getTotp", "saveCredentials", "updateCredentials"].includes(action)) fields.expectedSession = sessionId;
+    if (["getLoginItem", "getAutofillItem", "getTotp"].includes(action)) fields.expectedRevision = 1;
+    if (action === "getTotp") fields.domain = "https://shop.example";
+    return fields;
 }
 function nativeData(action) {
     switch (action) {
@@ -35,4 +43,4 @@ function nativeData(action) {
         default: return "Saved";
     }
 }
-module.exports = { summary, detail, nativeFields, nativeData };
+module.exports = { summary, detail, nativeFields, nativeData, sessionId };

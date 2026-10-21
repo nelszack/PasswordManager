@@ -74,8 +74,25 @@ async fn dispatch(vault: Vault, command: ServerCommand, locked: bool) -> RpcResp
         &state,
     );
     let (mut client, server) = tcp_pair().await;
+    let mut request = RequestEnvelope::new(command);
+    if matches!(
+        request.command,
+        ServerCommand::BrowserLogin { .. }
+            | ServerCommand::BrowserAutofillItem(_)
+            | ServerCommand::BrowserAuthenticatorData { .. }
+    ) {
+        request.expected_session = worker.session_id();
+        request.expected_revision = worker
+            .with_session(|live| live.vault().and_then(|v| v.revision(1)))
+            .await
+            .unwrap();
+        if request.expected_session.is_none() {
+            request.expected_session = Some("0".repeat(64));
+            request.expected_revision = Some(1);
+        }
+    }
     let task = tokio::spawn(handle_connection(server, state.clone(), worker));
-    let response = send(&mut client, &state.token, RequestEnvelope::new(command)).await;
+    let response = send(&mut client, &state.token, request).await;
     task.await.unwrap();
     response
 }
@@ -110,8 +127,6 @@ async fn history_and_trash_use_typed_records_without_exposing_secrets() {
         )
         .unwrap();
     let response = dispatch(vault.clone(), ServerCommand::History(Target::Id(1)), false).await;
-    let response =
-        decode_responses(&crate::protocol::encode_rpc_response(&response).unwrap()).unwrap();
     let ResponsePayload::History(history) = &response.payload else {
         panic!("history must use its typed response");
     };
@@ -125,8 +140,6 @@ async fn history_and_trash_use_typed_records_without_exposing_secrets() {
         .delete_entry(Target::Id(1), &mut VaultCredentials::default())
         .unwrap();
     let response = dispatch(vault, ServerCommand::Trash, false).await;
-    let response =
-        decode_responses(&crate::protocol::encode_rpc_response(&response).unwrap()).unwrap();
     let ResponsePayload::Trash(trash) = &response.payload else {
         panic!("trash must use its typed response");
     };
@@ -401,7 +414,7 @@ async fn browser_reads_require_unlock_and_site_selection() {
                 id: 1,
             },
             true,
-            ResponseCode::Failure,
+            ResponseCode::Conflict,
             false,
         ),
         (
@@ -747,22 +760,25 @@ fn default_address_uses_the_loopback_interface() {
 }
 
 #[test]
-fn session_tokens_are_random_256_bit_hex_values() {
-    let first = random_token();
-    let second = random_token();
-    assert_eq!(first.len(), TOKEN_HEX_LEN);
-    assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert_ne!(first, second);
-}
-
-#[test]
 fn session_token_rotation_replaces_old_tokens_and_cleanup_is_generation_safe() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(TOKEN_FILE);
     let mut first = rotate_token_file(&path).unwrap();
     let mut second = rotate_token_file(&path).unwrap();
+    for token in [&first, &second] {
+        assert_eq!(token.len(), TOKEN_HEX_LEN);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
     assert_ne!(first, second);
     assert_eq!(fs::read_to_string(&path).unwrap(), *second);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     remove_token_file_if_current(&path, &first);
     assert!(path.exists());
@@ -770,20 +786,6 @@ fn session_token_rotation_replaces_old_tokens_and_cleanup_is_generation_safe() {
     assert!(!path.exists());
     first.zeroize();
     second.zeroize();
-}
-
-#[cfg(unix)]
-#[test]
-fn session_token_files_have_owner_only_permissions() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join(TOKEN_FILE);
-    write_token_file(&random_token(), &path).unwrap();
-    assert_eq!(
-        fs::metadata(path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
 }
 
 #[tokio::test]
@@ -1036,4 +1038,147 @@ async fn published_status_remains_responsive_while_owner_is_busy() {
     release.send(()).unwrap();
     busy.await.unwrap().unwrap();
     connection.await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_selections_reject_stale_sessions_revisions_and_unmatched_otp_origins() {
+    let state = test_connection_state();
+    let mut vault = sample_vault();
+    vault.set_test_totp(
+        1,
+        "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+    );
+    let original = vault.clone();
+    let worker = test_worker(session(vault), &state);
+    let lookup = worker
+        .execute(
+            state.clone(),
+            RequestEnvelope::new(ServerCommand::BrowserLogins("https://example.com".into())),
+        )
+        .await;
+    let session_id = lookup.responses[0].session_id.clone().unwrap();
+    let ResponsePayload::Summaries(items) = &lookup.responses[0].payload else {
+        panic!("expected summaries")
+    };
+    let revision = items[0].revision;
+    let scoped = |command| {
+        let mut request = RequestEnvelope::new(command);
+        request.expected_revision = Some(revision);
+        request.expected_session = Some(session_id.clone());
+        request
+    };
+    let login = || ServerCommand::BrowserLogin {
+        domain: "https://example.com".into(),
+        id: 1,
+    };
+    let otp = |domain: &str| ServerCommand::BrowserAuthenticatorData {
+        domain: domain.into(),
+        id: 1,
+    };
+    for command in [
+        login(),
+        otp("https://example.com"),
+        ServerCommand::BrowserAutofillItem(1),
+    ] {
+        let invalid = worker
+            .execute(state.clone(), RequestEnvelope::new(command))
+            .await;
+        assert_eq!(invalid.responses[0].code, ResponseCode::InvalidInput as i32);
+    }
+    assert_eq!(
+        worker
+            .execute(state.clone(), scoped(login()))
+            .await
+            .responses[0]
+            .code,
+        0
+    );
+    let denied = worker
+        .execute(state.clone(), scoped(otp("https://attacker.example")))
+        .await;
+    assert_eq!(denied.responses[0].code, ResponseCode::NotFound as i32);
+    let allowed = worker
+        .execute(state.clone(), scoped(otp("https://example.com")))
+        .await;
+    let ResponsePayload::Authenticator(code) = &allowed.responses[0].payload else {
+        panic!("expected OTP")
+    };
+    assert_eq!(
+        code.counter,
+        Some(0),
+        "rejected origins must not consume HOTP"
+    );
+    // HOTP changes the item revision; old non-mutating reads must also fail.
+    assert_eq!(
+        worker
+            .execute(state.clone(), scoped(login()))
+            .await
+            .responses[0]
+            .code,
+        ResponseCode::Conflict as i32
+    );
+    worker.lock().await;
+    for replacement in [original, sample_vault()] {
+        worker
+            .with_session(move |live| *live = session(replacement))
+            .await
+            .unwrap();
+        assert_ne!(worker.session_id().as_deref(), Some(session_id.as_str()));
+        for command in [
+            login(),
+            otp("https://example.com"),
+            ServerCommand::BrowserAutofillItem(1),
+        ] {
+            assert_eq!(
+                worker
+                    .execute(state.clone(), scoped(command))
+                    .await
+                    .responses[0]
+                    .code,
+                ResponseCode::Conflict as i32
+            );
+        }
+        let mut write = RequestEnvelope::new(ServerCommand::Delete(Target::Id(1)));
+        write.expected_session = Some(session_id.clone());
+        assert_eq!(
+            worker.execute(state.clone(), write).await.responses[0].code,
+            ResponseCode::Conflict as i32
+        );
+        assert!(
+            worker
+                .with_session(|live| live.vault().unwrap().revision(1).is_some())
+                .await
+                .unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn automatic_browser_lookups_do_not_extend_inactivity() {
+    let state = test_connection_state();
+    state.inactivity_timeout.store(1, Ordering::Release);
+    let worker = test_worker(session(sample_vault()), &state);
+    worker
+        .execute(
+            state.clone(),
+            RequestEnvelope::new(ServerCommand::GetSecret(Target::Id(1))),
+        )
+        .await;
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        for command in [
+            ServerCommand::BrowserLogins("https://attacker.example".into()),
+            ServerCommand::BrowserAutofill,
+            ServerCommand::BrowserDuoItems("https://api-test.duosecurity.com".into()),
+        ] {
+            assert!(!command.extends_unlock());
+            worker
+                .execute(state.clone(), RequestEnvelope::new(command))
+                .await;
+        }
+    }
+    assert!(
+        worker.is_locked(),
+        "background detections must not keep an idle vault unlocked"
+    );
 }

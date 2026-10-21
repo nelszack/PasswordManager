@@ -5,6 +5,7 @@ const SecretReveal = require("./secret_reveal.js");
 module.exports.create = function create() {
     const byId = id => document.getElementById(id);
     let disposed = false;
+    let sessionId = null;
     let unlocked = false, selected = null, original = null, epoch = 0, searchTimer;
     let fieldRows = [];
     let duoTimer, duoSerial = 0, duoBusy = false, duoRendered = "";
@@ -43,7 +44,8 @@ module.exports.create = function create() {
 
     function send(action, fields = {}) {
         return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ action, ...fields }, response => {
+            const scoped = ["managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "managerDuoRequests", "managerDuoRespond"].includes(action);
+            chrome.runtime.sendMessage({ action, ...fields, ...(scoped ? { expectedSession: sessionId } : {}) }, response => {
                 const error = chrome.runtime.lastError;
                 if (error || !response?.success) {
                     const failure = new Error(error?.message || response?.error || "Native host unavailable");
@@ -103,7 +105,10 @@ module.exports.create = function create() {
         if (outstanding) mutations.remember(outstanding.operationId, outstanding.action);
         const active = status?.native && status?.running && !status?.locked;
         if (!active) { epoch++; clearSecrets(); byId("items").replaceChildren(); }
-        const becameUnlocked = active && !unlocked;
+        const sessionChanged = active && unlocked && sessionId !== status.sessionId;
+        if (sessionChanged) { epoch++; clearSecrets(); byId("items").replaceChildren(); }
+        const becameUnlocked = active && (!unlocked || sessionChanged);
+        sessionId = active ? status.sessionId : null;
         unlocked = Boolean(active);
         const label = !status?.native ? "Native host unavailable" : !status?.running ? "Server not running" : unlocked ? "Vault unlocked" : "Vault locked";
         byId("connection").textContent = label + (status?.warning ? ` · ${status.warning}` : "");

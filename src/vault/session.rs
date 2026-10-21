@@ -33,7 +33,7 @@ impl Drop for VaultCredentials {
 pub struct UnlockedVault {
     pub(crate) vault: Vault,
     key: SessionKey,
-    epoch: u64,
+    epoch: [u8; 16],
 }
 
 /// Cached encryption material cannot contain a master password or key path and
@@ -107,10 +107,20 @@ impl VaultSession {
     pub fn lock(&mut self) {
         *self = Self::Locked;
     }
-    pub(crate) fn epoch(&self) -> Option<u64> {
+    pub(crate) fn epoch(&self) -> Option<[u8; 16]> {
         match self {
             Self::Locked => None,
             Self::Unlocked(live) => Some(live.epoch),
+        }
+    }
+    pub(crate) fn session_id(&self) -> Option<String> {
+        match self {
+            Self::Locked => None,
+            Self::Unlocked(live) => Some(format!(
+                "{}{}",
+                hex::encode(live.vault.vault_id()),
+                hex::encode(live.epoch)
+            )),
         }
     }
     pub(crate) fn vault(&self) -> Option<&Vault> {
@@ -148,7 +158,7 @@ pub(crate) struct SessionEdit<'a> {
     session: &'a mut VaultSession,
     credentials: VaultCredentials,
     vault: Option<Vault>,
-    epoch: u64,
+    epoch: [u8; 16],
 }
 impl SessionEdit<'_> {
     pub(crate) fn parts_mut(&mut self) -> (&mut VaultCredentials, &mut Option<Vault>) {

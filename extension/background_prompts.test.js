@@ -26,7 +26,7 @@ function environment() {
             if (action === "getLoginItems") {
                 if (lookupError) throw new Error(lookupError);
                 if (holdLookup) await new Promise(resolve => { resolveLookup = resolve; });
-                return { success: true, data: [{"id": 7, "name": "Example", "username": "alice"}] };
+                return { success: true, sessionId: "a".repeat(64), data: [{"revision": 1, "id": 7, "name": "Example", "username": "alice"}] };
             }
             if (held) return new Promise(resolve => { resolveSave = resolve; });
             if (saveError) throw saveError;
@@ -140,4 +140,14 @@ test("only a current same-origin remembered username is used across navigation",
     const stale = environment(); stale.remember({ domain: "https://example.com", time: Date.now() - 60001, username: "alice" });
     const opened = await stale.open({ username: "" });
     assert.equal(stale.service.data({ token: opened.token }, stale.popup).data.askForUsername, true);
+});
+
+test("save and update prompts send the session captured by their lookup", async () => {
+    for (const action of ["add", "update"]) {
+        const env = environment(); const { token } = await env.open();
+        await env.complete(token, action);
+        const write = env.calls.at(-1);
+        assert.equal(write.fields.expectedSession, "a".repeat(64));
+        if (action === "update") assert.equal(write.fields.expectedRevision, 1);
+    }
 });

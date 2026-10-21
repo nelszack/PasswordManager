@@ -15,6 +15,7 @@ let duoRequests = JSON.parse(process.env.PM_E2E_NATIVE_DUO_REQUESTS || "[]");
 
 function write(response) {
     response.protocolVersion = contract.protocolVersion;
+    if (!locked) response.sessionId = "a".repeat(64);
     if (activeRequest?.operationId && contract.operations[activeRequest.action]?.mutates) {
         const operationId = activeRequest.operationId;
         const outcome = { operationId, state: response.success ? "committed" : "failed", revision: null };
@@ -46,18 +47,10 @@ function handle(request) {
             nativeVersion: "0.1.0",
             data: { locked, version: "0.1.0", warning: null }
         });
-    } else if (["getCredentials", "getLoginItems", "getLoginItem", "getDuoItems"].includes(request.action)) {
+    } else if (["getLoginItems", "getLoginItem", "getDuoItems"].includes(request.action)) {
         if (mode === "timeout") return;
         if (locked) {
             write({ id: request.id, success: false, error: "Vault is locked" });
-            return;
-        }
-        if (mode === "unavailable") {
-            write({ id: request.id, success: false, error: "Server is unavailable" });
-            return;
-        }
-        if (mode === "malformed") {
-            write({ id: request.id, success: true, data: "not-json" });
             return;
         }
         let matches = request.action === "getDuoItems"

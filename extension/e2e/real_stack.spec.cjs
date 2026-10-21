@@ -296,7 +296,8 @@ test("manager preserves CRLF primary and custom fields across hidden and reveale
     const secret = "private first\r\nprivate second\rlast";
     await manager.evaluate(async ({ primary, plain, secret }) => {
         const send = (action, fields) => new Promise((resolve, reject) => chrome.runtime.sendMessage({ action, ...fields }, response => response.success ? resolve(response.data) : reject(new Error(response.error))));
-        await send("managerAdd", { item: { name: "Multiline fields", kind: "secure-note", username: "", password: primary,
+        const { sessionId } = await chrome.runtime.sendMessage({ action: "getStatus" });
+        await send("managerAdd", { expectedSession: sessionId, item: { name: "Multiline fields", kind: "secure-note", username: "", password: primary,
             notes: "stored notes\r\nsecond line", urls: [], fields: [{ name: "public", value: plain, secret: false }, { name: "private\r\nfield", value: secret, secret: true }] } });
     }, { primary, plain, secret });
     await manager.locator("#search").fill("Multiline");
@@ -312,7 +313,8 @@ test("manager preserves CRLF primary and custom fields across hidden and reveale
     const read = () => manager.evaluate(async () => {
         const send = (action, fields) => new Promise((resolve, reject) => chrome.runtime.sendMessage({ action, ...fields }, response => response.success ? resolve(response.data) : reject(new Error(response.error))));
         const result = await send("managerList", { query: "Multiline fields" });
-        return send("managerItem", { entryId: result.items[0].id, reveal: true });
+        const { sessionId } = await chrome.runtime.sendMessage({ action: "getStatus" });
+        return send("managerItem", { entryId: result.items[0].id, reveal: true, expectedSession: sessionId });
     });
     const assertStored = async () => {
         const item = await read();

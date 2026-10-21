@@ -292,7 +292,7 @@ fn history_limits_and_restore_preserve_exact_secret_bytes() {
     for limit in [0, 1, 3] {
         let mut vault = memory();
         let mut key = VaultCredentials::default();
-        for password in ["one", "two", " \nexact\t "] {
+        for password in ["one", "two", " exact\n\t "] {
             vault
                 .update_typed_entry_with_limit(update(1, password), &mut key, limit)
                 .unwrap();
@@ -300,7 +300,7 @@ fn history_limits_and_restore_preserve_exact_secret_bytes() {
         assert_eq!(vault.item(1).unwrap().history.len(), limit);
         assert_eq!(
             vault.get_secret(&Target::Id(1)).unwrap().as_str(),
-            " \nexact\t "
+            " exact\n\t "
         );
         if limit > 0 {
             assert!(vault.restore_password(Target::Id(1), 1, &mut key).unwrap());
@@ -587,7 +587,7 @@ fn invalid_import_and_validation_errors_leave_live_state_unchanged() {
 fn json_and_csv_exports_refuse_clobber_and_round_trip_exact_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let mut vault = memory();
-    vault.item_mut(1).unwrap().entry.password = " \nexact\t ".into();
+    vault.item_mut(1).unwrap().entry.password = " exact\n\t ".into();
     vault.item_mut(1).unwrap().entry.notes = Some("multiline\nnotes".into());
     for format in ["json", "csv"] {
         let path = directory.path().join(format!("export.{format}"));
@@ -596,7 +596,7 @@ fn json_and_csv_exports_refuse_clobber_and_round_trip_exact_credentials() {
         if format == "json" {
             let json: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            assert_eq!(json["items"][0]["password"], " \nexact\t ");
+            assert_eq!(json["items"][0]["password"], " exact\n\t ");
         }
         let mut target = Vault::memory();
         target
@@ -1027,4 +1027,62 @@ fn oversize_import_is_rejected_before_parsing_or_mutation() {
             .is_err()
     );
     assert_eq!(vault, before);
+}
+
+#[test]
+fn csv_export_refuses_formula_cells_without_altering_json_or_existing_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let csv = directory.path().join("export.csv");
+    let json = directory.path().join("export.json");
+    let prefixes = [
+        "=",
+        "+",
+        "-",
+        "@",
+        "\t",
+        "\r",
+        "\n",
+        "＝",
+        "＋",
+        "－",
+        "＠",
+        "  =",
+        "\u{feff}=",
+        "\u{a0}=",
+        "\u{2003}+",
+        "\0=",
+    ];
+    // Prefix validation is shared by every cell; cover prefixes and fields separately.
+    let cases = prefixes
+        .into_iter()
+        .map(|prefix| ("password", format!("{prefix}1+1")))
+        .chain(
+            ["name", "username", "url", "notes"]
+                .into_iter()
+                .map(|field| (field, "=1+1".to_string())),
+        );
+    for (field, value) in cases {
+        let mut vault = memory();
+        let entry = &mut vault.item_mut(1).unwrap().entry;
+        match field {
+            "name" => entry.name = value.clone(),
+            "username" => entry.username = Some(value.clone()),
+            "password" => entry.password = value.clone().into(),
+            "url" => entry.url = Some(value.clone()),
+            _ => entry.notes = Some(value.clone().into()),
+        }
+        fs::write(&csv, b"existing export").unwrap();
+        let error = vault.export(csv.display().to_string(), true).unwrap_err();
+        assert!(error.to_string().contains(".json"));
+        assert_eq!(fs::read(&csv).unwrap(), b"existing export");
+        fs::remove_file(&csv).unwrap();
+        assert!(vault.export(csv.display().to_string(), false).is_err());
+        assert!(!csv.exists());
+        vault.export(json.display().to_string(), true).unwrap();
+        let restored = import_json(&fs::read_to_string(&json).unwrap(), "export.json").unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored[0].entry).unwrap()[field],
+            value
+        );
+    }
 }

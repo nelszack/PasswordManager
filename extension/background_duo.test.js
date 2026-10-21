@@ -27,8 +27,8 @@ function environment() {
         refreshStatus: async () => ({ native: true, running: true, locked }),
         nativeRequest: async (action, fields) => {
             calls.push({ action, ...fields });
-            if (action === "getLoginItems") return { success: true, data: items };
-            if (action === "getDuoItems") return { success: true, data: issuerItems };
+            if (action === "getLoginItems") return { success: true, sessionId: "a".repeat(64), data: items };
+            if (action === "getDuoItems") return { success: true, sessionId: "a".repeat(64), data: issuerItems };
             if (action === "managerDuoRequests") {
                 if (holdPoll) await holdPoll;
                 return { success: true, data: pending };
@@ -110,6 +110,8 @@ test("only the token-bearing Duo extension window can read or decide requests", 
     const decisions = env.calls.filter(r => r.action === "managerDuoRespond");
     assert.equal(decisions.length, 1); assert.equal(decisions[0].approve, true);
     assert.equal(decisions[0].fingerprint, r.fingerprint);
+    assert.equal(decisions[0].expectedSession, "a".repeat(64));
+    assert.equal(env.calls.find(call => call.action === "managerDuoRequests").expectedSession, "a".repeat(64));
     await assert.rejects(env.duo.complete(env.decision(r, true), env.popup), /expired/);
 });
 
@@ -179,7 +181,7 @@ test("an uncertain decision preserves an error window and blocks retries until a
 test("selected logins follow a same-tab Duo redirect, but never an unrelated host or tab", async () => {
     for (const allowed of [true, false]) {
         const env = environment();
-        env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 1, name: "Work", has_duo: true }] });
+        env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 1, name: "Work", has_duo: true, sessionId: "a".repeat(64) }] });
         env.setItems([]);
         const url = allowed ? "https://api-test.duosecurity.com" : "https://other.example";
         env.setOrigin(url); env.sender.url = url;
@@ -188,7 +190,7 @@ test("selected logins follow a same-tab Duo redirect, but never an unrelated hos
         if (allowed) assert.equal((await env.duo.data({ token: env.token() }, env.popup)).sourceOrigin, "https://login.example");
     }
     const env = environment();
-    env.duo.rememberLogin({ sender: { ...env.sender, tab: { id: 99 } }, accounts: [{ id: 1, has_duo: true }] });
+    env.duo.rememberLogin({ sender: { ...env.sender, tab: { id: 99 } }, accounts: [{ id: 1, has_duo: true, sessionId: "a".repeat(64) }] });
     env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = "https://api-test.duosecurity.com";
     await env.duo.observe({}, env.sender); assert.equal(env.created.length, 0);
 });

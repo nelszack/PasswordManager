@@ -9,7 +9,7 @@ const PasswordManagerBackgroundDuo = {
 
         function rememberLogin({ sender, accounts }) {
             const items = accounts.filter(item => item.has_duo === true && Number.isSafeInteger(item.id) && item.id > 0)
-                .map(({ id, name }) => ({ id, name: String(name || "") }));
+                .map(({ id, name, sessionId }) => ({ id, name: String(name || ""), sessionId }));
             if (!items.length || !Number.isInteger(sender?.tab?.id)) return;
             const record = { origin: security.senderOrigin(sender), items, expiresAt: Date.now() + lifetime };
             recentLogins.set(sender.tab.id, record);
@@ -47,7 +47,7 @@ const PasswordManagerBackgroundDuo = {
             const response = await nativeRequest(action, { domain: origin });
             if (!response.success && /not found/i.test(response.error)) return [];
             return protocol.parseItems(response).filter(item => item.has_duo === true && Number.isSafeInteger(item.id) && item.id > 0)
-                .map(({ id, name }) => ({ id, name: String(name || "") }));
+                .map(({ id, name }) => ({ id, name: String(name || ""), sessionId: protocol.sessionId(response) }));
         }
         async function poll(session) {
             if (session.failure) throw new Error(session.failure);
@@ -56,11 +56,11 @@ const PasswordManagerBackgroundDuo = {
                 if (!await current(session)) { discard(session); throw new Error("Duo login page is no longer active"); }
                 const requests = [];
                 for (const item of session.items) {
-                    const response = await nativeRequest("managerDuoRequests", { entryId: item.id });
+                    const response = await nativeRequest("managerDuoRequests", { entryId: item.id, expectedSession: item.sessionId });
                     if (!response.success) throw new Error(response.error || "Duo requests unavailable");
                     if (!Array.isArray(response.data)) throw new Error("Invalid Duo request response");
                     for (const r of response.data) {
-                        if (r.expires_at * 1000 > Date.now()) requests.push({ ...r, entryId: item.id, entryName: item.name });
+                        if (r.expires_at * 1000 > Date.now()) requests.push({ ...r, entryId: item.id, entryName: item.name, sessionId: item.sessionId });
                     }
                 }
                 if (!await current(session)) { discard(session); throw new Error("Duo login page is no longer active"); }
@@ -169,7 +169,7 @@ const PasswordManagerBackgroundDuo = {
                 if (!await current(session) || tokens.get(request.token) !== session) {
                     discard(session); throw new Error("Duo login page is no longer active");
                 }
-                const response = await nativeRequest("managerDuoRespond", { entryId: r.entryId, requestId: r.id,
+                const response = await nativeRequest("managerDuoRespond", { entryId: r.entryId, requestId: r.id, expectedSession: r.sessionId,
                     fingerprint: r.fingerprint, approve: request.approve, verificationCode: code });
                 if (!response.success) throw new Error(response.error || "Duo decision failed");
                 session.dismissed.add(requestKey(r));

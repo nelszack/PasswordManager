@@ -700,27 +700,21 @@ fn handle_command(
             }
         }
         ServerCommand::AuthenticatorData(target) => {
-            match available(vlt).and_then(|vault| vault.current_otp(target, server_info)) {
-                Ok(code) => {
-                    let payload = crate::protocol::AuthenticatorResponse {
-                        code: code.code.to_string().into(),
-                        expires_in: code.expires_in,
-                        counter: code.counter,
-                        mode: if code.counter.is_some() {
-                            "hotp"
-                        } else {
-                            "totp"
-                        }
-                        .into(),
-                    };
-                    respond_payload(
-                        ResponseCode::Success,
-                        crate::protocol::ResponsePayload::Authenticator(payload),
-                        responses,
-                    );
+            respond_authenticator(
+                available(vlt).and_then(|vault| vault.current_otp(target, server_info)),
+                responses,
+            );
+        }
+        ServerCommand::BrowserAuthenticatorData { domain, id } => {
+            let result = available(vlt).and_then(|vault| {
+                if vault.browser_login_revision(&domain, id).is_none() {
+                    return Err(crate::vault::VaultError::NotFound(
+                        "Login item not found for this site.".into(),
+                    ));
                 }
-                Err(error) => respond_domain_error(&error, responses),
-            }
+                vault.current_otp(Target::Id(id), server_info)
+            });
+            respond_authenticator(result, responses);
         }
         ServerCommand::GetSecret(target) => {
             match vlt
@@ -940,4 +934,31 @@ pub(super) fn execute_command(
         &mut outcome.effect,
     );
     outcome
+}
+
+fn respond_authenticator(
+    result: Result<crate::vault::AuthenticatorCode, crate::vault::VaultError>,
+    responses: &mut Vec<RpcResponse>,
+) {
+    match result {
+        Ok(code) => {
+            let payload = crate::protocol::AuthenticatorResponse {
+                code: code.code.to_string().into(),
+                expires_in: code.expires_in,
+                counter: code.counter,
+                mode: if code.counter.is_some() {
+                    "hotp"
+                } else {
+                    "totp"
+                }
+                .into(),
+            };
+            respond_payload(
+                ResponseCode::Success,
+                crate::protocol::ResponsePayload::Authenticator(payload),
+                responses,
+            );
+        }
+        Err(error) => respond_domain_error(&error, responses),
+    }
 }

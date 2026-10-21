@@ -56,6 +56,12 @@ A shared 64 MiB budget bounds ciphertext and plaintext request buffers before
 authentication; requests exceeding the available budget are rejected.
 The extension derives site identity from browser sender metadata and requires
 site-scoped selection rather than trusting a domain supplied by page scripts.
+Browser selections carry the reviewed vault/unlock-session identifier and item
+revision, checked by the vault worker before secret retrieval or HOTP consumption.
+OTP retrieval also revalidates the destination origin. Manager item operations and
+save/update prompts require their original unlock session, so a missed lock/unlock
+between status polls cannot redirect them into another vault. Automatic site and
+Duo lookups do not extend the inactivity timeout.
 Vault-management requests are separately restricted to the extension's manager
 page using the browser-provided extension ID and page URL. List responses contain
 summaries only; explicit reveal requests fetch one selected item. OTP seeds and
@@ -76,6 +82,8 @@ vault secrets; locking or disconnecting clears the fingerprints.
 New Unix key files are private at creation; Windows key
 writers deny shared data access until the private ACL is installed and the
 writer closes. Terminal presentation escapes controls in imported metadata.
+CSV exports reject formula-leading cells without rewriting credentials; JSON
+exports preserve exact values for migration.
 
 Duo enrollment and Push requests restrict hosts to HTTPS Duo endpoints, validate
 certificates, disable redirects, and bound response sizes and network timeouts.

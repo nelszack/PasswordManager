@@ -329,6 +329,7 @@ mod tests {
     #[test]
     fn poll_reviews_are_bound_to_session_key_and_item_revision() {
         let (mut vault, mut key) = fixture();
+        let body = body();
         let poll = vault
             .prepare_duo_poll(
                 DuoCommand::Requests {
@@ -338,7 +339,7 @@ mod tests {
             )
             .unwrap();
         let DuoPollResult::Requests(requests) =
-            vault.finish_duo_poll(&poll.review, &body(), &key).unwrap()
+            vault.finish_duo_poll(&poll.review, &body, &key).unwrap()
         else {
             panic!("expected typed requests")
         };
@@ -355,21 +356,17 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            vault.finish_duo_poll(&review.review, &body(), &key),
+            vault.finish_duo_poll(&review.review, &body, &key),
             Ok(DuoPollResult::Decision(_))
         ));
         key.locked = true;
         assert!(matches!(
-            vault.finish_duo_poll(&review.review, &body(), &key),
+            vault.finish_duo_poll(&review.review, &body, &key),
             Err(VaultError::Locked)
         ));
         key.locked = false;
         vault.item_mut(1).unwrap().duo.as_mut().unwrap().review_key = None;
-        assert!(
-            vault
-                .finish_duo_poll(&review.review, &body(), &key)
-                .is_err()
-        );
+        assert!(vault.finish_duo_poll(&review.review, &body, &key).is_err());
         let new_poll = vault
             .prepare_duo_poll(
                 DuoCommand::Requests {
@@ -388,7 +385,7 @@ mod tests {
         vault.update_entry_with_limit(change, &mut key, 10).unwrap();
         assert!(
             vault
-                .finish_duo_poll(&new_poll.review, &body(), &key)
+                .finish_duo_poll(&new_poll.review, &body, &key)
                 .is_err()
         );
     }

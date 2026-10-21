@@ -73,6 +73,7 @@
         if (!name) throw new Error("Enter a name for these credentials");
         const fields = {
             domain: pending.domain,
+            expectedSession: pending.sessionId,
             username,
             password: pending.password,
             name

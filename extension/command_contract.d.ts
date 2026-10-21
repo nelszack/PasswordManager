@@ -20,21 +20,21 @@ export interface NativeRequests {
     managerVaults: { };
     managerUnlock: { operationId: string; vaultFile?: string; password?: string; keyPath?: string; };
     managerList: { query?: string; };
-    managerItem: { entryId: number; reveal?: boolean; };
-    managerCopy: { operationId: string; entryId: number; };
-    managerAdd: { operationId: string; item: ManagementInput; };
-    managerUpdate: { operationId: string; entryId: number; expectedRevision: number; item: ManagementInput; };
-    managerDelete: { operationId: string; entryId: number; expectedRevision: number; };
-    managerDuoRequests: { entryId: number; };
-    managerDuoRespond: { operationId: string; entryId: number; requestId: string; fingerprint: string; approve: boolean; verificationCode?: string; };
+    managerItem: { entryId: number; expectedSession: string; reveal?: boolean; };
+    managerCopy: { operationId: string; entryId: number; expectedSession: string; };
+    managerAdd: { operationId: string; item: ManagementInput; expectedSession: string; };
+    managerUpdate: { operationId: string; entryId: number; expectedRevision: number; expectedSession: string; item: ManagementInput; };
+    managerDelete: { operationId: string; entryId: number; expectedRevision: number; expectedSession: string; };
+    managerDuoRequests: { entryId: number; expectedSession: string; };
+    managerDuoRespond: { operationId: string; entryId: number; requestId: string; fingerprint: string; approve: boolean; expectedSession: string; verificationCode?: string; };
     getAutofillItems: { };
     getLoginItems: { domain: string; };
     getDuoItems: { domain: string; };
-    getLoginItem: { domain: string; entryId: number; };
-    getAutofillItem: { entryId: number; };
-    getTotp: { operationId: string; entryId: number; };
-    saveCredentials: { operationId: string; domain: string; password: string; name: string; username?: string; };
-    updateCredentials: { operationId: string; domain: string; entryId: number; password: string; expectedRevision: number; username?: string; };
+    getLoginItem: { domain: string; entryId: number; expectedRevision: number; expectedSession: string; };
+    getAutofillItem: { entryId: number; expectedRevision: number; expectedSession: string; };
+    getTotp: { operationId: string; domain: string; entryId: number; expectedRevision: number; expectedSession: string; };
+    saveCredentials: { operationId: string; domain: string; password: string; name: string; expectedSession: string; username?: string; };
+    updateCredentials: { operationId: string; domain: string; entryId: number; password: string; expectedRevision: number; expectedSession: string; username?: string; };
     operationStatus: { operationId: string; };
 }
 export interface NativeResults {
@@ -62,8 +62,8 @@ export interface NativeResults {
 }
 export type NativeAction = keyof NativeRequests;
 export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
-export const protocolVersion: 1;
+export const protocolVersion: 2;
 export const operations: Readonly<Record<NativeAction, NativePolicy>>;
 export function validateRequest<K extends NativeAction>(action: K, fields: NativeRequests[K]): NativeRequests[K];
 export function validateResult<K extends NativeAction>(action: K, data: unknown): NativeResults[K];
-export type NativeResponse<K extends NativeAction> = { id: number; protocolVersion: number; nativeVersion: string; success: true; data: NativeResults[K]; operation?: OperationReceipt; operationId?: string } | { id: number; protocolVersion: number; nativeVersion: string; success: false; error: string; uncertain?: boolean; operationId?: string; operation?: OperationReceipt; code?: number };
+export type NativeResponse<K extends NativeAction> = { id: number; protocolVersion: number; nativeVersion: string; sessionId?: string; success: true; data: NativeResults[K]; operation?: OperationReceipt; operationId?: string } | { id: number; protocolVersion: number; nativeVersion: string; sessionId?: string; success: false; error: string; uncertain?: boolean; operationId?: string; operation?: OperationReceipt; code?: number };

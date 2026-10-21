@@ -30,7 +30,7 @@ function environment(options = {}) {
         const request = port.requests.at(index);
         const data = nativeData(request.action);
         if (request.action === "operationStatus" && extra.data) extra = { ...extra, data: { revision: null, ...extra.data } };
-        const response = { id: request.id, protocolVersion: 1, success: true, data, ...extra };
+        const response = { id: request.id, protocolVersion: require("./command_contract.js").protocolVersion, success: true, data, ...extra };
         if (request.operationId && response.success) response.operation = { operationId: request.operationId, state: "committed", revision: null };
         port.receive(response);
     }
@@ -204,11 +204,11 @@ test("worker restart retains only operation identities and requires reconciliati
     const bridge = native.create({ chrome: { ...env.chrome, storage: { session } }, protocol,
         contract: require("./command_contract.js"), crypto: require("node:crypto").webcrypto,
         onDisconnect() {}, setTimeout, clearTimeout, idleTimeoutMs: 0 });
-    await assert.rejects(bridge.request("managerAdd", { item: { name: "Another" } }), /reconciled/);
+    await assert.rejects(bridge.request("managerAdd", { item: { name: "Another" }, expectedSession: "a".repeat(64) }), /reconciled/);
     assert.equal(env.ports.length, 0);
     const review = bridge.reconcile("save-before-crash");
     const request = env.ports[0].requests[0];
-    env.ports[0].receive({ id: request.id, protocolVersion: 1, success: true, data: { state: "failed", operationId: "save-before-crash", revision: null } });
+    env.ports[0].receive({ id: request.id, protocolVersion: require("./command_contract.js").protocolVersion, success: true, data: { state: "failed", operationId: "save-before-crash", revision: null } });
     await review;
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(stored.pmUnresolvedOperations, []);

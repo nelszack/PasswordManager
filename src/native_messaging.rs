@@ -39,6 +39,8 @@ struct NativeRequest {
     operation_id: Option<String>,
     #[serde(default, rename = "expectedRevision")]
     expected_revision: Option<u64>,
+    #[serde(default, rename = "expectedSession")]
+    expected_session: Option<String>,
     #[serde(default)]
     domain: Option<String>,
     #[serde(default)]
@@ -110,6 +112,7 @@ impl NativeRequest {
         let supplied = [
             ("operationId", self.operation_id.is_some()),
             ("expectedRevision", self.expected_revision.is_some()),
+            ("expectedSession", self.expected_session.is_some()),
             ("domain", self.domain.is_some()),
             ("username", self.username.is_some()),
             ("password", self.password.is_some()),
@@ -125,6 +128,13 @@ impl NativeRequest {
             ("approve", self.approve.is_some()),
             ("verificationCode", self.verification_code.is_some()),
         ];
+        if self
+            .expected_session
+            .as_ref()
+            .is_some_and(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err("invalid unlock session identifier".into());
+        }
         if self.id == 0 || self.id > 9_007_199_254_740_991 {
             return Err("invalid native request identifier".into());
         }
@@ -185,6 +195,8 @@ struct NativeResponse {
     success: bool,
     #[serde(rename = "nativeVersion")]
     native_version: String,
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
     #[serde(rename = "protocolVersion")]
     protocol_version: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,6 +243,7 @@ impl NativeResponse {
             id,
             success: true,
             native_version: env!("CARGO_PKG_VERSION").to_string(),
+            session_id: None,
             protocol_version: crate::protocol::PROTOCOL_VERSION,
             data: Some(data),
             error: None,
@@ -246,6 +259,7 @@ impl NativeResponse {
             id,
             success: false,
             native_version: env!("CARGO_PKG_VERSION").to_string(),
+            session_id: None,
             protocol_version: crate::protocol::PROTOCOL_VERSION,
             data: None,
             error: Some(error.into()),
@@ -518,6 +532,7 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
     let mut uncertain = false;
     let mut receipt = None;
     let mut error_code = None;
+    let mut session_id = None;
     let result = (|| {
         request.validate()?;
         if request.action == NativeAction::ManagerVaults {
@@ -526,7 +541,8 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
                 .map_err(|e| e.to_string())
         } else {
             command_for_request(&mut request).and_then(|command| {
-            let envelope=RequestEnvelope::new(command).with_operation(operation_id.clone(),request.expected_revision);
+            let mut envelope=RequestEnvelope::new(command).with_operation(operation_id.clone(),request.expected_revision);
+            envelope.expected_session = request.expected_session.clone();
             envelope.validate()?;
             if matches!(request.action,NativeAction::ManagerUpdate|NativeAction::ManagerDelete|NativeAction::UpdateCredentials) && request.expected_revision.is_none() {
                 return Err("item edits require the revision that was reviewed".into());
@@ -534,6 +550,7 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
             client.request_envelope_tracked(envelope).map_err(|e| {
                 uncertain=e.sent && request.action.policy().mutates;e.message
             }).and_then(|response|{
+                session_id=response.session_id.clone();
                 receipt=response.operation.clone();
                 if let ResponsePayload::Operation(operation)=&response.payload && request.action.policy().mutates {
                         receipt=Some(operation.clone());
@@ -568,6 +585,7 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
             response
         }
     };
+    response.session_id = session_id;
     response.code = error_code;
     response.operation = receipt;
     response.operation_id = operation_id;
@@ -685,11 +703,12 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
         )),
-        "getTotp" => Ok(ServerCommand::AuthenticatorData(Target::Id(
-            request
+        "getTotp" => Ok(ServerCommand::BrowserAuthenticatorData {
+            domain: required(request.domain.take(), "domain", 2048)?,
+            id: request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
-        ))),
+        }),
         "saveCredentials" => Ok(ServerCommand::Add {
             entry: crate::types::TypedEntry {
                 entry: PasswordEntry {

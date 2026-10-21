@@ -87,6 +87,34 @@ impl Vault {
                 .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")))?;
             return persist_private_file(Path::new(&path), &encoded, force);
         }
+        // CSV quoting does not prevent spreadsheet formula evaluation. Refuse
+        // unsafe cells without altering credential bytes; JSON remains lossless.
+        for entry in self.active_entries() {
+            for value in [
+                Some(entry.name.as_str()),
+                entry.username.as_deref(),
+                Some(entry.password.as_str()),
+                entry.url.as_deref(),
+                entry.notes.as_ref().map(|s| s.as_str()),
+                Some(entry.created.as_str()),
+                Some(entry.modified.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let significant = value.trim_start_matches(|c: char| {
+                    c.is_whitespace() || c.is_control() || c == '\u{feff}'
+                });
+                let prefix = &value[..value.len() - significant.len()];
+                if prefix.chars().any(char::is_control)
+                    || significant.chars().next().is_some_and(|c| {
+                        matches!(c, '=' | '+' | '-' | '@' | '＝' | '＋' | '－' | '＠')
+                    })
+                {
+                    return Err(VaultError::Validation("CSV export contains a cell that a spreadsheet could interpret as a formula; export to a .json file to preserve the exact data safely".into()));
+                }
+            }
+        }
         let mut writer = csv::Writer::from_writer(Vec::new());
         for entry in self.active_entries() {
             writer

@@ -37,7 +37,7 @@ function environment() {
         chrome: { runtime: { onMessage: { addListener: handler => { listener = handler; } }, sendMessage: (request, callback) => {
             calls.push(request);
             if (responses.has(request.action)) { callback(responses.get(request.action)); return; }
-            if (request.action === "getStatus") { callback({ native: true, running: true, locked: false }); return; }
+            if (request.action === "getStatus") { callback({ native: true, running: true, locked: false, sessionId: "a".repeat(64) }); return; }
             let data;
             if (request.action === "managerVaults") data = [];
             if (request.action === "managerList") data = { total: 0, items: [] };
@@ -49,7 +49,7 @@ function environment() {
     });
     vm.runInContext(fs.readFileSync(path.join(__dirname, "manager.js"), "utf8"), context);
     context.api = context.module.exports.create();
-    return { context, elements, calls, timers, setResponse: (action, value) => value === undefined ? responses.delete(action) : responses.set(action, value), setPending: value => { pending = value; }, lock: () => listener({ action: "statusChanged", status: { native: true, running: true, locked: true } }), confirmations: () => confirmations };
+    return { context, elements, calls, timers, publishStatus: status => listener({ action: "statusChanged", status }), setResponse: (action, value) => value === undefined ? responses.delete(action) : responses.set(action, value), setPending: value => { pending = value; }, lock: () => listener({ action: "statusChanged", status: { native: true, running: true, locked: true } }), confirmations: () => confirmations };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
@@ -261,4 +261,16 @@ test("unknown unlocks can be acknowledged after inspecting the published lock st
     env.elements.acknowledgeUnknown.click(); await flush();
     assert.equal(env.calls.filter(call => call.action === "acknowledgeUnknownOperation").length, 1);
     assert.equal(env.confirmations(), 1);
+});
+
+test("the manager clears the old editor after a missed lock/unlock and binds reads to its displayed session", async () => {
+    const env = environment(); await flush(); await vm.runInContext("api.openItem(1);", env.context);
+    assert.equal(env.calls.find(call => call.action === "managerItem").expectedSession, "a".repeat(64));
+    env.elements.password.value = "old-session-secret";
+    env.publishStatus({ native: true, running: true, locked: false, sessionId: "b".repeat(64) });
+    await flush();
+    assert.equal(env.elements.password.value, "");
+    assert.equal(env.elements.editor.hidden, true);
+    await vm.runInContext("api.openItem(1);", env.context);
+    assert.equal(env.calls.filter(call => call.action === "managerItem").at(-1).expectedSession, "b".repeat(64));
 });

@@ -15,8 +15,8 @@ fuzzing = []
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 rand = "0.10"
-zxcvbn = "3"
-arboard = "3"
+zxcvbn = { version = "3", default-features = false }
+arboard = { version = "3", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 rpassword = "7.5"
@@ -28,7 +28,7 @@ blake3 = { version = "1.5", features = ["zeroize"] }
 hex = "0.4"
 psl = "2"
 url = "2"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = "0.4"
 csv = "1"
 serde_json = "1"
 sha1 = "0.11"

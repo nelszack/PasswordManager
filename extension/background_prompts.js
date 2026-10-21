@@ -64,11 +64,12 @@ const PasswordManagerBackgroundPrompts = {
             // The background owns this request across page navigation. Only open an
             // automatic prompt after an authenticated lookup confirms that the vault
             // is available, including the expected NotFound result for a new site.
-            let accounts;
+            let accounts, sessionId;
             try {
-                accounts = promptState.accountsFromLookup(
-                    await nativeRequest("getLoginItems", { domain })
-                );
+                const response = await nativeRequest("getLoginItems", { domain });
+                accounts = promptState.accountsFromLookup(response);
+                sessionId = response.sessionId;
+                if (typeof sessionId !== "string" || !/^[a-fA-F0-9]{64}$/.test(sessionId)) return { success: true, skipped: true };
             } catch (_) {
                 return { success: true, skipped: true };
             }
@@ -77,7 +78,7 @@ const PasswordManagerBackgroundPrompts = {
             // Never fetch unselected secrets to test passwords supplied by a page.
             const matched = await matchesFilledLogin(sender, username, password);
             if (epoch !== generation) return { success: true, skipped: true };
-            onLoginContext?.({ sender, accounts: username ? accounts.filter(account => account.username === username) : accounts });
+            onLoginContext?.({ sender, accounts: (username ? accounts.filter(account => account.username === username) : accounts).map(account => ({ ...account, sessionId })) });
             if (matched) {
                 return { success: true, skipped: true };
             }
@@ -85,6 +86,7 @@ const PasswordManagerBackgroundPrompts = {
             const pending = {
                 tabId,
                 frameId,
+                sessionId,
                 domain,
                 username,
                 password,

@@ -39,3 +39,13 @@ test("successful mutations require a committed receipt for the same operation id
     }
     assert.equal(protocol.validateResponse({ ...response, operation: { operationId: "save-id", state: "committed", revision: 1 } }, 1, "save-id").success, true);
 });
+
+test("unlock session identifiers reject missing and malformed response bindings", () => {
+    for (const sessionId of [undefined, null, "", "a".repeat(63), "z".repeat(64), 1]) {
+        assert.throws(() => protocol.sessionId({ sessionId }), /Unlock session unavailable/);
+    }
+    const sessionId = "a".repeat(64);
+    assert.equal(protocol.sessionId({ sessionId }), sessionId);
+    assert.throws(() => protocol.validateResponse({ id: 1, success: true, data: [], sessionId: "bad" }), /Unlock session unavailable/);
+    assert.equal(protocol.validateResponse({ id: 1, success: true, data: [], sessionId }).sessionId, sessionId);
+});

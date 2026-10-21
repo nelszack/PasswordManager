@@ -25,3 +25,22 @@ test("idle browsers use alarms; overlapping extension views share a live monitor
     onAlarm({ name: "status-poll" }); await service.refresh();
     assert.equal(cleanups, 1); assert.ok(refreshes >= 2);
 });
+
+test("an unlocked-to-unlocked session change invalidates old decisions and publishes new status", async () => {
+    let sessionId = "a".repeat(64), invalidations = 0;
+    const messages = [];
+    const event = { addListener() {} };
+    const service = status.create({ chrome: {
+        runtime: { onInstalled: event, onStartup: event, onConnect: event, sendMessage(message) { messages.push(message); } },
+        alarms: { create() {}, onAlarm: event },
+        action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setTitle() {} }, storage: { local: { set() {} } }
+    }, nativeRequest: async () => ({ success: true, sessionId, nativeVersion: "0.1.0", protocolVersion: 2, data: { locked: false, version: "0.1.0", warning: null } }),
+        state, version: "0.1.0", protocolVersion: 2, invalidate() { invalidations++; }, cleanupExpired() {}, setInterval() {} });
+    await service.refresh();
+    assert.equal(invalidations, 0);
+    sessionId = "b".repeat(64);
+    await service.refresh();
+    assert.equal(invalidations, 1);
+    assert.equal(messages.at(-1).status.sessionId, sessionId);
+    assert.equal(messages.length, 2);
+});
