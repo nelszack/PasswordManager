@@ -3,6 +3,7 @@
 [Back to README](../README.md) · [Command reference](commands.html) · [Security policy](../SECURITY.md)
 
 - [Installation and upgrades](#installation)
+- [Desktop interface](#desktop-interface)
 - [Vaults, entries, search, and recovery](#usage)
 - [Authenticators and Duo Push](#totp-and-hotp-authenticators)
 - [Import, export, and encrypted backups](#importexport)
@@ -12,6 +13,95 @@
 - [Clipboard behavior](#clipboard-behavior)
 
 ## Installation
+
+### Desktop interface
+
+Run `pm` without arguments, or `pm gui`, to open the Iced desktop interface.
+The same executable also runs every CLI command and the background server.
+Opening the GUI starts the server when needed; closing the GUI does not stop
+it. `pm --help`, scripted commands, native messaging, and the server do not open
+windows or require a graphical session. Builds made with
+`cargo build --release --locked --no-default-features` provide only CLI/server
+functionality and report that the desktop interface is unavailable.
+
+On Linux, put the binary at a stable path and run:
+
+```bash
+pm gui --install-shortcut
+```
+
+This installs `com.passwordmanager.Pm.desktop` under your XDG user applications
+directory, using the exact executable path, a password icon from your icon
+theme, and `Terminal=false`. Find **Password Manager** in the application menu
+and pin it to your dock. Desktop environments that support desktop icons can
+also use a copy of that file. Install again after moving the executable. On
+Windows, make a shortcut to `pm.exe`; on macOS, run the executable from your
+preferred launcher. Automatic shortcut installation currently targets Linux.
+
+The Vault tab supports creating a password-protected vault, selecting an
+existing vault, unlocking with a password or an absolute external-key path,
+searching item names/usernames/URLs, adding items, and viewing/editing names,
+types, usernames, primary secrets, URLs, and multiline notes. New vaults stay
+locked until explicitly unlocked. Existing custom fields and authenticators
+survive edits; use the CLI for their configuration and for multiline primary
+secret input. Moving an item to trash requires confirmation. Recover deleted
+items with `pm trash` and `pm restore --id ID`.
+
+Use **Browse…** beside the external-key path to select a file with the native
+file picker, or enter the path manually. Choosing a file fills its path; press
+**Unlock vault** to use it. Cancelling keeps the existing path unchanged.
+On Linux, the picker needs the D-Bus library, `xdg-desktop-portal`, and a
+FileChooser backend such as `xdg-desktop-portal-gtk` or
+`xdg-desktop-portal-kde`. If your desktop lacks a file-picker portal, enter
+the absolute key-file path directly. Windows and macOS use their native dialogs.
+
+The primary secret stays unchanged during edits unless **Replace the existing
+primary secret** is checked. An empty replacement deliberately clears it.
+**Generate replacement password** fills a new secret that is committed only
+when you save the item. The Generator tab also creates passwords and
+passphrases independently of the vault; generated values disappear after
+60 seconds. Saved-item secrets reveal for 15 seconds and hide on focus loss
+or Escape. Ctrl+L (Command+L on macOS) locks the vault. Copy buttons use the
+configured clipboard cleanup; see [clipboard behavior](#clipboard-behavior).
+
+Settings exposes every `pm config` preference: password length, strength/statistics,
+automatic copying of generated passwords and newly added login passwords,
+clipboard timeout, inactivity timeout, default vault, password history limit,
+trash retention, and server port. The GUI and CLI use the same configuration file.
+The Generator tab honors copying and statistics preferences; its temporary length
+control is separate from the saved default length in Settings.
+
+Inactivity accepts seconds or durations such as `15m`, `1h`, and `1d`, and takes
+effect on the next unlock. Clipboard timeout is in seconds; zero disables copying.
+Zero password-history limit disables history, and zero trash retention keeps trash
+indefinitely. Default vault can be set to **Automatic selection** without resetting
+other preferences. **Reset to defaults** resets every preference after confirmation.
+Unsaved edits to other settings do not overwrite unrelated preferences changed
+through the CLI in the meantime.
+
+Stop the running server before changing its configured port, including when a
+reset would change that port. The GUI switches its connection to the new port
+after saving, unless launched with an explicit `--port` override. Recovery changes
+require a server restart. The main toolbar provides **Stop server** and **Start server**
+controls; stopping locks the vault. Closing the window leaves the existing server
+and lock policy in effect.
+
+Status polling detects CLI/extension locks and vault switches and clears the
+old window contents. Passive polling does not extend the inactivity timeout.
+Edits check the reviewed revision; if another client changes an item, refresh
+and reopen it before editing again. Unsaved edits require an explicit discard
+when navigating away.
+
+A lost mutation reply may mean the server already saved the change. The GUI
+records random operation IDs (never credentials) privately under
+`desktop-operations/` in the application data directory and blocks new changes
+until the outcome is reviewed, even after reopening the window. Use **Check
+last change**; if the result remains unknown, unlock and inspect the vault,
+then explicitly acknowledge it. This never retries the previous operation.
+Import/export, backups, audits, password history, authenticator management,
+and trash recovery remain CLI features rather than desktop screens.
+
+### Build and upgrade
 
 Build from the repository root with a current stable Rust toolchain and a native
 C/C++ build toolchain (MSVC on Windows):

@@ -10,6 +10,9 @@
 ## Architecture
 
 - `src/main.rs` and `src/app/` - CLI initialization, explicit output settings, local commands, and conversion to server requests
+- `src/gui/` - Iced desktop client, asynchronous server adapter, editor state, and native widgets
+- `src/gui/settings.rs` - Complete configuration form, input validation, and edits relative to its loaded settings
+- `src/desktop.rs` - Linux application-menu launcher installation for the same executable
 - `src/server.rs` and `src/server/` - Authenticated connections, a bounded vault worker, command handling, and external effects
 - `src/client.rs` and `src/client/transport.rs` - Authenticated Result-returning client with explicit connection settings
 - `src/client/presentation.rs` - Human-readable rendering of typed response records
@@ -30,6 +33,46 @@
 
 See the [architecture review](architecture-review.md) for the reasoning behind
 the domain, protocol, and session refactor.
+
+The default `desktop` feature includes Iced 0.14 with its software renderer and
+X11/Wayland support. `cargo run --locked` opens the GUI; append a command after
+`--` to use the CLI. `--no-default-features` builds the CLI/server without GUI
+dependencies, including for the fuzz package. CLI parsing, native messaging,
+dynamic completions, and clipboard helpers run without initializing Iced.
+The Tokio CLI runtime is created only for CLI dispatch, leaving Iced's event
+loop on the main thread. Windows keeps the console subsystem for CLI and native
+messaging I/O; GUI dispatch releases an automatically created console only when
+no other process shares it, preserving existing command prompts.
+
+The desktop GUI calls `AuthenticatedClient` from blocking workers dispatched
+through Iced tasks. It never owns a second decrypted vault. Status polling does
+not extend inactivity; session changes clear selections and editor state. Reads,
+copies, and edits bind to the selected unlock session, and item writes include
+the reviewed revision. Late responses from before an explicit lock are ignored.
+Mutation IDs are recorded privately under `desktop-operations/` before sending;
+uncertain outcomes block further mutations until reviewed, including after GUI
+restart. Journal records contain only port numbers and random operation IDs.
+
+For desktop changes, run `cargo test --locked --bin pm` and the CLI integration
+tests in addition to shared validation. Manually check create/unlock, list/search,
+editing, timed reveal, copy cleanup, external locking, and GUI close/reopen while
+the server remains up. Native widget state, keyboard/IME behavior, accessibility,
+and compositor integration require platform testing; browser tests do not exercise
+the Iced window.
+
+The key-file chooser uses `rfd`. It creates the parented picker on Iced's window
+thread so AppKit calls stay on the main thread, then awaits the result in a task.
+Windows uses its native file dialog; macOS uses an AppKit sheet. Linux needs
+`libdbus-1.so.3`, `xdg-desktop-portal`, and a portal backend providing FileChooser
+(such as the GTK or KDE backend); a Wayland-only backend may need one of these
+alongside it. The path can also be entered manually. The CLI-only build excludes
+the dialog dependency. Selection fills the unlock path without reading the key
+or unlocking automatically.
+
+CI validates the default desktop build on Linux, Windows, and macOS, checks a
+CLI-only build on each platform, and checks both Intel and Apple Silicon macOS
+targets. Feature branch pushes run these checks before merging. Native visual
+and file-dialog smoke tests still need a desktop session on each OS.
 
 Vault IDs identify files; credentials authenticate the selected vault. When there
 is one vault, `pm unlock` selects it. With multiple vaults, use `--vault-file ID`

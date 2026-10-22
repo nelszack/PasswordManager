@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
 
 permissions:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     name: Test (${{ matrix.os }})
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +38,8 @@ jobs:
       - run: npm ci
       - name: Validate release sources
         run: npm run validate
+      - name: Check CLI-only build
+        run: cargo check --locked --no-default-features --all-targets
 
   mac-architectures:
     name: Build macOS (${{ matrix.target }})

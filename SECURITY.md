@@ -168,6 +168,10 @@ provide exactly-once guarantees for external Duo actions or clipboard effects.
 - Zeroization reduces the lifetime of application-owned buffers; it cannot
   guarantee removal from swap, crash dumps, OS buffers, allocators, or copies made
   by other software. Browser JavaScript has no reliable memory-zeroization API.
+- Desktop lock/session changes drop live GUI item and editor state. Iced text
+  widgets, text shaping, and clipboard integration can create additional copies
+  outside the zeroizing secret wrappers; not all GUI allocations can be wiped.
+  Closing the desktop window leaves the server and its existing lock policy active.
 - Clipboard history managers and other applications can retain copied secrets.
   Auto-clear cannot retract those copies. CLI-generated copies have a separate
   detached owner and timeout; locking the server does not cancel these helpers.

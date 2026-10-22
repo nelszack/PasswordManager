@@ -1,3 +1,4 @@
+use crate::config::parse_duration;
 use crate::types::{ItemKind, ListOptions, SortField};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
@@ -46,7 +47,7 @@ cli_values!(crate::types::OtpMode,
     name = "pm",
     version,
     about = "Local encrypted password manager",
-    long_about = "Manage an encrypted local vault through a background server. Start the server, create or unlock a vault, then use the entry, recovery, TOTP/HOTP, Duo Push, backup, import, and audit commands. Run `pm <COMMAND> --help` for command-specific examples and details."
+    long_about = "Open the desktop vault manager with `pm`, or use a subcommand for the CLI. Both connect to the same independent background server. Run `pm <COMMAND> --help` for command-specific examples and details."
 )]
 pub struct Cli {
     /// Override the configured loopback port for this invocation.
@@ -69,6 +70,12 @@ pub fn cli_parse() -> Cli {
 }
 #[derive(Subcommand, Debug)]
 pub enum CliCommands {
+    /// Open the desktop vault manager (also the default when no command is given).
+    Gui {
+        /// Install a Linux application-menu shortcut for this executable and exit.
+        #[arg(long)]
+        install_shortcut: bool,
+    },
     /// Generate a random password or passphrase without opening the vault.
     #[command(
         after_help = "Examples:\n  pm genpass --length 24 --copy\n  pm genpass --passphrase --words 7 --separator .\n  pm genpass --no-symbols --exclude-ambiguous"
@@ -591,28 +598,9 @@ impl From<ConfigArgs> for crate::config::ConfigChanges {
             trash_retention_days: args.trash_retention_days,
             server_port: args.server_port,
             default_vault: args.default_vault,
+            clear_default_vault: false,
         }
     }
-}
-
-fn parse_duration(value: &str) -> Result<u64, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("duration cannot be empty".to_string());
-    }
-    let (number, multiplier) = match value.as_bytes().last().copied() {
-        Some(b's') => (&value[..value.len() - 1], 1),
-        Some(b'm') => (&value[..value.len() - 1], 60),
-        Some(b'h') => (&value[..value.len() - 1], 60 * 60),
-        Some(b'd') => (&value[..value.len() - 1], 24 * 60 * 60),
-        Some(byte) if byte.is_ascii_digit() => (value, 1),
-        _ => return Err("use seconds or a suffix such as 15m, 1h, or 1d".to_string()),
-    };
-    number
-        .parse::<u64>()
-        .map_err(|_| "duration must be a positive whole number".to_string())?
-        .checked_mul(multiplier)
-        .ok_or_else(|| "duration is too large".to_string())
 }
 
 #[derive(Serialize, Deserialize, Debug, Args)]

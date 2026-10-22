@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-password_manager = { path = "..", features = ["fuzzing"] }
+password_manager = { path = "..", default-features = false, features = ["fuzzing"] }
 zeroize = "1"
 
 [workspace]
