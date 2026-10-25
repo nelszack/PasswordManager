@@ -2,17 +2,7 @@ use super::*;
 use password_manager::protocol::{AuthenticatorResponse, RpcResponse};
 
 fn app() -> App {
-    let mut app = App::new(
-        Config::default(),
-        AuthenticatedClient {
-            port: 7878,
-            token_path: std::path::PathBuf::from("unused-test-token"),
-            connect_timeout: Duration::from_millis(1),
-            io_timeout: Duration::from_millis(1),
-            max_response: 1024,
-            breach_timeout: Duration::from_millis(1),
-        },
-    );
+    let mut app = super::super::tests::app();
     app.running = true;
     app.session = Some("a".repeat(64));
     app.items.push(ItemSummary {
@@ -89,6 +79,40 @@ fn add_other_account(app: &mut App) {
     other.name = "Other".into();
     other.has_duo = false;
     app.items.push(other);
+}
+
+#[test]
+fn queued_current_vault_actions_cannot_dispatch_without_an_unlock_session() {
+    let mut app = app();
+    app.session = None;
+    app.vault = Some("selected.enc".into());
+    app.workspace.path = absolute("synthetic-transfer.json").unwrap();
+    app.workspace.password = "synthetic fixture password".into();
+    app.workspace.confirmation = app.workspace.password.clone();
+    for action in [
+        Action::History,
+        Action::Trash,
+        Action::Purge(None),
+        Action::Audit,
+        Action::Backup,
+        Action::Export,
+        Action::Rekey,
+        Action::Search,
+        Action::Import,
+        Action::PreviewImport,
+    ] {
+        let Err(error) = app.workspace.prepare(action, &app) else {
+            panic!("{action:?} must require a reviewed unlock session");
+        };
+        assert_eq!(error, "Unlock a vault first.");
+    }
+    for action in [Action::NewVault, Action::RestoreBackup, Action::DeleteVault] {
+        assert!(app.workspace.prepare(action, &app).is_ok(), "{action:?}");
+    }
+    app.workspace.import_new = true;
+    for action in [Action::Import, Action::PreviewImport] {
+        assert!(app.workspace.prepare(action, &app).is_ok(), "{action:?}");
+    }
 }
 
 #[test]

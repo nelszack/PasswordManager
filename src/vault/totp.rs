@@ -157,7 +157,8 @@ pub(super) fn parse_hotp_configuration(value: &str) -> Result<(Totp, u64), Vault
         VaultError::InvalidInput("invalid HOTP URI: requires a secret, SHA1/SHA256/SHA512, 6–8 digits, and one unsigned counter".into())
     };
     let mut url = url::Url::parse(value).map_err(|_| invalid())?;
-    if url.scheme() != "otpauth"
+    if value.chars().any(char::is_control)
+        || url.scheme() != "otpauth"
         || url.host_str() != Some("hotp")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -203,6 +204,37 @@ pub(super) fn parse_hotp_configuration(value: &str) -> Result<(Totp, u64), Vault
 const MIN_COMPATIBLE_TOTP_SECRET_BYTES: usize = 10;
 
 pub(super) fn compatible_totp_from_url(value: &str) -> Result<Totp, VaultError> {
+    // The dependency accepts repeated parameters (the last value wins), URL
+    // credentials, ports and fragments. Reject ambiguous configurations before
+    // parsing either compliant or legacy-length secrets.
+    let invalid = || {
+        VaultError::InvalidInput("invalid TOTP URI: requires one secret, unique parameters, and an otpauth://totp/ label without credentials, port, fragment, or HOTP counter".into())
+    };
+    let url = url::Url::parse(value).map_err(|_| invalid())?;
+    if value.chars().any(char::is_control)
+        || url.scheme() != "otpauth"
+        || url.host_str() != Some("totp")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path().trim_matches('/').is_empty()
+        || url.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    for name in [
+        "secret",
+        "algorithm",
+        "digits",
+        "period",
+        "issuer",
+        "counter",
+    ] {
+        let count = url.query_pairs().filter(|(key, _)| key == name).count();
+        if count > 1 || (name == "secret" && count != 1) || (name == "counter" && count != 0) {
+            return Err(invalid());
+        }
+    }
     match Totp::from_url(value) {
         Ok(totp) => Ok(totp),
         Err(TotpError::SecretTooShort { bits }) if bits >= MIN_COMPATIBLE_TOTP_SECRET_BYTES * 8 => {

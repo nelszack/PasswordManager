@@ -1,6 +1,6 @@
 use crate::file::{key_file_path, new_key_file_path, read_bounded_file, sync_parent};
 use crate::types::PasswordType;
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadInOut, Generate, KeyInit, Payload},
@@ -188,15 +188,19 @@ fn master_key_from_password_with_params(
     parallelism: u32,
 ) -> Option<[u8; 32]> {
     let params = Params::new(memory_kib, iterations, parallelism, Some(32)).ok()?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = [0u8; 32];
-    let result =
-        run_cpu_intensive(|| argon2.hash_password_into(password.as_bytes(), salt, &mut key));
-    if result.is_err() {
-        key.zeroize();
-        return None;
-    }
-    Some(key)
+    run_cpu_intensive(|| {
+        // Argon2's allocating API frees its working memory without wiping it.
+        // Own the blocks so password-derived state is erased on every return path.
+        let mut memory = Zeroizing::new(Vec::new());
+        memory.try_reserve_exact(params.block_count()).ok()?;
+        memory.resize(params.block_count(), Block::default());
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut key = Zeroizing::new([0u8; 32]);
+        argon2
+            .hash_password_into_with_memory(password.as_bytes(), salt, &mut *key, &mut *memory)
+            .ok()?;
+        Some(*key)
+    })
 }
 
 fn run_cpu_intensive<T>(operation: impl FnOnce() -> T) -> T {

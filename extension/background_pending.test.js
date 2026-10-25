@@ -62,7 +62,7 @@ test("expiry removes stored usernames without deleting a newer navigation record
     assert.equal(env.stored["pmPopupPending:7"].username, "replacement");
     env.advance(50000); env.timers[1](); await flush();
     assert.equal(env.stored["pmPopupPending:7"], undefined);
-    assert.equal(service.takeRemembered(env.sender), null);
+    assert.equal(await service.takeRemembered(env.sender), null);
 });
 
 test("cleanup after a worker restart removes expired and malformed session records", async () => {
@@ -77,7 +77,7 @@ test("cleanup after a worker restart removes expired and malformed session recor
 test("closing a tab and clearing pending state remove both memory and storage", async () => {
     const env = environment(), service = env.create(); await env.set(service);
     env.closeTab(7); await flush();
-    assert.equal(service.takeRemembered(env.sender), null);
+    assert.equal(await service.takeRemembered(env.sender), null);
     await env.set(service);
     assert.equal((await env.call(service, "clear", env.sender)).success, true);
     assert.equal((await env.call(service, "consume", env.sender)).pending, null);
@@ -85,11 +85,11 @@ test("closing a tab and clearing pending state remove both memory and storage", 
 
 test("remembered usernames are origin-bound and are not reusable", async () => {
     const env = environment(), service = env.create(); await env.set(service);
-    assert.equal(service.takeRemembered(env.sender).username, "alice");
-    assert.equal(service.takeRemembered(env.sender), null); await flush();
+    assert.equal((await service.takeRemembered(env.sender)).username, "alice");
+    assert.equal(await service.takeRemembered(env.sender), null); await flush();
     assert.equal(env.stored["pmPopupPending:7"], undefined);
     await env.set(service);
-    assert.equal(service.takeRemembered({ ...env.sender, url: "https://other.example" }), null);
+    assert.equal(await service.takeRemembered({ ...env.sender, url: "https://other.example" }), null);
 });
 
 test("storage failures disclose no pending secret and do not poison later operations", async () => {
@@ -123,4 +123,36 @@ test("navigation records reject password-bearing payloads and persist only usern
     assert.equal(response.success, false); assert.deepEqual(env.stored, {});
     await env.set(service);
     assert.deepEqual(env.stored["pmPopupPending:7"], { domain: "https://example.com", username: "alice", time: 1000 });
+});
+
+test("embedded frames cannot replace, clear, consume, or take top-level username context", async () => {
+    const env = environment(), service = env.create(); await env.set(service);
+    for (const url of [env.sender.url, "https://embedded.example"]) {
+        const frame = { ...env.sender, frameId: 3, url };
+        assert.equal((await env.call(service, "set", { pending: { username: "mallory" } }, frame)).success, false);
+        for (const method of ["consume", "clear"]) assert.equal((await env.call(service, method, frame)).success, false);
+        assert.equal(await service.takeRemembered(frame), null);
+    }
+    assert.equal((await env.call(service, "consume", env.sender)).pending.username, "alice");
+});
+
+test("prompt lookup takes a queued username once across worker restart and replacement", async () => {
+    const env = environment(), service = env.create();
+    const setting = env.set(service, "first");
+    const taking = service.takeRemembered(env.sender);
+    const replacing = env.set(service, "second");
+    await setting;
+    assert.equal((await taking).username, "first");
+    await replacing;
+    assert.equal((await env.create().takeRemembered(env.sender)).username, "second");
+    assert.equal((await env.call(env.create(), "consume", env.sender)).pending, null);
+});
+
+test("malformed pending payloads and restored records fail closed", async () => {
+    const env = environment(), service = env.create();
+    for (const value of ["alice", 1, true, [], { username: "x".repeat(4097) }]) {
+        assert.equal((await env.call(service, "set", { pending: value }, env.sender)).success, false);
+        env.stored["pmPopupPending:7"] = value;
+        assert.equal((await env.call(service, "consume", env.sender)).pending, null);
+    }
 });

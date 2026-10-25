@@ -3,6 +3,10 @@ const PasswordManagerBackgroundPending = {
     create({ chrome, security, records, setTimeout }) {
         const memory = new Map(), operations = new Map();
         const prefix = "pmPopupPending:";
+        // This context bridges top-level login steps. An embedded document must
+        // never replace or consume the containing page's username.
+        const keyFor = sender => sender?.frameId === 0 && security.senderOrigin(sender)
+            ? security.pendingStorageKey(sender) : null;
         function storage(method, value) {
             return new Promise((resolve, reject) => chrome.storage.session[method](value, result => {
                 const error = chrome.runtime.lastError?.message;
@@ -29,9 +33,9 @@ const PasswordManagerBackgroundPending = {
             });
         }
         function set(request, sender, sendResponse) {
-            const key = security.pendingStorageKey(sender), domain = security.senderOrigin(sender);
+            const key = keyFor(sender), domain = security.senderOrigin(sender);
             const pending = request?.pending;
-            if (!key || !domain || !pending || "password" in pending
+            if (!key || !domain || !pending || typeof pending !== "object" || Array.isArray(pending) || "password" in pending
                 || typeof pending.username !== "string" || !pending.username || pending.username.length > 4096) {
                 sendResponse({ success: false, error: "Invalid pending credentials" }); return;
             }
@@ -43,17 +47,20 @@ const PasswordManagerBackgroundPending = {
                 return { success: true };
             }), sendResponse);
         }
-        function consume(sender, sendResponse) {
-            const key = security.pendingStorageKey(sender), domain = security.senderOrigin(sender);
-            if (!key || !domain) { sendResponse({ success: false, error: "Invalid page origin" }); return; }
-            respond(ordered(key, async () => {
+        function take(key, domain) {
+            return ordered(key, async () => {
                 const result = await storage("get", key);
                 const pending = memory.get(key) || result?.[key] || null;
                 // Consume once across document and worker lifetimes.
                 await storage("remove", key);
                 memory.delete(key);
-                return { success: true, pending: records.usable(pending, domain) ? pending : null };
-            }), sendResponse);
+                return records.usable(pending, domain) ? pending : null;
+            });
+        }
+        function consume(sender, sendResponse) {
+            const key = keyFor(sender), domain = security.senderOrigin(sender);
+            if (!key || !domain) { sendResponse({ success: false, error: "Invalid page origin" }); return; }
+            respond(take(key, domain).then(pending => ({ success: true, pending })), sendResponse);
         }
         function clearKey(key) {
             return ordered(key, async () => {
@@ -63,15 +70,13 @@ const PasswordManagerBackgroundPending = {
             });
         }
         function clear(sender, sendResponse) {
-            const key = security.pendingStorageKey(sender);
+            const key = keyFor(sender);
             if (!key) { sendResponse({ success: false, error: "Invalid tab" }); return; }
             respond(clearKey(key), sendResponse);
         }
         function takeRemembered(sender) {
-            const key = security.pendingStorageKey(sender), domain = security.senderOrigin(sender);
-            const record = key ? memory.get(key) : null;
-            if (key) { memory.delete(key); clearKey(key).catch(() => {}); }
-            return records.usable(record, domain) ? record : null;
+            const key = keyFor(sender), domain = security.senderOrigin(sender);
+            return key ? take(key, domain) : Promise.resolve(null);
         }
         async function cleanup() {
             const stored = await storage("get", null);

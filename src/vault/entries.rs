@@ -141,9 +141,11 @@ impl Vault {
                 vault.push_password_history_with_limit(id, old, limit);
             }
             let entry = &mut vault.item_mut(id).unwrap().entry;
-            // A full replacement clears the previous primary before applying
-            // the new one. A clear without a replacement still removes it.
-            let mut changed = clear_urls && entry.url.take().is_some();
+            // Keep the existing primary while applying a replacement so an
+            // identical URL list remains a no-op. Clear it only when the
+            // request supplies no replacement primary.
+            let mut changed =
+                clear_urls && change.update.url.is_none() && entry.url.take().is_some();
             let update = std::mem::take(&mut change.update);
             changed |= apply_update(entry, update, change.password.take());
             if !clear_urls && entry.url.as_ref().is_some_and(|u| remove_url.contains(u)) {
@@ -310,6 +312,22 @@ mod tests {
             remove_fields: vec![],
             clear_fields: false,
         }
+    }
+
+    #[test]
+    fn identical_full_url_replacement_preserves_revisions_and_modified_time() {
+        let (mut vault, mut credentials, id) = fixture();
+        let before = vault.clone();
+        let mut replacement = change(id);
+        replacement.clear_urls = true;
+        replacement.entry.update.url = Some("https://primary.test".into());
+        replacement.add_url = vec!["https://additional.test".into()];
+        assert!(
+            !vault
+                .update_typed_entry_with_limit(replacement, &mut credentials, 10)
+                .unwrap()
+        );
+        assert_eq!(vault, before);
     }
 
     #[test]

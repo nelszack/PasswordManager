@@ -22,7 +22,13 @@ XChaCha20-Poly1305 encryption.
 ## Installation
 
 Build with a current stable Rust toolchain and a native C/C++ toolchain
-(MSVC on Windows):
+(MSVC on Windows).
+
+Linux desktop builds also need pkg-config and the Fontconfig/FreeType development
+packages (`pkg-config libfontconfig1-dev libfreetype6-dev` on Debian/Ubuntu,
+`pkgconf fontconfig freetype2` on Arch). CLI-only builds do not need these packages.
+
+Build the desktop executable with:
 
 ```bash
 cargo build --release --locked

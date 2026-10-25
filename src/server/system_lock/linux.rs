@@ -1,10 +1,10 @@
 use super::*;
-use std::{collections::HashMap, time::Duration};
+use futures_lite::StreamExt;
+use std::{collections::HashMap, num::NonZeroUsize, time::Duration};
 use zbus::{
-    MatchRule,
-    blocking::{Connection, MessageIterator, Proxy},
+    Connection, MatchRule, MessageStream, Proxy, block_on,
     message::Type,
-    zvariant::{OwnedFd, OwnedObjectPath, OwnedValue},
+    wire::{OwnedFd, OwnedObjectPath, OwnedVariant},
 };
 
 pub(super) fn start(watch: Watch) {
@@ -17,6 +17,8 @@ pub(super) fn start(watch: Watch) {
     ] {
         let watch = watch.clone();
         std::thread::spawn(move || {
+            // Block only on individual D-Bus operations: lock callbacks use
+            // blocking_send and must run outside a Tokio async context.
             while !watch.stopped() {
                 if let Err(error) = operation(&watch) {
                     watch.warning(source, error);
@@ -62,7 +64,7 @@ pub(super) fn start(watch: Watch) {
 }
 
 fn inhibitor(manager: &Proxy<'_>) -> zbus::Result<OwnedFd> {
-    manager.call(
+    block_on(manager.call(
         "Inhibit",
         &(
             "sleep",
@@ -70,7 +72,7 @@ fn inhibitor(manager: &Proxy<'_>) -> zbus::Result<OwnedFd> {
             "Lock vault before suspend",
             "delay",
         ),
-    )
+    ))
 }
 
 fn resolve_session(
@@ -91,16 +93,16 @@ fn resolve_session(
 }
 
 fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Connection::system()?;
-    let manager = Proxy::new(
+    let connection = block_on(Connection::system())?;
+    let manager = block_on(Proxy::new(
         &connection,
         "org.freedesktop.login1",
         "/org/freedesktop/login1",
         "org.freedesktop.login1.Manager",
-    )?;
+    ))?;
     let session: Option<OwnedObjectPath> = match resolve_session(
-        manager.call("GetSessionByPID", &(std::process::id(),)),
-        || manager.call("GetSession", &("auto",)),
+        block_on(manager.call("GetSessionByPID", &(std::process::id(),))),
+        || block_on(manager.call("GetSession", &("auto",))),
     ) {
         Ok(path) => {
             watch.ready("session");
@@ -113,9 +115,13 @@ fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
     };
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
-        .sender("org.freedesktop.login1")?
-        .build();
-    let messages = MessageIterator::for_match_rule(rule, &connection, Some(64))?;
+        .sender("org.freedesktop.login1")
+        .build()?;
+    let mut messages = block_on(MessageStream::for_match_rule(
+        rule,
+        &connection,
+        NonZeroUsize::new(64),
+    ))?;
     let mut delay = match inhibitor(&manager) {
         Ok(fd) => Some(fd),
         Err(error) => {
@@ -126,22 +132,22 @@ fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
     let session_proxy = session
         .as_ref()
         .map(|path| {
-            Proxy::new(
+            block_on(Proxy::new(
                 &connection,
                 "org.freedesktop.login1",
                 path.as_str(),
                 "org.freedesktop.login1.Session",
-            )
+            ))
         })
         .transpose()?;
     if session_proxy
         .as_ref()
-        .is_some_and(|proxy| proxy.get_property::<bool>("LockedHint").unwrap_or(false))
+        .is_some_and(|proxy| block_on(proxy.get_property::<bool>("LockedHint")).unwrap_or(false))
     {
         watch.lock();
     }
     watch.ready("logind");
-    for message in messages {
+    while let Some(message) = block_on(messages.next()) {
         if watch.stopped() {
             break;
         }
@@ -184,7 +190,7 @@ fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
             if interface == "org.freedesktop.DBus.Properties" && member == "PropertiesChanged" {
                 let (interface, properties, invalidated): (
                     String,
-                    HashMap<String, OwnedValue>,
+                    HashMap<String, OwnedVariant>,
                     Vec<String>,
                 ) = message.body().deserialize()?;
                 if interface == "org.freedesktop.login1.Session"
@@ -193,7 +199,7 @@ fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
                         .is_some_and(|value| bool::try_from(value).unwrap_or(false))
                         || invalidated.iter().any(|key| key == "LockedHint")
                             && session_proxy.as_ref().is_none_or(|proxy| {
-                                proxy.get_property::<bool>("LockedHint").unwrap_or(true)
+                                block_on(proxy.get_property::<bool>("LockedHint")).unwrap_or(true)
                             }))
                 {
                     watch.lock();
@@ -205,7 +211,7 @@ fn system(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn desktop(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Connection::session()?;
+    let connection = block_on(Connection::session())?;
     // Separate authenticated bus sender matches prevent arbitrary website
     // metadata from being interpreted as an OS event.
     let names = [
@@ -218,11 +224,15 @@ fn desktop(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
     ];
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
-        .member("ActiveChanged")?
-        .build();
-    let messages = MessageIterator::for_match_rule(rule, &connection, Some(16))?;
+        .member("ActiveChanged")
+        .build()?;
+    let mut messages = block_on(MessageStream::for_match_rule(
+        rule,
+        &connection,
+        NonZeroUsize::new(16),
+    ))?;
     watch.ready("desktop");
-    for message in messages {
+    while let Some(message) = block_on(messages.next()) {
         if watch.stopped() {
             break;
         }
@@ -234,12 +244,12 @@ fn desktop(watch: &Watch) -> Result<(), Box<dyn std::error::Error>> {
         let Some(path) = header.path() else {
             continue;
         };
-        let bus = zbus::blocking::fdo::DBusProxy::new(&connection)?;
+        let bus = block_on(zbus::fdo::DBusProxy::new(&connection))?;
         let trusted = names.iter().any(|(name, expected_path)| {
             (path.as_str() == *expected_path || path.as_str() == "/ScreenSaver")
                 && zbus::names::BusName::try_from(*name)
                     .ok()
-                    .and_then(|name| bus.get_name_owner(name).ok())
+                    .and_then(|name| block_on(bus.get_name_owner(name)).ok())
                     .is_some_and(|owner| owner.as_str() == sender.as_str())
         });
         if trusted && message.body().deserialize::<bool>().unwrap_or(false) {
@@ -255,11 +265,9 @@ mod tests {
 
     fn method_error(name: &str) -> zbus::Error {
         let call = zbus::Message::method_call("/org/freedesktop/login1", "GetSessionByPID")
-            .unwrap()
             .build(&(123_u32,))
             .unwrap();
         let reply = zbus::Message::error(&call.header(), name)
-            .unwrap()
             .build(&())
             .unwrap();
         zbus::Error::MethodError(name.try_into().unwrap(), None, reply)

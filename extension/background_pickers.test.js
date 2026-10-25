@@ -8,13 +8,22 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function environment(username = "alice", kind = "login") {
     const deliveries = [], removed = [], timers = [], calls = [], logins = [], requests = [];
     let sessionId = "a".repeat(64), revision = 1, omitSession = false;
-    let heldTab, releaseTab, heldWindow, releaseWindow, heldDelivery, releaseDelivery;
+    let heldTab, releaseTab, heldWindow, releaseWindow, heldDelivery, releaseDelivery, heldNative, releaseNative;
+    let topUrl = "https://example.com", closed = false, destinationRead = 0, invalidateAtRead;
     let delivered;
     const delivery = new Promise(resolve => { delivered = resolve; });
     const chrome = {
         runtime: { id: "abcdefghijklmnopabcdefghijklmnop", getURL: path => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${path}` },
         tabs: {
-            async get() { if (heldTab) await new Promise(resolve => { releaseTab = resolve; }); return { url: "https://example.com" }; },
+            async get() {
+                if (heldTab) await new Promise(resolve => { releaseTab = resolve; });
+                if (closed) throw new Error("Tab not found");
+                return { get url() {
+                    destinationRead++;
+                    if (destinationRead === invalidateAtRead) queueMicrotask(() => service.invalidate());
+                    return topUrl;
+                } };
+            },
             async sendMessage(tab, message, options) {
                 deliveries.push({ tab, message, options });
                 delivered();
@@ -32,6 +41,7 @@ function environment(username = "alice", kind = "login") {
         async nativeRequest(action, fields) {
             calls.push(action); requests.push({ action, ...fields });
             if (["getLoginItem", "getAutofillItem", "getTotp"].includes(action)) {
+                if (heldNative) await new Promise(resolve => { releaseNative = resolve; });
                 if (fields.expectedSession !== sessionId) return { success: false, error: "Unlock session changed" };
                 if (fields.expectedRevision !== revision) return { success: false, error: "Item changed" };
                 return { success: true, sessionId, data: action === "getTotp" ? { code: "123456" } : { username, password: "synthetic-secret" } };
@@ -46,7 +56,11 @@ function environment(username = "alice", kind = "login") {
         requests, switchSession() { sessionId = "b".repeat(64); }, changeItem() { revision++; }, omitSession() { omitSession = true; },
         holdTab() { heldTab = true; }, releaseTab() { releaseTab(); },
         holdWindow() { heldWindow = true; }, releaseWindow() { releaseWindow(); },
-        holdDelivery() { heldDelivery = true; }, releaseDelivery() { releaseDelivery(); }
+        holdDelivery() { heldDelivery = true; }, releaseDelivery() { releaseDelivery(); },
+        navigate(url) { topUrl = url; },
+        closeTab() { closed = true; },
+        invalidateAtDestinationRead(number) { invalidateAtRead = number; },
+        holdNative() { heldNative = true; }, releaseNative() { releaseNative(); }
     };
 }
 
@@ -62,6 +76,49 @@ test("invalidation while opening a picker cancels tab lookup and delayed window 
             assert.deepEqual(env.removed, stage === "Window" ? [42] : []);
         });
     }
+});
+
+test("navigation before or during selection prevents releasing every kind of secret", async t => {
+    for (const kind of ["login", "totp", "payment-card", "identity"]) {
+        for (const stage of ["before", "during"]) await t.test(`${kind}: ${stage}`, async () => {
+            const env = environment("alice", kind), { token } = await env.open(); await flush();
+            if (stage === "before") env.navigate("https://other.example");
+            else env.holdNative();
+            const completion = env.service.complete({ token, id: 1 }, env.popup);
+            const rejected = assert.rejects(completion, /destination changed/);
+            if (stage === "during") {
+                await flush(); env.navigate("https://other.example"); env.releaseNative();
+            }
+            await rejected;
+            assert.equal(env.deliveries.length, 1);
+            assert.equal(env.deliveries[0].message.payload, null);
+            assert.equal(env.service.data({ token }, env.popup).success, false);
+            assert.equal(env.logins.length, 0);
+            if (stage === "before") assert.equal(env.calls.length, 1, "no secret fetch before destination validation");
+        });
+    }
+});
+
+test("a closed destination discards its picker without fetching a secret", async () => {
+    const env = environment(), { token } = await env.open(); await flush();
+    env.closeTab();
+    await assert.rejects(env.service.complete({ token, id: 1 }, env.popup), /destination is unavailable/);
+    assert.equal(env.calls.length, 1);
+    assert.equal(env.deliveries.at(-1).message.payload, null);
+    assert.equal(env.service.data({ token }, env.popup).success, false);
+});
+
+test("invalidation between destination validation and its continuation cannot fetch or release a secret", async t => {
+    for (const stage of ["before fetch", "before release"]) await t.test(stage, async () => {
+        const env = environment(), { token } = await env.open(); await flush();
+        env.invalidateAtDestinationRead(stage === "before fetch" ? 2 : 3);
+        await assert.rejects(env.service.complete({ token, id: 1 }, env.popup), /expired/);
+        assert.equal(env.deliveries.length, 1);
+        assert.equal(env.deliveries[0].message.payload, null);
+        assert.equal(env.logins.length, 0);
+        assert.equal(await env.service.matchesFilledLogin(env.sender, "alice", "synthetic-secret"), false);
+        if (stage === "before fetch") assert.equal(env.calls.length, 1);
+    });
 });
 
 test("structured usernames remain eligible for filled-login prompt suppression", async t => {

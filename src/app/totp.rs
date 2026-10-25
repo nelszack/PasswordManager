@@ -1,4 +1,5 @@
 use super::output::Output;
+use super::session::SessionClient;
 use password_manager::{
     client::AuthenticatedClient,
     protocol::AuthenticatorResponse,
@@ -8,18 +9,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 fn fetch(
-    client: &AuthenticatedClient,
+    client: &mut SessionClient<'_>,
     target: &Target,
     copy_timeout: Option<u8>,
 ) -> Result<AuthenticatorResponse, String> {
-    let response = client.request_response(ServerCommand::Totp(TotpCommand::Watch {
+    let response = client.request(ServerCommand::Totp(TotpCommand::Watch {
         target: target.clone(),
         copy_timeout,
     }))?;
-    if response.code != 0 {
-        return Err(response.error_message());
-    }
-    let password_manager::protocol::ResponsePayload::Authenticator(code) = response.payload else {
+    let password_manager::protocol::ResponsePayload::Authenticator(code) = response else {
         return Err("invalid TOTP watch response".into());
     };
     if !code.valid() || code.mode != "totp" || code.expires_in == Some(0) {
@@ -37,12 +35,13 @@ pub(super) async fn watch(
     let stop = tokio::signal::ctrl_c();
     tokio::pin!(stop);
     let mut previous = Zeroizing::new(String::new());
+    let mut client = SessionClient::new(client);
     loop {
         // Fetch from the vault on every tick so locking or removing the entry
         // stops the watch. This command does not extend the auto-lock deadline.
-        let mut code = fetch(client, &target, None)?;
+        let mut code = fetch(&mut client, &target, None)?;
         if copy_timeout.is_some() && code.code.expose() != previous.as_str() {
-            code = fetch(client, &target, copy_timeout)?;
+            code = fetch(&mut client, &target, copy_timeout)?;
         }
         previous.zeroize();
         previous.push_str(&code.code);

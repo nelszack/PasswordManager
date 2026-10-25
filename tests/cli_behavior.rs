@@ -1093,17 +1093,18 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
         stdout.rewind().unwrap();
         output.clear();
         stdout.read_to_string(&mut output).unwrap();
-        if json {
+        let error = if json {
             let last: serde_json::Value =
                 serde_json::from_str(output.lines().last().unwrap()).unwrap();
             assert_eq!(last["ok"], false);
-            assert!(last["error"].as_str().unwrap().contains("Vault locked"));
+            last["error"].as_str().unwrap().to_owned()
         } else {
             stderr.rewind().unwrap();
             let mut error = String::new();
             stderr.read_to_string(&mut error).unwrap();
-            assert!(error.contains("Vault locked"));
-        }
+            error
+        };
+        assert!(error.contains("Unlock session changed"), "{error}");
     }
 }
 

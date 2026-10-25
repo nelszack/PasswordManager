@@ -10,7 +10,8 @@ const PasswordManagerBackgroundDuo = {
         function rememberLogin({ sender, accounts }) {
             const items = accounts.filter(item => item.has_duo === true && Number.isSafeInteger(item.id) && item.id > 0)
                 .map(({ id, name, sessionId }) => ({ id, name: String(name || ""), sessionId }));
-            if (!items.length || !Number.isInteger(sender?.tab?.id)) return;
+            if (!Number.isInteger(sender?.tab?.id)) return;
+            if (!items.length) { recentLogins.delete(sender.tab.id); return; }
             const record = { origin: security.senderOrigin(sender), items, expiresAt: Date.now() + lifetime };
             recentLogins.set(sender.tab.id, record);
             setTimeout(() => { if (recentLogins.get(sender.tab.id) === record) recentLogins.delete(sender.tab.id); }, lifetime);
@@ -87,6 +88,7 @@ const PasswordManagerBackgroundDuo = {
                 // Reserve before I/O so repeated content messages cannot open duplicates.
                 if (sessions.size >= 64) return { success: true };
                 const tab = await chrome.tabs.get(sender.tab.id);
+                if (epoch !== generation) return { success: true };
                 const topOrigin = security.senderOrigin({ url: tab.url });
                 if (!topOrigin) throw new Error("Invalid top-level login page");
                 session = { key, tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId, origin, topOrigin,

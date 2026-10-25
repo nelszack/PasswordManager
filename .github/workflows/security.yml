@@ -45,8 +45,8 @@ jobs:
           fallback: none
       - name: Scan locked dependencies
         run: |
-          cargo audit
-          cargo audit --file fuzz/Cargo.lock
+          cargo audit --deny warnings
+          cargo audit --deny warnings --file fuzz/Cargo.lock
 
   npm-audit:
     name: Browser test dependency audit

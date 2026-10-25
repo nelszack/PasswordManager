@@ -5,6 +5,7 @@ use output::Output;
 mod duo;
 mod local;
 mod remote;
+mod session;
 mod totp;
 
 pub async fn run(

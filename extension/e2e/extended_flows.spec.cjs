@@ -373,6 +373,22 @@ test.describe("extended credential flows", () => {
         await crossPicker.locator("#cancel").click();
     });
 
+    test("navigating to another origin expires a reviewed picker before a secret is fetched", async () => {
+        await page.goto(`${origin}/simple`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }).first());
+        const selection = picker.getByRole("button", { name: /Bob/ });
+        await expect(selection).toBeVisible();
+        const before = readNativeRequests(browser.nativeLog).filter(request => request.action === "getLoginItem").length;
+        await page.goto(`http://localhost:${server.address().port}/simple`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await selection.click();
+        await expect.poll(() => picker.isClosed()).toBe(true);
+        expect(readNativeRequests(browser.nativeLog).filter(request => request.action === "getLoginItem")).toHaveLength(before);
+        await expect(page.locator("#username")).toHaveValue("");
+        await expect(page.locator("#password")).toHaveValue("");
+    });
+
     test("nested open shadow forms fill selected credentials and capture a changed-password save", async () => {
         await page.goto(`${origin}/dynamic-shadow`);
         await expect(page.locator("#shadowHost")).toBeAttached();

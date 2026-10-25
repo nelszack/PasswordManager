@@ -42,8 +42,12 @@ const startup = new Promise(resolve => {
     chrome.windows.getAll({ populate: true }, windows => {
         const promptPaths = ["picker.html", "credential_prompt.html", "duo_prompt.html"].map(path => chrome.runtime.getURL(path));
         for (const window of windows || []) {
-            if (window.tabs?.some(tab => promptPaths.some(path => tab.url?.split("?")[0] === path))) {
-                chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
+            for (const tab of window.tabs || []) {
+                if (promptPaths.some(path => tab.url?.split(/[?#]/)[0] === path)) {
+                    // A restored decision can share a normal browser window with
+                    // unrelated tabs. Removing its tab closes an otherwise empty popup.
+                    chrome.tabs.remove(tab.id, () => void chrome.runtime.lastError);
+                }
             }
         }
         resolve();

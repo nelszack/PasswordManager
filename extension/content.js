@@ -58,7 +58,7 @@ module.exports.create = function create() {
         const submissionCoordinator = PasswordManagerFormSubmission.createSubmissionCoordinator({
             isForm: form => form instanceof HTMLFormElement,
             credentialsFor: form => findLoginCredentials(form),
-            shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
+            shouldIgnore: () => disposed || credentialAttemptPending || modalOpen || popupResolved,
             userActivated: () => navigator.userActivation?.isActive === true,
             handle: async ({ credentials }) => {
                 credentialAttemptPending = true;
@@ -111,7 +111,7 @@ module.exports.create = function create() {
                 password: snapshot.password
             }, {
                 remember: rememberUsernameAcrossNavigation,
-                shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
+                shouldIgnore: () => disposed || credentialAttemptPending || modalOpen || popupResolved,
                 prompt: captured => {
                     credentialAttemptPending = true;
                     const resolvedUsername = resolveUsername(captured.username);

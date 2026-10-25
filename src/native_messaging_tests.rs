@@ -43,85 +43,48 @@ fn validates_chrome_extension_ids() {
 }
 
 #[test]
-fn native_manifest_directory_matches_the_current_platform() {
+fn native_manifest_directories_cover_all_platforms_and_current_platform_dispatch() {
     let base_dirs = BaseDirs::new().unwrap();
-    let host_dir = data_dir().join("native-messaging");
-    let chrome = native_manifest_dir(&base_dirs, NativeBrowser::Chrome, &host_dir);
-    let chromium = native_manifest_dir(&base_dirs, NativeBrowser::Chromium, &host_dir);
-    let helium = native_manifest_dir(&base_dirs, NativeBrowser::Helium, &host_dir);
-
-    #[cfg(target_os = "linux")]
-    {
-        assert!(chrome.ends_with("google-chrome/NativeMessagingHosts"));
-        assert!(chromium.ends_with("chromium/NativeMessagingHosts"));
-        assert!(helium.ends_with("net.imput.helium/NativeMessagingHosts"));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        assert!(chrome.ends_with("Google/Chrome/NativeMessagingHosts"));
-        assert!(chromium.ends_with("Chromium/NativeMessagingHosts"));
-        assert!(helium.ends_with("net.imput.helium/NativeMessagingHosts"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        assert_eq!(chrome, host_dir);
-        assert_eq!(chromium, host_dir);
-        assert_eq!(helium, host_dir);
-    }
-}
-
-#[test]
-fn native_manifest_directories_cover_every_supported_platform() {
-    let config_dir = Path::new("config");
     let host_dir = Path::new("host");
-
-    let cases = [
+    for (browser, linux, macos) in [
+        (NativeBrowser::Chrome, "google-chrome", "Google/Chrome"),
+        (NativeBrowser::Chromium, "chromium", "Chromium"),
         (
-            NativePlatform::Linux,
-            NativeBrowser::Chrome,
-            "config/google-chrome/NativeMessagingHosts",
-        ),
-        (
-            NativePlatform::Linux,
-            NativeBrowser::Chromium,
-            "config/chromium/NativeMessagingHosts",
-        ),
-        (
-            NativePlatform::Linux,
             NativeBrowser::Helium,
-            "config/net.imput.helium/NativeMessagingHosts",
+            "net.imput.helium",
+            "net.imput.helium",
         ),
-        (
-            NativePlatform::Macos,
-            NativeBrowser::Chrome,
-            "config/Google/Chrome/NativeMessagingHosts",
-        ),
-        (
-            NativePlatform::Macos,
-            NativeBrowser::Chromium,
-            "config/Chromium/NativeMessagingHosts",
-        ),
-        (
-            NativePlatform::Macos,
-            NativeBrowser::Helium,
-            "config/net.imput.helium/NativeMessagingHosts",
-        ),
-    ];
-    for (platform, browser, expected) in cases {
-        assert_eq!(
-            native_manifest_dir_for(config_dir, browser, host_dir, platform),
-            PathBuf::from(expected)
-        );
-    }
-    for browser in [
-        NativeBrowser::Chrome,
-        NativeBrowser::Chromium,
-        NativeBrowser::Helium,
     ] {
-        assert_eq!(
-            native_manifest_dir_for(config_dir, browser, host_dir, NativePlatform::Windows),
-            host_dir
-        );
+        for (platform, vendor, current) in [
+            (
+                NativePlatform::Linux,
+                Some(linux),
+                cfg!(target_os = "linux"),
+            ),
+            (
+                NativePlatform::Macos,
+                Some(macos),
+                cfg!(target_os = "macos"),
+            ),
+            (NativePlatform::Windows, None, cfg!(target_os = "windows")),
+        ] {
+            let expected = vendor.map_or_else(
+                || host_dir.to_path_buf(),
+                |vendor| {
+                    base_dirs
+                        .config_dir()
+                        .join(vendor)
+                        .join("NativeMessagingHosts")
+                },
+            );
+            assert_eq!(
+                native_manifest_dir_for(base_dirs.config_dir(), browser, host_dir, platform),
+                expected
+            );
+            if current {
+                assert_eq!(native_manifest_dir(&base_dirs, browser, host_dir), expected);
+            }
+        }
     }
 }
 
@@ -240,11 +203,22 @@ fn native_requests_are_whitelisted_and_use_stable_ids() {
 
 #[test]
 fn native_bridge_rejects_oversized_and_truncated_frames() {
-    let mut input = Cursor::new(((MAX_NATIVE_MESSAGE + 1) as u32).to_ne_bytes());
-    assert!(read_message(&mut input).is_err());
-    let mut framed = 12u32.to_ne_bytes().to_vec();
-    framed.extend_from_slice(b"short");
-    assert!(read_message(&mut Cursor::new(framed)).is_err());
+    assert!(read_message(&mut Cursor::new([])).unwrap().is_none());
+    let header = 12u32.to_ne_bytes();
+    for length in 1..=header.len() {
+        let error = read_message(&mut Cursor::new(&header[..length])).unwrap_err();
+        assert!(error.contains(if length < header.len() {
+            "message length"
+        } else {
+            "native message"
+        }));
+    }
+    for frame in [
+        ((MAX_NATIVE_MESSAGE + 1) as u32).to_ne_bytes().to_vec(),
+        [header.as_slice(), b"short"].concat(),
+    ] {
+        assert!(read_message(&mut Cursor::new(frame)).is_err());
+    }
 
     let secret = "synthetic-response-secret";
     let response = Zeroizing::new(NativeResponse::success(

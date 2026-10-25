@@ -627,6 +627,17 @@ impl State {
         if !app.running {
             return Err("Start the server first.".into());
         }
+        // A queued action can outlive the unlocked UI that offered it. Never
+        // dispatch a current-vault operation without an expected session: a
+        // different client could unlock another vault before it reaches us.
+        let needs_session = match action {
+            Action::NewVault | Action::RestoreBackup | Action::DeleteVault => false,
+            Action::Import | Action::PreviewImport => !self.import_new,
+            _ => true,
+        };
+        if needs_session && app.session.is_none() {
+            return Err("Unlock a vault first.".into());
+        }
         let needs_item = matches!(
             action,
             Action::History

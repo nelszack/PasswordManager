@@ -5,11 +5,11 @@ const security = require("./background_security.js");
 const promptState = require("./credential_prompt_state.js");
 
 function environment() {
-    const calls = [], deliveries = [], removed = [], timers = [];
+    const calls = [], deliveries = [], destinations = [], removed = [], timers = [];
     let saveError, lookupError, windowError, remembered, held, resolveSave, matched = false;
     let holdLookup, resolveLookup, holdMatch, resolveMatch, holdWindow, createWindow;
     const chrome = { runtime: { id: "abcdefghijklmnopabcdefghijklmnop", getURL: path => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${path}` },
-        tabs: { sendMessage(tab, message, options, callback) { deliveries.push(message); callback(); } },
+        tabs: { sendMessage(tab, message, options, callback) { deliveries.push(message); destinations.push(options); callback(); } },
         windows: { create(options, callback) {
             if (holdWindow) { createWindow = () => callback({ id: 42 }); return; }
             if (windowError) { chrome.runtime.lastError = { message: windowError }; callback(); delete chrome.runtime.lastError; }
@@ -33,11 +33,11 @@ function environment() {
             return { success: true, data: "Saved" };
         }
     });
-    const sender = { tab: { id: 1 }, frameId: 0, url: "https://example.com/login" };
+    const sender = { tab: { id: 1 }, frameId: 0, documentId: "original-document", url: "https://example.com/login" };
     const popup = { id: chrome.runtime.id, url: chrome.runtime.getURL("credential_prompt.html") };
     const open = (request = {}) => service.open({ username: "alice", password: "synthetic", ...request }, sender);
     const complete = (token, action = "add") => service.complete({ token, selection: { action, name: "Example" } }, popup);
-    return { service, sender, popup, calls, deliveries, removed, timers, open, complete,
+    return { service, sender, popup, calls, deliveries, destinations, removed, timers, open, complete,
         failSave(error) { saveError = error; }, failLookup(error) { lookupError = error; },
         failWindow(error) { windowError = error; }, remember(record) { remembered = record; }, match() { matched = true; },
         hold() { held = true; }, release(response) { resolveSave(response); },
@@ -47,16 +47,24 @@ function environment() {
     };
 }
 
-test("uncertain saves block retries, retain an error and allow explicit cancellation", async () => {
-    const env = environment(); const { token } = await env.open();
-    env.failSave(Object.assign(new Error("Save may still complete; review the vault"), { uncertain: true }));
-    await assert.rejects(env.complete(token), error => error.uncertain === true);
-    assert.match(env.service.data({ token }, env.popup).error, /may still complete/);
-    await assert.rejects(env.complete(token), /review the vault/);
-    assert.equal(env.calls.filter(call => call.action === "saveCredentials").length, 1);
-    assert.equal((await env.complete(token, "cancel")).success, true);
-    assert.equal(env.service.data({ token }, env.popup).success, false);
-    assert.equal(env.deliveries.at(-1).result.action, "cancel");
+test("uncertain save errors and native responses block retries and allow document-bound dismissal", async t => {
+    for (const transport of ["error", "response"]) await t.test(transport, async () => {
+        const env = environment(); const { token } = await env.open();
+        const message = "Save may still complete; review the vault";
+        if (transport === "error") env.failSave(Object.assign(new Error(message), { uncertain: true }));
+        else env.hold();
+        const completion = env.complete(token);
+        const rejected = assert.rejects(completion, error => error.uncertain === true);
+        if (transport === "response") env.release({ success: false, error: message, uncertain: true });
+        await rejected;
+        assert.match(env.service.data({ token }, env.popup).error, /may still complete/);
+        await assert.rejects(env.complete(token), /review the vault/);
+        assert.equal(env.calls.filter(call => call.action === "saveCredentials").length, 1);
+        assert.equal((await env.complete(token, "cancel")).success, true);
+        assert.equal(env.service.data({ token }, env.popup).success, false);
+        assert.equal(env.deliveries.at(-1).result.action, "cancel");
+        assert.deepEqual(env.destinations.at(-1), { documentId: "original-document" });
+    });
 });
 
 test("invalidation while opening a save prompt cancels lookup, comparison, and window creation", async t => {
@@ -84,12 +92,7 @@ test("a failed save cannot revive a prompt invalidated while the write was pendi
     assert.equal(env.calls.filter(call => call.action === "saveCredentials").length, 1);
 });
 
-test("native transport uncertainty and a definite validation error have different retry behavior", async () => {
-    const env = environment(); const { token } = await env.open(); env.hold();
-    const completion = env.complete(token);
-    const rejected = assert.rejects(completion, error => error.uncertain === true);
-    env.release({ success: false, error: "Response lost", uncertain: true }); await rejected;
-    await assert.rejects(env.complete(token), /Response lost/);
+test("a definite validation error permits correcting the decision and retrying", async () => {
     const definite = environment(); const opened = await definite.open();
     definite.failSave(new Error("Name already exists"));
     await assert.rejects(definite.complete(opened.token), /already exists/);

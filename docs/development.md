@@ -41,6 +41,15 @@ the GUI; append a command after `--` to use the CLI. `--no-default-features` bui
 the CLI/server without GUI dependencies, including for the fuzz package. CLI
 parsing, native messaging, dynamic completions, and clipboard helpers run without
 initializing Iced.
+
+The [font database bridge](../vendor/fontdb-compat/README.md) uses maintained
+fontdb 0.24 behind Cosmic Text's compatible 0.23 API. The
+[window integration patch](../vendor/iced_winit/README.pm.md) selects Crossfont
+for decorated Wayland titlebars, removing the unmaintained ttf-parser dependency.
+Linux desktop builds require pkg-config and Fontconfig/FreeType development
+packages (`sudo apt-get install pkg-config libfontconfig1-dev libfreetype6-dev`
+on Debian/Ubuntu). CLI-only builds exclude these desktop dependencies.
+
 The Tokio CLI runtime is created only for CLI dispatch, leaving Iced's event
 loop on the main thread. Windows keeps the console subsystem for CLI and native
 messaging I/O; GUI dispatch releases an automatically created console only when
@@ -190,6 +199,8 @@ Dependency changes are scanned against the RustSec advisory database and
 reviewed on pull requests. Dependabot checks Rust crates and GitHub Actions
 weekly, including npm browser-test dependencies and the fuzz harness. Scheduled
 security checks audit the Rust and npm lockfiles, including the fuzz lockfile.
+Rust dependency audits deny warnings as well as vulnerabilities, including
+unmaintained and yanked packages.
 Repository secret-scanning and push-protection settings are managed separately
 from the checked-in workflows.
 

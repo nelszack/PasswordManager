@@ -123,22 +123,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Construct the client directly: AuthenticatedClient::new resolves and
-    // initializes the real data directory, which these unit tests never need.
-    fn app() -> App {
-        App::new(
-            Config::default(),
-            AuthenticatedClient {
-                port: 7878,
-                token_path: std::path::PathBuf::from("unused-test-token"),
-                connect_timeout: Duration::from_millis(1),
-                io_timeout: Duration::from_millis(1),
-                max_response: 1024,
-                breach_timeout: Duration::from_millis(1),
-            },
-        )
-    }
+    use crate::gui::tests::app;
 
     #[test]
     fn connection_ports_require_a_nonzero_u16() {

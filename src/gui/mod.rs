@@ -438,6 +438,12 @@ impl App {
 
     fn hide_secrets(&mut self) {
         self.workspace.hide_secrets();
+        if let Some(draft) = &mut self.draft {
+            // Multiline input is deliberately visible while editing. Focus
+            // loss and Escape must mask it just like a revealed stored secret.
+            draft.multiline = false;
+            draft.secret_editor = text_editor::Content::new();
+        }
         if self.revealing {
             // Focus loss/Escape can arrive before a reveal or OTP settings
             // preflight completes. Neither may dispatch new secret work later.
@@ -591,15 +597,6 @@ impl App {
                     self.workspace.result = None;
                     self.workspace.result_until = None;
                 }
-                if !self.busy
-                    && !self.polling
-                    && now.saturating_duration_since(self.last_status) < Duration::from_secs(2)
-                {
-                    let task = self.poll_tool_watches(now);
-                    if self.polling || self.busy {
-                        return task;
-                    }
-                }
                 if self.reveal_until.is_some_and(|deadline| now >= deadline) {
                     self.hide_secrets();
                 }
@@ -608,6 +605,15 @@ impl App {
                     self.generated_stats.clear();
                     self.generated_until = None;
                     self.show_generated = false;
+                }
+                if !self.busy
+                    && !self.polling
+                    && now.saturating_duration_since(self.last_status) < Duration::from_secs(2)
+                {
+                    let task = self.poll_tool_watches(now);
+                    if self.polling || self.busy {
+                        return task;
+                    }
                 }
                 if self.running
                     && !self.busy
@@ -829,11 +835,18 @@ impl App {
             Message::MultilineSecret(value) => {
                 if let Some(draft) = &mut self.draft {
                     draft.multiline = value;
-                    draft.secret_editor = text_editor::Content::with_text(draft.password.expose());
+                    draft.secret_editor = if value {
+                        text_editor::Content::with_text(draft.password.expose())
+                    } else {
+                        text_editor::Content::new()
+                    };
                 }
             }
             Message::SecretEdit(action) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = &mut self.draft
+                    && draft.multiline
+                    && (draft.id.is_none() || draft.replace_password)
+                {
                     let editing = action.is_edit();
                     draft.secret_editor.perform(action);
                     if editing {
@@ -1046,7 +1059,8 @@ impl App {
                 } => {
                     let restart_required =
                         restart_required || self.running && conf.recovery != self.conf.recovery;
-                    if conf.server.port != self.conf.server.port
+                    if !self.running
+                        && conf.server.port != self.conf.server.port
                         && self.client.port == self.conf.server.port
                     {
                         self.reset_connection(conf.server.port);
@@ -1579,7 +1593,11 @@ impl App {
                     && let Some(draft) = &mut self.draft
                 {
                     draft.password = value.into();
-                    draft.secret_editor = text_editor::Content::with_text(draft.password.expose());
+                    draft.secret_editor = if draft.multiline {
+                        text_editor::Content::with_text(draft.password.expose())
+                    } else {
+                        text_editor::Content::new()
+                    };
                     draft.replace_password = true;
                     draft.dirty = true;
                     self.notice =

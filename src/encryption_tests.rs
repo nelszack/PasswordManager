@@ -2,6 +2,32 @@ use super::*;
 use proptest::prelude::*;
 use std::fs;
 
+#[test]
+fn owned_argon2_memory_preserves_derived_keys_and_rejects_invalid_salts() {
+    let password = " synthetic password 🔐 ";
+    let salt = b"synthetic salt!!";
+    for (memory, iterations, parallelism) in [(32, 1, 1), (33, 2, 2)] {
+        let params = Params::new(memory, iterations, parallelism, Some(32)).unwrap();
+        let mut expected = [0; 32];
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password_into(password.as_bytes(), salt, &mut expected)
+            .unwrap();
+        assert_eq!(
+            master_key_from_password_with_params(password, salt, memory, iterations, parallelism),
+            Some(expected)
+        );
+        assert!(
+            master_key_from_password_with_params(
+                password,
+                b"short",
+                memory,
+                iterations,
+                parallelism
+            )
+            .is_none()
+        );
+    }
+}
 #[cfg(unix)]
 #[test]
 fn key_creation_permissions_subprocess_helper() {

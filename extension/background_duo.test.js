@@ -7,14 +7,14 @@ function environment() {
     const sender = { url: "https://login.example/duo", tab: { id: 7 }, frameId: 0, documentId: "doc-one" };
     const popup = { id: "extension", url: "chrome-extension://extension/duo_prompt.html" };
     const created = [], removed = [], calls = [], timers = [];
-    let active = true, origin = "https://login.example", locked = false, holdPoll, holdDecision, decisionError;
+    let active = true, origin = "https://login.example", locked = false, holdPoll, holdDecision, decisionError, holdTab;
     let items = [{ id: 1, name: "Work", has_duo: true }];
     let issuerItems = [];
     let pending = [{ id: "request-one", application: "Example VPN", username: "alice", location: "Boise",
         summary: "Login", expires_at: Math.floor(Date.now() / 1000) + 300,
         code_digits: null, unsupported: null, fingerprint: "a".repeat(128) }];
     const chrome = { runtime: { id: "extension", getURL: path => `chrome-extension://extension/${path}` },
-        tabs: { get: async () => ({ url: origin }), sendMessage: async (_tab, _message, options) => {
+        tabs: { get: async () => { if (holdTab) await holdTab; return { url: origin }; }, sendMessage: async (_tab, _message, options) => {
             assert.equal(options.documentId, sender.documentId);
             return { active };
         } }, windows: {
@@ -47,6 +47,7 @@ function environment() {
         setActive: value => active = value, setOrigin: value => origin = value, setLocked: value => locked = value,
         setDecisionError: value => decisionError = value,
         holdPoll: () => { let release; holdPoll = new Promise(resolve => release = resolve); return release; },
+        holdTab: () => { let release; holdTab = new Promise(resolve => release = resolve); return release; },
         holdDecision: () => { let release; holdDecision = new Promise(resolve => release = resolve); return release; },
         token: () => new URL(created.at(-1).url).searchParams.get("token"),
         async open() { await duo.observe({}, sender); return this.token(); },
@@ -161,6 +162,26 @@ test("duplicate decisions cannot send twice while the first response is pending"
     await assert.rejects(env.duo.complete(env.decision(r, false), env.popup), /already in progress/);
     release(); await first;
     assert.equal(env.calls.filter(r => r.action === "managerDuoRespond").length, 1);
+});
+
+test("locking during tab lookup cannot recreate a Duo session after invalidation", async () => {
+    const env = environment(), release = env.holdTab();
+    const opening = env.duo.observe({}, env.sender);
+    await flush(); env.duo.invalidate(); release();
+    assert.deepEqual(await opening, { success: true });
+    assert.equal(env.created.length, 0);
+    assert.equal(env.calls.length, 0);
+    assert.equal(env.timers.length, 0);
+});
+
+test("a new login without Duo clears a previous account's redirect context", async () => {
+    const env = environment();
+    env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 1, has_duo: true, sessionId: "a".repeat(64) }] });
+    env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 2, has_duo: false }] });
+    env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = "https://api-test.duosecurity.com";
+    await env.duo.observe({}, env.sender);
+    assert.equal(env.created.length, 0);
+    assert.equal(env.calls.some(call => call.action === "managerDuoRequests"), false);
 });
 
 test("an uncertain decision preserves an error window and blocks retries until a fresh page review", async () => {

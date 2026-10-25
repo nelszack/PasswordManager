@@ -82,6 +82,27 @@ const PasswordManagerBackgroundPickers = {
             filledLogins.clear();
         }
 
+        function requirePendingPicker(token, pending) {
+            if (pendingPickers.get(token) !== pending || pending.expiresAt <= Date.now()) {
+                discardPicker(token);
+                throw new Error("Secure picker expired");
+            }
+        }
+
+        async function requireCurrentDestination(token, pending) {
+            let tab;
+            try { tab = await chrome.tabs.get(pending.tabId); }
+            catch (_) {
+                discardPicker(token);
+                throw new Error("Secure picker expired; the destination is unavailable");
+            }
+            if (pendingPickers.get(token) !== pending || pending.expiresAt <= Date.now()
+                || security.senderOrigin({ url: tab.url }) !== pending.topOrigin) {
+                discardPicker(token);
+                throw new Error("Secure picker expired; the destination changed");
+            }
+        }
+
         async function openSecurePicker(request, sender) {
             const epoch = generation;
             const domain = security.senderOrigin(sender);
@@ -185,6 +206,8 @@ const PasswordManagerBackgroundPickers = {
             let filledLogin;
             const binding = { expectedSession: pending.sessionId, expectedRevision: selected.revision };
             try {
+                await requireCurrentDestination(request.token, pending);
+                requirePendingPicker(request.token, pending);
                 if (pending.kind === "login") {
                     const response = await nativeRequest("getLoginItem", {
                         domain: pending.domain, entryId: selected.id, ...binding
@@ -206,9 +229,12 @@ const PasswordManagerBackgroundPickers = {
                     if (!response.success) throw new Error(response.error || "Autofill item unavailable");
                     payload = response.data;
                 }
-                if (pendingPickers.get(request.token) !== pending || pending.expiresAt <= Date.now()) {
-                    throw new Error("Secure picker expired");
-                }
+                // Recheck after native I/O as well: confirmation belongs to the
+                // top-level origin shown in the picker, even for an embedded frame.
+                await requireCurrentDestination(request.token, pending);
+                // Keep this guard in the continuation that releases the secret;
+                // cancellation can run between an async check and its caller.
+                requirePendingPicker(request.token, pending);
                 pendingPickers.delete(request.token);
                 pickerWindows.delete(pending.windowId);
                 const key = filledLoginKey(pending);

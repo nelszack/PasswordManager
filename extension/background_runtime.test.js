@@ -25,7 +25,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
     let credentialResponse = { success: true, data: [
         summary()
     ] };
-    const requests = [], deliveries = [], removed = [], created = [], badge = [], responses = new Map();
+    const requests = [], deliveries = [], removed = [], removedTabs = [], created = [], badge = [], responses = new Map();
     const sessionData = {};
     const event = capture => ({ addListener(fn) { capture?.(fn); } });
     const origin = "https://shop.example";
@@ -67,6 +67,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
         } },
         tabs: {
             get: async () => ({ url: origin }),
+            remove(id, callback) { removedTabs.push(id); callback?.(); },
             sendMessage: async (tab, message, options) => {
                 if (deliveryError) throw new Error(deliveryError);
                 deliveries.push({ tab, message, options });
@@ -89,7 +90,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
     const pickerSender = { id: chrome.runtime.id, url: chrome.runtime.getURL("picker.html") };
     const message = (request, source = sender) => new Promise(resolve => listener(request, source, resolve));
     return {
-        context, requests, deliveries, removed, created, badge, sender, pickerSender, message,
+        context, requests, deliveries, removed, removedTabs, created, badge, sender, pickerSender, message,
         advanceTime(milliseconds) { now += milliseconds; },
         failDelivery(error) { deliveryError = error; },
         setCredentialResponse(response) { credentialResponse = response; },
@@ -285,6 +286,7 @@ test("locking cancels an in-flight selection and duplicate clicks cannot deliver
     const token = await env.open();
     env.holdLogin();
     const selection = env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
+    await new Promise(resolve => setImmediate(resolve));
     const duplicate = await env.message({ action: "completeSecurePicker", token, id: 1 }, env.pickerSender);
     assert.equal(duplicate.success, false);
     assert.match(duplicate.error, /already in progress/);
@@ -372,14 +374,17 @@ test("a completing save survives window closure and status invalidation without 
 test("a fresh worker closes orphan decision windows and rejects their tokens before accepting new work", async () => {
     const prefix = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
     const env = securityEnvironment({ orphanWindows: [
-        { id: 91, tabs: [{ url: `${prefix}picker.html?token=old-picker` }] },
-        { id: 92, tabs: [{ url: `${prefix}credential_prompt.html?token=old-save` }] },
-        { id: 93, tabs: [{ url: `${prefix}duo_prompt.html?token=old-duo` }] },
+        { id: 91, tabs: [{ id: 101, url: `${prefix}picker.html?token=old-picker` }] },
+        { id: 92, tabs: [{ id: 102, url: `${prefix}credential_prompt.html?token=old-save` }] },
+        { id: 93, tabs: [{ id: 103, url: `${prefix}duo_prompt.html?token=old-duo` }] },
+        { id: 96, tabs: [{ id: 104, url: `${prefix}picker.html#restored` }, { id: 105, url: "https://example.com" }] },
         { id: 94, tabs: [{ url: `${prefix}manager.html` }] },
         { id: 95, tabs: [{ url: "https://example.com/picker.html" }] }
     ] });
     const response = await env.message({ action: "getSecurePickerData", token: "old-picker" }, env.pickerSender);
-    assert.equal(response.success, false); assert.deepEqual(env.removed, [91, 92, 93]);
+    assert.equal(response.success, false);
+    assert.deepEqual(env.removedTabs, [101, 102, 103, 104]);
+    assert.deepEqual(env.removed, []);
     const token = await env.open();
     assert.equal((await env.message({ action: "getSecurePickerData", token }, env.pickerSender)).success, true);
 });

@@ -1,7 +1,9 @@
 use super::*;
 use password_manager::protocol::{OperationReceipt, RpcResponse, ServerStatus};
 
-fn app() -> App {
+// Construct clients directly: AuthenticatedClient::new initializes the real
+// application data directory, which GUI state tests must never touch.
+pub(super) fn app() -> App {
     App::new(
         Config::default(),
         AuthenticatedClient {
@@ -196,11 +198,29 @@ fn recovered_operations_block_writes_after_reopening_the_gui() {
 }
 
 #[test]
-fn revealing_expires_and_focus_loss_hides_it_immediately() {
-    let mut app = unlocked();
-    app.reveal_until = Some(Instant::now() - Duration::from_secs(1));
-    let _ = app.update(Message::Tick(Instant::now()));
+fn revealing_expires_before_watch_refresh_and_focus_loss_hides_it_immediately() {
+    let mut app = account_app(true);
+    let _ = app.workflow(workflows::Event::Toggle(workflows::Toggle::WatchDuo, true));
+    app.polling = false;
+    let now = Instant::now();
+    app.last_status = now;
+    app.workspace.last_watch = now - Duration::from_secs(5);
+    app.item.as_mut().unwrap().password = Some("revealed secret".into());
+    app.reveal_until = Some(now - Duration::from_secs(1));
+    app.generated = "expired generated secret".into();
+    app.generated_until = Some(now - Duration::from_secs(1));
+    app.generated_stats = "old assessment".into();
+    app.show_generated = true;
+    let _ = app.update(Message::Tick(now));
     assert!(app.item.as_ref().unwrap().password.is_none());
+    assert!(app.generated.is_empty());
+    assert!(app.generated_stats.is_empty());
+    assert!(app.generated_until.is_none());
+    assert!(!app.show_generated);
+    assert!(
+        app.polling,
+        "Duo watching should still refresh after expiry"
+    );
     app.item = Some(item());
     app.show_generated = true;
     let _ = app.update(Message::HideSecrets);
@@ -291,19 +311,25 @@ fn saved_settings_refresh_the_form_and_switch_a_stopped_server_connection() {
 }
 
 #[test]
-fn saving_settings_preserves_an_explicit_cli_port_override() {
-    let mut app = app();
-    app.client.port = 9999;
-    let mut conf = Config::default();
-    conf.server.port = 8787;
-    let _ = app.complete(
-        Job::Settings,
-        Reply::Settings {
-            conf,
-            restart_required: false,
-        },
-    );
-    assert_eq!(app.client.port, 9999);
+fn saving_settings_preserves_live_connections_and_explicit_port_overrides() {
+    for (running, port) in [(false, 9999), (true, 7878), (true, 9999)] {
+        let mut app = app();
+        app.running = running;
+        app.session = running.then(|| "active-session".into());
+        app.client.port = port;
+        let mut conf = Config::default();
+        conf.server.port = 8787;
+        let _ = app.complete(
+            Job::Settings,
+            Reply::Settings {
+                conf,
+                restart_required: false,
+            },
+        );
+        assert_eq!(app.client.port, port);
+        assert_eq!(app.running, running);
+        assert_eq!(app.session.as_deref(), running.then_some("active-session"));
+    }
 }
 
 #[test]
@@ -358,6 +384,51 @@ fn discarding_multiline_replacement_clears_both_the_display_and_submitted_value(
         command.entry.password.unwrap().expose(),
         draft.secret_editor.text()
     );
+}
+
+#[test]
+fn hiding_multiline_input_masks_it_without_discarding_the_replacement() {
+    let mut app = unlocked();
+    let replacement = "synthetic private key\nsecond line";
+    let _ = app.update(Message::Password(replacement.into()));
+    let _ = app.update(Message::MultilineSecret(true));
+    assert!(
+        app.draft
+            .as_ref()
+            .unwrap()
+            .secret_editor
+            .text()
+            .contains(replacement)
+    );
+    let _ = app.update(Message::HideSecrets);
+    // Input queued by the old visible editor cannot replace the retained
+    // password after its editor buffer has been cleared.
+    let _ = app.update(Message::SecretEdit(text_editor::Action::Edit(
+        text_editor::Edit::Insert('x'),
+    )));
+    let draft = app.draft.as_ref().unwrap();
+    assert!(!draft.multiline);
+    assert!(draft.secret_editor.text().is_empty());
+    let ServerCommand::Update(command) = draft.command().unwrap() else {
+        panic!()
+    };
+    assert_eq!(command.entry.password.unwrap().expose(), replacement);
+
+    let _ = app.update(Message::MultilineSecret(true));
+    assert!(
+        app.draft
+            .as_ref()
+            .unwrap()
+            .secret_editor
+            .text()
+            .contains(replacement)
+    );
+    let _ = app.update(Message::MultilineSecret(false));
+    assert!(app.draft.as_ref().unwrap().secret_editor.text().is_empty());
+    let _ = app.generate();
+    let draft = app.draft.as_ref().unwrap();
+    assert!(!draft.password.is_empty());
+    assert!(draft.secret_editor.text().is_empty());
 }
 
 #[test]

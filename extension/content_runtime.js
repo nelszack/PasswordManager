@@ -76,7 +76,7 @@ module.exports.create = function create() {
         const submissionCoordinator = PasswordManagerFormSubmission.createSubmissionCoordinator({
             isForm: form => form instanceof HTMLFormElement,
             credentialsFor: form => findLoginCredentials(form),
-            shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
+            shouldIgnore: () => disposed || credentialAttemptPending || modalOpen || popupResolved,
             userActivated: () => navigator.userActivation?.isActive === true,
             handle: async ({ credentials }) => {
                 credentialAttemptPending = true;
@@ -129,7 +129,7 @@ module.exports.create = function create() {
                 password: snapshot.password
             }, {
                 remember: rememberUsernameAcrossNavigation,
-                shouldIgnore: () => credentialAttemptPending || modalOpen || popupResolved,
+                shouldIgnore: () => disposed || credentialAttemptPending || modalOpen || popupResolved,
                 prompt: captured => {
                     credentialAttemptPending = true;
                     const resolvedUsername = resolveUsername(captured.username);
@@ -1315,10 +1315,12 @@ module.exports.create = function create() {
     };
     chrome.runtime.onMessage.addListener(listener);
     document.addEventListener("visibilitychange", check);
-    window.addEventListener("pagehide", () => clearTimeout(timer));
+    const pagehide = () => clearTimeout(timer);
+    window.addEventListener("pagehide", pagehide);
     check();
     return { dispose() {
         disposed = true; clearTimeout(timer); document.removeEventListener("visibilitychange", check);
+        window.removeEventListener("pagehide", pagehide);
         chrome.runtime.onMessage.removeListener(listener);
     } };
 };

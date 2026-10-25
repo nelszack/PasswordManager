@@ -480,11 +480,16 @@ fn run_with_io(
 
 fn read_message(reader: &mut impl Read) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let mut length = [0u8; 4];
-    match reader.read_exact(&mut length) {
+    // EOF between frames is normal. EOF after any header byte is a truncated
+    // message and must not silently look like a clean browser disconnect.
+    match reader.read_exact(&mut length[..1]) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(error) => return Err(format!("could not read message length: {error}")),
     }
+    reader
+        .read_exact(&mut length[1..])
+        .map_err(|error| format!("could not read message length: {error}"))?;
     let length = u32::from_ne_bytes(length) as usize;
     if length > MAX_NATIVE_MESSAGE {
         return Err("native message exceeds the 1 MiB limit".to_string());

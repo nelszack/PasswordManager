@@ -36,7 +36,10 @@ const PasswordManagerSecurity = (() => {
             const senderUrl = new URL(sender?.url || "");
             const expected = new URL(pickerUrl);
             return sender?.id === extensionId
-                && senderUrl.origin === expected.origin
+                // Extension URLs have an opaque ("null") WHATWG origin. Compare
+                // their scheme and authority rather than accepting any opaque URL.
+                && senderUrl.protocol === expected.protocol
+                && senderUrl.host === expected.host
                 && senderUrl.pathname === expected.pathname;
         } catch (_) {
             return false;

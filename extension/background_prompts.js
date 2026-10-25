@@ -16,7 +16,7 @@ const PasswordManagerBackgroundPrompts = {
             chrome.tabs.sendMessage(
                 pending.tabId,
                 { action: "credentialPromptResult", token, result: { action } },
-                { frameId: pending.frameId },
+                { documentId: pending.documentId },
                 () => void chrome.runtime.lastError
             );
         }
@@ -37,7 +37,8 @@ const PasswordManagerBackgroundPrompts = {
         function invalidateCredentialPrompts() {
             generation++;
             for (const [token, pending] of pendingCredentialPrompts) {
-                if (pending.operationId) { pending.password = ""; continue; }
+                pending.password = "";
+                if (pending.operationId) continue;
                 pending.invalidated = true;
                 if (!pending.completing) discardCredentialPrompt(token, "skipped");
             }
@@ -48,17 +49,20 @@ const PasswordManagerBackgroundPrompts = {
             const domain = security.senderOrigin(sender);
             const tabId = sender?.tab?.id;
             const frameId = sender?.frameId;
+            const documentId = sender?.documentId;
             let username = request?.username;
             const password = request?.password;
-            const remembered = pendingCredentials.takeRemembered(sender);
-            if (!username && remembered?.domain === domain && Date.now() - remembered.time < 60_000) {
-                username = remembered.username;
-            }
             if (!domain || !Number.isInteger(tabId) || !Number.isInteger(frameId)
+                || typeof documentId !== "string" || !documentId
                 || typeof username !== "string" || username.length > 4096
                 || typeof password !== "string" || !password || password.length > 64 * 1024
                 || /[\0\r\n]/.test(username) || /[\0\r\n]/.test(password)) {
                 throw new Error("Invalid credential prompt request");
+            }
+            const remembered = await pendingCredentials.takeRemembered(sender);
+            if (epoch !== generation) return { success: true, skipped: true };
+            if (!username && remembered?.domain === domain && Date.now() - remembered.time < 60_000) {
+                username = remembered.username;
             }
 
             // The background owns this request across page navigation. Only open an
@@ -86,6 +90,7 @@ const PasswordManagerBackgroundPrompts = {
             const pending = {
                 tabId,
                 frameId,
+                documentId,
                 sessionId,
                 domain,
                 username,

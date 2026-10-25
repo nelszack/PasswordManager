@@ -30,10 +30,12 @@ module.exports.create = function create() {
     };
     chrome.runtime.onMessage.addListener(listener);
     document.addEventListener("visibilitychange", check);
-    window.addEventListener("pagehide", () => clearTimeout(timer));
+    const pagehide = () => clearTimeout(timer);
+    window.addEventListener("pagehide", pagehide);
     check();
     return { dispose() {
         disposed = true; clearTimeout(timer); document.removeEventListener("visibilitychange", check);
+        window.removeEventListener("pagehide", pagehide);
         chrome.runtime.onMessage.removeListener(listener);
     } };
 };

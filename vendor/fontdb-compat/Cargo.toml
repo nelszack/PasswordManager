@@ -1,0 +1,17 @@
+[package]
+name = "fontdb"
+version = "0.23.1"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Compatibility re-export of maintained fontdb for Iced's Cosmic Text dependency"
+
+[dependencies]
+fontdb_upstream = { package = "fontdb", version = "0.24", default-features = false }
+
+[features]
+default = ["std", "fs", "memmap", "fontconfig"]
+std = ["fontdb_upstream/std"]
+fs = ["fontdb_upstream/fs"]
+memmap = ["fontdb_upstream/memmap"]
+fontconfig = ["fontdb_upstream/fontconfig"]

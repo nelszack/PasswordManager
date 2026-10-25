@@ -1,8 +1,10 @@
 use super::output::Output;
 use super::remote::target_type;
+use super::session::SessionClient;
 use password_manager::{
     cli::DuoCommands,
     client::AuthenticatedClient,
+    protocol::ResponsePayload,
     types::{DuoCommand, DuoPushRequest, ServerCommand, Target},
 };
 use std::{
@@ -12,15 +14,14 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-fn fetch(client: &AuthenticatedClient, target: &Target) -> Result<Vec<DuoPushRequest>, String> {
-    let response = client.request_response(ServerCommand::Duo(DuoCommand::Requests {
+fn fetch(client: &mut SessionClient<'_>, target: &Target) -> Result<Vec<DuoPushRequest>, String> {
+    let response = client.request(ServerCommand::Duo(DuoCommand::Requests {
         target: target.clone(),
     }))?;
-    if response.code != 0 {
-        return Err(response.error_message());
+    match response {
+        ResponsePayload::DuoRequests(requests) => Ok(requests),
+        _ => Err("invalid Duo request response".into()),
     }
-    serde_json::from_value(response.payload.into_json())
-        .map_err(|_| "invalid Duo request response".into())
 }
 
 fn review(r: &DuoPushRequest) -> String {
@@ -76,7 +77,7 @@ fn execute(
             console.print_success(&response);
         }
         DuoCommands::Requests { target } => {
-            let requests = fetch(client, &target_type(target))?;
+            let requests = fetch(&mut SessionClient::new(client), &target_type(target))?;
             if requests.is_empty() {
                 console.print_success("No pending Duo requests.");
             }
@@ -94,6 +95,7 @@ fn execute(
                 return Err("Interactive Duo watch requires a terminal to review requests".into());
             }
             let target = target_type(target);
+            let mut client = SessionClient::new(client);
             let mut seen = HashSet::new();
             console.print_success(if interactive {
                 "Watching Duo requests. After review: a to approve, d to deny, Enter to skip, q to quit. Polling does not extend auto-lock. Ctrl+C to stop."
@@ -101,7 +103,7 @@ fn execute(
                 "Watching Duo requests. Use pm duo approve/deny in another terminal (--request ID if multiple requests are pending). Polling does not extend auto-lock. Ctrl+C to stop."
             });
             loop {
-                let requests = fetch(client, &target)?;
+                let requests = fetch(&mut client, &target)?;
                 let pending: HashSet<_> = requests.iter().map(|r| r.fingerprint.clone()).collect();
                 seen.retain(|fingerprint| pending.contains(fingerprint));
                 for r in requests {
@@ -131,7 +133,14 @@ fn execute(
                         if interactive {
                             match interactive_decision(&r, console, prompt)? {
                                 WatchDecision::Respond { approve, code } => {
-                                    respond(client, target.clone(), r, approve, code, console)?;
+                                    respond(
+                                        &mut client,
+                                        target.clone(),
+                                        r,
+                                        approve,
+                                        code,
+                                        console,
+                                    )?;
                                 }
                                 WatchDecision::Skip => {}
                                 WatchDecision::Quit => return Ok(()),
@@ -169,7 +178,8 @@ fn decision(
                 .into(),
         );
     }
-    let requests = fetch(client, &target)?;
+    let mut client = SessionClient::new(client);
+    let requests = fetch(&mut client, &target)?;
     let r = select_request(requests, id.as_deref())?;
     console.print_success(&review(&r));
     if approve && let Some(reason) = &r.unsupported {
@@ -184,7 +194,7 @@ fn decision(
         return Err("Duo decision cancelled".into());
     }
     let code = verification_code(&r, approve, &mut prompt, console)?;
-    respond(client, target, r, approve, code, console)
+    respond(&mut client, target, r, approve, code, console)
 }
 
 fn select_request(
@@ -270,7 +280,7 @@ fn verification_code(
 }
 
 fn respond(
-    client: &AuthenticatedClient,
+    client: &mut SessionClient<'_>,
     target: Target,
     r: DuoPushRequest,
     approve: bool,
@@ -284,7 +294,10 @@ fn respond(
         approve,
         code: code.to_string().into(),
     }))?;
-    console.print_success(&response);
+    let ResponsePayload::Message(message) = response else {
+        return Err("invalid Duo decision response".into());
+    };
+    console.print_success(&message);
     Ok(())
 }
 

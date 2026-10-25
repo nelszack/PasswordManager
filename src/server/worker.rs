@@ -329,8 +329,14 @@ impl VaultWorker {
                     deadline = None;
                 } else if activity {
                     let seconds = timeout.load(Ordering::Acquire);
+                    // Configured seconds cover the full u64 range. A deadline
+                    // beyond the monotonic clock's range cannot expire during
+                    // this process, but must not panic and discard the worker.
                     deadline = (seconds > 0)
-                        .then(|| tokio::time::Instant::now() + Duration::from_secs(seconds));
+                        .then(|| {
+                            tokio::time::Instant::now().checked_add(Duration::from_secs(seconds))
+                        })
+                        .flatten();
                 }
                 let _ = reply.send(outcome);
             }
@@ -526,6 +532,29 @@ mod tests {
             Arc::new(Mutex::new(None)),
         )
     }
+    #[tokio::test]
+    async fn maximum_inactivity_timeout_keeps_the_worker_available() {
+        let worker = VaultWorker::start(
+            live(),
+            Arc::new(AtomicU64::new(u64::MAX)),
+            Arc::new(Mutex::new(None)),
+        );
+        worker
+            .submit(
+                false,
+                true,
+                Box::new(|_| outcome::CommandOutcome::default()),
+            )
+            .await;
+        assert!(
+            !worker
+                .with_session(|session| session.is_locked())
+                .await
+                .unwrap()
+        );
+        assert!(!worker.is_locked());
+    }
+
     #[tokio::test]
     async fn lock_deadline_is_not_extended_by_passive_jobs() {
         let worker = worker();

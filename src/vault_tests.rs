@@ -473,7 +473,20 @@ fn invalid_authenticator_inputs_never_modify_the_item() {
         "bad seed",
         "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ&counter=-1",
         "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ&counter=0&counter=1",
+        "otpauth://hotp/x?secret=GEZD\nGNBVGY3TQOJQ&counter=1",
         "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&period=0",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&secret=JBSWY3DPEHPK3PXP",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&digits=6&digits=8",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&period=30&period=60",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&algorithm=SHA1&algorithm=SHA256",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&issuer=a&issuer=a",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&counter=1",
+        "otpauth://user:password@totp/x?secret=GEZDGNBVGY3TQOJQ",
+        "otpauth://totp:443/x?secret=GEZDGNBVGY3TQOJQ",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ#fragment",
+        "otpauth://totp/x?secret=GEZD\nGNBVGY3TQOJQ",
+        "otpauth://totp/?secret=GEZDGNBVGY3TQOJQ",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&%73ecret=JBSWY3DPEHPK3PXP",
     ] {
         assert!(
             vault
