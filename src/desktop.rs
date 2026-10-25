@@ -23,7 +23,14 @@ pub fn install_shortcut() -> Result<PathBuf, String> {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         let base = directories::BaseDirs::new().ok_or("could not find user data directory")?;
         let applications = base.data_dir().join("applications");
+        let icons = base.data_dir().join("icons/hicolor/scalable/apps");
         std::fs::create_dir_all(&applications).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&icons).map_err(|e| e.to_string())?;
+        std::fs::write(
+            icons.join("com.passwordmanager.Pm.svg"),
+            include_bytes!("../assets/password-manager.svg"),
+        )
+        .map_err(|e| e.to_string())?;
         let path = applications.join("com.passwordmanager.Pm.desktop");
         std::fs::write(&path, launcher(&executable)?).map_err(|e| e.to_string())?;
         Ok(path)
@@ -55,7 +62,7 @@ fn launcher(executable: &std::path::Path) -> Result<String, String> {
     }
     let quoted = quoted.replace('\\', "\\\\");
     Ok(format!(
-        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Password Manager\nComment=Manage your encrypted local vault\nExec=\"{quoted}\"\nIcon=dialog-password\nTerminal=false\nCategories=Utility;Security;\nKeywords=password;vault;credentials;\nStartupWMClass=com.passwordmanager.Pm\n"
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Password Manager\nComment=Manage your encrypted local vault\nExec=\"{quoted}\"\nIcon=com.passwordmanager.Pm\nTerminal=false\nCategories=Utility;Security;\nKeywords=password;vault;credentials;\nStartupWMClass=com.passwordmanager.Pm\n"
     ))
 }
 

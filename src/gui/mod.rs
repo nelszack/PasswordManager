@@ -46,6 +46,14 @@ pub fn run(conf: Config, client: AuthenticatedClient) -> Result<(), String> {
     .window(iced::window::Settings {
         size: iced::Size::new(1060.0, 760.0),
         min_size: Some(iced::Size::new(780.0, 580.0)),
+        icon: Some(
+            iced::window::icon::from_rgba(
+                include_bytes!("../../assets/password-manager-64.rgba").to_vec(),
+                64,
+                64,
+            )
+            .expect("embedded application icon must contain 64 x 64 RGBA pixels"),
+        ),
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: "com.passwordmanager.Pm".into(),

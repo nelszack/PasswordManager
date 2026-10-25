@@ -64,12 +64,19 @@ On Linux, install an application-menu icon after putting `pm` at a stable path:
 pm gui --install-shortcut
 ```
 
-The shortcut runs the same executable without opening a terminal. Pin it to your
-dock or copy the installed `.desktop` file to your desktop if your environment
+The shortcut installs the lock icon shared with the browser extension and runs
+the same executable without opening a terminal. Rerun the command after upgrading
+to refresh the installed icon. Pin it to your dock or copy the installed
+`.desktop` file to your desktop if your environment
 supports desktop icons. Rerun installation if you move the executable. `pm gui`
 also opens the GUI explicitly; `pm --help` shows CLI usage. A GUI build requires
 a desktop display only when opening the GUI. For a CLI-only build, use
 `cargo build --release --locked --no-default-features`.
+
+On Windows, create a shortcut to `pm.exe`, then open the shortcut's
+**Properties → Change Icon → Browse** and select `assets/password-manager.ico`
+from the source checkout, or `password-manager.ico` beside `pm.exe` in a release
+archive. Keep the icon file at that location so the shortcut can find it.
 
 The desktop editor supports all item types, public and secret custom fields,
 URLs, multiline secrets, and notes. The Tools tab adds the recovery, security,

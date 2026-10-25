@@ -167,6 +167,15 @@ fn desktop_shortcut_targets_the_same_binary_and_never_starts_the_server() {
     )
     .unwrap();
     assert!(launcher.contains("Terminal=false\n"));
+    assert!(launcher.contains("Icon=com.passwordmanager.Pm\n"));
+    assert_eq!(
+        std::fs::read(
+            root.path()
+                .join("data/icons/hicolor/scalable/apps/com.passwordmanager.Pm.svg")
+        )
+        .unwrap(),
+        include_bytes!("../assets/password-manager.svg")
+    );
     assert!(launcher.contains("Exec=\""));
     assert!(launcher.contains("pm\"\n"));
     assert!(!root.path().join("data/session.key").exists());

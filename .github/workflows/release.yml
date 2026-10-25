@@ -137,6 +137,7 @@ jobs:
           New-Item -ItemType Directory -Force "dist/$Package/completions" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/$Package/"
           Copy-Item README.md, SECURITY.md "dist/$Package/"
+          Copy-Item assets/password-manager.ico "dist/$Package/"
           Copy-Item -Recurse docs "dist/$Package/"
           New-Item -ItemType Directory -Force "dist/$Package/fuzz" | Out-Null
           Copy-Item fuzz/README.md "dist/$Package/fuzz/"

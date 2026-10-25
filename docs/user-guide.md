@@ -31,11 +31,14 @@ pm gui --install-shortcut
 ```
 
 This installs `com.passwordmanager.Pm.desktop` under your XDG user applications
-directory, using the exact executable path, a password icon from your icon
-theme, and `Terminal=false`. Find **Password Manager** in the application menu
+directory, using the exact executable path, the lock icon shared with the
+browser extension, and `Terminal=false`. Find **Password Manager** in the application menu
 and pin it to your dock. Desktop environments that support desktop icons can
 also use a copy of that file. Install again after moving the executable. On
-Windows, make a shortcut to `pm.exe`; on macOS, run the executable from your
+Windows, make a shortcut to `pm.exe`, then select **Properties → Change Icon →
+Browse** and choose `assets/password-manager.ico` from the source checkout or
+`password-manager.ico` beside `pm.exe` in a release archive. Keep the icon file
+at that location. On macOS, run the executable from your
 preferred launcher. Automatic shortcut installation currently targets Linux.
 
 The Vault tab supports creating a password-protected vault, selecting an

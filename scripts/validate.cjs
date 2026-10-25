@@ -31,6 +31,7 @@ run(process.execPath, ["scripts/build_extension.cjs", "--check"]);
 run("cargo", ["fmt", "--all", "--", "--check"]);
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "extension/manifest.json"), "utf8"));
 for (const entry of [manifest.background.service_worker, manifest.action.default_popup,
+    ...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon),
     ...manifest.content_scripts.flatMap(script => script.js)]) {
     if (!fs.statSync(path.join(root, "extension", entry)).isFile()) throw new Error(`Missing extension entry: ${entry}`);
 }
