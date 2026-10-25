@@ -2,7 +2,7 @@ name: Security
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
     paths:
       - Cargo.toml
       - Cargo.lock
