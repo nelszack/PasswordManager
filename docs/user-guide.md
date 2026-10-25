@@ -3,6 +3,7 @@
 [Back to README](../README.md) · [Command reference](commands.html) · [Security policy](../SECURITY.md)
 
 - [Installation and upgrades](#installation)
+- [Desktop interface](#desktop-interface)
 - [Vaults, entries, search, and recovery](#usage)
 - [Authenticators and Duo Push](#totp-and-hotp-authenticators)
 - [Import, export, and encrypted backups](#importexport)
@@ -12,6 +13,178 @@
 - [Clipboard behavior](#clipboard-behavior)
 
 ## Installation
+
+### Desktop interface
+
+Run `pm` without arguments, or `pm gui`, to open the Iced desktop interface.
+The same executable also runs every CLI command and the background server.
+Opening the GUI starts the server when needed; closing the GUI does not stop
+it. `pm --help`, scripted commands, native messaging, and the server do not open
+windows or require a graphical session. Builds made with
+`cargo build --release --locked --no-default-features` provide only CLI/server
+functionality and report that the desktop interface is unavailable.
+
+On Linux, put the binary at a stable path and run:
+
+```bash
+pm gui --install-shortcut
+```
+
+This installs `com.passwordmanager.Pm.desktop` under your XDG user applications
+directory, using the exact executable path, a password icon from your icon
+theme, and `Terminal=false`. Find **Password Manager** in the application menu
+and pin it to your dock. Desktop environments that support desktop icons can
+also use a copy of that file. Install again after moving the executable. On
+Windows, make a shortcut to `pm.exe`; on macOS, run the executable from your
+preferred launcher. Automatic shortcut installation currently targets Linux.
+
+The Vault tab supports creating a password-protected vault, selecting an
+existing vault, unlocking with a password or an absolute external-key path,
+searching item names/usernames/URLs, adding items, and viewing/editing names,
+types, usernames, primary secrets, URLs, multiline notes, and custom fields.
+Enable **Multiline secret** when entering private keys or other multiline values;
+that editor displays the text while editing. New vaults stay locked until
+explicitly unlocked. Moving an item to trash requires confirmation.
+Use **Tools → History, trash & audit** to restore deleted items or passwords.
+The unlock form also allows an inactivity timeout for that individual session.
+
+Use **Browse…** beside the external-key path to select a file with the native
+file picker, or enter the path manually. Choosing a file fills its path; press
+**Unlock vault** to use it. Cancelling keeps the existing path unchanged.
+On Linux, the picker needs the D-Bus library, `xdg-desktop-portal`, and a
+FileChooser backend such as `xdg-desktop-portal-gtk` or
+`xdg-desktop-portal-kde`. If your desktop lacks a file-picker portal, enter
+the absolute key-file path directly. Windows and macOS use their native dialogs.
+
+The primary secret stays unchanged during edits unless **Replace the existing
+primary secret** is checked. An empty replacement deliberately clears it.
+**Generate replacement password** fills a new secret that is committed only
+when you save the item. The Generator tab also creates passwords and
+passphrases independently of the vault, with character-class controls, a custom
+symbol set, ambiguous-character exclusion, word count, and separator. It also
+checks an existing password's strength locally without storing it. Generated
+values disappear after 60 seconds. Saved-item secrets reveal for 15 seconds and hide on focus loss
+or Escape. Ctrl+L (Command+L on macOS) locks the vault. Copy buttons use the
+configured clipboard cleanup; see [clipboard behavior](#clipboard-behavior).
+
+Settings exposes every `pm config` preference: password length, strength/statistics,
+automatic copying of generated passwords and newly added login passwords,
+clipboard timeout, inactivity timeout, default vault, password history limit,
+trash retention, and server port. The GUI and CLI use the same configuration file.
+The Generator tab follows saved defaults unless you choose a one-time statistics,
+automatic-copy, or clipboard-timeout override. Length and generation options are
+also temporary. New items have their own Copy / Do not copy override, including
+non-login items. A timeout of zero disables copying. Settings reload when opened;
+**Refresh settings** reloads them again while preserving unsaved edits. Generation,
+item saving, and copy actions read current defaults before proceeding, including
+changes made through the CLI.
+
+Inactivity accepts seconds or durations such as `15m`, `1h`, and `1d`, and takes
+effect on the next unlock. Clipboard timeout is in seconds; zero disables copying.
+Zero password-history limit disables history, and zero trash retention keeps trash
+indefinitely. Default vault can be set to **Automatic selection** without resetting
+other preferences. **Reset to defaults** resets every preference after confirmation.
+Unsaved edits to other settings do not overwrite unrelated preferences changed
+through the CLI in the meantime.
+
+Stop the running server before changing its configured port, including when a
+reset would change that port. The GUI switches its connection to the new port
+after saving, unless the current connection uses a temporary port. The separate
+**Temporary connection port** control connects to an existing server without
+changing the saved port or starting a new server. Vault filenames appear on the
+unlock screen after connecting; the disconnected screen hides them. Recovery changes
+require a server restart. The main toolbar provides **Stop server** and **Start server**
+controls; stopping locks the vault. Closing the window leaves the existing server
+and lock policy in effect.
+
+Status polling detects CLI/extension locks and vault switches and clears the
+old window contents. Passive polling does not extend the inactivity timeout.
+Edits check the reviewed revision; if another client changes an item, refresh
+and reopen it before editing again. Unsaved edits require an explicit discard
+when navigating away.
+
+A lost mutation reply may mean the server already saved the change. The GUI
+records random operation IDs (never credentials) privately under
+`desktop-operations/` in the application data directory and blocks new changes
+until the outcome is reviewed, even after reopening the window. Use **Check
+last change**; if the result remains unknown, unlock and inspect the vault,
+then explicitly acknowledge it. This never retries the previous operation.
+
+Open **Edit item** to add, replace, or remove an authenticator using a Base32 secret
+or otpauth URI, enroll Duo Push/passcodes using a fresh activation link, or remove
+Duo Push credentials. Each change has a confirmation and keeps the editor open
+with the refreshed item. If you have unsaved item changes, use **Save changes &
+continue editing** first. Save new items before configuring their authenticators.
+Removing Duo Push retains passcodes; remove the authenticator separately to remove
+those too.
+
+Select an account in **Vault** to show/copy its OTP codes and review its Duo Push
+requests. **OTP options** contains the per-operation clipboard timeout and TOTP
+watch/copy controls. Codes remain hidden until requested, so selecting a HOTP
+account does not consume a counter. Custom fields appear in the same account
+details, with a Copy button for every field and individual Reveal/Hide controls
+for secret fields. Reveals last up to 15 seconds and hide on focus loss or Escape.
+Custom-field copying uses the saved clipboard timeout, reloaded before each copy.
+
+Import/export, backups, audits, password history, and trash recovery are available
+in **Tools**:
+
+| Tools section | Available operations |
+| --- | --- |
+| History, trash & audit | Select an item and restore a saved password revision; restore or permanently purge trash; audit weak, reused, duplicate, stale, breached, or under-protected logins. |
+| Import, export & backups | Preview CSV/JSON/Bitwarden imports, choose conflict handling, import into the current or a new vault, export plaintext CSV or portable JSON, and create/restore complete encrypted backups. |
+| Vault security | Create key-file vaults, rekey, or delete a vault. |
+| Advanced search | Combine text/name/username/URL/notes, type, authenticator, weak/stale, and sorting filters; open a matching item in Vault. |
+| Browser integration | Register or update the native browser bridge and install the Linux application-menu shortcut. |
+
+Choose files using native open/save dialogs or enter their paths. Backup creation
+uses a dedicated password (entered twice) or an existing external key. Restoring
+a backup requires locking the current vault and creates a separate vault.
+New key-based vaults, rekeying, and new-vault imports create a new external key
+at a path that must not already exist. Deleting a vault requires its existing
+credentials; lock first and select the intended filename on the Vault tab.
+External keys are preserved by default during deletion.
+
+Destructive operations, plaintext exports, import application, credential changes,
+enrollment, and Duo responses show a review and confirmation step. Editing the
+form cancels that pending confirmation. Save or discard any unsaved item edits
+before making changes in Tools. Untouched hidden custom fields remain unchanged;
+renaming or changing the secrecy of a hidden field requires entering its
+replacement value.
+
+Selecting a Push-enrolled account fetches its current Duo requests once and shows
+Approve and Deny controls in the account details, including Verified Push code
+entry. **Watch Duo requests in background** defaults to off. Enable it explicitly
+for repeated polling; its interval and private desktop alerts appear while enabled.
+Duo monitoring stays bound to its enrolled account while you change tabs, select
+other accounts, or switch to a browser. Choose an interval from 3 to 60 seconds. A
+global indicator offers **Review requests** and **Stop watching**. Selecting
+another item never displays or approves the watched item's requests as its own.
+Locking, changing connections, or changing the watched item's revision stops
+monitoring. Automatic refresh pauses as soon as an unexpired request is available,
+so its Approve/Deny controls and entered code stay stable while you review.
+Responding or expiration resumes monitoring; **Fetch Push requests** explicitly
+refreshes the list at any time. Confirmation also pauses refresh. Desktop alerts carry
+no account details or codes, and never approve a request. Alerts depend on the
+operating system's notification permissions: Linux uses `notify-send`, macOS uses
+its notification service, and Windows uses an available registered PowerShell
+sender. Unavailable or disabled notification delivery is reported in the GUI;
+request polling continues.
+
+TOTP refresh can optionally copy the first and each newly changed code once,
+using its own timeout override or the saved clipboard timeout. It stops on focus
+loss, Escape, navigation, or a vault lock. Neither TOTP nor Duo refresh keeps the
+vault unlocked. HOTP advances only after an explicit show/copy
+request; automatic refresh rejects HOTP. Codes and
+individual revealed custom fields disappear after at most 15 seconds and do
+not reappear if an in-flight reply arrives after focus loss.
+
+Shell completion generation, internal native-host/clipboard commands, generated
+developer artifacts, and terminal output flags remain CLI-specific. Settings controls
+persistent defaults; generation and authenticator controls provide one-time
+overrides.
+
+### Build and upgrade
 
 Build from the repository root with a current stable Rust toolchain and a native
 C/C++ build toolchain (MSVC on Windows):

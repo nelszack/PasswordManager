@@ -105,6 +105,74 @@ fn unused_port() -> u16 {
 }
 
 #[test]
+fn desktop_dispatch_rejects_script_output_flags_without_starting_a_server() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    for args in [
+        &["--json"][..],
+        &["--json", "gui"][..],
+        &["--quiet", "gui"][..],
+    ] {
+        let output = run(root.path(), port, args);
+        assert_eq!(output.status.code(), Some(2));
+        let message = if args[0] == "--json" {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            value["error"].as_str().unwrap().to_owned()
+        } else {
+            String::from_utf8(output.stderr).unwrap()
+        };
+        assert!(message.contains("desktop interface"), "{message}");
+    }
+    assert!(!root.path().join("data/session.key").exists());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_dispatch_without_a_display_has_an_actionable_error() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [vec![], vec!["gui"]] {
+        let output = isolated_pm(root.path())
+            .args(args)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .output_timeout("headless desktop dispatch");
+        assert!(!output.status.success());
+        let message = String::from_utf8(output.stderr).unwrap();
+        #[cfg(feature = "desktop")]
+        assert!(message.contains("No desktop display"), "{message}");
+        #[cfg(not(feature = "desktop"))]
+        assert!(message.contains("no desktop interface"), "{message}");
+        assert!(message.contains("pm --help"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_shortcut_targets_the_same_binary_and_never_starts_the_server() {
+    let root = tempfile::tempdir().unwrap();
+    let output = isolated_pm(root.path())
+        .args(["gui", "--install-shortcut"])
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output_timeout("desktop shortcut install");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let launcher = std::fs::read_to_string(
+        root.path()
+            .join("data/applications/com.passwordmanager.Pm.desktop"),
+    )
+    .unwrap();
+    assert!(launcher.contains("Terminal=false\n"));
+    assert!(launcher.contains("Exec=\""));
+    assert!(launcher.contains("pm\"\n"));
+    assert!(!root.path().join("data/session.key").exists());
+}
+
+#[test]
 fn duo_interaction_requires_a_terminal_and_visible_request_review() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();

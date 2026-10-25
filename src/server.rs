@@ -279,13 +279,39 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
             outcome::CommandOutcome {
                 responses: vec![response],
                 effect: CommandEffect::None,
+                ..Default::default()
             }
         } else {
             worker.execute(state, request).await
         };
     let stop_server = matches!(result.effect, CommandEffect::StopServer);
+    if !matches!(
+        result.effect,
+        CommandEffect::None | CommandEffect::StopServer
+    ) {
+        result = finish_external_effect(result, worker, operation_id).await;
+    }
+    for response in &mut result.responses {
+        response.request_id = Some(request_id.clone());
+    }
+    if let Err(error) = deliver_responses(result.responses, &mut stream, &response_key).await {
+        eprintln!("Could not deliver authenticated response: {error}");
+    }
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+    if stop_server {
+        let _ = kill_tx.send(()).await;
+    }
+}
+
+/// Finish asynchronous work through the same session check and response
+/// binding for Duo polling, decisions, enrollment, and audit reports.
+async fn finish_external_effect(
+    mut result: outcome::CommandOutcome,
+    worker: VaultWorker,
+    operation_id: Option<String>,
+) -> outcome::CommandOutcome {
     let effect = std::mem::take(&mut result.effect);
-    let external = !matches!(effect, CommandEffect::None | CommandEffect::StopServer);
     match effect {
         CommandEffect::Duo(prepared) => {
             finish_duo(*prepared, worker.clone(), &mut result.responses).await
@@ -308,20 +334,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
         }
         _ => {}
     }
-    if external && let Some(id) = operation_id {
-        result.responses = worker.complete(id, result.responses).await;
-    }
-    for response in &mut result.responses {
-        response.request_id = Some(request_id.clone());
-    }
-    if let Err(error) = deliver_responses(result.responses, &mut stream, &response_key).await {
-        eprintln!("Could not deliver authenticated response: {error}");
-    }
-    let _ = stream.flush().await;
-    let _ = stream.shutdown().await;
-    if stop_server {
-        let _ = kill_tx.send(()).await;
-    }
+    worker.finish_external(result, operation_id).await
 }
 
 async fn finish_duo_enrollment(

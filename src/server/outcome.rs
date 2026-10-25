@@ -4,6 +4,9 @@ use crate::protocol::{ResponsePayload, RpcResponse};
 pub(super) struct CommandOutcome {
     pub responses: Vec<RpcResponse>,
     pub effect: CommandEffect,
+    // Captured by the vault owner before an asynchronous effect releases it.
+    // Late replies must carry this session, never an unrelated later unlock.
+    pub session_id: Option<String>,
 }
 pub(super) fn respond_payload(
     code: ResponseCode,

@@ -140,6 +140,17 @@ impl Vault {
                 let old = vault.item(id).unwrap().entry.password.clone();
                 vault.push_password_history_with_limit(id, old, limit);
             }
+            let entry = &mut vault.item_mut(id).unwrap().entry;
+            // A full replacement clears the previous primary before applying
+            // the new one. A clear without a replacement still removes it.
+            let mut changed = clear_urls && entry.url.take().is_some();
+            let update = std::mem::take(&mut change.update);
+            changed |= apply_update(entry, update, change.password.take());
+            if !clear_urls && entry.url.as_ref().is_some_and(|u| remove_url.contains(u)) {
+                entry.url = None;
+                changed = true;
+            }
+            let primary_url = entry.url.clone();
             let metadata_changed = vault.apply_metadata_update(
                 id,
                 MetadataUpdate {
@@ -147,24 +158,15 @@ impl Vault {
                     add_urls: &add_url,
                     remove_urls: &remove_url,
                     clear_urls,
-                    primary_url: change.update.url.as_deref(),
+                    primary_url: primary_url.as_deref(),
                     password_changed: changed_password,
                     set_fields: &set_fields,
                     remove_fields: &remove_fields,
                     clear_fields,
                 },
             );
-            let entry = &mut vault.item_mut(id).unwrap().entry;
-            let update = std::mem::take(&mut change.update);
-            let mut changed = apply_update(entry, update, change.password.take());
-            if clear_urls {
-                changed |= entry.url.take().is_some();
-            } else if entry.url.as_ref().is_some_and(|u| remove_url.contains(u)) {
-                entry.url = None;
-                changed = true;
-            }
             if changed || metadata_changed {
-                entry.modified = Timestamp::now();
+                vault.item_mut(id).unwrap().entry.modified = Timestamp::now();
             }
             Ok((changed || metadata_changed, changed || metadata_changed))
         })
@@ -181,12 +183,16 @@ impl Vault {
         if update.clear_urls {
             record.additional_urls.clear();
         }
+        let primary_url = update.primary_url.map(str::trim);
         record
             .additional_urls
-            .retain(|u| !update.remove_urls.contains(u) && update.primary_url != Some(u.as_str()));
+            .retain(|u| !update.remove_urls.contains(u) && primary_url != Some(u.as_str()));
         for url in update.add_urls {
             let url = url.trim();
-            if !url.is_empty() && !record.additional_urls.iter().any(|saved| saved == url) {
+            if !url.is_empty()
+                && primary_url != Some(url)
+                && !record.additional_urls.iter().any(|saved| saved == url)
+            {
                 record.additional_urls.push(url.into());
             }
         }
@@ -258,4 +264,117 @@ pub(super) fn apply_update(
         entry.modified = Timestamp::now();
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (Vault, VaultCredentials, usize) {
+        let mut vault = Vault::memory();
+        let mut credentials = VaultCredentials::default();
+        vault
+            .add_typed_entry(
+                TypedEntry {
+                    entry: PasswordEntry {
+                        name: "URL fixture".into(),
+                        username: None,
+                        password: "secret".into(),
+                        url: Some("https://primary.test".into()),
+                        notes: None,
+                        copy: false,
+                    },
+                    kind: ItemKind::Login,
+                    additional_urls: vec!["https://additional.test".into()],
+                    custom_fields: vec![],
+                },
+                &mut credentials,
+            )
+            .unwrap();
+        let id = vault.entry_id(&Target::Name("URL fixture".into())).unwrap();
+        (vault, credentials, id)
+    }
+
+    fn change(id: usize) -> TypedUpdate {
+        TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(id),
+                update: EntryChanges::default(),
+                password: None,
+            },
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
+        }
+    }
+
+    #[test]
+    fn full_url_replacement_keeps_primary_and_clearing_still_removes_all_urls() {
+        let (mut vault, mut credentials, id) = fixture();
+        let mut replacement = change(id);
+        replacement.clear_urls = true;
+        replacement.entry.update.url = Some("https://new.test".into());
+        replacement.add_url = vec!["https://new.test".into(), "https://extra.test".into()];
+        assert!(
+            vault
+                .update_typed_entry_with_limit(replacement, &mut credentials, 10)
+                .unwrap()
+        );
+        assert_eq!(
+            vault.item(id).unwrap().entry.url.as_deref(),
+            Some("https://new.test")
+        );
+        assert_eq!(
+            vault.metadata(id).unwrap().additional_urls,
+            vec!["https://extra.test"]
+        );
+        assert_eq!(
+            vault.management_item(id, false).unwrap().urls,
+            vec!["https://new.test", "https://extra.test"]
+        );
+
+        let mut clear = change(id);
+        clear.clear_urls = true;
+        assert!(
+            vault
+                .update_typed_entry_with_limit(clear, &mut credentials, 10)
+                .unwrap()
+        );
+        assert!(vault.item(id).unwrap().entry.url.is_none());
+        assert!(vault.metadata(id).unwrap().additional_urls.is_empty());
+    }
+
+    #[test]
+    fn additional_urls_never_duplicate_the_existing_or_replaced_primary() {
+        let (mut vault, mut credentials, id) = fixture();
+        let mut duplicate = change(id);
+        duplicate.add_url = vec![" https://primary.test ".into()];
+        assert!(
+            !vault
+                .update_typed_entry_with_limit(duplicate, &mut credentials, 10)
+                .unwrap()
+        );
+        assert_eq!(
+            vault.metadata(id).unwrap().additional_urls,
+            vec!["https://additional.test"]
+        );
+
+        let mut promote = change(id);
+        promote.entry.update.url = Some("https://additional.test".into());
+        promote.add_url = vec!["https://additional.test".into()];
+        assert!(
+            vault
+                .update_typed_entry_with_limit(promote, &mut credentials, 10)
+                .unwrap()
+        );
+        assert_eq!(
+            vault.item(id).unwrap().entry.url.as_deref(),
+            Some("https://additional.test")
+        );
+        assert!(vault.metadata(id).unwrap().additional_urls.is_empty());
+    }
 }

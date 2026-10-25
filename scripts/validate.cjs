@@ -41,6 +41,7 @@ for (const entry of fs.readdirSync(path.join(root, "extension"), { recursive: tr
 }
 run(process.execPath, ["extension/check_unit_coverage.cjs"]);
 const artifacts = [];
+run("cargo", ["test", "--locked", "-p", "iced_tiny_skia", "--lib"]);
 run("cargo", ["test", "--locked", "--all-features", "--message-format=json-render-diagnostics"], true, artifacts);
 // Cargo reports the exact executable path, including custom target directories
 // and platform suffixes. Reuse it without another build or feature resolution.

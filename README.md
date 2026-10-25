@@ -1,7 +1,9 @@
 # Password Manager
 
-A local-first password manager with a Rust CLI and a Chrome/Chromium browser
-extension. Vaults use Argon2id key derivation and XChaCha20-Poly1305 encryption.
+A local-first password manager with an Iced desktop GUI, a Rust CLI, and a
+Chrome/Chromium browser extension. One `pm` executable provides the GUI, CLI,
+and independent background server. Vaults use Argon2id key derivation and
+XChaCha20-Poly1305 encryption.
 
 - Store logins, secure notes, payment cards, identities, Wi-Fi credentials,
   software licenses, SSH keys, and API secrets, with multiple URLs and custom fields.
@@ -37,6 +39,38 @@ See [installation and upgrade troubleshooting](docs/user-guide.md#installation)
 and [shell completions](docs/user-guide.md#shell-completions).
 
 ## Quick start
+
+Run `pm` with no arguments to open the desktop vault manager. It starts or connects
+to the background server automatically. Create or unlock a vault, search items,
+add/edit entries, copy or briefly reveal secrets, and generate passwords or
+passphrases. Closing the window leaves the server running for the CLI and extension;
+the vault still locks on inactivity and system-lock events.
+The Settings tab exposes all `pm config` preferences and reset, sharing the same
+configuration with the CLI.
+The Tools tab covers history/trash recovery, audits, import/export and encrypted
+backups, vault credential changes, advanced search, and browser registration.
+Select an account for OTP codes, Duo Push requests, and custom fields; edit it to
+manage authenticator and Duo enrollment or multiline secrets.
+
+On Linux, install an application-menu icon after putting `pm` at a stable path:
+
+```bash
+pm gui --install-shortcut
+```
+
+The shortcut runs the same executable without opening a terminal. Pin it to your
+dock or copy the installed `.desktop` file to your desktop if your environment
+supports desktop icons. Rerun installation if you move the executable. `pm gui`
+also opens the GUI explicitly; `pm --help` shows CLI usage. A GUI build requires
+a desktop display only when opening the GUI. For a CLI-only build, use
+`cargo build --release --locked --no-default-features`.
+
+The desktop editor supports all item types, public and secret custom fields,
+URLs, multiline secrets, and notes. The Tools tab adds the recovery, security,
+file, and integration workflows described in the
+[desktop guide](docs/user-guide.md#desktop-interface).
+
+For the terminal workflow, existing commands work as before:
 
 ```bash
 pm start

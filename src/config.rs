@@ -55,6 +55,29 @@ pub struct ConfigChanges {
     pub trash_retention_days: Option<u64>,
     pub server_port: Option<u16>,
     pub default_vault: Option<String>,
+    /// Return to automatic vault selection without resetting other settings.
+    pub clear_default_vault: bool,
+}
+
+/// Shared duration syntax for CLI arguments and desktop settings.
+pub fn parse_duration(value: &str) -> Result<u64, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+    let (number, multiplier) = match value.as_bytes().last().copied() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 60 * 60),
+        Some(b'd') => (&value[..value.len() - 1], 24 * 60 * 60),
+        Some(byte) if byte.is_ascii_digit() => (value, 1),
+        _ => return Err("use seconds or a suffix such as 15m, 1h, or 1d".to_string()),
+    };
+    number
+        .parse::<u64>()
+        .map_err(|_| "duration must be a positive whole number".to_string())?
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_string())
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -251,7 +274,13 @@ pub fn try_update(
         config.recovery.trash_retention_days = i;
     }
     if let Some(i) = modify.server_port {
+        if i == 0 {
+            return Err("server port must be between 1 and 65535".to_string());
+        }
         config.server.port = i;
+    }
+    if modify.clear_default_vault {
+        config.unlock.vault_id = None;
     }
     if let Some(vault_id) = modify.default_vault {
         crate::vault::validate_vault_filename(&vault_id).map_err(|error| error.to_string())?;

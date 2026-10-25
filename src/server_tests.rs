@@ -924,6 +924,140 @@ fn request_memory_budget_accounts_for_buffers_and_releases_reservations() {
 }
 
 #[tokio::test]
+async fn asynchronous_audit_reply_keeps_the_unlocked_session_over_encrypted_tcp() {
+    let state = test_connection_state();
+    let worker = test_worker(session(sample_vault()), &state);
+    let expected_session = worker.session_id();
+    assert!(expected_session.is_some());
+    let (mut client, server) = tcp_pair().await;
+    let mut request = RequestEnvelope::new(ServerCommand::Audit(Default::default()));
+    request.expected_session = expected_session.clone();
+    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
+    let response = send(&mut client, &state.token, request).await;
+    task.await.unwrap();
+    assert_eq!(response.code, ResponseCode::Success as i32);
+    assert!(matches!(response.payload, ResponsePayload::Audit(_)));
+    assert_eq!(response.session_id, expected_session);
+}
+
+#[tokio::test]
+async fn duo_poll_preserves_session_through_async_completion_and_encrypted_delivery() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let http = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "stat": "OK", "response": { "transactions": [{
+                "urgid": "synthetic-request", "type": "Login",
+                "expiration": chrono::Utc::now().timestamp() + 120,
+                "step_up_code_info": { "num_digits": 3 }
+            }] }
+        }))
+        .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.write_all(&body).await.unwrap();
+    });
+    let private = crate::duo::crypto::new_key().unwrap();
+    let mut vault = sample_vault();
+    vault.set_test_duo(
+        1,
+        DuoCredentials {
+            host: "api-test.duosecurity.com".into(),
+            akey: "synthetic".into(),
+            pkey: "synthetic".into(),
+            private_key: crate::duo::crypto::private_pem(&private)
+                .unwrap()
+                .to_string()
+                .into(),
+        },
+    );
+    let state = test_connection_state();
+    let worker = test_worker(session(vault), &state);
+    let expected_session = worker.session_id();
+    assert!(expected_session.is_some());
+    let mut request = RequestEnvelope::new(ServerCommand::Duo(DuoCommand::Requests {
+        target: Target::Id(1),
+    }));
+    request.expected_session = expected_session.clone();
+    let mut result = worker.execute(state, request).await;
+    let CommandEffect::Duo(prepared) = &mut result.effect else {
+        panic!("Duo polling must defer its network response");
+    };
+    assert!(result.responses.is_empty());
+    // Replace only the remote transport. Session capture, parsing, completion,
+    // response encryption, and decoding use the production path.
+    prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
+    let result = finish_external_effect(result, worker, None).await;
+    http.await.unwrap();
+    let (mut client, mut server) = tcp_pair().await;
+    let response_key = [17; 32];
+    let delivery = tokio::spawn(async move {
+        deliver_responses(result.responses, &mut server, &response_key)
+            .await
+            .unwrap();
+    });
+    let mut encrypted = vec![];
+    client.read_to_end(&mut encrypted).await.unwrap();
+    delivery.await.unwrap();
+    let plaintext =
+        Zeroizing::new(decrypt_record_stream(&response_key, &encrypted, 1024 * 1024).unwrap());
+    let response = decode_responses(&plaintext).unwrap();
+    assert_eq!(response.code, ResponseCode::Success as i32);
+    assert_eq!(response.session_id, expected_session);
+    let ResponsePayload::DuoRequests(requests) = response.payload else {
+        panic!("expected pending Duo request");
+    };
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].id, "synthetic-request");
+    assert!(!requests[0].fingerprint.is_empty());
+}
+
+#[tokio::test]
+async fn asynchronous_results_cannot_survive_a_lock_or_be_relabelled_with_a_new_session() {
+    for unlock_again in [false, true] {
+        let state = test_connection_state();
+        let worker = test_worker(session(sample_vault()), &state);
+        let original_session = worker.session_id();
+        let result = worker
+            .execute(
+                state,
+                RequestEnvelope::new(ServerCommand::Audit(Default::default())),
+            )
+            .await;
+        assert!(matches!(result.effect, CommandEffect::Audit(..)));
+        worker
+            .with_session(move |live| {
+                live.lock();
+                if unlock_again {
+                    *live = session(sample_vault());
+                }
+            })
+            .await
+            .unwrap();
+        assert_ne!(worker.session_id(), original_session);
+        let result = finish_external_effect(result, worker, None).await;
+        assert_eq!(result.responses.len(), 1);
+        assert_eq!(result.responses[0].code, ResponseCode::Conflict as i32);
+        assert!(matches!(
+            result.responses[0].payload,
+            ResponsePayload::Message(_)
+        ));
+        assert_eq!(result.responses[0].session_id, original_session);
+    }
+}
+
+#[tokio::test]
 async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

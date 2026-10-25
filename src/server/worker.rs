@@ -187,6 +187,7 @@ impl Owner {
                 return outcome::CommandOutcome {
                     responses: previous.responses.clone(),
                     effect: CommandEffect::None,
+                    ..Default::default()
                 };
             }
             let receipt = OperationReceipt {
@@ -233,8 +234,9 @@ impl Owner {
         if before != self.session.epoch() || self.session.is_locked() {
             self.clear_results();
         }
+        result.session_id = self.session.session_id();
         for response in &mut result.responses {
-            response.session_id = self.session.session_id();
+            response.session_id = result.session_id.clone();
         }
         if let Some(id) = operation_id {
             if matches!(
@@ -256,6 +258,7 @@ fn one(response: RpcResponse) -> outcome::CommandOutcome {
     outcome::CommandOutcome {
         responses: vec![response],
         effect: CommandEffect::None,
+        ..Default::default()
     }
 }
 
@@ -424,20 +427,34 @@ impl VaultWorker {
                 .unwrap_or_else(|| "Vault worker stopped before completing the operation".into())
         })
     }
-    pub async fn complete(&self, id: String, mut responses: Vec<RpcResponse>) -> Vec<RpcResponse> {
+    pub async fn finish_external(
+        &self,
+        mut result: outcome::CommandOutcome,
+        operation_id: Option<String>,
+    ) -> outcome::CommandOutcome {
         self.submit(
             false,
             false,
             Box::new(move |owner| {
-                owner.complete(&id, &mut responses, true);
-                outcome::CommandOutcome {
-                    responses,
-                    effect: CommandEffect::None,
+                // Revalidate on the owner queue. A lock or another unlock while
+                // network work was in flight must discard its old payload.
+                if owner.session.session_id() != result.session_id {
+                    result.responses.clear();
+                    outcome::respond_conflict(
+                        "Unlock session changed; reopen the selection before continuing",
+                        &mut result.responses,
+                    );
                 }
+                for response in &mut result.responses {
+                    response.session_id = result.session_id.clone();
+                }
+                if let Some(id) = operation_id {
+                    owner.complete(&id, &mut result.responses, true);
+                }
+                result
             }),
         )
         .await
-        .responses
     }
     pub async fn lock(&self) -> outcome::CommandOutcome {
         self.submit(
