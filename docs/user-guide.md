@@ -84,6 +84,10 @@ wildcards and uses the system browser. Username copying checks the unlock sessio
 and item revision, follows the clipboard timeout, and is disabled at timeout zero.
 
 The editor keeps **Save item** and **Cancel** visible while its fields scroll.
+The name and type selector share a row. Login credentials also share a row
+when there is room; enlarged and narrow layouts stack the fields. **Show**
+reveals only the primary secret you are entering, and **Hide**, Escape, switching
+tabs, or leaving the window masks it again.
 Saving returns to the saved item's details with its current revision and keeps
 your search and type filter. If concurrent additions make a newly saved item
 ambiguous, the app refreshes the list instead of guessing which item to open.
@@ -108,6 +112,11 @@ opens in the main content area and can be closed without moving the current form
 Generated secrets appear above the generation options. After generation, the
 view returns to the top so the result and its Copy/Show controls are visible.
 The feedback bar announces completion and the secret is cleared after 60 seconds.
+Saved-item Copy buttons are disabled when the clipboard timeout is zero, with a
+message pointing to **Settings → Security**. Undo deletion is cleared when you
+leave its context or the deleted item is restored or erased. Recovery dates use
+the same readable local format as item details. A health check with no login
+items explains that there is nothing to assess and does not display a score.
 
 Choose **Shortcuts** for the keyboard guide. Ctrl (Command on macOS) + F searches.
 With that same modifier, N creates an item, S saves the current item or settings,

@@ -13,6 +13,26 @@ fn event(value: Event) -> AppMessage {
 fn action<'a>(label: &'a str, value: Action, enabled: bool) -> crate::gui::widgets::Button<'a> {
     button(label)
         .padding([11, 14])
+        .style(
+            if matches!(
+                value,
+                Action::Trash
+                    | Action::History
+                    | Action::RestoreTrash(_)
+                    | Action::Audit
+                    | Action::Search
+                    | Action::Backup
+                    | Action::PreviewImport
+                    | Action::Export
+                    | Action::NewVault
+                    | Action::RestoreBackup
+                    | Action::Import
+            ) {
+                button_style::primary
+            } else {
+                crate::gui::view::quiet_button
+            },
+        )
         .on_press_maybe(enabled.then_some(event(Event::Run(value))))
 }
 fn field<'a>(
@@ -57,6 +77,7 @@ fn path<'a>(
                 ),
             button("Browse…")
                 .padding([11, 14])
+                .style(crate::gui::view::quiet_button)
                 .on_press_maybe(enabled.then_some(event(Event::Pick(key, save))))
         ]
         .spacing(8)
@@ -630,7 +651,12 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             for (index, changed) in page.history.iter().enumerate() {
                 form = form.push(
                     row![
-                        text(format!("Revision {} · {changed}", index + 1)).width(Fill),
+                        text(format!(
+                            "Revision {} · {}",
+                            index + 1,
+                            crate::gui::presentation::display_date(changed)
+                        ))
+                        .width(Fill),
                         action(
                             "Restore password",
                             Action::RestorePassword(index + 1),
@@ -648,8 +674,8 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
                         text(trash_label(entry)),
                         row![
                             action("Restore", Action::RestoreTrash(entry.id), writes),
-                            action("Erase permanently", Action::Purge(Some(entry.id)), writes)
-                                .style(button_style::danger)
+                            action("Erase permanently…", Action::Purge(Some(entry.id)), writes)
+                                .style(crate::gui::view::quiet_danger)
                         ]
                         .spacing(10)
                     ]
@@ -660,8 +686,8 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
                 form = form.push(text("Trash is empty."));
             } else {
                 form = form.push(
-                    action("Empty trash permanently", Action::Purge(None), writes)
-                        .style(button_style::danger),
+                    action("Empty trash permanently…", Action::Purge(None), writes)
+                        .style(crate::gui::view::quiet_danger),
                 );
             }
         }
@@ -670,8 +696,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             for item in &page.items {
                 form = form.push(
                     button(text(format!(
-                        "{} · {} · {}",
-                        item.id,
+                        "{} · {}",
                         item.name,
                         item.username.as_deref().unwrap_or("")
                     )))
@@ -681,15 +706,10 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             }
         }
         ResponsePayload::Audit(report) => {
+            let (heading, detail) = audit_summary(report);
             form = form
-                .push(text(format!("Vault health · {}/100", report.score)).size(27))
-                .push(
-                    text(format!(
-                        "{} of {} login items have no detected issues.",
-                        report.healthy, report.total
-                    ))
-                    .size(16),
-                );
+                .push(text(heading).size(25))
+                .push(text(detail).size(16));
             for (label, entries) in [
                 ("Weak passwords", report.weak.as_slice()),
                 ("Old passwords", report.stale.as_slice()),
@@ -902,10 +922,8 @@ pub(super) fn report(payload: &ResponsePayload) -> String {
             report.losses.join("\n")
         ),
         ResponsePayload::Audit(report) => {
-            let mut output = format!(
-                "Health score: {}/100\n{} of {} login entries have no detected issues.\n",
-                report.score, report.healthy, report.total
-            );
+            let (heading, detail) = audit_summary(report);
+            let mut output = format!("{heading}\n{detail}\n");
             for (name, entries) in [
                 ("Weak password", &report.weak),
                 ("Stale password", &report.stale),
@@ -954,6 +972,23 @@ pub(super) fn report(payload: &ResponsePayload) -> String {
     }
 }
 
+pub(super) fn audit_summary(report: &password_manager::vault::AuditReport) -> (String, String) {
+    if report.total == 0 {
+        (
+            "No login items to assess".into(),
+            "Vault health checks login passwords. Add a login item to get an assessment.".into(),
+        )
+    } else {
+        (
+            format!("Vault health · {}/100", report.score),
+            format!(
+                "{} of {} login items have no detected issues.",
+                report.healthy, report.total
+            ),
+        )
+    }
+}
+
 fn expiry(seconds: u64) -> String {
     i64::try_from(seconds)
         .ok()
@@ -969,7 +1004,9 @@ fn expiry(seconds: u64) -> String {
 
 pub(super) fn trash_label(entry: &password_manager::vault::TrashSummary) -> String {
     format!(
-        "{} · {} [{}] · deleted {}",
-        entry.id, entry.name, entry.kind, entry.deleted
+        "{} · {} · Deleted {}",
+        entry.name,
+        crate::gui::model::profile(entry.kind).title,
+        crate::gui::presentation::display_date(&entry.deleted)
     )
 }

@@ -1044,18 +1044,20 @@ fn duo_notifications_deduplicate_fingerprints_and_ignore_expired_requests() {
 }
 
 #[test]
-fn trash_and_audit_render_cli_detail_fields() {
+fn trash_and_audit_use_readable_labels_and_preserve_finding_details() {
     let entry = password_manager::vault::TrashSummary {
         id: 9,
         name: "Deleted".into(),
         kind: ItemKind::ApiSecret,
         username: None,
-        deleted: "2026-10-01".into(),
+        deleted: "2026-10-15T12:00:00.123456789+00:00".into(),
         has_totp: false,
     };
     let label = view::trash_label(&entry);
-    assert!(label.contains(&format!("[{}]", entry.kind)));
-    assert!(label.contains("2026-10-01"));
+    assert!(label.contains("API secret"));
+    assert!(label.contains("Oct ") && label.contains("2026"));
+    assert!(!label.starts_with("9 ·"));
+    assert!(!label.contains("123456789") && !label.contains("+00:00"));
     let label = password_manager::vault::AuditLabel {
         id: 7,
         name: "Work".into(),
@@ -1348,4 +1350,30 @@ fn onboarding_import_targets_a_new_vault_when_no_vault_is_unlocked() {
     let _ = app.workflow(Event::FileOperation(FileOperation::Import));
     assert!(app.workspace.import_new);
     assert_eq!(app.workspace.section, Section::Files);
+}
+
+#[test]
+fn empty_health_assessment_has_no_numeric_score() {
+    let mut assessment = password_manager::vault::AuditReport {
+        total: 0,
+        healthy: 0,
+        score: 100,
+        weak: vec![],
+        stale: vec![],
+        reused: vec![],
+        duplicates: vec![],
+        missing_totp: vec![],
+        breached: vec![],
+        unchecked: vec![],
+        breach_error: None,
+    };
+    let rendered = view::report(&ResponsePayload::Audit(assessment.clone()));
+    assert!(rendered.contains("No login items to assess"));
+    assert!(!rendered.contains("100") && !rendered.contains("0 of 0"));
+    assessment.total = 2;
+    assessment.healthy = 1;
+    assessment.score = 50;
+    let rendered = view::report(&ResponsePayload::Audit(assessment));
+    assert!(rendered.contains("50/100"));
+    assert!(rendered.contains("1 of 2"));
 }

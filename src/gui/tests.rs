@@ -1609,3 +1609,95 @@ fn generated_results_have_completion_feedback_and_expire_without_losing_options(
     assert!(app.generated.is_empty());
     assert_eq!(app.generator_length, length);
 }
+
+#[test]
+fn successful_restore_and_purge_clear_only_the_resolved_undo_action() {
+    use workflows::Action;
+    for (action, cleared) in [
+        (Action::RestoreTrash(1), true),
+        (Action::RestoreTrash(2), false),
+        (Action::Purge(Some(1)), true),
+        (Action::Purge(Some(2)), false),
+        (Action::Purge(None), true),
+    ] {
+        let mut app = unlocked();
+        app.draft = None;
+        app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
+        let session = app.session.clone();
+        let _ = app.complete(
+            Job::Workflow(action),
+            reply(
+                ResponsePayload::Message("Completed".into()),
+                session.as_deref(),
+            ),
+        );
+        assert_eq!(app.ui.undo_trash.is_none(), cleared, "{action:?}");
+    }
+}
+
+#[test]
+fn failed_restore_retains_undo_but_navigation_removes_it() {
+    let mut app = unlocked();
+    app.draft = None;
+    app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
+    let mut response = reply(
+        ResponsePayload::Message("Could not restore".into()),
+        app.session.as_deref(),
+    );
+    if let Reply::Server { response, .. } = &mut response {
+        response.code = ResponseCode::Failure as i32;
+    }
+    let _ = app.complete(Job::Workflow(workflows::Action::RestoreTrash(1)), response);
+    assert!(app.ui.undo_trash.is_some());
+    app.busy = false;
+    let _ = app.update(Message::Tab(Tab::Generator));
+    assert!(app.ui.undo_trash.is_none());
+    app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
+    let _ = app.update(Message::OpenTools(workflows::Section::Trash));
+    assert!(app.ui.undo_trash.is_none());
+}
+
+#[test]
+fn loading_trash_invalidates_undo_when_another_client_has_restored_the_item() {
+    let mut app = unlocked();
+    app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
+    let session = app.session.clone();
+    let _ = app.complete(
+        Job::Workflow(workflows::Action::Trash),
+        reply(
+            ResponsePayload::Trash(password_manager::vault::TrashPage { trash: vec![] }),
+            session.as_deref(),
+        ),
+    );
+    assert!(app.ui.undo_trash.is_none());
+}
+
+#[test]
+fn editor_visibility_is_temporary_and_does_not_reveal_a_stored_password() {
+    let mut app = unlocked();
+    let _ = app.update(Message::Password("new draft secret".into()));
+    let _ = app.update(Message::ShowEditorSecret(true));
+    assert!(app.ui.editor_show_secret);
+    let _ = app.update(Message::HideSecrets);
+    assert!(!app.ui.editor_show_secret);
+    assert_eq!(
+        app.draft.as_ref().unwrap().password.expose(),
+        "new draft secret"
+    );
+    assert!(app.item.as_ref().unwrap().password.is_none());
+    let _ = app.update(Message::ShowEditorSecret(true));
+    let _ = app.update(Message::ReplacePassword(false));
+    assert!(!app.ui.editor_show_secret);
+    assert!(app.draft.as_ref().unwrap().password.is_empty());
+    let _ = app.update(Message::ReplacePassword(true));
+    let _ = app.update(Message::ShowEditorSecret(true));
+    let session = app.session.clone();
+    let _ = app.complete(
+        Job::Save,
+        reply(
+            ResponsePayload::Message("Item saved".into()),
+            session.as_deref(),
+        ),
+    );
+    assert!(!app.ui.editor_show_secret);
+}
