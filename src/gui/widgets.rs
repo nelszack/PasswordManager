@@ -145,6 +145,8 @@ impl Widget<Message, Theme, Renderer> for Control<'_> {
                 shell.request_redraw();
             }
         }
+        // command() covers only Ctrl or Logo depending on the platform.
+        // Block both so OS shortcuts cannot activate a focused control.
         if !shell.is_event_captured()
             && state.focused
             && let Some(on_key) = &self.on_key
@@ -154,7 +156,8 @@ impl Widget<Message, Theme, Renderer> for Control<'_> {
                 repeat: false,
                 ..
             }) = event
-            && !modifiers.command()
+            && !modifiers.control()
+            && !modifiers.logo()
             && !modifiers.alt()
             && let Some(message) = on_key(key)
         {
@@ -552,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_activation_requires_focus_enabled_control_and_unmodified_press() {
+    fn keyboard_activation_requires_focus_enabled_control_and_no_shortcut_modifiers() {
         let mut control: Element<'_, Message> = button("Save").on_press(Message::Save).into();
         assert!(
             press(
@@ -585,16 +588,19 @@ mod tests {
             )
             .is_empty()
         );
-        assert!(
-            press(
-                &mut control,
-                true,
-                Key::Named(Named::Space),
-                false,
-                keyboard::Modifiers::CTRL
-            )
-            .is_empty()
-        );
+        for modifiers in [
+            keyboard::Modifiers::CTRL,
+            keyboard::Modifiers::LOGO,
+            keyboard::Modifiers::ALT,
+            keyboard::Modifiers::CTRL | keyboard::Modifiers::LOGO,
+        ] {
+            for key in [Named::Enter, Named::Space] {
+                assert!(
+                    press(&mut control, true, Key::Named(key), false, modifiers).is_empty(),
+                    "a shortcut modifier must not activate a focused control: {modifiers:?}"
+                );
+            }
+        }
         let mut disabled: Element<'_, Message> = button("Save").into();
         assert!(
             press(
