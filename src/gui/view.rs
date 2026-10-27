@@ -31,6 +31,15 @@ pub(super) fn quiet_button(theme: &Theme, status: button_style::Status) -> butto
     style
 }
 
+pub(super) fn quiet_danger(theme: &Theme, status: button_style::Status) -> button_style::Style {
+    let mut style = quiet_button(theme, status);
+    if status != button_style::Status::Disabled {
+        style.text_color = theme.extended_palette().danger.base.color;
+        style.border.color = style.text_color;
+    }
+    style
+}
+
 fn primary<'a>(label: &'a str, message: Message, enabled: bool) -> crate::gui::widgets::Button<'a> {
     action(label, message, enabled).style(|theme, status| {
         let mut style = button_style::primary(theme, status);
@@ -323,6 +332,8 @@ fn feedback(app: &App) -> Element<'_, Message> {
         .undo_trash
         .as_ref()
         .is_some_and(|(_, session)| app.session.as_ref() == Some(session))
+        && app.tab == Tab::Vault
+        && app.draft.is_none()
     {
         line = line.push(action(
             "Undo deletion",
@@ -776,7 +787,15 @@ fn vault(app: &App) -> Element<'_, Message> {
 
 fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
     let profile = model::profile(item.kind);
-    let mut content = column![text(&item.name).size(25), text(profile.title).size(14)].spacing(13);
+    let mut content = column![
+        row![
+            text(&item.name).size(24).width(Fill),
+            text(profile.title).size(14)
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+    ]
+    .spacing(10);
     if app.delete_confirm {
         content = content
             .push(rule::horizontal(1))
@@ -803,10 +822,10 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
     {
         content = content.push(app.workspace.duo_confirmation(app));
     }
-    content =
-        content.push(
+    content = content
+        .push(rule::horizontal(1))
+        .push(
             column![
-                rule::horizontal(1),
                 label(profile.owner),
                 row![
                     text(item.username.as_deref().unwrap_or("—")).width(Fill),
@@ -817,7 +836,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                             "Copy"
                         },
                         Message::CopyUsername,
-                        app.writes_allowed()
+                        app.copying_allowed()
                             && item
                                 .username
                                 .as_ref()
@@ -826,28 +845,39 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
-                label(profile.secret),
-                text(item.password.as_ref().map(SecretString::expose).unwrap_or(
-                    if item.has_secret {
-                        "••••••••••••"
-                    } else {
-                        "No primary secret"
-                    }
-                )),
-                row![action(
-                    if app.reveal_until.is_some() {
-                        "Hide secrets"
-                    } else {
-                        "Reveal for 15 seconds"
-                    },
-                    Message::Reveal,
-                    !app.busy
-                )]
-                .spacing(10)
-                .wrap(),
             ]
-            .spacing(13),
+            .spacing(4),
+        )
+        .push(
+            column![
+                label(profile.secret),
+                row![
+                    text(item.password.as_ref().map(SecretString::expose).unwrap_or(
+                        if item.has_secret {
+                            "••••••••••••"
+                        } else {
+                            "No primary secret"
+                        }
+                    ))
+                    .width(Fill),
+                    action(
+                        if app.reveal_until.is_some() {
+                            "Hide secrets"
+                        } else {
+                            "Reveal for 15 seconds"
+                        },
+                        Message::Reveal,
+                        !app.busy && item.has_secret
+                    ),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
+            ]
+            .spacing(4),
         );
+    if app.conf.clipboard.timeout == 0 {
+        content = content.push(text("Copying is off in Settings → Security.").size(13));
+    }
     if item.has_totp || item.has_duo {
         content = content
             .push(rule::horizontal(1))
@@ -904,7 +934,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
             controls = controls.push(action(
                 "Copy field",
                 Message::CopyField(target),
-                app.writes_allowed(),
+                app.copying_allowed(),
             ));
             content = content.push(
                 column![
@@ -923,24 +953,26 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
             );
         }
     }
-    content = content.push(action(
-        "Password history",
-        Message::OpenItemTools(item.id),
-        !app.busy,
-    ));
+    content = content.push(
+        row![
+            action(
+                "Password history",
+                Message::OpenItemTools(item.id),
+                !app.busy
+            ),
+            action("Move to trash…", Message::Delete, app.writes_allowed()).style(quiet_danger),
+        ]
+        .spacing(10)
+        .wrap(),
+    );
     content = content.push(
         text(format!(
             "Created {}\nModified {}",
             presentation::display_date(&item.created),
             presentation::display_date(&item.modified)
         ))
-        .size(14),
+        .size(13),
     );
-    content = content.push(action(
-        "Move to trash…",
-        Message::Delete,
-        app.writes_allowed(),
-    ));
     panel(
         column![
             scrollable(content)
@@ -952,7 +984,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                 primary(
                     "Copy secret",
                     Message::Copy,
-                    app.writes_allowed() && item.has_secret
+                    app.copying_allowed() && item.has_secret
                 ),
                 action("Edit item", Message::Edit, app.writes_allowed())
             ]
@@ -976,7 +1008,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             .padding(10)
             .on_input_maybe(enabled.then_some(Message::Name)),
     ]
-    .spacing(6)
+    .spacing(4)
     .width(Fill);
     if draft.dirty && draft.name.trim().is_empty() {
         name = name.push(error("Give this item a name so you can find it later."));
@@ -988,70 +1020,79 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             Some(model::KindChoice(draft.kind)),
             |choice| Message::Kind(choice.0)
         )
-        .padding(10)
+        .padding(8)
         .width(Fill)
     ]
-    .spacing(6)
-    .width(Fill);
-    let identity: Element<'_, Message> = if app.compact() {
-        column![name, kind].spacing(12).into()
-    } else {
-        row![name, kind].spacing(14).into()
-    };
-    let mut form = column![
-        identity,
-        text(profile.guidance).size(14),
-        column![
-            label(profile.owner),
-            text_input(profile.owner, &draft.username)
-                .padding(10)
-                .on_input_maybe(enabled.then_some(Message::Username))
-        ]
-        .spacing(6)
+    .spacing(4)
+    .width(168);
+    let owner = column![
+        label(profile.owner),
+        text_input(profile.owner, &draft.username)
+            .padding(10)
+            .on_input_maybe(enabled.then_some(Message::Username))
     ]
-    .spacing(14);
+    .spacing(4)
+    .width(Fill);
+    let mut secret = column![label(profile.secret)].spacing(4).width(Fill);
     if draft.id.is_some() {
-        form = form.push(
+        secret = secret.push(
             checkbox(draft.replace_password)
                 .label("Replace primary secret")
                 .on_toggle(Message::ReplacePassword),
         );
     }
     if draft.id.is_none() || draft.replace_password {
-        form = form.push(label(profile.secret));
         if draft.multiline {
-            form = form.push(
+            secret = secret.push(
                 text_editor(&draft.secret_editor)
                     .placeholder("Private key or multiline secret")
                     .height(160)
-                    .padding(12)
+                    .padding(10)
                     .on_action(Message::SecretEdit),
             );
         } else {
-            form = form.push(
+            let mut entry = row![
                 text_input(profile.secret, draft.password.expose())
-                    .secure(true)
-                    .padding(12)
+                    .id("item-secret")
+                    .secure(!app.ui.editor_show_secret)
+                    .padding(10)
+                    .width(Fill)
                     .on_input_maybe(
-                        enabled.then_some(|value: String| Message::Password(value.into())),
+                        enabled.then_some(|value: String| Message::Password(value.into()))
                     ),
-            );
-        }
-        if matches!(draft.kind, ItemKind::Login | ItemKind::Wifi) {
-            form = form.push(action(
-                "Generate a strong password",
-                Message::Generate,
-                enabled,
-            ));
+                action(
+                    if app.ui.editor_show_secret {
+                        "Hide"
+                    } else {
+                        "Show"
+                    },
+                    Message::ShowEditorSecret(!app.ui.editor_show_secret),
+                    enabled
+                )
+                .padding([9, 10]),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if matches!(draft.kind, ItemKind::Login | ItemKind::Wifi) {
+                entry = entry.push(action("Generate", Message::Generate, enabled).padding([9, 10]));
+            }
+            secret = secret.push(entry);
         }
         if matches!(draft.kind, ItemKind::SshKey | ItemKind::SecureNote) {
-            form = form.push(
+            secret = secret.push(
                 checkbox(draft.multiline)
                     .label("Use multiline editor (visible while editing)")
                     .on_toggle(Message::MultilineSecret),
             );
         }
     }
+    let credentials: Element<'_, Message> =
+        if !app.compact() && app.ui.width >= 1120.0 && !draft.multiline {
+            row![owner, secret].spacing(14).into()
+        } else {
+            column![owner, secret].spacing(8).into()
+        };
+    let mut form = column![row![name, kind].spacing(12), credentials].spacing(8);
     if !profile.suggested.is_empty() {
         form = form.push(text(format!("{} details", profile.title)).size(19));
         for &(name, secret) in profile.suggested {
@@ -1082,30 +1123,40 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             if let Some((index, _)) = slot {
                 line = line.push(action("Clear", Message::RemoveField(index), enabled));
             }
-            form = form.push(label(name)).push(line);
+            form = form.push(column![label(name), line].spacing(6));
         }
     }
-    form = form.push(label("Websites (optional)"));
+    let mut websites = column![
+        row![
+            label("Websites (optional)").width(Fill),
+            action("Add website", Message::AddUrl, enabled).padding([7, 10])
+        ]
+        .align_y(Alignment::Center)
+    ]
+    .spacing(6);
     for (index, url) in draft.urls.iter().enumerate() {
-        form = form.push(
+        websites = websites.push(
             row![
                 text_input("https://example.com", url)
-                    .padding(12)
+                    .padding(10)
                     .on_input_maybe(enabled.then_some(move |value| Message::Url(index, value))),
-                action("Remove", Message::RemoveUrl(index), enabled)
+                action("Remove", Message::RemoveUrl(index), enabled).padding([9, 10])
             ]
             .spacing(8),
         );
     }
     form = form
-        .push(action("Add website", Message::AddUrl, enabled))
-        .push(label("Notes (optional)"))
+        .push(websites)
         .push(
-            text_editor(&draft.notes)
-                .placeholder("Private notes")
-                .height(110)
-                .padding(12)
-                .on_action(Message::Notes),
+            column![
+                label("Notes (optional)"),
+                text_editor(&draft.notes)
+                    .placeholder("Private notes")
+                    .height(88)
+                    .padding(10)
+                    .on_action(Message::Notes)
+            ]
+            .spacing(6),
         )
         .push(rule::horizontal(1))
         .push(disclosure(
@@ -1115,6 +1166,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             enabled,
         ));
     if app.ui.editor_advanced {
+        form = form.push(text(profile.guidance).size(14));
         if draft.id.is_none() {
             form = form
                 .push(label("Copy primary secret after saving"))
@@ -1212,29 +1264,27 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                 Message::Save,
                 app.writes_allowed() && draft.validate().is_ok()
             ),
-            action("Cancel", Message::Navigate(Navigate::Close), enabled)
+            action("Cancel", Message::Navigate(Navigate::Close), enabled),
+            text(if draft.dirty {
+                "Unsaved changes"
+            } else {
+                "Save to keep changes"
+            })
+            .size(13)
         ]
         .spacing(8)
+        .align_y(Alignment::Center)
         .wrap(),
     );
-    let heading = column![
-        text(if draft.id.is_some() {
-            "Edit item"
-        } else {
-            "New item"
-        })
-        .size(25),
-        text(if draft.dirty {
-            "Unsaved changes"
-        } else {
-            "Changes are saved only when you choose Save item."
-        })
-        .size(14),
-    ]
-    .spacing(6);
+    let heading = text(if draft.id.is_some() {
+        "Edit item"
+    } else {
+        "New item"
+    })
+    .size(24);
     panel(
         column![
-            scrollable(column![heading, rule::horizontal(1), form].spacing(14))
+            scrollable(column![heading, form].spacing(8))
                 .id("credential-editor")
                 .spacing(8)
                 .height(Fill),
