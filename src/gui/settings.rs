@@ -1,4 +1,4 @@
-use password_manager::config::{Config, ConfigChanges, parse_duration};
+use password_manager::config::{Appearance, Config, ConfigChanges, parse_duration};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Field {
@@ -75,6 +75,33 @@ mod tests {
         .unwrap();
         let cli = config::try_update(base, args, &directory.path().join("cli.toml")).unwrap();
         assert_eq!(desktop, cli);
+    }
+
+    #[test]
+    fn appearance_edits_survive_refresh_and_save_only_the_changed_preference() {
+        let base = Config::default();
+        let mut draft = SettingsDraft::from(&base);
+        assert!(!draft.is_dirty());
+        draft.appearance = Appearance::Light;
+        let mut disk = base.clone();
+        disk.desktop.scale = 130;
+        disk.genpass.length = 31;
+        draft.reload(&disk);
+        assert_eq!(draft.appearance, Appearance::Light);
+        assert_eq!(draft.scale, 130);
+        assert_eq!(draft.length, "31");
+        assert!(draft.is_dirty());
+        let changes = draft.changes().unwrap();
+        assert_eq!(changes.desktop_appearance, Some(Appearance::Light));
+        assert_eq!(changes.desktop_scale, None);
+        assert_eq!(changes.genpass_length, None);
+        draft.edit(Field::Length, "0".into());
+        assert!(draft.field_error(Field::Length, &draft.length).is_some());
+        assert!(
+            draft
+                .field_error(Field::ServerPort, &draft.server_port)
+                .is_none()
+        );
     }
 
     #[test]
@@ -206,6 +233,8 @@ pub struct SettingsDraft {
     pub trash_retention: String,
     pub server_port: String,
     pub default_vault: String,
+    pub appearance: Appearance,
+    pub scale: u16,
 }
 
 impl From<&Config> for SettingsDraft {
@@ -222,6 +251,8 @@ impl From<&Config> for SettingsDraft {
             trash_retention: conf.recovery.trash_retention_days.to_string(),
             server_port: conf.server.port.to_string(),
             default_vault: conf.unlock.vault_id.clone().unwrap_or_default(),
+            appearance: conf.desktop.appearance,
+            scale: conf.desktop.scale,
         }
     }
 }
@@ -251,6 +282,8 @@ impl SettingsDraft {
             trash_retention,
             server_port,
             default_vault,
+            appearance,
+            scale,
         );
         self.baseline = conf.clone();
     }
@@ -332,6 +365,33 @@ impl SettingsDraft {
             default_vault: (!vault.is_empty() && base.unlock.vault_id.as_deref() != Some(vault))
                 .then(|| vault.to_owned()),
             clear_default_vault: vault.is_empty() && base.unlock.vault_id.is_some(),
+            desktop_appearance: (self.appearance != base.desktop.appearance)
+                .then_some(self.appearance),
+            desktop_scale: (self.scale != base.desktop.scale).then_some(self.scale),
         })
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        let previous = Self::from(&self.baseline);
+        self.length != previous.length
+            || self.stats != previous.stats
+            || self.generator_copy != previous.generator_copy
+            || self.password_copy != previous.password_copy
+            || self.clipboard_timeout != previous.clipboard_timeout
+            || self.unlock_timeout != previous.unlock_timeout
+            || self.history_limit != previous.history_limit
+            || self.trash_retention != previous.trash_retention
+            || self.server_port != previous.server_port
+            || self.default_vault != previous.default_vault
+            || self.appearance != previous.appearance
+            || self.scale != previous.scale
+    }
+
+    /// Validate one edited field against valid defaults so the inline error
+    /// uses exactly the same rules and wording as saving the complete form.
+    pub fn field_error(&self, field: Field, value: &str) -> Option<String> {
+        let mut isolated = Self::from(&Config::default());
+        isolated.edit(field, value.into());
+        isolated.changes().err()
     }
 }

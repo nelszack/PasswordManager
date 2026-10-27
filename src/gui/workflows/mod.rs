@@ -14,25 +14,22 @@ use password_manager::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
+    Overview,
+    Audit,
+    Trash,
     Recovery,
     Files,
     Security,
     Search,
     Browser,
 }
-impl Section {
-    pub const ALL: [Self; 5] = [
-        Self::Recovery,
-        Self::Files,
-        Self::Security,
-        Self::Search,
-        Self::Browser,
-    ];
-}
 impl std::fmt::Display for Section {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Recovery => "History, trash & audit",
+            Self::Overview => "All tools",
+            Self::Audit => "Vault health",
+            Self::Trash => "Deleted items",
+            Self::Recovery => "Password history",
             Self::Files => "Import, export & backups",
             Self::Security => "Vault security",
             Self::Search => "Advanced search",
@@ -263,6 +260,7 @@ impl Action {
 #[derive(Clone, Debug)]
 pub enum Event {
     Section(Section),
+    ShowResults(bool),
     FileOperation(FileOperation),
     VaultOperation(VaultOperation),
     Field(Field, SecretString),
@@ -297,6 +295,7 @@ impl Drop for Prepared {
 
 pub struct State {
     pub section: Section,
+    pub show_results: bool,
     pub file_operation: FileOperation,
     pub vault_operation: VaultOperation,
     pub selected: Option<Choice>,
@@ -357,7 +356,8 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            section: Section::Recovery,
+            section: Section::Overview,
+            show_results: false,
             file_operation: FileOperation::Backup,
             vault_operation: VaultOperation::Rekey,
             selected: None,
@@ -1084,6 +1084,7 @@ impl State {
             None
         };
         self.result = Some(payload);
+        self.show_results = true;
     }
     pub fn duo_confirmation<'a>(&'a self, app: &'a App) -> Element<'a, super::Message> {
         view::confirmation(self, app).into()
@@ -1173,7 +1174,7 @@ impl App {
                 Ok(seconds) => seconds,
                 Err(error) => {
                     self.workspace.reset_duo();
-                    self.notice = error;
+                    self.report_error(error);
                     return Task::none();
                 }
             };
@@ -1209,7 +1210,7 @@ impl App {
             Ok(prepared) => self.execute_workflow(prepared),
             Err(error) => {
                 self.stop_tool_watches();
-                self.notice = error;
+                self.report_error(error);
                 Task::none()
             }
         }
@@ -1296,7 +1297,7 @@ impl App {
             Ok(prepared) => self.execute_workflow(prepared),
             Err(error) => {
                 self.workspace.hide_secrets();
-                self.notice = error;
+                self.report_error(error);
                 Task::none()
             }
         }
@@ -1357,7 +1358,12 @@ impl App {
             self.polling = false;
         }
         match event {
+            Event::ShowResults(show) => {
+                self.workspace.show_results = show;
+                return show_form();
+            }
             Event::Section(section) => {
+                self.workspace.show_results = false;
                 self.workspace.hide_secrets();
                 self.workspace.clear_history();
                 self.workspace.section = section;
@@ -1367,6 +1373,11 @@ impl App {
             }
             Event::FileOperation(operation) => {
                 self.workspace.file_operation = operation;
+                if operation == FileOperation::Import && self.session.is_none() {
+                    self.workspace.import_new = true;
+                }
+                self.workspace.section = Section::Files;
+                self.workspace.show_results = false;
                 self.workspace.prepared = None;
                 self.workspace.result = None;
                 self.workspace.clear_inputs();
@@ -1385,7 +1396,7 @@ impl App {
                         Ok(target) => target,
                         Err(error) => {
                             self.stop_tool_watches();
-                            self.notice = error;
+                            self.report_error(error);
                             return Task::none();
                         }
                     };
@@ -1410,7 +1421,7 @@ impl App {
                     } else {
                         if let Err(error) = self.workspace.duo_interval_seconds() {
                             self.workspace.reset_duo();
-                            self.notice = error;
+                            self.report_error(error);
                             return Task::none();
                         }
                         if !self
@@ -1432,7 +1443,7 @@ impl App {
                         Ok(prepared) => self.execute_workflow(prepared),
                         Err(error) => {
                             self.stop_tool_watches();
-                            self.notice = error;
+                            self.report_error(error);
                             Task::none()
                         }
                     };
@@ -1473,6 +1484,7 @@ impl App {
                 return file_picker::pick_workflow_file(self.serial, field, save);
             }
             Event::ClearResult => {
+                self.workspace.show_results = false;
                 self.workspace.clear_history();
                 self.workspace.result = None;
                 self.workspace.prepared = None;
@@ -1482,7 +1494,10 @@ impl App {
                     self.notice = reason;
                 }
             }
-            Event::Cancel => self.workspace.prepared = None,
+            Event::Cancel => {
+                self.workspace.prepared = None;
+                self.workspace.show_results = false;
+            }
             Event::Confirm => {
                 if let Some(prepared) = self.workspace.prepared.take() {
                     return self.execute_workflow(prepared);
@@ -1529,7 +1544,7 @@ impl App {
                 }
                 Ok(prepared) => return self.execute_workflow(prepared),
                 Err(error) => {
-                    self.notice = error;
+                    self.report_error(error);
                     if matches!(action, Action::WatchOtp | Action::CopyWatchedOtp) {
                         self.workspace.hide_secrets();
                     }
@@ -1626,7 +1641,7 @@ impl App {
     }
 }
 pub fn show_result() -> Task<super::Message> {
-    iced::widget::operation::snap_to_end("vault-tools")
+    show_form()
 }
 pub fn show_form() -> Task<super::Message> {
     iced::widget::operation::snap_to(

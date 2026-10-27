@@ -1,23 +1,18 @@
 use super::*;
 use crate::gui::Message as AppMessage;
+use crate::gui::widgets::{button, checkbox, pick_list, scrollable, text_input};
+use iced::widget::button as button_style;
 use iced::{
     Fill,
-    widget::{
-        Column, button, checkbox, column, container, pick_list, row, rule, scrollable, text,
-        text_input,
-    },
+    widget::{Column, column, container, row, rule, text},
 };
 
 fn event(value: Event) -> AppMessage {
     AppMessage::Workflow(value)
 }
-fn action<'a>(
-    label: &'a str,
-    value: Action,
-    enabled: bool,
-) -> iced::widget::Button<'a, AppMessage> {
+fn action<'a>(label: &'a str, value: Action, enabled: bool) -> crate::gui::widgets::Button<'a> {
     button(label)
-        .padding([9, 14])
+        .padding([11, 14])
         .on_press_maybe(enabled.then_some(event(Event::Run(value))))
 }
 fn field<'a>(
@@ -28,7 +23,7 @@ fn field<'a>(
     enabled: bool,
 ) -> Element<'a, AppMessage> {
     column![
-        text(label).size(13),
+        text(label).size(14),
         text_input(label, value)
             .secure(secret)
             .padding(10)
@@ -53,7 +48,7 @@ fn path<'a>(
     enabled: bool,
 ) -> Element<'a, AppMessage> {
     column![
-        text(label).size(13),
+        text(label).size(14),
         row![
             text_input("Choose or enter a file path", value)
                 .padding(10)
@@ -61,7 +56,7 @@ fn path<'a>(
                     enabled.then_some(move |value: String| event(Event::Field(key, value.into())))
                 ),
             button("Browse…")
-                .padding([9, 14])
+                .padding([11, 14])
                 .on_press_maybe(enabled.then_some(event(Event::Pick(key, save))))
         ]
         .spacing(8)
@@ -128,11 +123,11 @@ pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, App
             .push(
                 row![
                     button("Cancel")
-                        .padding([9, 14])
+                        .padding([11, 14])
                         .on_press_maybe(enabled.then_some(event(Event::Cancel))),
                     button("Confirm")
-                        .padding([9, 14])
-                        .style(button::danger)
+                        .padding([11, 14])
+                        .style(button_style::danger)
                         .on_press_maybe(
                             (enabled && app.pending.is_none()).then_some(event(Event::Confirm))
                         ),
@@ -170,7 +165,7 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             !app.busy,
         ));
     if let Err(error) = state.duo_interval_seconds() {
-        form = form.push(text(error).size(12));
+        form = form.push(text(error).size(14));
     }
     if let Some(target) = state.duo_watch_target.as_ref().filter(|_| state.watch_duo) {
         form = form.push(
@@ -178,7 +173,7 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
                 "Watching {}. Review each request here before responding.",
                 target.choice
             ))
-            .size(12),
+            .size(14),
         );
     }
     form
@@ -212,7 +207,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
     ]
     .spacing(12);
     if !enrolled {
-        return form.push(text("Select a Push-enrolled item to receive requests. Passcodes-only enrollment does not support Push.").size(13)).push(duo_options(state, app));
+        return form.push(text("Select a Push-enrolled item to receive requests. Passcodes-only enrollment does not support Push.").size(14)).push(duo_options(state, app));
     }
     if app.tab != Tab::Vault
         && state
@@ -235,7 +230,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
         form = form.push(text("No pending Push requests."));
     } else if state.duo_review_pending(app) {
         form = form
-            .push(text("Refresh paused while you review. Fetch requests to check again.").size(12));
+            .push(text("Refresh paused while you review. Fetch requests to check again.").size(14));
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -257,7 +252,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             } else {
                 "This request has expired."
             }))
-            .size(12),
+            .size(14),
         ]
         .spacing(8);
         if let Some(digits) = request.code_digits {
@@ -273,7 +268,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
                     text(format!(
                         "Enter the {digits}-digit code shown for this request."
                     ))
-                    .size(12),
+                    .size(14),
                 );
         }
         form = form
@@ -286,7 +281,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
                             writes && current && request.unsupported.is_none()
                         ),
                         action("Deny", Action::Respond(index, false), writes && current)
-                            .style(button::danger),
+                            .style(button_style::danger),
                     ]
                     .spacing(10),
                 ),
@@ -326,7 +321,7 @@ pub(super) fn account_authenticators<'a>(
                 action("Show code", Action::ShowOtp(false), writes),
                 action("Copy code", Action::ShowOtp(true), writes && copy_enabled),
                 button("Hide code")
-                    .padding([9, 14])
+                    .padding([11, 14])
                     .on_press_maybe(code.is_some().then_some(AppMessage::HideSecrets)),
             ]
             .spacing(8)
@@ -346,7 +341,7 @@ pub(super) fn account_authenticators<'a>(
                             )
                         }),
                 )
-                .size(12),
+                .size(14),
             );
         }
         form = form.push(toggle(
@@ -371,7 +366,7 @@ pub(super) fn account_authenticators<'a>(
                             .err()
                             .unwrap_or_else(|| "Zero disables OTP copying.".into()),
                     )
-                    .size(12),
+                    .size(14),
                 )
                 .push(toggle(
                     "Copy each new time-based code once while watching",
@@ -386,7 +381,7 @@ pub(super) fn account_authenticators<'a>(
                     writes,
                 ));
         }
-        form = form.push(text("Showing or copying HOTP consumes its next counter. Codes hide after 15 seconds or on focus loss. Watching supports TOTP only.").size(12));
+        form = form.push(text("Showing or copying HOTP consumes its next counter. Codes hide after 15 seconds or on focus loss. Watching supports TOTP only.").size(14));
     }
     form
 }
@@ -407,11 +402,11 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
         return form
             .push(
                 text("Save your item changes before changing its authenticator or Duo enrollment.")
-                    .size(13),
+                    .size(14),
             )
             .push(
                 button("Save changes & continue editing")
-                    .padding([9, 14])
+                    .padding([11, 14])
                     .on_press_maybe(app.writes_allowed().then_some(AppMessage::SaveAndEdit)),
             );
     }
@@ -420,7 +415,7 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
         .push(field("Base32 secret or otpauth URI", state.configuration.expose(), Field::Configuration, true, enabled))
         .push(row![
             action(if item.has_totp { "Replace authenticator" } else { "Add authenticator" }, Action::SetOtp, writes),
-            action("Remove authenticator", Action::RemoveOtp, writes && item.has_totp).style(button::danger),
+            action("Remove authenticator", Action::RemoveOtp, writes && item.has_totp).style(button_style::danger),
         ].spacing(8).wrap())
         .push(rule::horizontal(1))
         .push(text(if item.has_duo { "Duo Push configured" } else { "No Duo Push enrollment" }).size(14))
@@ -431,9 +426,9 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
         .push(row![
             action("Enroll Duo Push & passcodes", Action::EnrollDuo, writes),
             action("Enroll Duo passcodes only", Action::EnrollPasscodes, writes),
-            action("Remove Duo Push", Action::RemoveDuo, writes && item.has_duo).style(button::danger),
+            action("Remove Duo Push", Action::RemoveDuo, writes && item.has_duo).style(button_style::danger),
         ].spacing(8).wrap())
-        .push(text("Removing Duo Push keeps its passcodes. Remove the authenticator separately to remove passcodes. These changes take effect after confirmation.").size(12));
+        .push(text("Removing Duo Push keeps its passcodes. Remove the authenticator separately to remove passcodes. These changes take effect after confirmation.").size(14));
     if state
         .prepared
         .as_ref()
@@ -457,16 +452,58 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             label: format!("{} · {}", item.id, item.name),
         })
         .collect();
-    let mut form = column![
-        text("Vault tools").size(25),
-        pick_list(Section::ALL.as_slice(), Some(state.section), |value| event(
-            Event::Section(value)
-        ))
-        .padding(10),
+    if state.section == Section::Overview {
+        return overview(app);
+    }
+    let header = row![
+        button("All tools")
+            .padding([11, 14])
+            .style(crate::gui::view::quiet_button)
+            .on_press_maybe(enabled.then_some(event(Event::Section(Section::Overview)))),
+        text(if state.section == Section::Files {
+            state.file_operation.to_string()
+        } else {
+            state.section.to_string()
+        })
+        .size(25),
     ]
-    .spacing(14);
+    .spacing(14)
+    .align_y(iced::Alignment::Center)
+    .wrap();
+    let mut frame = column![header].spacing(14).height(Fill);
+    if state
+        .prepared
+        .as_ref()
+        .is_some_and(|prepared| !matches!(prepared.action, Action::Respond(..)))
+    {
+        frame = frame.push(
+            scrollable(confirmation(state, app))
+                .id("vault-tools")
+                .height(Fill),
+        );
+        return container(crate::gui::view::panel(frame).max_width(900).height(Fill))
+            .center_x(Fill)
+            .height(Fill)
+            .into();
+    }
+    if state.show_results && state.result.is_some() {
+        frame = frame.push(results(state, app));
+        return container(crate::gui::view::panel(frame).max_width(900).height(Fill))
+            .center_x(Fill)
+            .height(Fill)
+            .into();
+    }
+    if state.result.is_some() {
+        frame = frame.push(
+            button("View last result")
+                .padding([11, 14])
+                .style(crate::gui::view::quiet_button)
+                .on_press_maybe(enabled.then_some(event(Event::ShowResults(true)))),
+        );
+    }
+    let mut form = column![].spacing(16);
     if state.section == Section::Recovery {
-        form = form.push(text("Item for password history").size(13)).push(
+        form = form.push(text("Item for password history").size(14)).push(
             pick_list(choices, state.selected.clone(), |value| {
                 event(Event::Select(value))
             })
@@ -476,23 +513,25 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
         );
     }
     if app.session.is_none() && state.section != Section::Browser {
-        form = form.push(text("Unlock a vault to use item tools. Creating a vault, restoring a backup, and importing into a new vault are available while locked.").size(13));
+        form = form.push(text("Unlock a vault to use item tools. Creating a vault, restoring a backup, and importing into a new vault are available while locked.").size(14));
     }
     form = match state.section {
+        Section::Overview => unreachable!(),
         Section::Recovery => form
-            .push(text("Password history & trash").size(19))
-            .push(row![action("Load password history", Action::History, unlocked), action("Open trash", Action::Trash, unlocked)].spacing(10).wrap())
-            .push(rule::horizontal(1))
-            .push(text("Vault health audit").size(19))
+            .push(text("Review an item's previous passwords and restore a revision when needed.").size(16))
+            .push(action("Load password history", Action::History, unlocked)),
+        Section::Trash => form
+            .push(text("Deleted items stay encrypted in your vault until you restore or permanently erase them.").size(16))
+            .push(action("Load deleted items", Action::Trash, unlocked)),
+        Section::Audit => form
+            .push(text("Find weak, reused, or exposed passwords and open an affected item directly from the results.").size(16))
             .push(field("Passwords at least this many days old (optional)", &state.stale_days, Field::StaleDays, false, enabled))
             .push(toggle("Report logins missing an authenticator", state.require_otp, Toggle::RequireOtp, enabled))
             .push(toggle("Check Pwned Passwords using hash prefixes (network request)", state.breaches, Toggle::Breaches, enabled))
-            .push(action("Run audit", Action::Audit, unlocked)),
+            .push(action("Check vault health", Action::Audit, unlocked)),
         Section::Files => {
-            let operations = [FileOperation::Backup, FileOperation::Restore, FileOperation::Import, FileOperation::Export];
             let saving = matches!(state.file_operation, FileOperation::Backup | FileOperation::Export);
             let mut form = form
-                .push(pick_list(operations, Some(state.file_operation), |value| event(Event::FileOperation(value))).padding(10))
                 .push(path("File", &state.path, Field::Path, saving, enabled));
             match state.file_operation {
                 FileOperation::Backup => {
@@ -503,12 +542,12 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
                         .push(action("Create encrypted backup", Action::Backup, writes))
                 }
                 FileOperation::Restore => form
-                    .push(text("Restores a separate locked vault. Lock the current vault first.").size(13))
+                    .push(text("Restores a separate locked vault. Lock the current vault first.").size(14))
                     .push(credentials(state, false, enabled))
                     .push(action("Restore backup", Action::RestoreBackup, server_writes && app.session.is_none())),
                 FileOperation::Import => {
                     form = form
-                        .push(text("Supports CSV, JSON, Bitwarden JSON, and portable JSON. Preview counts, conflicts, and data loss before importing.").size(13))
+                        .push(text("Supports CSV, JSON, Bitwarden JSON, and portable JSON. Preview counts, conflicts, and data loss before importing.").size(14))
                         .push(pick_list([Policy::Skip, Policy::Replace, Policy::KeepBoth], Some(state.policy), |value| event(Event::Policy(value))).padding(10))
                         .push(toggle("Import into a new vault", state.import_new, Toggle::ImportNew, enabled));
                     if state.import_new { form = form.push(credentials(state, true, enabled)); }
@@ -518,21 +557,21 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
                     ].spacing(10))
                 }
                 FileOperation::Export => form
-                    .push(text("Exports plaintext secrets. Use .json to preserve rich metadata; other extensions produce CSV. Prefer an encrypted backup for safekeeping.").size(13))
+                    .push(text("Exports plaintext secrets. Use .json to preserve rich metadata; other extensions produce CSV. Prefer an encrypted backup for safekeeping.").size(14))
                     .push(toggle("Replace an existing export file", state.force, Toggle::Force, enabled))
                     .push(action("Export plaintext", Action::Export, writes)),
             }
         }
         Section::Security => {
             form.push(text("Vault credentials").size(19))
-                .push(text("New vaults and rekeying create a new external key when key mode is selected. Deleting a vault authenticates using its existing credentials. Select the vault on the Vault tab.").size(13))
+                .push(text("New vaults and rekeying create a new external key when key mode is selected. Deleting a vault authenticates using its existing credentials. Select the vault on the Vault tab.").size(14))
                 .push(pick_list([VaultOperation::Rekey, VaultOperation::Create, VaultOperation::Delete], Some(state.vault_operation), |value| event(Event::VaultOperation(value))).padding(10))
                 .push(credentials(state, state.vault_operation != VaultOperation::Delete, enabled))
                 .push(toggle("Keep the external key when deleting a vault", state.keep_key, Toggle::KeepKey, enabled))
                 .push(match state.vault_operation {
                     VaultOperation::Rekey => action("Change vault credentials", Action::Rekey, writes),
                     VaultOperation::Create => action("Create vault", Action::NewVault, server_writes),
-                    VaultOperation::Delete => action("Delete selected vault", Action::DeleteVault, server_writes && app.session.is_none()).style(button::danger),
+                    VaultOperation::Delete => action("Delete selected vault", Action::DeleteVault, server_writes && app.session.is_none()).style(button_style::danger),
                 })
         }
         Section::Search => {
@@ -557,7 +596,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
         }
         Section::Browser => form
             .push(text("Register the browser extension").size(19))
-            .push(text("Load extension/ as an unpacked extension first, then enter its ID. Reload the extension afterward. On Windows, fully close the browser before installing or updating its native host.").size(13))
+            .push(text("Load extension/ as an unpacked extension first, then enter its ID. Reload the extension afterward. On Windows, fully close the browser before installing or updating its native host.").size(14))
             .push(pick_list([Browser::Chrome, Browser::Chromium, Browser::Helium], Some(state.browser), |value| event(Event::Browser(value))).padding(10))
             .push(field("32-character extension ID", &state.extension_id, Field::ExtensionId, false, enabled))
             .push(row![
@@ -566,89 +605,261 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             ].spacing(10).wrap())
             .push(action("Install application-menu shortcut (Linux)", Action::Shortcut, enabled && cfg!(target_os = "linux"))),
     };
-    if let Some(result) = &state.result {
-        form = form.push(rule::horizontal(1)).push(
-            row![
-                text("Result").size(20),
-                button("Clear").on_press(event(Event::ClearResult))
-            ]
-            .spacing(15),
-        );
-        match result {
-            ResponsePayload::History(_) if state.history_for(app).is_none() => {
-                form = form.push(text(
-                    "Reload password history for the selected item before restoring.",
-                ));
-            }
-            ResponsePayload::History(page) => {
-                if page.history.is_empty() {
-                    form = form.push(text("No saved password revisions."));
-                }
-                for (index, changed) in page.history.iter().enumerate() {
-                    form = form.push(
-                        row![
-                            text(format!("Revision {} · {changed}", index + 1)).width(Fill),
-                            action(
-                                "Restore password",
-                                Action::RestorePassword(index + 1),
-                                writes
-                            )
-                        ]
-                        .spacing(10),
-                    );
-                }
-            }
-            ResponsePayload::Trash(page) => {
-                for entry in &page.trash {
-                    form = form.push(
-                        column![
-                            text(trash_label(entry)),
-                            row![
-                                action("Restore", Action::RestoreTrash(entry.id), writes),
-                                action("Erase permanently", Action::Purge(Some(entry.id)), writes)
-                                    .style(button::danger)
-                            ]
-                            .spacing(10)
-                        ]
-                        .spacing(8),
-                    );
-                }
-                if page.trash.is_empty() {
-                    form = form.push(text("Trash is empty."));
-                } else {
-                    form = form.push(
-                        action("Empty trash permanently", Action::Purge(None), writes)
-                            .style(button::danger),
-                    );
-                }
-            }
-            ResponsePayload::ItemPage(page) => {
-                form = form.push(text(format!("{} matching items", page.total)));
-                for item in &page.items {
-                    form = form.push(
-                        button(text(format!(
-                            "{} · {} · {}",
-                            item.id,
-                            item.name,
-                            item.username.as_deref().unwrap_or("")
-                        )))
-                        .padding(10)
-                        .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(item.id))),
-                    );
-                }
-            }
-            _ => form = form.push(text(report(result)).size(14)),
+    frame = frame.push(scrollable(form).spacing(12).id("vault-tools").height(Fill));
+    container(crate::gui::view::panel(frame).max_width(900).height(Fill))
+        .center_x(Fill)
+        .height(Fill)
+        .into()
+}
+
+fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
+    let enabled = !app.busy;
+    let writes = enabled && app.session.is_some() && app.pending.is_none();
+    let result = state.result.as_ref().unwrap();
+    let mut form = column![].spacing(14);
+    match result {
+        ResponsePayload::History(_) if state.history_for(app).is_none() => {
+            form = form.push(text(
+                "Reload password history for the selected item before restoring.",
+            ));
         }
+        ResponsePayload::History(page) => {
+            if page.history.is_empty() {
+                form = form.push(text("No saved password revisions."));
+            }
+            for (index, changed) in page.history.iter().enumerate() {
+                form = form.push(
+                    row![
+                        text(format!("Revision {} · {changed}", index + 1)).width(Fill),
+                        action(
+                            "Restore password",
+                            Action::RestorePassword(index + 1),
+                            writes
+                        )
+                    ]
+                    .spacing(10),
+                );
+            }
+        }
+        ResponsePayload::Trash(page) => {
+            for entry in &page.trash {
+                form = form.push(
+                    column![
+                        text(trash_label(entry)),
+                        row![
+                            action("Restore", Action::RestoreTrash(entry.id), writes),
+                            action("Erase permanently", Action::Purge(Some(entry.id)), writes)
+                                .style(button_style::danger)
+                        ]
+                        .spacing(10)
+                    ]
+                    .spacing(8),
+                );
+            }
+            if page.trash.is_empty() {
+                form = form.push(text("Trash is empty."));
+            } else {
+                form = form.push(
+                    action("Empty trash permanently", Action::Purge(None), writes)
+                        .style(button_style::danger),
+                );
+            }
+        }
+        ResponsePayload::ItemPage(page) => {
+            form = form.push(text(format!("{} matching items", page.total)));
+            for item in &page.items {
+                form = form.push(
+                    button(text(format!(
+                        "{} · {} · {}",
+                        item.id,
+                        item.name,
+                        item.username.as_deref().unwrap_or("")
+                    )))
+                    .padding(10)
+                    .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(item.id))),
+                );
+            }
+        }
+        ResponsePayload::Audit(report) => {
+            form = form
+                .push(text(format!("Vault health · {}/100", report.score)).size(27))
+                .push(
+                    text(format!(
+                        "{} of {} login items have no detected issues.",
+                        report.healthy, report.total
+                    ))
+                    .size(16),
+                );
+            for (label, entries) in [
+                ("Weak passwords", report.weak.as_slice()),
+                ("Old passwords", report.stale.as_slice()),
+                ("Missing authenticators", report.missing_totp.as_slice()),
+                ("Breach check incomplete", report.unchecked.as_slice()),
+            ] {
+                if !entries.is_empty() {
+                    form = form.push(text(format!("{label} · {}", entries.len())).size(19));
+                }
+                for entry in entries {
+                    form = form.push(
+                        button(text(&entry.name).size(16))
+                            .padding(12)
+                            .width(Fill)
+                            .style(crate::gui::view::quiet_button)
+                            .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
+                    );
+                }
+            }
+            for (title, groups) in [
+                ("Reused passwords", &report.reused),
+                ("Duplicate logins", &report.duplicates),
+            ] {
+                for group in groups {
+                    form = form.push(text(title).size(19));
+                    for entry in group {
+                        form = form.push(
+                            button(text(&entry.name).size(16))
+                                .padding(12)
+                                .style(crate::gui::view::quiet_button)
+                                .on_press_maybe(
+                                    enabled.then_some(AppMessage::OpenToolItem(entry.id)),
+                                ),
+                        );
+                    }
+                }
+            }
+            for (entry, count) in &report.breached {
+                form = form
+                    .push(text(format!("Exposed password · seen {count} times")).size(19))
+                    .push(
+                        button(text(&entry.name).size(16))
+                            .padding(12)
+                            .style(crate::gui::view::quiet_button)
+                            .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
+                    );
+            }
+            if let Some(message) = &report.breach_error {
+                form = form
+                    .push(text(format!("Breach check incomplete: {message}")).style(text::danger));
+            }
+        }
+        _ => form = form.push(text(report(result)).size(16)),
     }
-    if !state
-        .prepared
-        .as_ref()
-        .is_some_and(|prepared| matches!(prepared.action, Action::Respond(..)))
-    {
-        form = form.push(confirmation(state, app));
-    }
+
+    column![
+        scrollable(form).spacing(12).id("vault-tools").height(Fill),
+        rule::horizontal(1),
+        row![
+            button("Back to options")
+                .padding([11, 14])
+                .style(crate::gui::view::quiet_button)
+                .on_press_maybe(enabled.then_some(event(Event::ShowResults(false)))),
+            button("Clear result")
+                .padding([11, 14])
+                .style(crate::gui::view::quiet_button)
+                .on_press(event(Event::ClearResult)),
+            button("View your items")
+                .padding([11, 14])
+                .style(crate::gui::view::quiet_button)
+                .on_press_maybe(enabled.then_some(AppMessage::Tab(Tab::Vault))),
+        ]
+        .spacing(10)
+        .wrap(),
+    ]
+    .spacing(14)
+    .height(Fill)
+    .into()
+}
+
+fn overview(app: &App) -> Element<'_, AppMessage> {
+    let card = |title: &'static str, description: &'static str, value: Event| {
+        button(column![text(title).size(17), text(description).size(14)].spacing(6))
+            .padding(12)
+            .width(iced::Length::Fixed(if app.compact() {
+                (app.ui.width - 72.0).min(760.0)
+            } else {
+                195.0
+            }))
+            .style(crate::gui::view::quiet_button)
+            .on_press_maybe((!app.busy).then_some(event(value)))
+    };
+    let recovery = row![
+        card(
+            "Vault health",
+            "Find weak, reused, and exposed passwords.",
+            Event::Section(Section::Audit)
+        ),
+        card(
+            "Deleted items",
+            "Restore an item or empty encrypted trash.",
+            Event::Section(Section::Trash)
+        ),
+        card(
+            "Password history",
+            "Recover a previous password for an item.",
+            Event::Section(Section::Recovery)
+        ),
+    ]
+    .spacing(12)
+    .wrap();
+    let files = row![
+        card(
+            "Encrypted backup",
+            "Save a complete encrypted copy of your vault.",
+            Event::FileOperation(FileOperation::Backup)
+        ),
+        card(
+            "Restore a backup",
+            "Recover a separate vault from an encrypted backup.",
+            Event::FileOperation(FileOperation::Restore)
+        ),
+        card(
+            "Import items",
+            "Bring passwords from another manager.",
+            Event::FileOperation(FileOperation::Import)
+        ),
+        card(
+            "Export items",
+            "Create a portable plaintext export.",
+            Event::FileOperation(FileOperation::Export)
+        ),
+    ]
+    .spacing(12)
+    .wrap();
+    let advanced = row![
+        card(
+            "Advanced search",
+            "Search notes, fields, types, and password age.",
+            Event::Section(Section::Search)
+        ),
+        card(
+            "Vault security",
+            "Change credentials or manage a vault.",
+            Event::Section(Section::Security)
+        ),
+        card(
+            "Browser connection",
+            "Connect your browser extension.",
+            Event::Section(Section::Browser)
+        ),
+    ]
+    .spacing(12)
+    .wrap();
+    let content = column![
+        row![text("Tools").size(27), text("Choose a task").size(16)]
+            .spacing(16)
+            .align_y(iced::Alignment::Center),
+        text("Security & recovery").size(20),
+        recovery,
+        text("Move & protect your data").size(20),
+        files,
+        text("More tools").size(20),
+        advanced,
+    ]
+    .spacing(12);
     container(
-        super::super::view::panel(scrollable(form).spacing(10).id("vault-tools")).max_width(900),
+        container(scrollable(content).id("vault-tools").spacing(12))
+            .max_width(850)
+            .height(Fill),
     )
     .center_x(Fill)
     .height(Fill)

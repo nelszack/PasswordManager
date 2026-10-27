@@ -4,8 +4,12 @@ mod connection;
 mod file_picker;
 mod generator;
 mod model;
+mod presentation;
 mod settings;
+mod vault_names;
 mod view;
+mod website;
+mod widgets;
 mod workflows;
 
 use backend::{Failure, Reply};
@@ -42,10 +46,11 @@ pub fn run(conf: Config, client: AuthenticatedClient) -> Result<(), String> {
         App::view,
     )
     .title("Password Manager")
-    .theme(Theme::TokyoNight)
+    .theme(App::theme)
+    .scale_factor(App::scale_factor)
     .window(iced::window::Settings {
         size: iced::Size::new(1060.0, 760.0),
-        min_size: Some(iced::Size::new(780.0, 580.0)),
+        min_size: Some(iced::Size::new(480.0, 480.0)),
         icon: Some(
             iced::window::icon::from_rgba(
                 include_bytes!("../../assets/password-manager-64.rgba").to_vec(),
@@ -88,17 +93,24 @@ enum Job {
     Attach,
     DiscoverVaults,
     ReloadSettings,
+    OpenSettings,
     GenerateDefaults,
     SaveDefaults,
     SaveEditorDefaults,
     CopyDefaults,
     ItemCopyDefaults,
+    UsernameDefaults,
+    UsernameValue,
+    UsernameCopied,
+    OpenWebsite,
+    VaultName,
     FieldCopyDefaults(FieldTarget),
     WorkflowDefaults(workflows::Action),
     WatchOtpDefaults,
     WatchCopyDefaults,
     Status,
     List,
+    SavedList,
     Item,
     EditorList(usize),
     EditorItem(usize),
@@ -148,6 +160,10 @@ enum Message {
     Discard,
     KeepEditing,
     Vault(String),
+    VaultName(String),
+    RenameVault,
+    CopyUsername,
+    OpenWebsite(usize),
     Master(SecretString),
     ConfirmMaster(SecretString),
     KeyPath(SecretString),
@@ -166,6 +182,7 @@ enum Message {
     ReplacePassword(bool),
     CopyPolicy(model::ClipboardPolicy),
     AddField,
+    TemplateValue(&'static str, bool, SecretString),
     FieldName(usize, String),
     FieldValue(usize, SecretString),
     FieldSecret(usize, bool),
@@ -187,6 +204,7 @@ enum Message {
     Delete,
     CancelDelete,
     ConfirmDelete,
+    UndoDelete,
     Reconcile,
     Acknowledge,
     GeneratorLength(String),
@@ -202,6 +220,18 @@ enum Message {
     CancelResetSettings,
     ConfirmResetSettings,
     FocusNext(bool),
+    FocusSearch,
+    ScrollFocus(Vec<(iced::advanced::widget::Id, f32)>),
+    DismissNotice,
+    Resize(iced::Size),
+    Disclosure(presentation::Disclosure),
+    FilterKind(Option<ItemKind>),
+    SettingsSection(presentation::SettingsSection),
+    Appearance(password_manager::config::Appearance),
+    InterfaceScale(u16),
+    OpenTools(workflows::Section),
+    OpenFileTool(workflows::FileOperation),
+    ConfirmStop(bool),
     Workflow(workflows::Event),
     OpenToolItem(usize),
     OpenItemTools(usize),
@@ -219,7 +249,15 @@ impl std::fmt::Debug for Message {
     }
 }
 
+struct Creation {
+    password: SecretString,
+    name: String,
+}
+
 struct App {
+    names: vault_names::Names,
+    creation: Option<Creation>,
+    ui: presentation::State,
     conf: Config,
     client: AuthenticatedClient,
     connection_port: String,
@@ -267,6 +305,9 @@ struct App {
 impl App {
     fn new(conf: Config, client: AuthenticatedClient) -> Self {
         Self {
+            ui: presentation::State::default(),
+            names: vault_names::Names::default(),
+            creation: None,
             connection_port: client.port.to_string(),
             connect_after_discovery: false,
             generator_length: conf.genpass.length.to_string(),
@@ -338,14 +379,46 @@ impl App {
                         {
                             Some(Message::Lock)
                         }
+                        keyboard::Key::Character(c)
+                            if modifiers.command()
+                                && modifiers.shift()
+                                && c.eq_ignore_ascii_case("c") =>
+                        {
+                            Some(Message::CopyUsername)
+                        }
+                        keyboard::Key::Character(c)
+                            if modifiers.command()
+                                && modifiers.shift()
+                                && c.eq_ignore_ascii_case("o") =>
+                        {
+                            Some(Message::OpenWebsite(0))
+                        }
+                        keyboard::Key::Character(c) if modifiers.command() => match c
+                            .to_lowercase()
+                            .as_str()
+                        {
+                            "f" => Some(Message::FocusSearch),
+                            "n" => Some(Message::Navigate(Navigate::New)),
+                            "s" => Some(Message::Save),
+                            "e" => Some(Message::Edit),
+                            "1" => Some(Message::Tab(Tab::Vault)),
+                            "2" => Some(Message::Tab(Tab::Generator)),
+                            "3" => Some(Message::Tab(Tab::Tools)),
+                            "4" => Some(Message::Tab(Tab::Settings)),
+                            "/" => Some(Message::Disclosure(presentation::Disclosure::Shortcuts)),
+                            _ => None,
+                        },
                         _ => None,
                     }
                 }
                 _ => None,
             }),
-            iced::event::listen_with(|event, _, _| {
-                matches!(event, iced::Event::Window(iced::window::Event::Unfocused))
-                    .then_some(Message::HideSecrets)
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::HideSecrets),
+                iced::Event::Window(iced::window::Event::Resized(size)) => {
+                    Some(Message::Resize(size))
+                }
+                _ => None,
             }),
         ])
     }
@@ -367,7 +440,10 @@ impl App {
                 | Job::WatchOtpDefaults
                 | Job::WorkflowDefaults(workflows::Action::ShowOtp(true))
         );
-        self.busy = !self.polling;
+        self.busy = !self.polling && job != Job::OpenWebsite;
+        if !self.polling {
+            self.ui.notice_error = false;
+        }
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(work).await.unwrap_or_else(|_| Err(Failure::from("The desktop operation could not finish. Inspect the vault before retrying any change.".to_owned())))
@@ -477,10 +553,16 @@ impl App {
         self.workspace.clear_vault();
         self.items.clear();
         self.query.zeroize();
+        self.ui.kind = None;
+        self.ui.undo_trash = None;
+        self.ui.active_vault = None;
+        self.ui.saved_item = None;
+        self.ui.confirm_stop = false;
         self.item = None;
         self.draft = None;
         self.deferred = None;
         self.delete_confirm = false;
+        self.creation = None;
         self.master.zeroize();
         self.confirmation.zeroize();
         self.key_path.zeroize();
@@ -505,6 +587,8 @@ impl App {
         }
         self.hide_secrets();
         self.cancel_passive_read();
+        self.notice.clear();
+        self.ui.undo_trash = None;
         self.delete_confirm = false;
         self.workspace.prepared = None;
         self.workspace.clear_inputs();
@@ -524,12 +608,19 @@ impl App {
                 )
             }
             Navigate::New => {
+                self.ui.editor_advanced = false;
+                self.ui.editor_authenticators = false;
                 self.draft = Some(Draft::default());
-                Task::none()
+                iced::widget::operation::focus("item-name")
             }
             Navigate::Close => Task::none(),
             Navigate::Refresh => self.load_items(),
         }
+    }
+
+    fn report_error(&mut self, message: impl Into<String>) {
+        self.notice = message.into();
+        self.ui.notice_error = true;
     }
 
     fn writes_allowed(&self) -> bool {
@@ -547,6 +638,7 @@ impl App {
                 | Message::AddField
                 | Message::FieldName(..)
                 | Message::FieldValue(..)
+                | Message::TemplateValue(..)
                 | Message::FieldSecret(..)
                 | Message::RemoveField(_)
                 | Message::MultilineSecret(_)
@@ -573,7 +665,13 @@ impl App {
                 return match result {
                     Ok(reply) => self.complete(job, reply),
                     Err(error) => {
-                        self.notice = error.message;
+                        if job == Job::SavedList {
+                            self.ui.saved_item = None;
+                        }
+                        if matches!(job, Job::Create | Job::Unlock) {
+                            self.creation = None;
+                        }
+                        self.report_error(error.message);
                         if matches!(job, Job::Workflow(_)) {
                             self.stop_tool_watches();
                         }
@@ -613,6 +711,9 @@ impl App {
                     self.generated_stats.clear();
                     self.generated_until = None;
                     self.show_generated = false;
+                    if self.notice.starts_with("New secret ready.") {
+                        self.notice = "Generated secret cleared after 60 seconds. Generate another when you need it.".into();
+                    }
                 }
                 if !self.busy
                     && !self.polling
@@ -639,13 +740,89 @@ impl App {
             }
             Message::HideSecrets => self.hide_secrets(),
             Message::FocusNext(backwards) => {
-                return if backwards {
+                let focus = if backwards {
                     iced::widget::operation::focus_previous()
                 } else {
                     iced::widget::operation::focus_next()
                 };
+                return focus.chain(widgets::ensure_focus_visible());
+            }
+            Message::ScrollFocus(offsets) => {
+                return Task::batch(offsets.into_iter().map(|(id, delta)| {
+                    iced::widget::operation::scroll_by(
+                        id,
+                        iced::widget::operation::AbsoluteOffset { x: 0.0, y: delta },
+                    )
+                }));
+            }
+            Message::Resize(size) => {
+                self.ui.width = size.width;
+                self.ui.height = size.height;
+            }
+            Message::DismissNotice => {
+                self.ui.undo_trash = None;
+                self.notice.clear();
+                self.ui.notice_error = false;
             }
             _ if self.busy => return Task::none(),
+            Message::Disclosure(section) => {
+                use presentation::Disclosure;
+                let expanded = match section {
+                    Disclosure::Unlock => &mut self.ui.unlock_advanced,
+                    Disclosure::Editor => &mut self.ui.editor_advanced,
+                    Disclosure::Authenticators => &mut self.ui.editor_authenticators,
+                    Disclosure::Generator => &mut self.ui.generator_advanced,
+                    Disclosure::Shortcuts => &mut self.ui.shortcuts,
+                };
+                *expanded = !*expanded;
+                if !*expanded {
+                    if matches!(section, Disclosure::Unlock) {
+                        self.key_path.zeroize();
+                    }
+                    self.hide_secrets();
+                }
+            }
+            Message::FilterKind(kind) => self.ui.kind = kind,
+            Message::ConfirmStop(value) => self.ui.confirm_stop = value,
+            Message::SettingsSection(section) => {
+                self.ui.settings_section = section;
+                if section == presentation::SettingsSection::Security
+                    && let Some(id) = &self.vault
+                {
+                    self.ui.vault_name = self.names.label(id, &self.vaults);
+                }
+                return iced::widget::operation::snap_to(
+                    "page-form",
+                    iced::widget::operation::RelativeOffset::START,
+                );
+            }
+            Message::Appearance(value) => self.settings.appearance = value,
+            Message::InterfaceScale(value) if [100, 115, 130].contains(&value) => {
+                self.settings.scale = value;
+                return widgets::ensure_focus_visible();
+            }
+            Message::FocusSearch if self.session.is_some() => {
+                self.tab = Tab::Vault;
+                self.hide_secrets();
+                if self.compact() && (self.draft.is_some() || self.item.is_some()) {
+                    return self
+                        .navigate(Navigate::Close)
+                        .chain(iced::widget::operation::focus("vault-search"));
+                }
+                return iced::widget::operation::focus("vault-search");
+            }
+            Message::OpenFileTool(operation) => {
+                self.hide_secrets();
+                self.cancel_passive_read();
+                self.tab = Tab::Tools;
+                return self.workflow(workflows::Event::FileOperation(operation));
+            }
+            Message::OpenTools(section) => {
+                self.hide_secrets();
+                self.cancel_passive_read();
+                self.tab = Tab::Tools;
+                return self.workflow(workflows::Event::Section(section));
+            }
             Message::Workflow(workflows::Event::Run(action))
                 if matches!(
                     action,
@@ -702,11 +879,20 @@ impl App {
                     return self.fetch_selected_duo();
                 }
                 if tab == Tab::Settings {
-                    return self.reload_settings();
+                    if self.ui.settings_section == presentation::SettingsSection::Security
+                        && let Some(id) = &self.vault
+                    {
+                        self.ui.vault_name = self.names.label(id, &self.vaults);
+                    }
+                    return self.launch(Job::OpenSettings, backend::reload_settings);
                 }
             }
             Message::Search(query) => self.query = query,
             Message::Navigate(destination) if self.session.is_some() => {
+                if matches!(destination, Navigate::New) && !self.writes_allowed() {
+                    return Task::none();
+                }
+                self.tab = Tab::Vault;
                 return self.navigate(destination);
             }
             Message::Discard => {
@@ -716,12 +902,58 @@ impl App {
                 }
             }
             Message::KeepEditing => self.deferred = None,
+            Message::VaultName(value) => self.ui.vault_name = value,
+            Message::RenameVault if self.writes_allowed() => {
+                if let Some(id) = self.vault.clone() {
+                    let label = self.ui.vault_name.clone();
+                    return self.launch(Job::VaultName, move || {
+                        backend::save_vault_name(&id, &label)
+                    });
+                }
+            }
+            Message::UndoDelete if self.writes_allowed() && self.draft.is_none() => {
+                if let Some((id, session)) = self.ui.undo_trash.take()
+                    && self.session.as_ref() == Some(&session)
+                {
+                    return self.request(
+                        Job::Workflow(workflows::Action::RestoreTrash(id)),
+                        ServerCommand::RestoreTrash(id),
+                        None,
+                    );
+                }
+            }
+            Message::CopyUsername
+                if self.writes_allowed() && self.session.is_some() && self.draft.is_none() =>
+            {
+                return self.launch(Job::UsernameDefaults, backend::reload_settings);
+            }
+            Message::OpenWebsite(index) if self.session.is_some() && self.draft.is_none() => {
+                if let Some(url) = self
+                    .item
+                    .as_ref()
+                    .and_then(|item| item.urls.get(index))
+                    .cloned()
+                {
+                    return self.launch(Job::OpenWebsite, move || {
+                        website::open(&url).map_err(Failure::from)?;
+                        Ok(Reply::WebsiteOpened)
+                    });
+                }
+            }
             Message::Vault(vault) => {
+                self.ui.vault_name = self.names.label(&vault, &self.vaults);
                 self.master.zeroize();
                 self.key_path.zeroize();
                 self.vault = Some(vault);
             }
-            Message::Master(password) => self.master = password,
+            Message::Master(password) => {
+                self.ui.master_error = if self.creating {
+                    password_manager::encryption::validate_new_password(password.expose()).err()
+                } else {
+                    None
+                };
+                self.master = password;
+            }
             Message::ConfirmMaster(password) => self.confirmation = password,
             Message::KeyPath(path) => self.key_path = path,
             Message::UnlockTimeout(value) => self.unlock_timeout = value,
@@ -733,15 +965,26 @@ impl App {
             }
             Message::Creating(creating) => {
                 self.creating = creating;
+                self.ui.master_error = None;
+                if creating {
+                    self.ui.vault_name = if self.vaults.is_empty() {
+                        "Personal vault".into()
+                    } else {
+                        format!("Vault {}", self.vaults.len() + 1)
+                    };
+                }
                 self.master.zeroize();
                 self.confirmation.zeroize();
                 self.key_path.zeroize();
+                self.notice.clear();
+                self.ui.notice_error = false;
+                return iced::widget::operation::focus("master-password");
             }
             Message::Unlock => {
                 let timeout = match password_manager::config::parse_duration(&self.unlock_timeout) {
                     Ok(timeout) => timeout,
                     Err(error) => {
-                        self.notice = format!("Lock timeout: {error}");
+                        self.report_error(format!("Lock timeout: {error}"));
                         return Task::none();
                     }
                 };
@@ -749,7 +992,7 @@ impl App {
                     let path = match workflows::absolute(self.key_path.expose()) {
                         Ok(path) => path,
                         Err(error) => {
-                            self.notice = error;
+                            self.report_error(error);
                             return Task::none();
                         }
                     };
@@ -770,30 +1013,78 @@ impl App {
                 );
             }
             Message::Create if self.writes_allowed() => {
+                if let Err(error) = vault_names::validate_name(&self.ui.vault_name) {
+                    self.report_error(error);
+                    return Task::none();
+                }
+                if let Err(error) =
+                    password_manager::encryption::validate_new_password(self.master.expose())
+                {
+                    self.report_error(error);
+                    return Task::none();
+                }
                 if self.master != self.confirmation {
-                    self.notice = "The two master passwords do not match.".into();
+                    self.report_error("The two master passwords do not match.");
                     return Task::none();
                 }
                 // The server applies the same password policy as the CLI.
                 let key = PasswordType::Password(std::mem::take(&mut self.master).expose_owned());
-                self.confirmation.zeroize();
+                self.creation = Some(Creation {
+                    password: std::mem::take(&mut self.confirmation),
+                    name: self.ui.vault_name.trim().to_owned(),
+                });
                 return self.request(Job::Create, ServerCommand::New(key), None);
             }
             Message::Stop if self.pending.is_none() => {
+                self.ui.confirm_stop = false;
                 self.clear_vault();
                 return self.request(Job::Stop, ServerCommand::Kill, None);
             }
-            Message::Edit => {
+            Message::Edit if self.draft.is_none() && self.writes_allowed() => {
+                self.ui.undo_trash = None;
+                self.notice.clear();
                 if let Some(item) = &self.item {
+                    self.ui.editor_advanced = item.fields.iter().any(|field| {
+                        !model::profile(item.kind)
+                            .suggested
+                            .iter()
+                            .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
+                    });
                     self.draft = Some(Draft::from_item(item));
                     self.workspace.prepared = None;
                     self.workspace.clear_inputs();
                     self.hide_secrets();
+                    self.ui.editor_authenticators = false;
+                    return iced::widget::operation::focus("item-name");
                 }
             }
             Message::Name(value) => {
                 if let Some(draft) = &mut self.draft {
                     draft.name = value;
+                    draft.dirty = true;
+                }
+            }
+            Message::TemplateValue(name, secret, value) => {
+                if let Some(draft) = &mut self.draft {
+                    if let Some(field) = draft
+                        .fields
+                        .iter_mut()
+                        .find(|field| !field.removed && field.name.eq_ignore_ascii_case(name))
+                    {
+                        field.value = value;
+                        field.value_edited = true;
+                        field.changed = true;
+                        field.secret |= secret;
+                    } else if !value.is_empty() {
+                        draft.fields.push(model::FieldDraft {
+                            name: name.into(),
+                            value,
+                            secret,
+                            changed: true,
+                            value_edited: true,
+                            ..Default::default()
+                        });
+                    }
                     draft.dirty = true;
                 }
             }
@@ -838,6 +1129,13 @@ impl App {
                     field.removed = true;
                     field.value.zeroize();
                     draft.dirty = true;
+                    if model::profile(draft.kind)
+                        .suggested
+                        .iter()
+                        .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
+                    {
+                        return iced::widget::operation::focus(format!("template-{}", field.name));
+                    }
                 }
             }
             Message::MultilineSecret(value) => {
@@ -873,6 +1171,13 @@ impl App {
                 if let Some(draft) = &mut self.draft {
                     draft.kind = value;
                     draft.dirty = true;
+                    self.ui.editor_advanced = draft.fields.iter().any(|field| {
+                        !field.removed
+                            && !model::profile(value)
+                                .suggested
+                                .iter()
+                                .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
+                    });
                 }
             }
             Message::Password(value) => {
@@ -935,7 +1240,12 @@ impl App {
                 self.workspace.prepared = None;
                 return self.launch(Job::SaveEditorDefaults, backend::reload_settings);
             }
-            Message::Save if self.writes_allowed() => {
+            Message::Save if self.writes_allowed() && self.tab == Tab::Settings => {
+                return self.update(Message::SaveSettings);
+            }
+            Message::Save
+                if self.writes_allowed() && self.tab == Tab::Vault && self.draft.is_some() =>
+            {
                 self.workspace.prepared = None;
                 return self.launch(Job::SaveDefaults, backend::reload_settings);
             }
@@ -944,7 +1254,7 @@ impl App {
                     self.hide_secrets();
                     return self.request(Job::Field(target), command, Some(revision));
                 }
-                Err(error) => self.notice = error,
+                Err(error) => self.report_error(error),
             },
             Message::HideField(target) => {
                 if let Some(field) = self
@@ -986,7 +1296,13 @@ impl App {
             Message::Copy if self.writes_allowed() => {
                 return self.launch(Job::ItemCopyDefaults, backend::reload_settings);
             }
-            Message::Delete => self.delete_confirm = true,
+            Message::Delete => {
+                self.delete_confirm = true;
+                return iced::widget::operation::snap_to(
+                    "account-details",
+                    iced::widget::operation::RelativeOffset::START,
+                );
+            }
             Message::CancelDelete => self.delete_confirm = false,
             Message::ConfirmDelete if self.writes_allowed() => {
                 if let Some(item) = &self.item {
@@ -1035,7 +1351,7 @@ impl App {
                 Ok(changes) => {
                     return self.launch(Job::Settings, move || backend::save_settings(changes));
                 }
-                Err(error) => self.notice = error,
+                Err(error) => self.report_error(error),
             },
             Message::ResetSettings => self.confirm_reset_settings = true,
             Message::CancelResetSettings => self.confirm_reset_settings = false,
@@ -1054,6 +1370,16 @@ impl App {
     }
 
     fn complete(&mut self, job: Job, reply: Reply) -> Task<Message> {
+        if job != Job::Status {
+            self.ui.notice_error = false;
+        }
+        let reply = match reply {
+            Reply::Created { reply, names } => {
+                self.names = names;
+                *reply
+            }
+            reply => reply,
+        };
         let Reply::Server {
             response,
             vaults,
@@ -1092,7 +1418,8 @@ impl App {
                         "Settings saved. Restart the server to apply recovery settings. The lock timeout applies on the next unlock."
                     } else { "Settings saved. The lock timeout applies on the next unlock." }.into();
                 }
-                Reply::Vaults(vaults) => {
+                Reply::Vaults { vaults, names } => {
+                    self.names = names;
                     self.apply_vaults(vaults);
                     if self.connect_after_discovery {
                         self.connect_after_discovery = false;
@@ -1101,19 +1428,23 @@ impl App {
                 }
                 Reply::Configuration(conf) => {
                     self.apply_configuration(conf);
+                    if job != Job::ReloadSettings && self.notice == "Settings reloaded." {
+                        self.notice.clear();
+                    }
                     return match job {
                         Job::GenerateDefaults => self.generate(),
                         Job::SaveDefaults => self.save_item(Job::Save),
                         Job::SaveEditorDefaults => self.save_item(Job::SaveEditor),
                         Job::CopyDefaults => self.copy_generated(),
                         Job::ItemCopyDefaults => self.copy_item(),
+                        Job::UsernameDefaults => self.fetch_username(),
                         Job::FieldCopyDefaults(target) => {
                             match self.custom_field_command(target, true) {
                                 Ok((command, revision)) => {
                                     self.request(Job::FieldCopy, command, Some(revision))
                                 }
                                 Err(error) => {
-                                    self.notice = error;
+                                    self.report_error(error);
                                     Task::none()
                                 }
                             }
@@ -1128,7 +1459,19 @@ impl App {
                     };
                 }
                 Reply::Copied => {
-                    self.notice = "Generated value copied with timed clipboard cleanup.".into()
+                    self.notice = if job == Job::UsernameCopied {
+                        "Username copied. The clipboard will clear automatically."
+                    } else {
+                        "Generated value copied with timed clipboard cleanup."
+                    }
+                    .into();
+                }
+                Reply::Names(names) => {
+                    self.names = names;
+                    self.notice = "Vault name saved on this device.".into();
+                }
+                Reply::WebsiteOpened => {
+                    self.notice = "Website opened in your default browser.".into()
                 }
                 Reply::Acknowledged => {
                     self.pending = None;
@@ -1172,7 +1515,13 @@ impl App {
             self.hide_secrets();
         }
         if response.code != ResponseCode::Success as i32 && !incomplete_audit {
-            self.notice = response.error_message();
+            if job == Job::SavedList {
+                self.ui.saved_item = None;
+            }
+            if matches!(job, Job::Create | Job::Unlock) {
+                self.creation = None;
+            }
+            self.report_error(response.error_message());
             self.hide_secrets();
             if response.code == ResponseCode::Conflict as i32 {
                 self.stop_tool_watches();
@@ -1203,10 +1552,46 @@ impl App {
                 };
                 let changed = self.session != next_session;
                 if changed {
+                    let known = self
+                        .ui
+                        .active_vault
+                        .take()
+                        .filter(|(_, session)| next_session.as_ref() == Some(session));
                     self.clear_vault();
+                    self.ui.active_vault = known;
                 }
                 self.session = next_session;
                 if status.locked {
+                    if self.pending.is_some() {
+                        self.creation = None;
+                    }
+                    if self.creation.is_some() && self.select_created_vault {
+                        let new: Vec<_> = vaults
+                            .iter()
+                            .filter(|id| !self.vaults.contains(id))
+                            .cloned()
+                            .collect();
+                        if new.len() == 1 {
+                            let creation = self.creation.take().unwrap();
+                            let id = new[0].clone();
+                            self.vault = Some(id.clone());
+                            self.vaults = vaults;
+                            self.select_created_vault = false;
+                            let client = self.client.clone();
+                            let timeout = self.conf.unlock.timeout;
+                            return self.launch(Job::Unlock, move || {
+                                backend::open_created(
+                                    &client,
+                                    id,
+                                    creation.name,
+                                    creation.password,
+                                    timeout,
+                                )
+                            });
+                        }
+                        self.creation = None;
+                        self.notice = "Your vault was created. Select the new vault and unlock it to continue.".into();
+                    }
                     if self.select_created_vault {
                         self.vault = vaults
                             .iter()
@@ -1223,8 +1608,7 @@ impl App {
                         self.vault = self.vaults.first().cloned();
                     }
                     if matches!(job, Job::Connect | Job::Attach) {
-                        self.notice =
-                            "Server connected. Unlock a vault or create one to get started.".into();
+                        self.notice.clear();
                     }
                 } else {
                     self.vaults = vaults;
@@ -1284,7 +1668,14 @@ impl App {
                     if self.tab == Tab::Vault {
                         ""
                     } else {
-                        "Results are ready in Tools."
+                        match action {
+                            workflows::Action::Audit => "Vault health check complete.",
+                            workflows::Action::History => "Password history loaded.",
+                            workflows::Action::Trash => "Deleted items loaded.",
+                            workflows::Action::Search => "Search complete.",
+                            workflows::Action::PreviewImport => "Import preview ready.",
+                            _ => "Operation complete.",
+                        }
                     }
                     .into()
                 };
@@ -1385,7 +1776,42 @@ impl App {
                     return workflows::show_result();
                 }
             }
+            (Job::UsernameValue, ResponsePayload::Item(item)) => {
+                if self.item.as_ref().is_some_and(|current| {
+                    current.id == item.id && current.revision == item.revision
+                }) && let Some(username) = item.username.filter(|value| !value.is_empty())
+                {
+                    let timeout = self.conf.clipboard.timeout;
+                    let username = SecretString::from(username);
+                    return self.launch(Job::UsernameCopied, move || {
+                        password_manager::clipboard::copy_with_timeout(username.expose(), timeout)
+                            .map_err(Failure::from)?;
+                        Ok(Reply::Copied)
+                    });
+                }
+            }
             (Job::List, ResponsePayload::ItemPage(page)) => self.items = page.items,
+            (Job::SavedList, ResponsePayload::ItemPage(page)) => {
+                let selected = self.ui.saved_item.take().and_then(|saved| {
+                    let mut matches = page.items.iter().filter(|item| {
+                        !saved.previous_ids.contains(&item.id)
+                            && item.name == saved.name
+                            && item.kind == saved.kind
+                    });
+                    let id = matches.next()?.id;
+                    matches.next().is_none().then_some(id)
+                });
+                self.items = page.items;
+                if let Some(id) = selected {
+                    let item = self.items.iter().find(|item| item.id == id).unwrap();
+                    return self.request(
+                        Job::AccountItem(id),
+                        ServerCommand::ManagementItem { id, reveal: false },
+                        Some(item.revision),
+                    );
+                }
+                self.notice = "Item saved. Select it from your items to continue.".into();
+            }
             (Job::EditorList(id), ResponsePayload::ItemPage(page)) => {
                 self.items = page.items;
                 if let Some(item) = self.items.iter().find(|item| item.id == id) {
@@ -1480,14 +1906,30 @@ impl App {
                 self.notice = "Server stopped.".into();
             }
             (Job::Create | Job::Unlock | Job::Lock, _) => {
+                let known = if job == Job::Unlock {
+                    self.vault.clone().zip(response.session_id.clone())
+                } else {
+                    None
+                };
+                let creation = if job == Job::Create && self.pending.is_none() {
+                    self.creation.take()
+                } else {
+                    None
+                };
                 self.clear_vault();
+                self.creation = creation;
+                self.ui.active_vault = known;
                 self.creating = false;
                 if job == Job::Create {
                     self.vault = None;
                     self.select_created_vault = true;
                 }
                 self.notice = if job == Job::Create {
-                    "Vault created. Select it and unlock to continue.".into()
+                    if self.creation.is_some() {
+                        "Opening your new vault…".into()
+                    } else {
+                        "Vault created. Select it and unlock to continue.".into()
+                    }
                 } else {
                     String::new()
                 };
@@ -1499,18 +1941,36 @@ impl App {
                     return self.refresh_editor(id);
                 }
             }
-            (Job::Save | Job::Delete, _) => {
+            (Job::Save, _) => {
+                let id = self.draft.as_ref().and_then(|draft| draft.id);
+                self.ui.saved_item = self.draft.as_ref().filter(|_| id.is_none()).map(|draft| {
+                    presentation::SavedItem {
+                        name: draft.name.clone(),
+                        kind: draft.kind,
+                        previous_ids: self.items.iter().map(|item| item.id).collect(),
+                    }
+                });
                 self.workspace.prepared = None;
                 self.workspace.clear_inputs();
                 self.draft = None;
                 self.item = None;
                 self.delete_confirm = false;
-                self.notice = if job == Job::Save {
-                    "Item saved."
-                } else {
-                    "Item moved to trash. Restore it in Tools → History, trash & audit."
+                self.notice = "Item saved.".into();
+                if let Some(id) = id {
+                    return self.refresh_account(id);
                 }
-                .into();
+                return self.load_items_for(Job::SavedList);
+            }
+            (Job::Delete, _) => {
+                if let (Some(item), Some(session)) = (&self.item, &self.session) {
+                    self.ui.undo_trash = Some((item.id, session.clone()));
+                }
+                self.workspace.prepared = None;
+                self.workspace.clear_inputs();
+                self.draft = None;
+                self.item = None;
+                self.delete_confirm = false;
+                self.notice = "Item moved to encrypted trash. Undo here or restore it from Tools → Deleted items.".into();
                 return self.load_items();
             }
             (Job::Copy, _) => self.notice = "Secret copied with timed clipboard cleanup.".into(),
@@ -1553,6 +2013,26 @@ impl App {
         ))
     }
 
+    fn fetch_username(&mut self) -> Task<Message> {
+        if self.conf.clipboard.timeout == 0 {
+            self.report_error(
+                "Copying is disabled. Set a clipboard timeout in Settings → Security.",
+            );
+            return Task::none();
+        }
+        if let Some(item) = &self.item {
+            return self.request(
+                Job::UsernameValue,
+                ServerCommand::ManagementItem {
+                    id: item.id,
+                    reveal: false,
+                },
+                Some(item.revision),
+            );
+        }
+        Task::none()
+    }
+
     fn copy_item(&mut self) -> Task<Message> {
         if self.conf.clipboard.timeout == 0 {
             self.notice = "Copying is disabled because the clipboard timeout is zero.".into();
@@ -1578,7 +2058,7 @@ impl App {
                     draft.apply_copy_policy(&mut command, &self.conf);
                     return self.request(job, command, draft.revision);
                 }
-                Err(error) => self.notice = error,
+                Err(error) => self.report_error(error),
             }
         }
         Task::none()
@@ -1588,7 +2068,7 @@ impl App {
         let policy = match self.generator.generation_policy(&self.conf) {
             Ok(policy) => policy,
             Err(error) => {
-                self.notice = error;
+                self.report_error(error);
                 return Task::none();
             }
         };
@@ -1621,12 +2101,18 @@ impl App {
                     };
                     self.generated_until = Some(Instant::now() + Duration::from_secs(60));
                     self.show_generated = false;
+                    self.notice = "New secret ready. Copy it or save it in an item; it clears from this screen after 60 seconds.".into();
+                    let show = iced::widget::operation::snap_to(
+                        "generator-form",
+                        iced::widget::operation::RelativeOffset::START,
+                    );
                     if policy.copy {
-                        return self.copy_generated();
+                        return Task::batch([show, self.copy_generated()]);
                     }
+                    return show;
                 }
             }
-            Err(error) => self.notice = error,
+            Err(error) => self.report_error(error),
         }
         Task::none()
     }
@@ -1636,7 +2122,7 @@ impl App {
         let timeout = match self.generator.copy_timeout(&self.conf) {
             Ok(timeout) => timeout,
             Err(error) => {
-                self.notice = error;
+                self.report_error(error);
                 return Task::none();
             }
         };

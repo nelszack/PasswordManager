@@ -76,7 +76,8 @@ pub(crate) fn with_test_kdf_parameters<T>(
     operation()
 }
 
-pub(crate) fn validate_new_password(password: &str) -> Result<(), &'static str> {
+/// Shared policy for new vault credentials, including desktop form feedback.
+pub fn validate_new_password(password: &str) -> Result<(), &'static str> {
     if password.chars().count() < 14 {
         return Err("master passwords must contain at least 14 characters");
     }

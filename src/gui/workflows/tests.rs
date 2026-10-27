@@ -1313,3 +1313,39 @@ fn otp_watch_results_bind_to_the_prepared_account_even_if_selection_changes() {
     );
     assert!(app.workspace.otp_result_for(&app).is_none());
 }
+
+#[test]
+fn tools_results_and_options_are_separate_without_discarding_a_reviewed_result() {
+    let mut app = app();
+    app.workspace.section = Section::Audit;
+    app.workspace
+        .receive(ResponsePayload::Message("Audit done".into()));
+    assert!(app.workspace.show_results);
+    let _ = app.workflow(Event::ShowResults(false));
+    assert!(!app.workspace.show_results);
+    assert!(app.workspace.result.is_some());
+    let _ = app.workflow(Event::ShowResults(true));
+    assert!(app.workspace.show_results);
+    let _ = app.workflow(Event::Section(Section::Trash));
+    assert!(!app.workspace.show_results);
+    assert!(app.workspace.result.is_none());
+}
+
+#[test]
+fn direct_file_tool_selection_opens_the_requested_task_and_clears_old_credentials() {
+    let mut app = app();
+    app.workspace.password = "temporary password".into();
+    let _ = app.workflow(Event::FileOperation(FileOperation::Import));
+    assert_eq!(app.workspace.section, Section::Files);
+    assert_eq!(app.workspace.file_operation, FileOperation::Import);
+    assert!(app.workspace.password.is_empty());
+}
+
+#[test]
+fn onboarding_import_targets_a_new_vault_when_no_vault_is_unlocked() {
+    let mut app = app();
+    app.session = None;
+    let _ = app.workflow(Event::FileOperation(FileOperation::Import));
+    assert!(app.workspace.import_new);
+    assert_eq!(app.workspace.section, Section::Files);
+}

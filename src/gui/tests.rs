@@ -1244,3 +1244,368 @@ fn review_incomplete_audits_from_other_sessions_clear_previous_results() {
         assert!(app.session.is_none());
     }
 }
+
+#[test]
+fn compact_search_preserves_a_dirty_draft_until_discard_is_confirmed() {
+    let mut app = unlocked();
+    app.ui.width = 600.0;
+    app.draft.as_mut().unwrap().dirty = true;
+    let _ = app.update(Message::FocusSearch);
+    assert!(app.draft.is_some());
+    assert!(matches!(app.deferred, Some(Navigate::Close)));
+    let _ = app.update(Message::KeepEditing);
+    assert!(app.draft.is_some());
+    assert!(app.deferred.is_none());
+}
+
+#[test]
+fn closing_advanced_unlock_clears_the_hidden_key_override() {
+    let mut app = app();
+    app.ui.unlock_advanced = true;
+    app.key_path = "/tmp/demo.key".into();
+    app.master = "password still being entered".into();
+    let _ = app.update(Message::Disclosure(presentation::Disclosure::Unlock));
+    assert!(!app.ui.unlock_advanced);
+    assert!(app.key_path.is_empty());
+    assert_eq!(app.master.expose(), "password still being entered");
+}
+
+#[test]
+fn save_shortcut_routes_to_settings_and_preserves_the_item_draft() {
+    let mut app = unlocked();
+    app.tab = Tab::Settings;
+    app.settings.edit(SettingsField::Length, "0".into());
+    let _ = app.update(Message::Save);
+    assert!(!app.busy);
+    assert!(app.ui.notice_error);
+    assert!(app.notice.contains("length"));
+    assert!(app.draft.is_some());
+}
+
+#[test]
+fn new_item_shortcut_opens_the_editor_from_other_tabs() {
+    let mut app = unlocked();
+    app.tab = Tab::Generator;
+    let _ = app.update(Message::Navigate(Navigate::New));
+    assert_eq!(app.tab, Tab::Vault);
+    assert!(app.draft.as_ref().unwrap().id.is_none());
+}
+
+#[test]
+fn weak_master_passwords_are_rejected_locally_without_clearing_the_form() {
+    let mut app = app();
+    app.creating = true;
+    let _ = app.update(Message::Master("aaaaaaaaaaaaaa".into()));
+    app.confirmation = app.master.clone();
+    assert!(app.ui.master_error.is_some());
+    let _ = app.update(Message::Create);
+    assert!(!app.busy);
+    assert!(app.ui.notice_error);
+    assert_eq!(app.master.expose(), "aaaaaaaaaaaaaa");
+    assert_eq!(app.confirmation, app.master);
+}
+
+fn pending_gui_creation() -> App {
+    let mut app = app();
+    app.running = true;
+    app.creating = true;
+    app.vaults = vec!["existing.enc".into()];
+    app.ui.vault_name = "Work".into();
+    app.master = "cobalt-raindrop-otter-galaxy-742".into();
+    app.confirmation = app.master.clone();
+    let _ = app.update(Message::Create);
+    assert!(app.creation.is_some());
+    assert!(app.master.is_empty() && app.confirmation.is_empty());
+    let _ = app.update(Message::Finished(
+        app.serial,
+        Job::Create,
+        Arc::new(Ok(reply(
+            ResponsePayload::Message("Vault created".into()),
+            None,
+        ))),
+    ));
+    app
+}
+
+#[test]
+fn gui_creation_opens_only_the_unambiguously_new_file() {
+    let mut app = pending_gui_creation();
+    let mut response = RpcResponse::success(ResponsePayload::Status(ServerStatus::new(true, None)));
+    response.session_id = None;
+    let _ = app.update(Message::Finished(
+        app.serial,
+        Job::Status,
+        Arc::new(Ok(Reply::Server {
+            response: Box::new(response),
+            vaults: vec!["existing.enc".into(), "new.enc".into()],
+            pending: vec![],
+        })),
+    ));
+    assert_eq!(app.vault.as_deref(), Some("new.enc"));
+    assert!(app.creation.is_none());
+    assert!(app.busy); // The exact-file unlock is queued; no test task is driven.
+}
+
+#[test]
+fn ambiguous_creation_discovery_never_guesses_which_vault_to_open() {
+    let mut app = pending_gui_creation();
+    let serial = app.serial;
+    let _ = app.update(Message::Finished(
+        serial,
+        Job::Status,
+        Arc::new(Ok(Reply::Server {
+            response: Box::new(RpcResponse::success(ResponsePayload::Status(
+                ServerStatus::new(true, None),
+            ))),
+            vaults: vec!["existing.enc".into(), "one.enc".into(), "two.enc".into()],
+            pending: vec![],
+        })),
+    ));
+    assert!(app.creation.is_none());
+    assert_eq!(app.serial, serial);
+    assert!(!app.busy);
+    assert!(app.notice.contains("Select"));
+}
+
+#[test]
+fn explicit_lock_drops_the_creation_credential_before_late_replies() {
+    let mut app = pending_gui_creation();
+    let serial = app.serial;
+    let _ = app.update(Message::Lock);
+    assert!(app.creation.is_none());
+    let _ = app.update(Message::Finished(
+        serial,
+        Job::Status,
+        Arc::new(Ok(reply(
+            ResponsePayload::Status(ServerStatus::new(true, None)),
+            None,
+        ))),
+    ));
+    assert!(app.creation.is_none());
+    assert!(app.session.is_none());
+}
+
+#[test]
+fn edit_shortcut_cannot_replace_an_unsaved_draft() {
+    let mut app = unlocked();
+    let _ = app.update(Message::Name("Unsaved name".into()));
+    let _ = app.update(Message::Edit);
+    assert_eq!(app.draft.as_ref().unwrap().name, "Unsaved name");
+}
+
+#[test]
+fn username_copy_checks_timeout_and_the_selected_revision() {
+    let mut app = unlocked();
+    app.draft = None;
+    app.conf.clipboard.timeout = 0;
+    let serial = app.serial;
+    let _ = app.fetch_username();
+    assert_eq!(app.serial, serial);
+    assert!(app.ui.notice_error);
+    app.conf.clipboard.timeout = 15;
+    let _ = app.fetch_username();
+    let serial = app.serial;
+    let mut changed = item();
+    changed.revision += 1;
+    let _ = app.update(Message::Finished(
+        serial,
+        Job::UsernameValue,
+        Arc::new(Ok(reply(
+            ResponsePayload::Item(changed),
+            Some(&"a".repeat(64)),
+        ))),
+    ));
+    assert_eq!(app.serial, serial); // No clipboard task for a stale revision.
+    assert!(!app.busy);
+}
+
+#[test]
+fn typed_fields_are_added_only_when_edited_and_preserve_other_hidden_fields() {
+    let mut app = unlocked();
+    app.draft.as_mut().unwrap().fields.push(model::FieldDraft {
+        name: "Existing token".into(),
+        original_name: Some("Existing token".into()),
+        secret: true,
+        hidden: true,
+        ..Default::default()
+    });
+    let _ = app.update(Message::TemplateValue("Security code", true, "123".into()));
+    let ServerCommand::Update(update) = app.draft.as_ref().unwrap().command().unwrap() else {
+        panic!()
+    };
+    assert_eq!(update.set_fields.len(), 1);
+    assert_eq!(update.set_fields[0].name, "Security code");
+    assert!(update.set_fields[0].secret);
+    assert_eq!(update.set_fields[0].value.expose(), "123");
+    assert!(update.remove_fields.is_empty());
+}
+
+#[test]
+fn duplicate_vault_names_remain_distinguishable_without_showing_filenames() {
+    let mut app = app();
+    app.vaults = vec!["one.enc".into(), "two.enc".into()];
+    app.names.0.insert("one.enc".into(), "Work".into());
+    app.names.0.insert("two.enc".into(), "Work".into());
+    let choices = app.vault_choices();
+    assert_ne!(choices[0].label, choices[1].label);
+    assert!(choices.iter().all(|choice| !choice.label.contains(".enc")));
+}
+
+#[test]
+fn a_pending_change_discovered_after_creation_prevents_automatic_unlock() {
+    let mut app = pending_gui_creation();
+    let serial = app.serial;
+    let _ = app.update(Message::Finished(
+        serial,
+        Job::Status,
+        Arc::new(Ok(Reply::Server {
+            response: Box::new(RpcResponse::success(ResponsePayload::Status(
+                ServerStatus::new(true, None),
+            ))),
+            vaults: vec!["existing.enc".into(), "new.enc".into()],
+            pending: vec!["f".repeat(32)],
+        })),
+    ));
+    assert!(app.pending.is_some());
+    assert!(app.creation.is_none());
+    assert_eq!(app.serial, serial);
+}
+
+#[test]
+fn the_header_vault_name_survives_its_unlock_but_never_an_external_session_switch() {
+    let mut app = app();
+    app.running = true;
+    app.vault = Some("personal.enc".into());
+    let session = "a".repeat(64);
+    let _ = app.complete(
+        Job::Unlock,
+        reply(ResponsePayload::Message("Unlocked".into()), Some(&session)),
+    );
+    let _ = app.complete(
+        Job::Status,
+        reply(
+            ResponsePayload::Status(ServerStatus::new(false, None)),
+            Some(&session),
+        ),
+    );
+    assert_eq!(
+        app.ui.active_vault.as_ref().map(|(id, _)| id.as_str()),
+        Some("personal.enc")
+    );
+    let _ = app.complete(
+        Job::Status,
+        reply(
+            ResponsePayload::Status(ServerStatus::new(false, None)),
+            Some(&"b".repeat(64)),
+        ),
+    );
+    assert!(app.ui.active_vault.is_none());
+}
+
+#[test]
+fn saved_edits_reopen_the_current_revision_without_clearing_filters() {
+    let mut app = unlocked();
+    app.ui.kind = Some(ItemKind::Login);
+    let _ = app.complete(
+        Job::Save,
+        reply(
+            ResponsePayload::Message("Item updated.".into()),
+            Some(&"a".repeat(64)),
+        ),
+    );
+    assert!(app.draft.is_none());
+    assert!(app.ui.saved_item.is_none());
+    assert_eq!(app.query, "query");
+    assert_eq!(app.ui.kind, Some(ItemKind::Login));
+    assert!(app.busy);
+    let mut updated = item();
+    updated.revision += 1;
+    let _ = app.complete(
+        Job::AccountList(updated.id),
+        reply(
+            ResponsePayload::ItemPage(password_manager::vault::ItemPage {
+                items: vec![editor_summary(&updated)],
+                total: 1,
+            }),
+            Some(&"a".repeat(64)),
+        ),
+    );
+    let _ = app.complete(
+        Job::AccountItem(updated.id),
+        reply(
+            ResponsePayload::Item(updated.clone()),
+            Some(&"a".repeat(64)),
+        ),
+    );
+    assert_eq!(app.item.as_ref().unwrap().revision, updated.revision);
+    assert!(app.draft.is_none());
+}
+
+#[test]
+fn new_save_selects_only_a_unique_new_matching_item() {
+    for ambiguous in [false, true] {
+        let mut app = unlocked();
+        app.items = vec![editor_summary(&item())];
+        app.draft.as_mut().unwrap().id = None;
+        let _ = app.complete(
+            Job::Save,
+            reply(
+                ResponsePayload::Message("Item added.".into()),
+                Some(&"a".repeat(64)),
+            ),
+        );
+        assert!(
+            app.draft.is_none(),
+            "saved passwords must be dropped before listing"
+        );
+        assert!(app.ui.saved_item.is_some());
+        let mut added = item();
+        added.id = 2;
+        let mut rows = vec![editor_summary(&item()), editor_summary(&added)];
+        if ambiguous {
+            let mut other = added.clone();
+            other.id = 3;
+            rows.push(editor_summary(&other));
+        }
+        app.busy = false;
+        let _ = app.complete(
+            Job::SavedList,
+            reply(
+                ResponsePayload::ItemPage(password_manager::vault::ItemPage {
+                    total: rows.len(),
+                    items: rows,
+                }),
+                Some(&"a".repeat(64)),
+            ),
+        );
+        assert!(app.ui.saved_item.is_none());
+        assert_eq!(
+            app.busy, !ambiguous,
+            "ambiguous additions must never be guessed"
+        );
+        if !ambiguous {
+            let _ = app.complete(
+                Job::AccountItem(2),
+                reply(ResponsePayload::Item(added), Some(&"a".repeat(64))),
+            );
+            assert_eq!(app.item.as_ref().unwrap().id, 2);
+        } else {
+            assert!(app.item.is_none());
+        }
+    }
+}
+
+#[test]
+fn generated_results_have_completion_feedback_and_expire_without_losing_options() {
+    let mut app = app();
+    app.tab = Tab::Generator;
+    app.conf.genpass.copy = false;
+    let _ = app.generate();
+    assert!(!app.generated.is_empty());
+    assert!(app.notice.starts_with("New secret ready."));
+    let length = app.generator_length.clone();
+    let deadline = app.generated_until.unwrap();
+    let _ = app.update(Message::Tick(deadline + Duration::from_secs(1)));
+    assert!(app.generated.is_empty());
+    assert_eq!(app.generator_length, length);
+}

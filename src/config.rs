@@ -14,6 +14,42 @@ pub struct Config {
     pub recovery: RecoveryConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    pub desktop: DesktopConfig,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Appearance {
+    #[default]
+    Dark,
+    Light,
+    HighContrast,
+}
+
+impl std::fmt::Display for Appearance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::HighContrast => "High contrast",
+        })
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+pub struct DesktopConfig {
+    pub appearance: Appearance,
+    pub scale: u16,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            appearance: Appearance::Dark,
+            scale: 100,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -57,6 +93,8 @@ pub struct ConfigChanges {
     pub default_vault: Option<String>,
     /// Return to automatic vault selection without resetting other settings.
     pub clear_default_vault: bool,
+    pub desktop_appearance: Option<Appearance>,
+    pub desktop_scale: Option<u16>,
 }
 
 /// Shared duration syntax for CLI arguments and desktop settings.
@@ -278,6 +316,15 @@ pub fn try_update(
             return Err("server port must be between 1 and 65535".to_string());
         }
         config.server.port = i;
+    }
+    if let Some(appearance) = modify.desktop_appearance {
+        config.desktop.appearance = appearance;
+    }
+    if let Some(scale) = modify.desktop_scale {
+        if ![100, 115, 130].contains(&scale) {
+            return Err("interface scale must be 100, 115, or 130 percent".into());
+        }
+        config.desktop.scale = scale;
     }
     if modify.clear_default_vault {
         config.unlock.vault_id = None;

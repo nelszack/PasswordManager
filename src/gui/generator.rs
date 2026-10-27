@@ -90,6 +90,34 @@ impl Default for Options {
     }
 }
 impl Options {
+    pub fn input_error(&self, passphrase: bool, length: &str, words: &str) -> Option<&'static str> {
+        if passphrase {
+            if words
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .is_none_or(|value| value == 0)
+            {
+                return Some("Choose between 1 and 255 words.");
+            }
+        } else {
+            if length
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .is_none_or(|value| value == 0)
+            {
+                return Some("Choose a length between 1 and 255.");
+            }
+            if !self.uppercase && !self.lowercase && !self.digits && !self.symbols {
+                return Some("Select at least one character group.");
+            }
+            if self.symbols && self.symbol_set.is_empty() {
+                return Some("Enter allowed symbols or turn off Symbols.");
+            }
+        }
+        None
+    }
     pub fn stats_enabled(&self, conf: &Config) -> bool {
         self.stats.resolve(conf.genpass.stats)
     }

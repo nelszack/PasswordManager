@@ -9,7 +9,16 @@ use password_manager::{
 
 #[derive(Clone, Debug)]
 pub enum Reply {
-    Vaults(Vec<String>),
+    Vaults {
+        vaults: Vec<String>,
+        names: super::vault_names::Names,
+    },
+    Created {
+        reply: Box<Reply>,
+        names: super::vault_names::Names,
+    },
+    Names(super::vault_names::Names),
+    WebsiteOpened,
     Configuration(Config),
     Server {
         response: Box<ProtocolResponse>,
@@ -57,7 +66,11 @@ pub fn attach(client: &AuthenticatedClient) -> Result<Reply, Failure> {
 
 /// Discovery is local and works independently of the server's status.
 pub fn discover_vaults() -> Result<Reply, Failure> {
-    discover_vaults_at(&data_dir()).map(Reply::Vaults)
+    Ok(Reply::Vaults {
+        vaults: discover_vaults_at(&data_dir())?,
+        names: super::vault_names::Names::read(&config_dir().join("vault-names.json"))
+            .map_err(Failure::from)?,
+    })
 }
 
 fn discover_vaults_at(directory: &std::path::Path) -> Result<Vec<String>, Failure> {
@@ -112,6 +125,48 @@ fn reload_settings_at(path: &std::path::Path) -> Result<Reply, Failure> {
             .map_err(|error| Failure::from(error.to_string()))?;
     }
     Ok(Reply::Configuration(conf))
+}
+
+pub fn save_vault_name(id: &str, label: &str) -> Result<Reply, Failure> {
+    super::vault_names::Names::save(&config_dir().join("vault-names.json"), id, label)
+        .map(Reply::Names)
+        .map_err(Failure::from)
+}
+
+pub fn open_created(
+    client: &AuthenticatedClient,
+    id: String,
+    name: String,
+    password: SecretString,
+    timeout: u64,
+) -> Result<Reply, Failure> {
+    let names = super::vault_names::Names::save(&config_dir().join("vault-names.json"), &id, &name)
+        .map_err(|message| {
+            Failure::from(format!(
+                "Your vault was created but is still locked. {message}"
+            ))
+        })?;
+    let reply = request(
+        client,
+        RequestEnvelope::new(password_manager::types::ServerCommand::Unlock(
+            password_manager::types::UnlockInfo {
+                key: password_manager::types::PasswordType::Password(password.expose_owned()),
+                timeout,
+                vault_file: Some(id),
+            },
+        )),
+    )
+    .map_err(|mut failure| {
+        failure.message = format!(
+            "Your vault was created. Unlock it to continue. {}",
+            failure.message
+        );
+        failure
+    })?;
+    Ok(Reply::Created {
+        reply: Box::new(reply),
+        names,
+    })
 }
 
 pub fn request(client: &AuthenticatedClient, envelope: RequestEnvelope) -> Result<Reply, Failure> {

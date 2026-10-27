@@ -116,6 +116,7 @@ fn updates_persist_all_fields_and_boundary_values() {
                     trash_retention_days: retention
                 },
                 server: ServerConfig { port },
+                desktop: DesktopConfig::default(),
             },
             "{label}"
         );
@@ -328,6 +329,9 @@ password_history_limit=10
 trash_retention_days=0
 [server]
 port={}
+[desktop]
+appearance="dark"
+scale=100
 "#,
         crate::server::DEFAULT_PORT
     );
@@ -336,4 +340,57 @@ port={}
     try_read_config(&config_path).unwrap();
 
     assert_eq!(fs::read_to_string(&config_path).unwrap(), complete);
+}
+
+#[test]
+fn desktop_preferences_persist_without_changing_cli_defaults() {
+    let (_root, path) = isolated_config();
+    let initial = default_test_config(true, &path);
+    let updated = try_update(
+        initial.clone(),
+        ConfigChanges {
+            desktop_appearance: Some(Appearance::HighContrast),
+            desktop_scale: Some(130),
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(read_config(&path), updated);
+    assert_eq!(updated.genpass, initial.genpass);
+    assert_eq!(updated.unlock, initial.unlock);
+    assert_eq!(updated.desktop.appearance, Appearance::HighContrast);
+    assert_eq!(updated.desktop.scale, 130);
+    assert!(
+        try_update(
+            updated.clone(),
+            ConfigChanges {
+                desktop_scale: Some(0),
+                ..Default::default()
+            },
+            &path
+        )
+        .is_err()
+    );
+    assert_eq!(read_config(&path), updated);
+    let reset = try_update(
+        updated,
+        ConfigChanges {
+            reset: true,
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(reset.desktop, DesktopConfig::default());
+}
+
+#[test]
+fn older_configuration_files_receive_desktop_defaults() {
+    let (_root, path) = isolated_config();
+    fs::write(&path, "[genpass]\nlength = 37\n").unwrap();
+    let config = try_read_config(&path).unwrap();
+    assert_eq!(config.genpass.length, 37);
+    assert_eq!(config.desktop, DesktopConfig::default());
+    assert_eq!(try_read_config(&path).unwrap(), config);
 }

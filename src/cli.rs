@@ -599,6 +599,7 @@ impl From<ConfigArgs> for crate::config::ConfigChanges {
             server_port: args.server_port,
             default_vault: args.default_vault,
             clear_default_vault: false,
+            ..Default::default()
         }
     }
 }

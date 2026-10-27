@@ -109,7 +109,7 @@ impl App {
         let port = match parse_connection_port(&self.connection_port) {
             Ok(port) => port,
             Err(error) => {
-                self.notice = error.into();
+                self.report_error(error);
                 return Task::none();
             }
         };

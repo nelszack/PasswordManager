@@ -45,11 +45,15 @@ The Vault tab supports creating a password-protected vault, selecting an
 existing vault, unlocking with a password or an absolute external-key path,
 searching item names/usernames/URLs, adding items, and viewing/editing names,
 types, usernames, primary secrets, URLs, multiline notes, and custom fields.
-Enable **Multiline secret** when entering private keys or other multiline values;
-that editor displays the text while editing. New vaults stay locked until
-explicitly unlocked. Moving an item to trash requires confirmation.
-Use **Tools → History, trash & audit** to restore deleted items or passwords.
-The unlock form also allows an inactivity timeout for that individual session.
+Open **Custom fields & advanced options** and enable **Edit as a multiline secret** when entering private keys or other multiline values;
+that editor displays the text while editing. The desktop creation form accepts a
+friendly vault name and opens the new vault using the password just entered.
+CLI-created vaults still remain locked. If another client creates a vault at
+the same time and the new file cannot be identified unambiguously, select and
+unlock it explicitly. Moving an item to trash requires confirmation; the feedback
+bar offers **Undo deletion** until you navigate elsewhere. **Tools → Deleted
+items** and **Tools → Password history** provide recovery afterward.
+Open **Advanced unlock options** to choose a key file or change the inactivity timeout for that session. With no vaults, the welcome screen offers creation and import/restore directly. Narrow windows show the item list and details one at a time; **Back to items** returns to the list. Search can be narrowed by item type, with **Advanced search** beside the list.
 
 Use **Browse…** beside the external-key path to select a file with the native
 file picker, or enter the path manually. Choosing a file fills its path; press
@@ -59,9 +63,8 @@ FileChooser backend such as `xdg-desktop-portal-gtk` or
 `xdg-desktop-portal-kde`. If your desktop lacks a file-picker portal, enter
 the absolute key-file path directly. Windows and macOS use their native dialogs.
 
-The primary secret stays unchanged during edits unless **Replace the existing
-primary secret** is checked. An empty replacement deliberately clears it.
-**Generate replacement password** fills a new secret that is committed only
+The primary secret stays unchanged during edits unless **Replace primary secret** is checked. An empty replacement deliberately clears it.
+**Generate a strong password** fills a new secret that is committed only
 when you save the item. The Generator tab also creates passwords and
 passphrases independently of the vault, with character-class controls, a custom
 symbol set, ambiguous-character exclusion, word count, and separator. It also
@@ -69,6 +72,61 @@ checks an existing password's strength locally without storing it. Generated
 values disappear after 60 seconds. Saved-item secrets reveal for 15 seconds and hide on focus loss
 or Escape. Ctrl+L (Command+L on macOS) locks the vault. Copy buttons use the
 configured clipboard cleanup; see [clipboard behavior](#clipboard-behavior).
+
+Vault names are labels on this device, stored in `vault-names.json` beside the
+configuration. Encrypted filenames are unchanged; the advanced unlock section
+shows the underlying filename when needed. **Settings → Security → Save vault
+name** changes the selected vault's label. Names survive preference resets.
+
+Item details offers **Copy username**, **Copy secret**, and **Open website**.
+Website opening accepts explicit HTTP/HTTPS URLs without embedded credentials or
+wildcards and uses the system browser. Username copying checks the unlock session
+and item revision, follows the clipboard timeout, and is disabled at timeout zero.
+
+The editor keeps **Save item** and **Cancel** visible while its fields scroll.
+Saving returns to the saved item's details with its current revision and keeps
+your search and type filter. If concurrent additions make a newly saved item
+ambiguous, the app refreshes the list instead of guessing which item to open.
+Each item type has relevant labels and guidance. Cards, identities, Wi-Fi,
+licenses, SSH keys, and API secrets show their usual optional fields directly;
+untouched fields are preserved, and new optional fields are stored only when
+edited. Routine feedback appears in a fixed footer without moving the form.
+Validation appears beside names, custom fields, and settings inputs. Custom
+fields and copy overrides are under **Custom fields & advanced options**;
+authenticator enrollment has its own disclosure. Changing tabs preserves an
+open item draft and offers **Return to item draft**. Navigating to another
+item requires saving or explicitly discarding dirty changes.
+
+**Settings → Appearance** provides Dark, Light, and High contrast themes and
+100%, 115%, and 130% interface sizes. Appearance previews immediately and persists
+when you save settings. Settings are grouped into Appearance, Security,
+Passwords, Recovery, and Connection; Save remains visible in each section.
+Section navigation scrolls with the settings content to leave room for controls
+at enlarged sizes. Very short windows scroll the whole page. The keyboard guide
+opens in the main content area and can be closed without moving the current form.
+
+Generated secrets appear above the generation options. After generation, the
+view returns to the top so the result and its Copy/Show controls are visible.
+The feedback bar announces completion and the secret is cleared after 60 seconds.
+
+Choose **Shortcuts** for the keyboard guide. Ctrl (Command on macOS) + F searches.
+With that same modifier, N creates an item, S saves the current item or settings,
+1–4 switches between Vault, Generator, Tools, and Settings, E edits the selected
+item, and L locks the vault. Ctrl/Command+Shift+C copies the selected item's username;
+Ctrl/Command+Shift+O opens its first website. These companion actions operate
+on saved item details, not unsaved drafts.
+Tab / Shift+Tab moves between controls; Enter / Space activates buttons and
+checkboxes. Arrow keys, Home, and End change selection-list values. Keyboard
+focus has a visible outline and scrolls into view in forms. Escape hides
+revealed secrets. Native screen-reader integration still depends on toolkit
+and platform support.
+
+The Tools overview offers direct tasks for vault health, deleted items, password
+history, encrypted backups, restore, import, export, advanced search, credentials,
+and browser setup. Results open in their own view at the top, with **Back to
+options**, **Clear result**, and **View your items** actions. Health findings open
+the affected item directly. Destructive confirmations replace the options view so
+the reviewed operation and decision controls are visible together.
 
 Settings exposes every `pm config` preference: password length, strength/statistics,
 automatic copying of generated passwords and newly added login passwords,
@@ -78,7 +136,7 @@ The Generator tab follows saved defaults unless you choose a one-time statistics
 automatic-copy, or clipboard-timeout override. Length and generation options are
 also temporary. New items have their own Copy / Do not copy override, including
 non-login items. A timeout of zero disables copying. Settings reload when opened;
-**Refresh settings** reloads them again while preserving unsaved edits. Generation,
+**Refresh** reloads them again while preserving unsaved edits. Generation,
 item saving, and copy actions read current defaults before proceeding, including
 changes made through the CLI.
 
@@ -96,8 +154,7 @@ after saving, unless the current connection uses a temporary port. The separate
 **Temporary connection port** control connects to an existing server without
 changing the saved port or starting a new server. Vault filenames appear on the
 unlock screen after connecting; the disconnected screen hides them. Recovery changes
-require a server restart. The main toolbar provides **Stop server** and **Start server**
-controls; stopping locks the vault. Closing the window leaves the existing server
+require a server restart. **Settings → Connection** provides **Stop local service…** and **Start local service**. Stopping requires confirmation because it locks the vault, discards an open draft, and disconnects the CLI and extension. Closing the window leaves the existing server
 and lock policy in effect.
 
 Status polling detects CLI/extension locks and vault switches and clears the
