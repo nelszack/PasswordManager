@@ -179,6 +179,7 @@ enum Message {
     Username(String),
     Kind(ItemKind),
     Password(SecretString),
+    ShowEditorSecret(bool),
     ReplacePassword(bool),
     CopyPolicy(model::ClipboardPolicy),
     AddField,
@@ -521,6 +522,7 @@ impl App {
     }
 
     fn hide_secrets(&mut self) {
+        self.ui.editor_show_secret = false;
         self.workspace.hide_secrets();
         if let Some(draft) = &mut self.draft {
             // Multiline input is deliberately visible while editing. Focus
@@ -625,6 +627,10 @@ impl App {
 
     fn writes_allowed(&self) -> bool {
         !self.busy && self.pending.is_none()
+    }
+
+    fn copying_allowed(&self) -> bool {
+        self.writes_allowed() && self.conf.clipboard.timeout > 0
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -812,12 +818,14 @@ impl App {
                 return iced::widget::operation::focus("vault-search");
             }
             Message::OpenFileTool(operation) => {
+                self.ui.undo_trash = None;
                 self.hide_secrets();
                 self.cancel_passive_read();
                 self.tab = Tab::Tools;
                 return self.workflow(workflows::Event::FileOperation(operation));
             }
             Message::OpenTools(section) => {
+                self.ui.undo_trash = None;
                 self.hide_secrets();
                 self.cancel_passive_read();
                 self.tab = Tab::Tools;
@@ -843,6 +851,7 @@ impl App {
                 return self.navigate(Navigate::Select(id));
             }
             Message::OpenItemTools(id) => {
+                self.ui.undo_trash = None;
                 self.hide_secrets();
                 self.cancel_passive_read();
                 self.tab = Tab::Tools;
@@ -865,6 +874,9 @@ impl App {
             Message::ConnectionPort(value) => self.connection_port = value,
             Message::UseConnectionPort => return self.use_connection_port(),
             Message::Tab(tab) => {
+                if tab != self.tab {
+                    self.ui.undo_trash = None;
+                }
                 self.hide_secrets();
                 self.cancel_passive_read();
                 self.workspace.prepared = None;
@@ -1138,7 +1150,11 @@ impl App {
                     }
                 }
             }
+            Message::ShowEditorSecret(value) if self.draft.is_some() => {
+                self.ui.editor_show_secret = value;
+            }
             Message::MultilineSecret(value) => {
+                self.ui.editor_show_secret = false;
                 if let Some(draft) = &mut self.draft {
                     draft.multiline = value;
                     draft.secret_editor = if value {
@@ -1193,6 +1209,7 @@ impl App {
                 }
             }
             Message::ReplacePassword(value) => {
+                self.ui.editor_show_secret = false;
                 if let Some(draft) = &mut self.draft {
                     draft.replace_password = value;
                     if !value {
@@ -1634,6 +1651,20 @@ impl App {
         }
         match (job, response.payload) {
             (Job::Workflow(action), payload) => {
+                if let Some((id, _)) = self.ui.undo_trash.as_ref() {
+                    let resolved = match action {
+                        workflows::Action::RestoreTrash(target)
+                        | workflows::Action::Purge(Some(target)) => target == *id,
+                        workflows::Action::Purge(None) => true,
+                        workflows::Action::Trash => {
+                            matches!(&payload, ResponsePayload::Trash(page) if !page.trash.iter().any(|entry| entry.id == *id))
+                        }
+                        _ => false,
+                    };
+                    if resolved {
+                        self.ui.undo_trash = None;
+                    }
+                }
                 if action == workflows::Action::Requests {
                     return self.complete_duo_requests(payload);
                 }
@@ -1942,6 +1973,7 @@ impl App {
                 }
             }
             (Job::Save, _) => {
+                self.ui.editor_show_secret = false;
                 let id = self.draft.as_ref().and_then(|draft| draft.id);
                 self.ui.saved_item = self.draft.as_ref().filter(|_| id.is_none()).map(|draft| {
                     presentation::SavedItem {
@@ -1970,7 +2002,9 @@ impl App {
                 self.draft = None;
                 self.item = None;
                 self.delete_confirm = false;
-                self.notice = "Item moved to encrypted trash. Undo here or restore it from Tools → Deleted items.".into();
+                self.notice =
+                    "Item moved to encrypted trash. You can restore it from Tools → Deleted items."
+                        .into();
                 return self.load_items();
             }
             (Job::Copy, _) => self.notice = "Secret copied with timed clipboard cleanup.".into(),
