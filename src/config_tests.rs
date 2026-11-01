@@ -398,3 +398,43 @@ fn older_configuration_files_receive_desktop_defaults() {
     assert_eq!(config.desktop, DesktopConfig::default());
     assert_eq!(try_read_config(&path).unwrap(), config);
 }
+
+#[test]
+fn changing_sync_origin_clears_the_previous_servers_ssh_destination() {
+    let (_root, path) = isolated_config();
+    let mut original = default_test_config(true, &path);
+    original.sync.server_url = "https://old.example.com".into();
+    original.sync.ssh_target = Some("user@old-server".into());
+    let unchanged = try_update(
+        original.clone(),
+        ConfigChanges {
+            sync_server_url: Some("https://old.example.com/".into()),
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(unchanged.sync.ssh_target, original.sync.ssh_target);
+    let changed = try_update(
+        original.clone(),
+        ConfigChanges {
+            sync_server_url: Some("https://new.example.com".into()),
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(changed.sync.ssh_target, None);
+    let guided = try_update(
+        original,
+        ConfigChanges {
+            sync_server_url: Some("https://new.example.com".into()),
+            sync_ssh_target: Some("user@new-server".into()),
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    assert_eq!(guided.sync.ssh_target.as_deref(), Some("user@new-server"));
+    assert_eq!(read_config(&path), guided);
+}

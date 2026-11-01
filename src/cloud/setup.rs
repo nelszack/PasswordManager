@@ -1,8 +1,8 @@
 //! SSH provisioning. Server sources travel inside pm; Go builds only on this device.
-use super::{CloudClient, read_token_file, validate_server_url, write_private};
+use super::{CloudClient, validate_server_url};
 use crate::{
     config::{self, Config, ConfigChanges},
-    file::{config_dir, read_bounded_file},
+    file::read_bounded_file,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -533,39 +533,14 @@ fn connect(target: &str, url: &str, name: Option<&str>, path: &Path) -> Result<C
     }
     let credential: Credential = serde_json::from_slice(&response)
         .map_err(|_| "Invalid enrollment response from sync host")?;
-    let result = (|| {
-        CloudClient::with_token(url, Zeroizing::new(credential.token.expose().to_owned()))?
-            .list()
-            .map_err(|e| {
-                format!(
-                    "The server is installed, but this device could not connect over Tailscale: {e}"
-                )
-            })?;
-        let token_path = config_dir().join("sync-token");
-        let previous = match read_token_file(&token_path) {
-            Ok(token) => Some(token),
-            Err(_) if !token_path.exists() => None,
-            Err(e) => return Err(e),
-        };
-        super::install_token(credential.token.expose())?;
-        let saved = config::try_update(
-            current,
-            ConfigChanges {
-                sync_server_url: Some(url.into()),
-                sync_ssh_target: Some(target.into()),
-                ..Default::default()
-            },
-            path,
-        );
-        if saved.is_err() {
-            if let Some(previous) = previous {
-                write_private(&token_path, previous.as_bytes(), true)?;
-            } else {
-                fs::remove_file(&token_path).map_err(|e| e.to_string())?;
-            }
-        }
-        saved
-    })();
+    let result = super::connect_with_token(
+        current,
+        url,
+        credential.token.expose(),
+        Some(target.into()),
+        path,
+    )
+    .map_err(|e| format!("The server is installed, but this device could not connect: {e}"));
     if result.is_err()
         && credential.device_id.len() == 64
         && credential.device_id.bytes().all(|b| b.is_ascii_hexdigit())

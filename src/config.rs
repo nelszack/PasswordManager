@@ -359,7 +359,11 @@ pub fn try_update(
         if !url.is_empty() {
             crate::cloud::validate_server_url(&url)?;
         }
-        config.sync.server_url = url.trim_end_matches('/').to_owned();
+        let url = url.trim_end_matches('/').to_owned();
+        if config.sync.server_url != url {
+            config.sync.ssh_target = None;
+        }
+        config.sync.server_url = url;
     }
     if let Some(target) = modify.sync_ssh_target {
         crate::cloud::setup::validate_ssh_target(&target)?;

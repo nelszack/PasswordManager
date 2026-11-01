@@ -107,8 +107,12 @@ pub(crate) fn verify_identity(vault: &Path, id: [u8; 16]) -> Result<(), String> 
 }
 pub fn install_token(token: &str) -> Result<(), String> {
     let token = token.trim();
-    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("Device token must contain 64 hexadecimal characters".into());
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("Device token must contain 64 lowercase hexadecimal characters".into());
     }
     write_private(&config_dir().join("sync-token"), token.as_bytes(), true)
 }
@@ -117,6 +121,45 @@ pub fn read_token_file(path: &Path) -> Result<Zeroizing<String>, String> {
     String::from_utf8(std::mem::take(&mut *bytes))
         .map(Zeroizing::new)
         .map_err(|_| "Device credential must be UTF-8".into())
+}
+
+/// Verify replacement credentials before changing an existing connection.
+pub fn connect_with_token(
+    current: crate::config::Config,
+    url: &str,
+    token: &str,
+    ssh_target: Option<String>,
+    path: &Path,
+) -> Result<crate::config::Config, String> {
+    CloudClient::with_token(url, Zeroizing::new(token.trim().to_owned()))?.list()?;
+    let previous_config = fs::read(path).map_err(|e| e.to_string())?;
+    let token_path = config_dir().join("sync-token");
+    let previous = match read_token_file(&token_path) {
+        Ok(token) => Some(token),
+        Err(_) if !token_path.exists() => None,
+        Err(e) => return Err(e),
+    };
+    let saved = install_token(token).and_then(|()| {
+        crate::config::try_update(
+            current,
+            crate::config::ConfigChanges {
+                sync_server_url: Some(url.into()),
+                sync_ssh_target: ssh_target,
+                ..Default::default()
+            },
+            path,
+        )
+    });
+    if saved.is_err() {
+        if let Some(previous) = previous {
+            write_private(&token_path, previous.as_bytes(), true)?;
+        } else if token_path.exists() {
+            fs::remove_file(&token_path).map_err(|e| e.to_string())?;
+        }
+        // A directory-sync error can be reported after config replacement.
+        write_private(path, &previous_config, true)?;
+    }
+    saved
 }
 #[derive(Clone)]
 pub struct CloudClient {

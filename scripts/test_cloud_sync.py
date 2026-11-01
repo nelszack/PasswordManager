@@ -152,6 +152,21 @@ def main():
             assert len(list((storage / "devices").glob("*.json"))) == count
             manifest.write_text(json.dumps({"schema": 1, "listen_port": cloud_port, "https_port": 8443, "server_url": url}))
             print("PASS: Tailscale naming, SSH enrollment, saved host, credential reuse, and failed-connection recovery")
+            # Manual connections must also preserve a working connection on
+            # authentication/network failure, including the previous SSH host.
+            invalid_token = root / "invalid-token"
+            invalid_token.write_text("f" * 64 + "\n")
+            for destination, credential in [(url, invalid_token), (bad_manifest["server_url"], token)]:
+                desktop.run("sync", "connect", destination, "--token-file", str(credential), ok=False)
+                assert (desktop.root / "config" / "config.toml").read_bytes() == old_config
+                assert local_token.read_bytes() == old_token
+            # A successful change of origin must not retain the previous
+            # server's SSH update destination. This alias reaches the same test server.
+            desktop.run("sync", "connect", f"http://localhost:{cloud_port}", "--token-file", str(token))
+            assert "ssh_target" not in (desktop.root / "config" / "config.toml").read_text()
+            desktop.run("sync", "connect", "--ssh", "test-host")
+            assert 'ssh_target = "test-host"' in (desktop.root / "config" / "config.toml").read_text()
+            print("PASS: manual connection failures preserve credentials and changing servers clears the saved SSH destination")
             key = root / "external-test.key"
             laptop.run("new", "--key", str(key))
             laptop.run("unlock", "--key", str(key))

@@ -6,7 +6,7 @@ use password_manager::{
         self, Action,
         setup::{Operation, Request},
     },
-    config::{self, Config, ConfigChanges},
+    config::Config,
     protocol::ResponsePayload,
     server::start,
     types::ServerCommand,
@@ -68,24 +68,15 @@ pub(super) async fn run(
                         .unwrap_or_else(|e| console.exit_error(&e.to_string(), 1)),
                 ),
             };
-            cloud::install_token(&token).unwrap_or_else(|e| console.exit_error(&e, 1));
-            let config = config::try_update(
-                conf.clone(),
-                ConfigChanges {
-                    sync_server_url: Some(url),
-                    ..Default::default()
-                },
-                path,
-            )
-            .unwrap_or_else(|e| console.exit_error(&e, 1));
-            let result =
-                tokio::task::spawn_blocking(move || cloud::CloudClient::new(&config.sync)?.list())
-                    .await;
+            let config = conf.clone();
+            let path = path.to_owned();
+            let result = tokio::task::spawn_blocking(move || {
+                cloud::connect_with_token(config, &url, &token, None, &path)
+            })
+            .await;
             match result {
                 Ok(Ok(_)) => console.print_success("Connected to encrypted vault sync server"),
-                Ok(Err(e)) => {
-                    console.exit_error(&format!("Settings saved, but connection failed: {e}"), 1)
-                }
+                Ok(Err(e)) => console.exit_error(&format!("Connection failed: {e}"), 1),
                 Err(e) => console.exit_error(&e.to_string(), 1),
             }
             None
