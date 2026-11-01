@@ -132,6 +132,14 @@ Run `pm <COMMAND> --help` or open the [complete command reference](docs/commands
 for flags and examples. The [user guide](docs/user-guide.md) covers typed items,
 custom fields, history, rekeying, authenticators, Duo Push, and scripted JSON output.
 
+## Cloud sync
+
+Optional self-hosted sync stores encrypted vault snapshots on a small Go server
+and supports downloading existing vaults onto a new device. Set up the server
+with `pm sync setup --ssh USER@HOST`, then run `pm sync enable` for an unlocked
+vault. Connect another device with `pm sync connect --ssh USER@HOST`. See the
+[cloud sync setup and current limitations](docs/cloud-sync.md).
+
 ## Browser extension
 
 1. Load `extension/` as an unpacked extension in Chrome, Chromium, or Helium.

@@ -1701,3 +1701,71 @@ fn editor_visibility_is_temporary_and_does_not_reveal_a_stored_password() {
     );
     assert!(!app.ui.editor_show_secret);
 }
+
+#[test]
+fn cloud_revision_refresh_preserves_an_open_draft() {
+    let mut app = unlocked();
+    app.vault_revision = Some(2);
+    app.draft.as_mut().unwrap().dirty = true;
+    app.draft.as_mut().unwrap().name = "Unsaved local draft".into();
+    let mut status = ServerStatus::new(false, None);
+    status.vault_revision = Some(3);
+    let session = "a".repeat(64);
+    let _ = app.complete(
+        Job::Status,
+        reply(ResponsePayload::Status(status), Some(&session)),
+    );
+    assert_eq!(app.draft.as_ref().unwrap().name, "Unsaved local draft");
+    assert!(app.notice.contains("draft is preserved"));
+    assert!(!app.busy);
+}
+
+#[test]
+fn cloud_revision_refresh_reloads_a_vault_without_an_editor() {
+    let mut app = unlocked();
+    app.draft = None;
+    app.vault_revision = Some(2);
+    let mut status = ServerStatus::new(false, None);
+    status.vault_revision = Some(3);
+    let session = "a".repeat(64);
+    let _ = app.complete(
+        Job::Status,
+        reply(ResponsePayload::Status(status), Some(&session)),
+    );
+    assert!(app.busy);
+    assert!(app.item.is_none());
+}
+
+#[test]
+fn guided_sync_connection_preserves_other_unsaved_settings_and_lists_vaults() {
+    let mut app = app();
+    app.running = true;
+    app.settings.edit(SettingsField::Length, "31".into());
+    let mut conf = app.conf.clone();
+    conf.sync.server_url = "https://sync-server.example.ts.net:9443".into();
+    conf.sync.ssh_target = Some("user@server".into());
+    let _ = app.complete(
+        Job::CloudSetup,
+        Reply::CloudSetup {
+            conf,
+            message: "Server ready".into(),
+        },
+    );
+    assert_eq!(app.cloud_ssh, "user@server");
+    assert_eq!(app.settings.length, "31");
+    assert_eq!(
+        app.settings.sync_server,
+        "https://sync-server.example.ts.net:9443"
+    );
+    assert!(app.busy);
+}
+#[test]
+fn invalid_guided_sync_host_never_starts_an_operation() {
+    let mut app = app();
+    app.cloud_ssh = "-oProxyCommand=bad".into();
+    let _ = app.update(Message::SetupCloud(
+        password_manager::cloud::setup::Operation::Setup,
+    ));
+    assert!(!app.busy);
+    assert!(app.notice.contains("SSH hostname"));
+}

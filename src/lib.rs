@@ -2,6 +2,7 @@
 pub mod cli;
 pub mod client;
 pub mod clipboard;
+pub mod cloud;
 pub mod config;
 pub mod docs;
 mod duo;

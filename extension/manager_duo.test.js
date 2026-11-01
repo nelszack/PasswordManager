@@ -29,7 +29,7 @@ function environment() {
     elements.multilineLabel.hidden = true;
     elements.editForm.reset = () => { elements.password.value = ""; elements.secretMultiline.value = ""; elements.kind.value = "login"; };
     const calls = [], timers = new Map(), responses = new Map(); let timerId = 0, confirmations = 0, listener;
-    let pending = [{ id: "test-request", application: "Example VPN", username: "alice", location: "Boise", summary: "Login", expires_at: Math.floor(Date.now()/1000)+300, code_digits: 3, unsupported: null, fingerprint: "a".repeat(128) }];
+    let pending = [{ id: "test-request", application: "Example VPN", username: "alice", location: "Example City", summary: "Login", expires_at: Math.floor(Date.now()/1000)+300, code_digits: 3, unsupported: null, fingerprint: "a".repeat(128) }];
     const context = vm.createContext({ module: { exports: {} }, require: name => name === "./password_generator.js" ? { defaults: {}, validate: () => ({}) } : require(name), document: { getElementById: id => elements[id], createElement: tag => new Element(tag), createTextNode: () => new Element() },
         window: { addEventListener() {}, confirm: () => { confirmations++; return true; } },
         setTimeout: callback => { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id),

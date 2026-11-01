@@ -44,6 +44,30 @@ jobs:
       - name: Check CLI-only build
         run: cargo check --locked --no-default-features --all-targets
 
+  cloud-sync:
+    name: Cloud sync server and two-device integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: sync-server/go.mod
+          cache: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Validate Go server
+        working-directory: sync-server
+        run: |
+          go test -race ./...
+          go vet ./...
+      - name: Build CLI client
+        run: cargo build --locked --no-default-features
+      - name: Exercise two independent devices
+        run: python3 scripts/test_cloud_sync.py
+
   mac-architectures:
     name: Build macOS (${{ matrix.target }})
     runs-on: macos-latest

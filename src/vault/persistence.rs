@@ -396,6 +396,7 @@ pub(super) fn lookup_vault_in(
         VaultError::Validation("incorrect password/key or modified encrypted contents".into())
     })?);
     let data = decode_document(&plaintext)?;
+    crate::cloud::verify_identity(&path, data.vault_id).map_err(VaultError::Validation)?;
     *key_pass = candidate;
     Ok(Some((
         filename.clone(),
@@ -559,7 +560,11 @@ fn write_vault_with_limit(
     result
 }
 
-fn persist_ciphertext(directory: &Path, filename: &str, txt: &[u8]) -> Result<(), VaultError> {
+pub(crate) fn persist_ciphertext(
+    directory: &Path,
+    filename: &str,
+    txt: &[u8],
+) -> Result<(), VaultError> {
     validate_vault_filename(filename)?;
     let file_path = directory.join(filename);
     run_blocking_io(|| {

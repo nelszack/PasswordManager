@@ -6,3 +6,6 @@
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
+
+/sync-server/pm-sync
+/sync-server/sync-data/

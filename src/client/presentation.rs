@@ -11,8 +11,10 @@ pub fn render(payload: &ResponsePayload) -> String {
             status
                 .warning
                 .as_ref()
+                .into_iter()
+                .chain(status.cloud_warning.as_ref())
                 .map(|w| format!("\nWarning: {w}"))
-                .unwrap_or_default()
+                .collect::<String>()
         ),
         ResponsePayload::Authenticator(code) => {
             if let Some(counter) = code.counter {

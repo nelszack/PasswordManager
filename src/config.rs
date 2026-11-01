@@ -15,6 +15,25 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
     pub desktop: DesktopConfig,
+    pub sync: SyncConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+pub struct SyncConfig {
+    pub server_url: String,
+    pub automatic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_target: Option<String>,
+}
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            automatic: true,
+            ssh_target: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
@@ -95,6 +114,9 @@ pub struct ConfigChanges {
     pub clear_default_vault: bool,
     pub desktop_appearance: Option<Appearance>,
     pub desktop_scale: Option<u16>,
+    pub sync_server_url: Option<String>,
+    pub sync_automatic: Option<bool>,
+    pub sync_ssh_target: Option<String>,
 }
 
 /// Shared duration syntax for CLI arguments and desktop settings.
@@ -332,6 +354,19 @@ pub fn try_update(
     if let Some(vault_id) = modify.default_vault {
         crate::vault::validate_vault_filename(&vault_id).map_err(|error| error.to_string())?;
         config.unlock.vault_id = Some(vault_id);
+    }
+    if let Some(url) = modify.sync_server_url {
+        if !url.is_empty() {
+            crate::cloud::validate_server_url(&url)?;
+        }
+        config.sync.server_url = url.trim_end_matches('/').to_owned();
+    }
+    if let Some(target) = modify.sync_ssh_target {
+        crate::cloud::setup::validate_ssh_target(&target)?;
+        config.sync.ssh_target = Some(target);
+    }
+    if let Some(automatic) = modify.sync_automatic {
+        config.sync.automatic = automatic;
     }
     write_file(&config, config_path)?;
     Ok(config)

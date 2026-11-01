@@ -1660,7 +1660,8 @@ fn settings(app: &App) -> Element<'_, Message> {
                     row![primary("Keep running", Message::ConfirmStop(false), !app.busy), action("Stop service", Message::Stop, !app.busy && app.pending.is_none()).style(button_style::danger)].spacing(8).wrap(),
                 ].spacing(12)));
             }
-            form.push(rule::horizontal(1))
+            form.push(cloud_settings(app))
+                .push(rule::horizontal(1))
                 .push(field(
                     "Saved service port (1–65535)",
                     &app.settings.server_port,
@@ -1760,4 +1761,126 @@ fn settings(app: &App) -> Element<'_, Message> {
     .center_x(Fill)
     .height(Fill)
     .into()
+}
+
+fn cloud_settings(app: &App) -> Element<'_, Message> {
+    use password_manager::cloud::Action;
+    let ready = !app.busy && app.running;
+    use password_manager::cloud::setup::Operation;
+    let host_valid = password_manager::cloud::setup::validate_ssh_target(&app.cloud_ssh).is_ok();
+    let mut form=column![
+        text("Cloud sync").size(22),
+        text("Set up a server once, then enable sync for each vault you want on your devices.").size(14),
+        label("Server SSH address"),
+        text_input("user@server",&app.cloud_ssh).padding(12)
+            .on_input_maybe((!app.busy).then_some(Message::CloudSsh)),
+        text("This device's name is taken from Tailscale automatically.").size(14),
+        row![
+            primary("Set up server",Message::SetupCloud(Operation::Setup),!app.busy && host_valid),
+            action("Connect to existing server",Message::SetupCloud(Operation::Connect),!app.busy && host_valid),
+            action("Update server",Message::SetupCloud(Operation::Update),!app.busy && host_valid && app.conf.sync.ssh_target.is_some()),
+        ].spacing(8).wrap(),
+        text("Uses your SSH key or agent. Setup installs the server and connects this device automatically; existing services are preserved.").size(14),
+        checkbox(app.settings.sync_automatic).label("Automatically synchronize enabled vaults")
+            .on_toggle(|value|Message::SettingToggled(SettingsToggle::SyncAutomatic,value)),
+    ].spacing(12);
+    if !app.conf.sync.server_url.is_empty() {
+        form = form.push(text(format!("Server: {}", app.conf.sync.server_url)).size(14));
+    }
+    form = form.push(action(
+        "Refresh cloud vaults",
+        Message::Cloud(Action::List),
+        ready && !app.conf.sync.server_url.is_empty(),
+    ));
+    if !app.cloud_vaults.is_empty() {
+        form = form.push(pick_list(
+            app.cloud_vaults.as_slice(),
+            app.cloud_vault.as_ref(),
+            Message::CloudVault,
+        ));
+        if let Some(id) = &app.cloud_vault {
+            form = form.push(action(
+                "Download selected vault",
+                Message::Cloud(Action::Pull(id.clone())),
+                ready,
+            ));
+        }
+    }
+    form = form.push(
+        row![
+            action(
+                "Enable for open vault",
+                Message::Cloud(Action::Enable),
+                ready && app.session.is_some()
+            ),
+            action(
+                "Sync now",
+                Message::Cloud(Action::Now),
+                ready && app.session.is_some()
+            ),
+            action(
+                "Check changes",
+                Message::Cloud(Action::Check),
+                ready && app.session.is_some()
+            ),
+            action(
+                "Sync status",
+                Message::Cloud(Action::Status),
+                ready && app.session.is_some()
+            ),
+            action(
+                "Disable for open vault",
+                Message::Cloud(Action::Disable),
+                ready && app.session.is_some()
+            ),
+        ]
+        .spacing(8)
+        .wrap(),
+    );
+    form = form.push(action(
+        if app.cloud_advanced {
+            "Hide manual connection options"
+        } else {
+            "Manual connection options"
+        },
+        Message::CloudAdvanced,
+        !app.busy,
+    ));
+    if app.cloud_advanced {
+        form = form.push(label("Device name override (optional)")).push(
+            text_input("Use this device's Tailscale name", &app.cloud_device_name)
+                .padding(12)
+                .on_input_maybe((!app.busy).then_some(Message::CloudDeviceName)),
+        );
+        form =
+            form.push(label("Server URL (save settings after editing)"))
+                .push(
+                    text_input(
+                        "https://server.your-tailnet.ts.net:8443",
+                        &app.settings.sync_server,
+                    )
+                    .padding(12)
+                    .on_input_maybe((!app.busy).then_some(|value| {
+                        Message::SettingChanged(SettingsField::SyncServer, value)
+                    })),
+                )
+                .push(label("Device credential"))
+                .push(
+                    text_input(
+                        "Paste a server-generated credential",
+                        app.cloud_token.expose(),
+                    )
+                    .secure(true)
+                    .padding(12)
+                    .on_input_maybe(
+                        (!app.busy).then_some(|value: String| Message::CloudToken(value.into())),
+                    ),
+                )
+                .push(action(
+                    "Save device credential",
+                    Message::SaveCloudToken,
+                    !app.busy && !app.cloud_token.is_empty(),
+                ));
+    }
+    panel(form).into()
 }

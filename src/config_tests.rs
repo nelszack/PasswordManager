@@ -117,6 +117,7 @@ fn updates_persist_all_fields_and_boundary_values() {
                 },
                 server: ServerConfig { port },
                 desktop: DesktopConfig::default(),
+                sync: SyncConfig::default(),
             },
             "{label}"
         );
@@ -332,6 +333,9 @@ port={}
 [desktop]
 appearance="dark"
 scale=100
+[sync]
+server_url=""
+automatic=true
 "#,
         crate::server::DEFAULT_PORT
     );

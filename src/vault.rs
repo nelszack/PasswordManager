@@ -50,6 +50,7 @@ mod entries;
 mod export;
 
 mod persistence;
+mod sync;
 pub use persistence::VaultStore;
 pub(crate) use persistence::unlock_selected_vault;
 #[cfg(test)]

@@ -9,6 +9,7 @@ pub enum Field {
     TrashRetention,
     ServerPort,
     DefaultVault,
+    SyncServer,
 }
 
 #[cfg(test)]
@@ -219,6 +220,7 @@ pub enum Toggle {
     GeneratorStats,
     GeneratorCopy,
     PasswordCopy,
+    SyncAutomatic,
 }
 
 pub struct SettingsDraft {
@@ -235,6 +237,8 @@ pub struct SettingsDraft {
     pub default_vault: String,
     pub appearance: Appearance,
     pub scale: u16,
+    pub sync_server: String,
+    pub sync_automatic: bool,
 }
 
 impl From<&Config> for SettingsDraft {
@@ -253,6 +257,8 @@ impl From<&Config> for SettingsDraft {
             default_vault: conf.unlock.vault_id.clone().unwrap_or_default(),
             appearance: conf.desktop.appearance,
             scale: conf.desktop.scale,
+            sync_server: conf.sync.server_url.clone(),
+            sync_automatic: conf.sync.automatic,
         }
     }
 }
@@ -284,6 +290,8 @@ impl SettingsDraft {
             default_vault,
             appearance,
             scale,
+            sync_server,
+            sync_automatic,
         );
         self.baseline = conf.clone();
     }
@@ -297,6 +305,7 @@ impl SettingsDraft {
             Field::TrashRetention => &mut self.trash_retention,
             Field::ServerPort => &mut self.server_port,
             Field::DefaultVault => &mut self.default_vault,
+            Field::SyncServer => &mut self.sync_server,
         } = value;
     }
 
@@ -305,6 +314,7 @@ impl SettingsDraft {
             Toggle::GeneratorStats => &mut self.stats,
             Toggle::GeneratorCopy => &mut self.generator_copy,
             Toggle::PasswordCopy => &mut self.password_copy,
+            Toggle::SyncAutomatic => &mut self.sync_automatic,
         } = value;
     }
 
@@ -345,6 +355,9 @@ impl SettingsDraft {
             password_manager::vault::validate_vault_filename(vault)
                 .map_err(|error| error.to_string())?;
         }
+        if !self.sync_server.is_empty() {
+            password_manager::cloud::validate_server_url(&self.sync_server)?;
+        }
         let base = &self.baseline;
         // Only send edited settings. Other fields may have been changed by the
         // CLI since this form was opened; the backend rereads them before saving.
@@ -368,6 +381,11 @@ impl SettingsDraft {
             desktop_appearance: (self.appearance != base.desktop.appearance)
                 .then_some(self.appearance),
             desktop_scale: (self.scale != base.desktop.scale).then_some(self.scale),
+            sync_server_url: (self.sync_server != base.sync.server_url)
+                .then(|| self.sync_server.clone()),
+            sync_automatic: (self.sync_automatic != base.sync.automatic)
+                .then_some(self.sync_automatic),
+            sync_ssh_target: None,
         })
     }
 
@@ -385,6 +403,8 @@ impl SettingsDraft {
             || self.default_vault != previous.default_vault
             || self.appearance != previous.appearance
             || self.scale != previous.scale
+            || self.sync_server != previous.sync_server
+            || self.sync_automatic != previous.sync_automatic
     }
 
     /// Validate one edited field against valid defaults so the inline error

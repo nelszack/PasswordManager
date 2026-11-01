@@ -29,6 +29,7 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+mod cloud;
 mod commands;
 use commands::execute_command;
 mod outcome;
@@ -183,6 +184,7 @@ pub async fn server(
     );
     let system_lock =
         system_lock::Monitor::start(worker.system_lock_handler(Arc::clone(&background_error)));
+    let cloud_task = cloud::start(worker.clone(), stopping.clone());
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
 
@@ -221,6 +223,7 @@ pub async fn server(
         }
     }
     stopping.store(true, Ordering::Release);
+    cloud_task.abort();
     system_lock.stop();
     worker.lock().await;
     let _ = crate::clipboard::clear_owned();
@@ -275,10 +278,46 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
             let mut response = RpcResponse::success(ResponsePayload::Status(
                 crate::protocol::ServerStatus::new(session_id.is_none(), warning),
             ));
+            if let ResponsePayload::Status(status) = &mut response.payload {
+                status.vault_revision = worker.vault_revision();
+                status.cloud_warning = worker.cloud_warning().await;
+            }
             response.session_id = session_id;
             outcome::CommandOutcome {
                 responses: vec![response],
                 effect: CommandEffect::None,
+                ..Default::default()
+            }
+        } else if let ServerCommand::Cloud(action) = &request.command {
+            let result = if state.stopping.load(Ordering::Acquire) {
+                Err("Server is stopping".into())
+            } else if let Err(e) = request.validate() {
+                Err(e)
+            } else if request
+                .expected_session
+                .as_ref()
+                .is_some_and(|s| worker.session_id().as_ref() != Some(s))
+            {
+                Err("Unlock session changed; reopen the vault before syncing".into())
+            } else {
+                cloud::command(
+                    &worker,
+                    action.clone(),
+                    request
+                        .expected_session
+                        .clone()
+                        .or_else(|| worker.session_id()),
+                    state.stopping.clone(),
+                )
+                .await
+            };
+            let mut response = match result {
+                Ok(message) => RpcResponse::message(ResponseCode::Success, message),
+                Err(error) => RpcResponse::message(ResponseCode::Failure, error),
+            };
+            response.session_id = worker.session_id();
+            outcome::CommandOutcome {
+                responses: vec![response],
                 ..Default::default()
             }
         } else {

@@ -6,7 +6,7 @@ updates:
       interval: weekly
       day: monday
       time: "07:00"
-      timezone: America/Boise
+      timezone: Etc/UTC
     groups:
       rust-dependencies:
         patterns:
@@ -19,7 +19,7 @@ updates:
       interval: weekly
       day: monday
       time: "07:15"
-      timezone: America/Boise
+      timezone: Etc/UTC
     groups:
       github-actions:
         patterns:
@@ -32,7 +32,7 @@ updates:
       interval: weekly
       day: monday
       time: "07:30"
-      timezone: America/Boise
+      timezone: Etc/UTC
     groups:
       browser-test-dependencies:
         patterns:
@@ -45,7 +45,7 @@ updates:
       interval: weekly
       day: monday
       time: "07:45"
-      timezone: America/Boise
+      timezone: Etc/UTC
     groups:
       fuzz-dependencies:
         patterns:

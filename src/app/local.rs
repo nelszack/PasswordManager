@@ -26,6 +26,10 @@ pub(super) async fn run(
 ) -> Option<CliCommands> {
     let port = client.port;
     match (command, server_running) {
+        (CliCommands::Sync { command }, _) => {
+            super::sync::run(command, conf, config_file, client, server_running, console).await;
+        }
+
         (CliCommands::Vaults, _) => match vault::list_vaults() {
             Ok(names) => console.print_data(serde_json::json!(&names), &names.join("\n")),
             Err(error) => console.exit_error(&error.to_string(), 1),

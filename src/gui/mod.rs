@@ -135,6 +135,9 @@ enum Job {
     PickFile(workflows::Field),
     Workflow(workflows::Action),
     Local,
+    Cloud,
+    CloudList,
+    CloudSetup,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +151,14 @@ enum Navigate {
 #[derive(Clone)]
 enum Message {
     Tick(Instant),
+    Cloud(password_manager::cloud::Action),
+    CloudToken(SecretString),
+    CloudSsh(String),
+    CloudDeviceName(String),
+    CloudAdvanced,
+    SetupCloud(password_manager::cloud::setup::Operation),
+    CloudVault(String),
+    SaveCloudToken,
     Finished(u64, Job, Arc<Result<Reply, Failure>>),
     Connect,
     RefreshVaults,
@@ -298,6 +309,13 @@ struct App {
     show_generated: bool,
     generated_stats: String,
     settings: SettingsDraft,
+    cloud_token: SecretString,
+    cloud_ssh: String,
+    cloud_device_name: String,
+    cloud_advanced: bool,
+    cloud_vaults: Vec<String>,
+    cloud_vault: Option<String>,
+    vault_revision: Option<u64>,
     confirm_reset_settings: bool,
     workspace: workflows::State,
     generator: generator::Options,
@@ -313,6 +331,13 @@ impl App {
             connect_after_discovery: false,
             generator_length: conf.genpass.length.to_string(),
             settings: SettingsDraft::from(&conf),
+            cloud_token: SecretString::default(),
+            cloud_ssh: conf.sync.ssh_target.clone().unwrap_or_default(),
+            cloud_device_name: String::new(),
+            cloud_advanced: false,
+            cloud_vaults: vec![],
+            cloud_vault: None,
+            vault_revision: None,
             unlock_timeout: conf.unlock.timeout.to_string(),
             vault: conf.unlock.vault_id.clone(),
             conf,
@@ -660,6 +685,51 @@ impl App {
             self.workspace.prepared = None;
         }
         match message {
+            Message::Cloud(action) => {
+                let job = if matches!(action, password_manager::cloud::Action::List) {
+                    Job::CloudList
+                } else {
+                    Job::Cloud
+                };
+                return self.request(job, ServerCommand::Cloud(action), None);
+            }
+            Message::CloudSsh(value) => self.cloud_ssh = value,
+            Message::CloudDeviceName(value) => self.cloud_device_name = value,
+            Message::CloudAdvanced => self.cloud_advanced = !self.cloud_advanced,
+            Message::SetupCloud(operation) => {
+                if self.busy {
+                    return Task::none();
+                }
+                if let Err(error) =
+                    password_manager::cloud::setup::validate_ssh_target(&self.cloud_ssh)
+                {
+                    self.notice = error;
+                    return Task::none();
+                }
+                let request = password_manager::cloud::setup::Request {
+                    operation,
+                    ssh_target: Some(self.cloud_ssh.clone()),
+                    binary: None,
+                    device_name: (!self.cloud_device_name.trim().is_empty())
+                        .then(|| self.cloud_device_name.clone()),
+                };
+                self.notice=match operation {
+                    password_manager::cloud::setup::Operation::Setup=>"Setting up the sync server and connecting this device. Building may take a few minutes…",
+                    password_manager::cloud::setup::Operation::Connect=>"Authorizing this device over SSH…",
+                    password_manager::cloud::setup::Operation::Update=>"Building and updating the sync server. Your vault data will be kept…",
+                }.into();
+                return self.launch(Job::CloudSetup, move || backend::setup_sync(request));
+            }
+            Message::CloudToken(token) => self.cloud_token = token,
+            Message::CloudVault(id) => self.cloud_vault = Some(id),
+            Message::SaveCloudToken => {
+                let token = std::mem::take(&mut self.cloud_token);
+                return self.launch(Job::Local, move || {
+                    password_manager::cloud::install_token(token.expose())
+                        .map_err(Failure::from)?;
+                    Ok(Reply::Local("Device credential saved".into()))
+                });
+            }
             Message::Finished(serial, job, result) => {
                 if serial != self.serial {
                     return Task::none();
@@ -1443,6 +1513,19 @@ impl App {
                         return self.connect();
                     }
                 }
+                Reply::CloudSetup { conf, message } => {
+                    self.cloud_ssh = conf.sync.ssh_target.clone().unwrap_or_default();
+                    self.apply_configuration(conf);
+                    self.settings.sync_server = self.conf.sync.server_url.clone();
+                    self.notice = message;
+                    if self.running {
+                        return self.request(
+                            Job::CloudList,
+                            ServerCommand::Cloud(password_manager::cloud::Action::List),
+                            None,
+                        );
+                    }
+                }
                 Reply::Configuration(conf) => {
                     self.apply_configuration(conf);
                     if job != Job::ReloadSettings && self.notice == "Settings reloaded." {
@@ -1503,6 +1586,7 @@ impl App {
                     self.notice.clear();
                 }
                 Reply::PickedFile(field, Some(path)) => self.workspace.edit(field, path),
+                Reply::Local(message) if job == Job::Local => self.notice = message,
                 Reply::Local(message) => self.workspace.receive(ResponsePayload::Message(message)),
                 _ => {}
             }
@@ -1561,7 +1645,13 @@ impl App {
                     self.notice.clear();
                 }
                 self.running = true;
-                self.warning = status.warning;
+                self.warning = match (status.warning, status.cloud_warning) {
+                    (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+                    (a, b) => a.or(b),
+                };
+                let revision_changed =
+                    self.vault_revision.is_some() && self.vault_revision != status.vault_revision;
+                self.vault_revision = status.vault_revision;
                 let next_session = if status.locked {
                     None
                 } else {
@@ -1633,6 +1723,17 @@ impl App {
                         self.creating = false;
                         return self.load_items();
                     }
+                    if revision_changed {
+                        if self.draft.is_some() || self.pending.is_some() {
+                            self.notice="The vault changed on another client or device. Your draft is preserved; reopen the item before saving if it changed.".into();
+                        } else {
+                            self.notice = "Vault updated from another client or device.".into();
+                            if let Some(id) = self.item.as_ref().map(|item| item.id) {
+                                return self.refresh_account(id);
+                            }
+                            return self.load_items();
+                        }
+                    }
                 }
             }
             return Task::none();
@@ -1650,6 +1751,22 @@ impl App {
             return self.status();
         }
         match (job, response.payload) {
+            (Job::CloudList, ResponsePayload::Message(message)) => {
+                match serde_json::from_str::<Vec<password_manager::cloud::RemoteVault>>(&message) {
+                    Ok(vaults) => {
+                        self.cloud_vaults = vaults.into_iter().map(|v| v.id).collect();
+                        self.cloud_vault = self.cloud_vaults.first().cloned();
+                        self.notice =
+                            format!("{} cloud vault(s) available", self.cloud_vaults.len());
+                    }
+                    Err(e) => self.notice = format!("Invalid vault list: {e}"),
+                }
+            }
+            (Job::Cloud, ResponsePayload::Message(message)) => {
+                self.notice = message;
+                return self.refresh_vaults();
+            }
+
             (Job::Workflow(action), payload) => {
                 if let Some((id, _)) = self.ui.undo_trash.as_ref() {
                     let resolved = match action {

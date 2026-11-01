@@ -32,7 +32,7 @@ fn duo_request() -> DuoPushRequest {
         id: "request-1".into(),
         application: "Work VPN".into(),
         username: "alice".into(),
-        location: "Boise".into(),
+        location: "Example City".into(),
         summary: "New login".into(),
         expires_at,
         code_digits: Some(3),
@@ -509,7 +509,13 @@ fn duo_decisions_capture_the_reviewed_fingerprint_and_verified_code() {
         .workspace
         .prepare(Action::Respond(0, true), &app)
         .unwrap();
-    assert!(prepared.confirmation.as_ref().unwrap().contains("Boise"));
+    assert!(
+        prepared
+            .confirmation
+            .as_ref()
+            .unwrap()
+            .contains("Example City")
+    );
     let ServerCommand::Duo(DuoCommand::Respond {
         request_id,
         fingerprint,
