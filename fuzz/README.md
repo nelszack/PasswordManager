@@ -7,19 +7,22 @@ normal builds do not include those helpers.
 Clone the source repository before running these commands; release archives
 contain this guide but not the developer fuzz harness.
 
-Use a native C/C++ build toolchain, install nightly Rust and `cargo-fuzz`, then
-run from the repository root:
+Use a native C/C++ build toolchain, install the CI-pinned nightly Rust and
+`cargo-fuzz`, then run from the repository root. The pin avoids a
+[compiler regression in async-drop analysis](https://github.com/rust-lang/rust/issues/165263)
+that prevents dependencies from compiling on nightly-2026-11-01. Keep the
+workflow and these commands aligned when updating the toolchain.
 
 ```bash
-rustup toolchain install nightly
+rustup toolchain install nightly-2026-10-31 --profile minimal
 cargo install cargo-fuzz --locked
 mkdir -p fuzz/corpus/encrypted_headers fuzz/corpus/native_messages fuzz/corpus/imports
 cp fuzz/seeds/encrypted_headers/* fuzz/corpus/encrypted_headers/
 cp fuzz/seeds/native_messages/* fuzz/corpus/native_messages/
 cp fuzz/seeds/imports/* fuzz/corpus/imports/
-cargo +nightly fuzz run encrypted_headers -- -max_total_time=600 -max_len=65536
-cargo +nightly fuzz run native_messages -- -max_total_time=600 -max_len=65536
-cargo +nightly fuzz run imports -- -max_total_time=600 -max_len=65536
+cargo +nightly-2026-10-31 fuzz run encrypted_headers -- -max_total_time=600 -max_len=65536
+cargo +nightly-2026-10-31 fuzz run native_messages -- -max_total_time=600 -max_len=65536
+cargo +nightly-2026-10-31 fuzz run imports -- -max_total_time=600 -max_len=65536
 ```
 
 - `encrypted_headers` validates arbitrary headers and decrypts using cached
@@ -54,7 +57,7 @@ artifacts without checking that they contain no real secrets. Runtime corpora,
 artifacts, and build outputs are ignored by Git. Reproduce a finding with:
 
 ```bash
-cargo +nightly fuzz run imports fuzz/artifacts/imports/crash-EXAMPLE
+cargo +nightly-2026-10-31 fuzz run imports fuzz/artifacts/imports/crash-EXAMPLE
 ```
 
 Minimize the input, fix the parser, and add a focused regression test before
