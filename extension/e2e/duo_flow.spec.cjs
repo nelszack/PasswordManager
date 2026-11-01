@@ -5,7 +5,7 @@ const origin = "https://login.example";
 const challenge = "<!doctype html><html><body><h1>Duo Push</h1><p>Push sent. Check your phone.</p></body></html>";
 const universalChallenge = '<!doctype html><html><body><h1>Check for a Duo Push</h1><p>Verify it\'s you by approving the notification...</p><p>Sent to "Password Manager"</p><button>Other options</button><p>Need help? Secured by Duo</p></body></html>';
 const pending = options => ({ entryId: 7, id: "synthetic-request", application: "Example VPN", username: "alice@example.com",
-    location: "Boise", summary: "Login", expires_at: Math.floor(Date.now() / 1000) + 300,
+    location: "Example City", summary: "Login", expires_at: Math.floor(Date.now() / 1000) + 300,
     fingerprint: "a".repeat(128), code_digits: null, unsupported: null, ...options });
 
 async function setup(options = {}) {
@@ -46,7 +46,7 @@ test("Duo decisions require one explicit click and the appropriate verification"
     test.setTimeout(120_000);
     for (const scenario of [
         { name: "ordinary approval", approve: true },
-        { name: "BYU–Idaho Universal Prompt approval", approve: true, universal: true },
+        { name: "Example University Universal Prompt approval", approve: true, universal: true },
         { name: "ordinary denial", approve: false },
         { name: "verified approval", approve: true, request: { code_digits: 3 } },
         { name: "unsupported approval leaves denial available", approve: false, request: { unsupported: "Requires proximity verification" } }

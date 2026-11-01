@@ -153,6 +153,10 @@ fn handle_command(
                 );
             }
         }
+        ServerCommand::Cloud(_) => respond_failure(
+            "Sync commands are handled outside the vault worker",
+            responses,
+        ),
         ServerCommand::Status => {
             let warning = combined_lock_warning(&background_error, system_lock.as_deref());
             respond_payload(

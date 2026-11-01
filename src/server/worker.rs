@@ -267,6 +267,8 @@ pub(super) struct VaultWorker {
     normal: mpsc::Sender<Job>,
     control: mpsc::Sender<Job>,
     locked: watch::Receiver<Option<String>>,
+    revision: watch::Receiver<Option<u64>>,
+    cloud_warning: Arc<Mutex<Option<String>>>,
 }
 impl VaultWorker {
     pub fn start(
@@ -277,6 +279,7 @@ impl VaultWorker {
         let (normal_tx, mut normal) = mpsc::channel::<Job>(QUEUE_CAPACITY);
         let (control_tx, mut control) = mpsc::channel::<Job>(CONTROL_CAPACITY);
         let (locked_tx, locked) = watch::channel(session.session_id());
+        let (revision_tx, revision) = watch::channel(session.vault().map(Vault::vault_revision));
         tokio::spawn(async move {
             let mut owner = Some(Owner::new(session));
             let mut deadline: Option<tokio::time::Instant> = None;
@@ -322,6 +325,7 @@ impl VaultWorker {
                     locked_tx.send_replace(None);
                     break;
                 };
+                revision_tx.send_replace(returned.session.vault().map(Vault::vault_revision));
                 let locked = returned.session.is_locked();
                 locked_tx.send_replace(returned.session.session_id());
                 owner = Some(returned);
@@ -349,7 +353,22 @@ impl VaultWorker {
             normal: normal_tx,
             control: control_tx,
             locked,
+            revision,
+            cloud_warning: Arc::new(Mutex::new(None)),
         }
+    }
+    pub fn vault_revision(&self) -> Option<u64> {
+        if self.session_id().is_none() {
+            None
+        } else {
+            *self.revision.borrow()
+        }
+    }
+    pub async fn cloud_warning(&self) -> Option<String> {
+        self.cloud_warning.lock().await.clone()
+    }
+    pub async fn set_cloud_warning(&self, warning: Option<String>) {
+        *self.cloud_warning.lock().await = warning;
     }
     #[cfg(test)]
     pub fn is_locked(&self) -> bool {

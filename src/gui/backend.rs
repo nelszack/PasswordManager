@@ -34,6 +34,10 @@ pub enum Reply {
     KeyFile(Option<SecretString>),
     PickedFile(super::workflows::Field, Option<SecretString>),
     Local(String),
+    CloudSetup {
+        conf: Config,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -331,6 +335,15 @@ fn save_settings_at(
     Ok(Reply::Settings {
         conf,
         restart_required,
+    })
+}
+
+pub fn setup_sync(request: password_manager::cloud::setup::Request) -> Result<Reply, Failure> {
+    let result =
+        password_manager::cloud::setup::execute(request, &config_dir().join("config.toml"))?;
+    Ok(Reply::CloudSetup {
+        conf: result.config,
+        message: result.message,
     })
 }
 

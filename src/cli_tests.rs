@@ -571,3 +571,65 @@ fn push_cli_requires_selected_entry_and_bounded_polling() {
         }) if id == "chosen"));
     }
 }
+
+#[test]
+fn sync_setup_connect_update_and_automatic_vault_selection_parse() {
+    for args in [
+        vec!["pm", "sync", "setup", "--ssh", "user@server"],
+        vec![
+            "pm",
+            "sync",
+            "connect",
+            "--ssh",
+            "user@server",
+            "--name",
+            "laptop",
+        ],
+        vec!["pm", "sync", "server", "update"],
+        vec![
+            "pm",
+            "sync",
+            "server",
+            "update",
+            "--ssh",
+            "sync-server",
+            "--binary",
+            "server",
+        ],
+        vec!["pm", "sync", "pull"],
+        vec![
+            "pm",
+            "sync",
+            "connect",
+            "https://sync-server.example.ts.net",
+            "--token-file",
+            "token",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+    }
+    assert!(Cli::try_parse_from(["pm", "sync", "connect"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "pm",
+            "sync",
+            "connect",
+            "https://example.com",
+            "--ssh",
+            "sync-server"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "pm",
+            "sync",
+            "connect",
+            "--ssh",
+            "sync-server",
+            "--token-file",
+            "token"
+        ])
+        .is_err()
+    );
+}

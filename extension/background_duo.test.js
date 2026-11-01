@@ -10,7 +10,7 @@ function environment() {
     let active = true, origin = "https://login.example", locked = false, holdPoll, holdDecision, decisionError, holdTab;
     let items = [{ id: 1, name: "Work", has_duo: true }];
     let issuerItems = [];
-    let pending = [{ id: "request-one", application: "Example VPN", username: "alice", location: "Boise",
+    let pending = [{ id: "request-one", application: "Example VPN", username: "alice", location: "Example City",
         summary: "Login", expires_at: Math.floor(Date.now() / 1000) + 300,
         code_digits: null, unsupported: null, fingerprint: "a".repeat(128) }];
     const chrome = { runtime: { id: "extension", getURL: path => `chrome-extension://extension/${path}` },
@@ -220,7 +220,7 @@ test("Duo-hosted challenges can find their enrolled issuer without a remembered 
     for (const url of ["https://api-test.duosecurity.com", "https://unrelated.example", "http://api-test.duosecurity.com"]) {
         const env = environment();
         env.setItems([{ id: 2, has_duo: false }]);
-        env.setIssuerItems([{ id: 1, name: "BYU–Idaho", has_duo: true }]);
+        env.setIssuerItems([{ id: 1, name: "Example University", has_duo: true }]);
         env.setOrigin(url); env.sender.url = url;
         await env.duo.observe({}, env.sender);
         const allowed = url === "https://api-test.duosecurity.com";
@@ -242,9 +242,9 @@ test("Duo challenge detection distinguishes sign-in prompts from informational t
         assert.equal(detection.challenge(text, "https://login.example"), false);
     }
     assert.equal(detection.challenge("Check your device", "https://api-test.duosecurity.com"), true);
-    // BYU–Idaho's Universal Prompt doesn't use the older "Push sent" wording.
+    // The Universal Prompt can omit the older "Push sent" wording.
     const universal = 'Check for a Duo Push Verify it\'s you by approving the notification... Sent to "Password Manager" Other options Need help? Secured by Duo';
-    for (const url of ["https://secure.byui.edu/cas/login", "https://api-test.duosecurity.com/frame/prompt"]) {
+    for (const url of ["https://sso.example.edu/cas/login", "https://api-test.duosecurity.com/frame/prompt"]) {
         assert.equal(detection.challenge(universal, url), true, url);
     }
     for (const url of ["http://api-test.duosecurity.com", "https://api-test.duosecurity.com.evil.example", "https://duosecurity.com", "https://api-test.duosecurity.com:8443", "invalid"]) {

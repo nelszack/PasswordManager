@@ -23,6 +23,11 @@
 - `src/password.rs` - Password generation and strength checking
 - `src/cli.rs` - CLI argument parsing
 - `src/config.rs` - Configuration management
+- `src/cloud.rs` - Encrypted cloud transport, device credentials, and local sync checkpoints
+- `src/cloud/setup.rs` and its shell templates - SSH setup, local cross-compilation, device enrollment, and rollback updates
+- `src/server/cloud.rs` - Automatic sync and change notifications outside the vault owner queue
+- `src/vault/sync.rs` - Authenticated application of downloaded snapshots on the vault owner
+- `sync-server/` - Independent Go snapshot server, device enrollment, quotas, and Linux service unit
 - `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - Application paths, key-path validation, private permissions, and atomic file writes
 - `src/protocol.rs` and `src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
@@ -33,6 +38,12 @@
 
 See the [architecture review](architecture-review.md) for the reasoning behind
 the domain, protocol, and session refactor.
+
+For cloud-sync changes, run `go test -race ./...` and `go vet ./...` in
+`sync-server/`. After building `pm`, run `python3 scripts/test_cloud_sync.py`
+from the repository root to exercise two isolated clients against the actual Go
+server. This test uses temporary profiles and loopback ports. See
+[cloud sync](cloud-sync.md) for setup, protocol behavior, and current limitations.
 
 The default `desktop` feature includes Iced 0.14 with its software renderer and
 X11/Wayland support. A [local renderer patch](../vendor/iced_tiny_skia/README.pm.md)

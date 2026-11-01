@@ -1,0 +1,13 @@
+[Unit]
+Description=Encrypted password vault sync
+After=network.target
+
+[Service]
+ExecStart=%h/.local/bin/pm-sync --data %h/.local/share/pm-sync --listen 127.0.0.1:8788 --max-storage 268435456 --keep 3
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

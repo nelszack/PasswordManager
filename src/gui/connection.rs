@@ -47,6 +47,9 @@ impl App {
     }
 
     pub(super) fn apply_configuration(&mut self, conf: Config) {
+        if self.cloud_ssh == self.conf.sync.ssh_target.clone().unwrap_or_default() {
+            self.cloud_ssh = conf.sync.ssh_target.clone().unwrap_or_default();
+        }
         let recovery_changed = self.running && conf.recovery != self.conf.recovery;
         self.settings.reload(&conf);
 

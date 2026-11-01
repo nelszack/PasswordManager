@@ -183,6 +183,14 @@ pub enum CliCommands {
     },
     /// List opaque vault filenames without decrypting them or requiring a server.
     Vaults,
+    /// Connect, download, and synchronize encrypted cloud vaults.
+    #[command(
+        after_help = "Examples:\n  pm sync setup --ssh user@server\n  pm sync enable\n  pm sync connect --ssh user@server\n  pm sync pull\n  pm sync server update"
+    )]
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommands,
+    },
     /// Internal detached clipboard owner. Secrets arrive only over stdin.
     #[command(hide = true)]
     ClipboardHelper {
@@ -902,3 +910,72 @@ impl From<UpdateArgs> for crate::types::EntryChanges {
 #[cfg(test)]
 #[path = "cli_tests.rs"]
 mod test;
+
+#[derive(Subcommand, Debug)]
+pub enum SyncCommands {
+    /// Build locally, install a sync server over SSH, and connect this device.
+    Setup {
+        /// SSH destination; defaults to the saved server host.
+        #[arg(long)]
+        ssh: Option<String>,
+        /// Use a prebuilt Linux server binary instead of building with local Go.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        binary: Option<PathBuf>,
+        /// Override the device name; defaults to this device's Tailscale name.
+        #[arg(long = "name")]
+        device_name: Option<String>,
+    },
+    /// Manage the saved sync server installation.
+    Server {
+        #[command(subcommand)]
+        command: SyncServerCommands,
+    },
+    /// Save the server address and a device token (prompted privately by default).
+    Connect {
+        /// HTTPS origin of your private sync server.
+        #[arg(required_unless_present = "ssh", conflicts_with = "ssh")]
+        url: Option<String>,
+        /// Authorize this device over SSH without copying a credential file.
+        #[arg(long, conflicts_with = "token_file")]
+        ssh: Option<String>,
+        /// Override the Tailscale device name for SSH enrollment.
+        #[arg(long = "name", requires = "ssh")]
+        device_name: Option<String>,
+        /// Read the device credential from a private file instead of prompting.
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    /// List encrypted vaults available on the server.
+    Vaults,
+    /// Download an existing cloud vault onto this machine without overwriting files.
+    Pull {
+        /// Opaque vault identity reported by `pm sync vaults`.
+        id: Option<String>,
+        /// Download a separate comparison copy with synchronization disabled.
+        #[arg(long)]
+        copy: bool,
+    },
+    /// Enable sync for the currently unlocked vault and upload its initial copy.
+    Enable,
+    /// Disable sync for the currently unlocked vault.
+    Disable,
+    /// Show this vault's local sync checkpoint.
+    Status,
+    /// Check for local and remote changes without applying them.
+    Check,
+    /// Upload or download changes, preserving both copies on conflict.
+    Now,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SyncServerCommands {
+    /// Install the bundled server version and restart with automatic rollback on failure.
+    Update {
+        /// SSH destination; defaults to the host saved during setup or connection.
+        #[arg(long)]
+        ssh: Option<String>,
+        /// Use a prebuilt Linux server binary instead of building with local Go.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        binary: Option<PathBuf>,
+    },
+}

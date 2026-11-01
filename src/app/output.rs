@@ -13,6 +13,9 @@ impl Output {
     pub fn new(json: bool, quiet: bool) -> Self {
         Self { json, quiet }
     }
+    pub fn can_prompt(&self) -> bool {
+        !self.json && !self.quiet && io::stdin().is_terminal() && io::stdout().is_terminal()
+    }
     pub fn print_error(&self, error: &str) {
         if self.json {
             println!("{}", serde_json::json!({"ok":false,"error":error}));

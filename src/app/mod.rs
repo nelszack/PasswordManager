@@ -6,6 +6,7 @@ mod duo;
 mod local;
 mod remote;
 mod session;
+mod sync;
 mod totp;
 
 pub async fn run(

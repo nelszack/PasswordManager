@@ -1275,8 +1275,8 @@ pm add --type payment-card --name "Personal Visa" --username "Alice Example" \
 
 pm add --type identity --name "Home identity" --username alice@example.com \
   --field "full name=Alice Example" --field "address line 1=123 Main St" \
-  --field city=Boise --field state=Idaho --field "postal code=83702" \
-  --field country=US --field "phone number=2085550100"
+  --field "city=Example City" --field "state=Example Region" --field "postal code=00000" \
+  --field country=US --field "phone number=2025550100"
 ```
 
 Supported standard browser fields include cardholder name, card number,

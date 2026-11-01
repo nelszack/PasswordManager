@@ -311,7 +311,7 @@ mod tests {
             id: id.into(),
             application: "Example VPN".into(),
             username: "alice".into(),
-            location: "Boise".into(),
+            location: "Example City".into(),
             summary: "Login".into(),
             expires_at: u64::MAX,
             code_digits: None,

@@ -1099,3 +1099,37 @@ fn csv_export_refuses_formula_cells_without_altering_json_or_existing_files() {
         );
     }
 }
+
+#[test]
+fn cloud_updates_authenticate_identity_before_replacing_disk_or_memory() {
+    let (dir, mut vault, mut credentials) = persisted();
+    let before = fs::read(dir.path().join("test.enc")).unwrap();
+    let original = vault.clone();
+    let mut remote = vault.clone();
+    remote.data.vault_id = [8; 16];
+    let plaintext = persistence::encode_document(&remote.data, None).unwrap();
+    let encrypted = try_encrypt_file_in_place(&mut key(42), plaintext.to_vec()).unwrap();
+    assert!(vault.apply_cloud(&mut credentials, &encrypted).is_err());
+    assert_eq!(fs::read(dir.path().join("test.enc")).unwrap(), before);
+    assert_eq!(vault, original);
+    let mut corrupt = before.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    assert!(vault.apply_cloud(&mut credentials, &corrupt).is_err());
+    assert_eq!(vault, original);
+    assert_eq!(fs::read(dir.path().join("test.enc")).unwrap(), before);
+
+    remote.data.vault_id = vault.vault_id();
+    remote.data.revision += 1;
+    remote
+        .data
+        .items
+        .get_mut(&ItemId::try_from(1).unwrap())
+        .unwrap()
+        .entry
+        .name = "Remote edit".into();
+    let plaintext = persistence::encode_document(&remote.data, None).unwrap();
+    let encrypted = try_encrypt_file_in_place(&mut key(42), plaintext.to_vec()).unwrap();
+    vault.apply_cloud(&mut credentials, &encrypted).unwrap();
+    assert_eq!(vault.data, remote.data);
+    assert_eq!(reopen(&vault).data, remote.data);
+}

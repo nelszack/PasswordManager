@@ -579,6 +579,10 @@ mod tests {
 #[serde(deny_unknown_fields)]
 pub struct ServerStatus {
     pub locked: bool,
+    #[serde(default)]
+    pub vault_revision: Option<u64>,
+    #[serde(default)]
+    pub cloud_warning: Option<String>,
     pub version: String,
     pub warning: Option<String>,
 }
@@ -587,6 +591,8 @@ impl ServerStatus {
         Self {
             locked,
             version: env!("CARGO_PKG_VERSION").into(),
+            vault_revision: None,
+            cloud_warning: None,
             warning,
         }
     }

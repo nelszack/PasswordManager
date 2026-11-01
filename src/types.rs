@@ -123,6 +123,7 @@ pub enum ServerCommand {
     Lock(bool),
     Unlock(UnlockInfo),
     Status,
+    Cloud(crate::cloud::Action),
     View(ListOptions),
     BrowserAutofill,
     BrowserAutofillItem(usize),
@@ -193,6 +194,7 @@ impl ServerCommand {
         !matches!(
             self,
             Self::Status
+                | Self::Cloud(_)
                 | Self::View(_)
                 | Self::Search(_)
                 | Self::History(_)
@@ -228,6 +230,7 @@ impl ServerCommand {
             Self::Kill
                 | Self::Lock(_)
                 | Self::Status
+                | Self::Cloud(_)
                 | Self::OperationStatus(_)
                 | Self::BrowserDuoItems(_)
                 | Self::BrowserLogins(_)

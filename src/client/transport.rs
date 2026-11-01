@@ -100,6 +100,8 @@ impl AuthenticatedClient {
             })
         ) {
             self.breach_timeout
+        } else if matches!(command, ServerCommand::Cloud(_)) {
+            Duration::from_secs(120)
         } else if matches!(
             command,
             ServerCommand::Duo(_) | ServerCommand::Totp(TotpCommand::Duo { .. })

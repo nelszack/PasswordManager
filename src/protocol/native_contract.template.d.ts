@@ -11,7 +11,7 @@ export interface ItemDetail extends ItemSummary { notes: string | null; password
 export interface BrowserLogin { id: number; revision: number; name: string; username: string | null; password: string; has_totp: boolean; }
 export interface AutofillItem { id: number; revision: number; name: string; kind: ItemKind; username: string | null; primary_secret: string; custom_fields: CustomField[]; }
 export interface ManagementInput { name: string; username?: string; password?: string | null; kind?: ItemKind; urls?: string[]; notes?: string; fields?: CustomField[]; removeFields?: string[]; removeUrls?: string[]; }
-export interface ServerStatus { locked: boolean; version: string; warning: string | null; }
+export interface ServerStatus { locked: boolean; version: string; warning: string | null; vault_revision: number | null; cloud_warning: string | null; }
 export type Authenticator = { code: string; mode: "totp"; expires_in: number; counter: null } | { code: string; mode: "hotp"; expires_in: null; counter: string };
 export interface DuoRequest { id: string; application: string; username: string; location: string; summary: string; expires_at: number; code_digits: number | null; unsupported: string | null; fingerprint: string; }
 export interface NativeRequests {
