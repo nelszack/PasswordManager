@@ -46,11 +46,38 @@ pub(super) fn scrollable<'a>(
     })
 }
 
+/// A focusable message viewport: long errors must be readable without a wheel.
+pub(super) fn keyboard_scrollable<'a>(
+    content: impl Into<Element<'a, Message>>,
+    id: &'static str,
+    announcement: Option<(&str, bool)>,
+) -> Element<'a, Message> {
+    Element::new(Control {
+        id: None,
+        content: scrollable(content).id(id).height(Length::Fill).into(),
+        announcement: announcement.map(|(text, urgent)| (text.to_owned(), urgent)),
+        on_key: Some(Box::new(move |key| {
+            let delta = match key {
+                Key::Named(Named::ArrowUp) => -32.0,
+                Key::Named(Named::ArrowDown) => 32.0,
+                Key::Named(Named::PageUp) => -200.0,
+                Key::Named(Named::PageDown) => 200.0,
+                Key::Named(Named::Home) => -1_000_000.0,
+                Key::Named(Named::End) => 1_000_000.0,
+                _ => return None,
+            };
+            Some(Message::ScrollPane(id.into(), delta))
+        })),
+    })
+}
+
 type KeyHandler<'a> = Box<dyn Fn(&Key) -> Option<Message> + 'a>;
 
 struct Control<'a> {
+    id: Option<widget::Id>,
     content: Element<'a, Message>,
     on_key: Option<KeyHandler<'a>>,
+    announcement: Option<(String, bool)>,
 }
 
 struct Focus {
@@ -77,12 +104,110 @@ impl Focusable for Focus {
     }
 }
 
+/// Associate the native control's semantics with the keyboard wrapper's stable
+/// focus ID. Both pointer and assistive actions still go through that control.
+struct ControlOperation<'a> {
+    inner: &'a mut dyn widget::Operation,
+    focus: &'a mut Focus,
+    associated: bool,
+    container_pending: bool,
+    announcement: Option<(&'a str, bool)>,
+}
+impl widget::Operation for ControlOperation<'_> {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn widget::Operation)) {
+        let focus = &mut self.focus;
+        let associated = &mut self.associated;
+        let container_pending = &mut self.container_pending;
+        self.inner.traverse(&mut |inner| {
+            let mut forwarded = ControlOperation {
+                inner,
+                focus,
+                associated: *associated,
+                container_pending: *container_pending,
+                announcement: self.announcement,
+            };
+            operate(&mut forwarded);
+            *associated = forwarded.associated;
+            *container_pending = forwarded.container_pending;
+        });
+    }
+    fn container(&mut self, id: Option<&widget::Id>, bounds: Rectangle) {
+        if self.container_pending {
+            self.container_pending = false;
+            self.inner.container(Some(&self.focus.id), bounds);
+        } else {
+            self.inner.container(id, bounds);
+        }
+    }
+    fn accessible(
+        &mut self,
+        id: Option<&widget::Id>,
+        bounds: Rectangle,
+        accessible: &widget::operation::Accessible<'_>,
+    ) {
+        if !self.associated {
+            self.associated = true;
+            self.container_pending = true;
+            let id = self.focus.id.clone();
+            let mut accessible = accessible.clone();
+            if let Some((message, urgent)) = self.announcement {
+                accessible.label = Some(message);
+                accessible.live = Some(if urgent {
+                    widget::operation::accessible::Live::Assertive
+                } else {
+                    widget::operation::accessible::Live::Polite
+                });
+            }
+            self.inner.accessible(Some(&id), bounds, &accessible);
+            self.inner.focusable(Some(&id), bounds, self.focus);
+        } else {
+            self.inner.accessible(id, bounds, accessible);
+        }
+    }
+    fn text(&mut self, id: Option<&widget::Id>, bounds: Rectangle, text: &str) {
+        self.inner.text(id, bounds, text);
+    }
+    fn focusable(&mut self, id: Option<&widget::Id>, bounds: Rectangle, state: &mut dyn Focusable) {
+        self.inner.focusable(id, bounds, state);
+    }
+    fn text_input(
+        &mut self,
+        id: Option<&widget::Id>,
+        bounds: Rectangle,
+        state: &mut dyn widget::operation::TextInput,
+    ) {
+        self.inner.text_input(id, bounds, state);
+    }
+    fn scrollable(
+        &mut self,
+        id: Option<&widget::Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+        state: &mut dyn widget::operation::Scrollable,
+    ) {
+        self.inner
+            .scrollable(id, bounds, content_bounds, translation, state);
+    }
+    fn custom(
+        &mut self,
+        id: Option<&widget::Id>,
+        bounds: Rectangle,
+        state: &mut dyn std::any::Any,
+    ) {
+        self.inner.custom(id, bounds, state);
+    }
+}
+
 impl Widget<Message, Theme, Renderer> for Control<'_> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<Focus>()
     }
     fn state(&self) -> tree::State {
-        tree::State::new(Focus::default())
+        tree::State::new(Focus {
+            id: self.id.clone().unwrap_or_else(widget::Id::unique),
+            focused: false,
+        })
     }
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
@@ -114,15 +239,28 @@ impl Widget<Message, Theme, Renderer> for Control<'_> {
         operation: &mut dyn widget::Operation,
     ) {
         let state = tree.state.downcast_mut::<Focus>();
-        if self.on_key.is_some() {
-            let id = state.id.clone();
-            operation.focusable(Some(&id), layout.bounds(), state);
-        } else {
+        if let Some(id) = &self.id {
+            state.id = id.clone();
+        }
+        if self.on_key.is_none() {
             state.focused = false;
         }
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        let mut associated = ControlOperation {
+            inner: operation,
+            focus: state,
+            associated: self.on_key.is_none(),
+            container_pending: false,
+            announcement: self
+                .announcement
+                .as_ref()
+                .map(|(message, urgent)| (message.as_str(), *urgent)),
+        };
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            &mut associated,
+        );
     }
     fn update(
         &mut self,
@@ -251,11 +389,13 @@ fn activate(key: &Key) -> bool {
 }
 
 pub(super) struct Button<'a> {
+    id: Option<widget::Id>,
     inner: iced::widget::Button<'a, Message>,
     message: Option<Message>,
 }
 pub(super) fn button<'a>(content: impl Into<Element<'a, Message>>) -> Button<'a> {
     Button {
+        id: None,
         inner: native_button(content).style(|theme, status| {
             let mut style = native_button::primary(theme, status);
             style.border.radius = 8.0.into();
@@ -265,6 +405,14 @@ pub(super) fn button<'a>(content: impl Into<Element<'a, Message>>) -> Button<'a>
     }
 }
 impl<'a> Button<'a> {
+    pub fn id(mut self, id: impl Into<widget::Id>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.inner = self.inner.accessibility_selected(selected);
+        self
+    }
     pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
         self.inner = self.inner.padding(padding);
         self
@@ -296,7 +444,9 @@ impl<'a> Button<'a> {
 impl<'a> From<Button<'a>> for Element<'a, Message> {
     fn from(button: Button<'a>) -> Self {
         Element::new(Control {
+            id: button.id,
             content: button.inner.into(),
+            announcement: None,
             on_key: button.message.map(|message| {
                 Box::new(move |key: &Key| activate(key).then(|| message.clone())) as KeyHandler<'a>
             }),
@@ -338,7 +488,9 @@ impl<'a> Checkbox<'a> {
 impl<'a> From<Checkbox<'a>> for Element<'a, Message> {
     fn from(checkbox: Checkbox<'a>) -> Self {
         Element::new(Control {
+            id: None,
             content: checkbox.inner.into(),
+            announcement: None,
             on_key: checkbox.on_key,
         })
     }
@@ -408,7 +560,9 @@ impl<'a, T: ToString + PartialEq + Clone + 'a> PickList<'a, T> {
 impl<'a, T: ToString + PartialEq + Clone + 'a> From<PickList<'a, T>> for Element<'a, Message> {
     fn from(picker: PickList<'a, T>) -> Self {
         Element::new(Control {
+            id: None,
             content: picker.inner.into(),
+            announcement: None,
             on_key: Some(picker.on_key),
         })
     }
@@ -612,6 +766,33 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn feedback_panes_publish_keyboard_scroll_commands() {
+        let mut pane = keyboard_scrollable(
+            iced::widget::text("Long recovery instructions"),
+            "notice",
+            None,
+        );
+        for (key, positive) in [
+            (Named::ArrowDown, true),
+            (Named::PageDown, true),
+            (Named::End, true),
+            (Named::ArrowUp, false),
+            (Named::Home, false),
+        ] {
+            let messages = press(
+                &mut pane,
+                true,
+                Key::Named(key),
+                false,
+                keyboard::Modifiers::empty(),
+            );
+            assert!(
+                matches!(messages.as_slice(), [Message::ScrollPane(id, delta)] if id == "notice" && (*delta > 0.0) == positive)
+            );
+        }
     }
 
     #[test]

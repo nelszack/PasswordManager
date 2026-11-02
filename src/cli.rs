@@ -42,6 +42,19 @@ cli_values!(crate::types::OtpMode,
     crate::types::OtpMode::Hotp => ("hotp", "Counter-based code"),
     crate::types::OtpMode::Totp => ("totp", "Time-based code"),
 );
+fn parse_operation_id(value: &str) -> Result<String, String> {
+    if !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("operation ID must contain 1–128 letters, digits, hyphens or underscores".into())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "pm",
@@ -66,7 +79,33 @@ pub struct Cli {
     pub command: Option<CliCommands>,
 }
 pub fn cli_parse() -> Cli {
-    Cli::parse()
+    let args: Vec<_> = std::env::args_os().collect();
+    match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error)
+            if error.exit_code() != 0
+                && args
+                    .iter()
+                    .take_while(|arg| *arg != "--")
+                    .any(|arg| arg == "--json") =>
+        {
+            // Parser diagnostics can contain rejected values, including secrets.
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            let result = writeln!(stdout, "{}", serde_json::json!({"ok":false,"error":"Invalid command arguments. Run pm <COMMAND> --help for usage.","code":error.exit_code(),"kind":format!("{:?}", error.kind())}))
+                .and_then(|()| stdout.flush());
+            if let Err(write_error) = result
+                && write_error.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Error: could not write command output: {write_error}"
+                );
+            }
+            std::process::exit(error.exit_code());
+        }
+        Err(error) => error.exit(),
+    }
 }
 #[derive(Subcommand, Debug)]
 pub enum CliCommands {
@@ -180,6 +219,15 @@ pub enum CliCommands {
 
         #[command(flatten)]
         timeout: Timeout,
+    },
+    /// Inspect a previous change after a lost response; never retries the change.
+    #[command(
+        after_help = "Use the operation ID printed by an uncertain command. If the result is unknown, inspect the vault before deciding whether to make a new change."
+    )]
+    Operation {
+        /// Operation identifier reported by the original command.
+        #[arg(long, value_parser = parse_operation_id)]
+        id: String,
     },
     /// List opaque vault filenames without decrypting them or requiring a server.
     Vaults,
@@ -722,6 +770,9 @@ pub struct DeleteArgs {
     /// Use this only when the key is intentionally shared or retained as a backup.
     #[arg(long, requires_all = ["vault", "key"])]
     pub keep_key: bool,
+    /// Confirm permanent vault deletion without prompting (required for scripts).
+    #[arg(long, requires = "vault")]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -732,6 +783,9 @@ pub struct PurgeArgs {
     /// Permanently erase every entry in trash.
     #[arg(long, conflicts_with = "id", required_unless_present = "id")]
     pub all: bool,
+    /// Confirm permanent trash deletion without prompting (required for scripts).
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]

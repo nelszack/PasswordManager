@@ -268,6 +268,17 @@ const PasswordManagerBackgroundPickers = {
         function data(request, sender) {
             if (!pickerSenderAllowed(sender)) return { success: false, error: "Invalid picker sender" };
             const pending = pendingPickers.get(request.token);
+            if (request.retry === true && pending && pending.expiresAt > Date.now() && !pending.loading && !pending.completing) {
+                pending.loading = true; pending.error = null; pending.items = []; pending.summaries = []; pending.sessionId = null;
+                requireCurrentDestination(request.token, pending)
+                    .then(() => loadSecurePickerItems(pending.kind, pending.domain))
+                    .then(result => {
+                        if (pendingPickers.get(request.token) !== pending || pending.expiresAt <= Date.now()) return;
+                        Object.assign(pending, result, { loading: false });
+                    }).catch(error => {
+                        if (pendingPickers.get(request.token) === pending) { pending.loading = false; pending.error = error.message || "Vault items unavailable"; }
+                    });
+            }
             return pending && pending.expiresAt > Date.now()
                 ? { success: true, kind: pending.kind, origin: pending.domain, topOrigin: pending.topOrigin,
                     crossOrigin: pending.crossOrigin, items: pending.summaries, loading: pending.loading, error: pending.error }

@@ -21,6 +21,21 @@ pub struct RequestFailure {
     pub sent: bool,
 }
 
+impl RequestFailure {
+    pub fn describe(self, operation_id: Option<&str>) -> String {
+        if self.sent
+            && let Some(id) = operation_id
+        {
+            format!(
+                "{} The change may have completed. Do not retry blindly. Inspect the vault and run pm operation --id {id} to check its recorded outcome.",
+                self.message
+            )
+        } else {
+            self.message
+        }
+    }
+}
+
 /// An authenticated local connection with explicit resource and timeout limits.
 #[derive(Clone, Debug)]
 pub struct AuthenticatedClient {
@@ -65,8 +80,10 @@ impl AuthenticatedClient {
     }
 
     pub fn request_response(&self, command: ServerCommand) -> Result<ProtocolResponse, String> {
-        self.request_response_tracked(command)
-            .map_err(|error| error.message)
+        let envelope = RequestEnvelope::new(command);
+        let operation_id = envelope.operation_id.clone();
+        self.request_envelope_tracked(envelope)
+            .map_err(|error| error.describe(operation_id.as_deref()))
     }
 
     pub fn request_response_tracked(
@@ -286,6 +303,25 @@ mod tests {
         assert!(result.err().unwrap().sent);
         worker.join().unwrap();
     }
+    #[test]
+    fn convenience_requests_keep_duo_mutation_uncertainty_and_identity() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorded = captured.clone();
+        let (client, worker, _root) = fixture(move |envelope| {
+            *recorded.lock().unwrap() = envelope.operation_id.clone();
+            None
+        });
+        let error = client
+            .request(ServerCommand::Duo(DuoCommand::Remove {
+                target: Target::Id(9),
+            }))
+            .unwrap_err();
+        worker.join().unwrap();
+        let id = captured.lock().unwrap().clone().unwrap();
+        assert!(error.contains(&id));
+        assert!(error.contains("Do not retry blindly"));
+    }
+
     #[test]
     fn correlation_mismatch_is_rejected_after_send() {
         let (client, worker, _root) = fixture(|_| {

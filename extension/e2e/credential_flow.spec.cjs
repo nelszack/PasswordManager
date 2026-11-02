@@ -57,6 +57,12 @@ test("adds and updates credentials across username, password, and TOTP pages", a
         async function submitCredentials(password) {
             await page.goto(`${origin}/username`);
             await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
+            await page.locator("#username").focus();
+            await page.keyboard.press("Tab");
+            await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeFocused();
+            const target = await page.getByRole("button", { name: "Choose saved credentials" }).boundingBox();
+            expect(target.width).toBeGreaterThanOrEqual(28);
+            expect(target.height).toBeGreaterThanOrEqual(28);
             await page.locator("#username").fill("alice@example.com");
             await Promise.all([
                 page.waitForURL(`${origin}/password`),

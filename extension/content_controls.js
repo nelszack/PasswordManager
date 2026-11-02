@@ -90,9 +90,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         button.setAttribute("aria-label", title);
         Object.assign(button.style, {
             position: "fixed", border: "none", background: "transparent", cursor: "pointer",
-            fontSize: "16px", zIndex: "2147483647", padding: "0", margin: "0", display: "none"
+            fontSize: "16px", zIndex: "2147483647", padding: "0", margin: "0", display: "none",
+            width: "28px", height: "28px", minWidth: "28px", minHeight: "28px", boxSizing: "border-box"
         });
-        document.body.appendChild(button);
+        // Keep keyboard traversal beside the field the control belongs to.
+        if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
         const positionButton = () => {
             if (!isElementVisible(input)) {
                 button.style.display = "none";
@@ -100,7 +102,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             }
             const rect = input.getBoundingClientRect();
             button.style.display = rect.width && rect.height ? "" : "none";
-            button.style.left = rect.right - 24 + "px";
+            button.style.left = rect.right - 30 + "px";
             button.style.top = rect.top + rect.height / 2 - 14 + "px";
         };
         positionButton();
@@ -122,9 +124,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             } catch (error) {
                 button.innerText = "⚠️";
                 button.title = error?.message || "Could not open secure picker";
+                button.setAttribute("aria-label", `${title}: ${button.title}`);
                 setTimeout(() => {
                     button.innerText = originalIcon;
                     button.title = title;
+                    button.setAttribute("aria-label", title);
                 }, 5000);
             }
         });

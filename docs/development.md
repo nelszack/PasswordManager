@@ -105,6 +105,54 @@ the server remains up. Native widget state, keyboard/IME behavior, accessibility
 and compositor integration require platform testing; browser tests do not exercise
 the Iced window.
 
+The desktop build also enables the local AccessKit bridge in
+[`iced_winit`](../vendor/iced_winit/README.pm.md), with semantic widget metadata
+from the local core/widget patches. Protected inputs omit their contents from
+the accessibility tree. The Unix adapter uses the AT-SPI `IsEnabled` property
+for compatibility with AT-SPI 2.62.1. This integration needs native validation;
+compilation and a semantic tree do not demonstrate complete Orca usability.
+
+The Linux protocol helpers are local zbus 6 ports so the desktop does not bring
+back the abandoned standalone zvariant/zbus_names implementations. Their
+READMEs describe the changes and upstream versions. The protocol and XML helper
+crates are workspace members for their upstream tests; the application remains
+the default workspace member. `npm run validate` runs those tests on Linux along
+with the Unix adapter's wire-signature and serialization checks. Registry audits
+do not cover path sources, so local ports still need source review and native
+validation when updated. The actual DBus codec/transport and XML parser remain
+maintained registry dependencies checked by the dependency audit.
+
+On Linux with Orca, GTK3, PyGObject, AT-SPI, and DBus installed, run
+`python scripts/test_gui_accessibility.py` after building. The smoke check uses
+private profiles and buses, a GTK reference control, and the real desktop app.
+It checks named controls, a button action, protected input focus, and, on Hyprland
+with `wtype`, typing and Tab navigation. `--output DIR` retains diagnostic
+evidence; `--orca-runtime DIR` accepts an extracted user-local Orca installation.
+For repeatable native X11 checks without desktop focus changes, supply
+`--xvfb /path/to/Xvfb`; this also needs `xdotool`. The extended check requires
+Orca to announce the protected field and saved-settings feedback, exercises
+dropdown selection, and checks that keyboard focus scrolls into view at 480px.
+It also attempts multiline note input, line navigation, caret movement, and text
+selection in a temporary synthetic vault. Inspect `result.json` for the completed
+checks and failure phase; a partial run does not certify native accessibility.
+Use `--scale 130` to repeat the checks with enlarged controls. On X11, the
+check also clicks a control at its exported accessible bounds to verify that
+physical pointer coordinates agree with accessibility coordinates.
+The script never examines personal vaults or other applications' control trees.
+Full spoken-output quality, editing, scrolling, menus, and IME checks remain part
+of the native acceptance review.
+
+The GUI tests also exercise the real Iced software renderer without opening a
+window or reading personal vaults. To export the synthetic fixtures as PPM images:
+
+```bash
+PM_GUI_REVIEW_DIR=/absolute/path/to/renders cargo test --locked --bin pm gui::render_tests
+```
+
+These checks cover minimum windows, enlargement, themes, long content, recovery
+banners, and bounded large-vault lists. They verify widget layout and rendering;
+they do not verify native window events, IME, file dialogs, or screen-reader support.
+
 The key-file chooser uses `rfd`. It creates the parented picker on Iced's window
 thread so AppKit calls stay on the main thread, then awaits the result in a task.
 Windows uses its native file dialog; macOS uses an AppKit sheet. Linux needs

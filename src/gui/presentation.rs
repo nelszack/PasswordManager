@@ -51,6 +51,15 @@ impl std::fmt::Display for ScaleChoice {
 }
 
 pub(super) struct State {
+    pub progress: String,
+    pub progress_started: Option<Instant>,
+    pub page_input: String,
+    pub reverse_items: bool,
+    pub item_page: usize,
+    pub draft_conflict: bool,
+    pub conflict_latest: Option<ItemDetail>,
+    pub confirm_close: Option<iced::window::Id>,
+    pub transfer_generated: bool,
     pub width: f32,
     pub height: f32,
     pub unlock_advanced: bool,
@@ -81,6 +90,15 @@ pub(super) struct SavedItem {
 impl Default for State {
     fn default() -> Self {
         Self {
+            progress: String::new(),
+            progress_started: None,
+            page_input: String::new(),
+            reverse_items: false,
+            item_page: 0,
+            draft_conflict: false,
+            conflict_latest: None,
+            confirm_close: None,
+            transfer_generated: false,
             width: 1060.0,
             height: 760.0,
             unlock_advanced: false,

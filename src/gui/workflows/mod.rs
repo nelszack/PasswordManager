@@ -237,6 +237,36 @@ pub enum Action {
     Shortcut,
 }
 impl Action {
+    pub fn confirm_label(self) -> &'static str {
+        match self {
+            Self::Backup => "Create encrypted backup",
+            Self::RestoreBackup => "Restore as a new vault",
+            Self::Import => "Import items",
+            Self::Export => "Export plaintext secrets",
+            Self::NewVault => "Create vault",
+            Self::Rekey => "Change vault credentials",
+            Self::DeleteVault => "Permanently delete vault",
+            Self::Purge(_) => "Permanently erase",
+            Self::RestorePassword(_) => "Restore this password",
+            Self::RemoveOtp => "Remove authenticator",
+            Self::RemoveDuo => "Remove Duo enrollment",
+            Self::Respond(_, true) => "Approve login",
+            Self::Respond(_, false) => "Deny login",
+            _ => "Apply this change",
+        }
+    }
+    pub fn dangerous(self, overwrite: bool) -> bool {
+        matches!(
+            self,
+            Self::DeleteVault
+                | Self::Purge(_)
+                | Self::Export
+                | Self::Rekey
+                | Self::RemoveOtp
+                | Self::RemoveDuo
+                | Self::RestorePassword(_)
+        ) || (overwrite && matches!(self, Self::Backup))
+    }
     pub fn edits_authenticator(self) -> bool {
         matches!(
             self,

@@ -5,7 +5,7 @@ export type ItemKind = "login" | "secure-note" | "payment-card" | "identity" | "
 export type OperationState = "pending" | "committed" | "committed_durability_unknown" | "failed" | "unknown";
 export interface OperationReceipt { operationId: string; state: OperationState; revision: number | null; }
 export interface ItemSummary { id: number; revision: number; name: string; username: string | null; kind: ItemKind; urls: string[]; has_totp: boolean; has_duo: boolean; }
-export interface ItemPage { items: ItemSummary[]; total: number; }
+export interface ItemPage { items: ItemSummary[]; total: number; offset?: number; displayTruncated?: boolean; }
 export interface CustomField { name: string; value: string; secret: boolean; }
 export interface ItemDetail extends ItemSummary { notes: string | null; password: string | null; has_secret: boolean; fields: { name: string; value: string | null; secret: boolean }[]; created: string; modified: string; }
 export interface BrowserLogin { id: number; revision: number; name: string; username: string | null; password: string; has_totp: boolean; }

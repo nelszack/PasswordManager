@@ -126,7 +126,7 @@ impl NativeAction {
             Self::Lock => (&[], &[], "message"),
             Self::ManagerVaults => (&[], &[], "vaultArray"),
             Self::ManagerUnlock => (&[], &["vaultFile", "password", "keyPath"], "message"),
-            Self::ManagerList => (&[], &["query"], "itemPage"),
+            Self::ManagerList => (&[], &["query", "offset", "limit"], "itemPage"),
             Self::ManagerItem => (&["entryId", "expectedSession"], &["reveal"], "item"),
             Self::ManagerCopy => (&["entryId", "expectedSession"], &[], "message"),
             Self::ManagerAdd => (&["item", "expectedSession"], &[], "message"),
@@ -274,7 +274,7 @@ pub fn browser_declarations() -> String {
 }
 fn typescript_field(field: &str) -> &'static str {
     match field {
-        "entryId" | "expectedRevision" => "number",
+        "entryId" | "expectedRevision" | "offset" | "limit" => "number",
         "approve" | "reveal" => "boolean",
         "item" => "ManagementInput",
         _ => "string",

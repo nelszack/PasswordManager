@@ -1,6 +1,6 @@
 use password_manager::{
     client::{AuthenticatedClient, render_response, terminal_output},
-    protocol::ResponsePayload,
+    protocol::{RequestEnvelope, ResponsePayload},
     types::ServerCommand,
 };
 use std::io::{self, IsTerminal, Write};
@@ -18,20 +18,47 @@ impl Output {
     }
     pub fn print_error(&self, error: &str) {
         if self.json {
-            println!("{}", serde_json::json!({"ok":false,"error":error}));
+            self.print_json(serde_json::json!({"ok":false,"error":error}));
         } else {
             eprintln!("Error: {}", terminal_output(error));
         }
     }
+    fn write_stdout(&self, value: String) {
+        let value = zeroize::Zeroizing::new(value);
+        let mut stdout = io::stdout().lock();
+        let result = stdout
+            .write_all(value.as_bytes())
+            .and_then(|()| stdout.flush());
+        drop(stdout);
+        drop(value);
+        if let Err(error) = Self::stdout_result(result) {
+            let _ = writeln!(
+                io::stderr(),
+                "Error: could not write command output: {error}"
+            );
+            std::process::exit(1);
+        }
+    }
+    fn stdout_result(result: io::Result<()>) -> io::Result<()> {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+        {
+            std::process::exit(0);
+        }
+        result
+    }
+    fn print_json(&self, value: serde_json::Value) {
+        self.write_stdout(format!("{value}\n"));
+    }
     pub fn print_success(&self, value: &str) {
         if let Some(rendered) = self.success_output(value) {
-            let rendered = zeroize::Zeroizing::new(rendered);
-            let _ = io::stdout().write_all(rendered.as_bytes());
+            self.write_stdout(rendered);
         }
     }
     pub fn print_data(&self, data: serde_json::Value, text: &str) {
         if self.json {
-            println!("{}", serde_json::json!({"ok":true,"data":data}));
+            self.print_json(serde_json::json!({"ok":true,"data":data}));
         } else {
             self.print_success(text);
         }
@@ -40,8 +67,11 @@ impl Output {
         if self.json {
             let encoded = zeroize::Zeroizing::new(serde_json::to_string(data)?);
             let mut stdout = io::stdout().lock();
-            writeln!(stdout, "{{\"ok\":true,\"data\":{}}}", encoded.as_str())?;
-            stdout.flush()
+            let result = writeln!(stdout, "{{\"ok\":true,\"data\":{}}}", encoded.as_str())
+                .and_then(|()| stdout.flush());
+            drop(stdout);
+            drop(encoded);
+            Self::stdout_result(result)
         } else {
             self.print_watch(text)
         }
@@ -67,12 +97,14 @@ impl Output {
     }
     pub fn print_watch(&self, value: &str) -> io::Result<()> {
         let mut stdout = io::stdout().lock();
-        if self.watch_in_place() {
-            write!(stdout, "\r{}\x1b[K", terminal_output(value))?;
+        let result = if self.watch_in_place() {
+            write!(stdout, "\r{}\x1b[K", terminal_output(value))
         } else if let Some(rendered) = self.success_output(value) {
-            stdout.write_all(rendered.as_bytes())?;
-        }
-        stdout.flush()
+            stdout.write_all(rendered.as_bytes())
+        } else {
+            Ok(())
+        };
+        Self::stdout_result(result.and_then(|()| stdout.flush()))
     }
     pub fn finish_watch(&self) {
         if self.watch_in_place() {
@@ -93,10 +125,26 @@ impl Output {
         client: &AuthenticatedClient,
         command: ServerCommand,
     ) -> Result<(), i32> {
-        let response = match client.request_response(command) {
+        let envelope = RequestEnvelope::new(command);
+        let operation_id = envelope.operation_id.clone();
+        let response = match client.request_envelope_tracked(envelope) {
             Ok(r) => r,
             Err(e) => {
-                self.print_error(&e);
+                if e.sent
+                    && let Some(id) = operation_id
+                {
+                    let message = format!(
+                        "{} The change may have completed. Do not retry blindly. Inspect the vault and run pm operation --id {id} to check its recorded outcome.",
+                        e.message
+                    );
+                    if self.json {
+                        self.print_json(serde_json::json!({"ok":false,"error":message,"uncertain":true,"operationId":id}));
+                    } else {
+                        self.print_error(&message);
+                    }
+                } else {
+                    self.print_error(&e.message);
+                }
                 return Err(1);
             }
         };
@@ -109,12 +157,9 @@ impl Output {
                 let encoded = zeroize::Zeroizing::new(
                     serde_json::to_string(&document).expect("response serializes"),
                 );
-                println!("{}", encoded.as_str());
+                self.write_stdout(format!("{}\n", encoded.as_str()));
             } else {
-                println!(
-                    "{}",
-                    serde_json::json!({"ok":false,"error":response.error_message(),"code":code,"operation":response.operation,"data":response.payload.into_json()})
-                );
+                self.print_json(serde_json::json!({"ok":false,"error":response.error_message(),"code":code,"operation":response.operation,"data":response.payload.into_json()}));
             }
         } else if !self.quiet || code != 0 {
             if code != 0 {
@@ -127,9 +172,9 @@ impl Output {
                 eprintln!("{}", terminal_output(&response.error_message()));
             } else if let ResponsePayload::Secret(secret) = &response.payload {
                 if io::stdout().is_terminal() {
-                    println!("{}", terminal_output(secret.expose()));
+                    self.write_stdout(format!("{}\n", terminal_output(secret.expose())));
                 } else {
-                    print!("{}", secret.expose());
+                    self.write_stdout(secret.expose().to_owned());
                 }
             } else {
                 let rendered = zeroize::Zeroizing::new(render_response(&response.payload));

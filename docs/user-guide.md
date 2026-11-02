@@ -55,6 +55,24 @@ bar offers **Undo deletion** until you navigate elsewhere. **Tools → Deleted
 items** and **Tools → Password history** provide recovery afterward.
 Open **Advanced unlock options** to choose a key file or change the inactivity timeout for that session. With no vaults, the welcome screen offers creation and import/restore directly. Narrow windows show the item list and details one at a time; **Back to items** returns to the list. Search can be narrowed by item type, with **Advanced search** beside the list.
 
+Large item lists show 50 items per page. Use Previous/Next or enter a page
+number to jump directly; search still covers the whole vault. The A–Z/Z–A control
+changes name order. Ctrl/Cmd+R refreshes the list.
+
+The Generator tab can transfer its exact output into a new or existing item
+draft without using the clipboard. Confirm replacement, review the item, then
+save it. Expired generated values and values from a previous unlock cannot be transferred.
+
+If another client changes an item while you edit, your masked draft is kept.
+Choose **Review latest version** to compare metadata, note previews, and public
+custom fields. **Reapply my edits to this version** retains changes to untouched
+fields from the other client; it does not save automatically. Review the result
+before saving. Stored passwords and secret custom values remain hidden.
+
+Closing the window or changing connections asks before discarding an unsaved
+item. Locking remains immediate and discards the draft. Long feedback messages
+can be focused with Tab and scrolled with arrow keys, Page Up/Down, or Home/End.
+
 Use **Browse…** beside the external-key path to select a file with the native
 file picker, or enter the path manually. Choosing a file fills its path; press
 **Unlock vault** to use it. Cancelling keeps the existing path unchanged.
@@ -525,6 +543,10 @@ pm restore --id 1
 pm purge --id 1
 pm purge --all
 ```
+
+Permanent CLI deletion (`pm purge` and `pm delete --vault`) asks you to type
+`yes` before continuing. In scripts or other noninteractive sessions, pass
+`--yes` explicitly. Ordinary item deletion still moves an item to recoverable trash.
 
 `restore` and `purge --id` use the **stable entry IDs** shown by `pm trash`.
 These IDs remain unchanged when other trash items are restored or purged.
@@ -1083,9 +1105,26 @@ pm --quiet lock
 pm get --id 3 --password-only
 ```
 
+With `--json`, invalid arguments also produce a JSON error and exit 2. These
+errors identify the parser error kind without echoing rejected values. Help and
+version requests keep their ordinary text output.
+
 Password-only and custom-field retrieval preserve the stored value exactly in
 JSON output and when standard output is redirected, including trailing spaces,
 newlines, and empty values. Redirected secret output has no added newline.
+
+If a mutation loses its reply after being sent, the CLI reports that it may
+have completed and prints its operation ID. JSON failures include `uncertain`
+and `operationId`. Inspect the vault and query the retained outcome before
+retrying:
+
+```bash
+pm operation --id OPERATION_ID_FROM_THE_ERROR
+```
+
+This command only checks the outcome; it never retries the change. An `Unknown`
+outcome (for example after server restart) does not establish that the original
+change failed. Inspect vault state before deciding what to do next.
 
 ### Shell Completions
 

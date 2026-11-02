@@ -116,10 +116,7 @@ impl App {
                 return Task::none();
             }
         };
-        self.reset_connection(port);
-        self.notice = format!("Connecting to port {port}…");
-        let client = self.client.clone();
-        self.launch(Job::Attach, move || backend::attach(&client))
+        self.navigate(Navigate::Connect(port))
     }
 }
 

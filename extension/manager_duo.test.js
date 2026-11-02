@@ -11,7 +11,9 @@ class Element {
     replaceWith(replacement) { const siblings = this.parentElement.children; siblings[siblings.indexOf(this)] = replacement; replacement.parentElement = this.parentElement; this.isConnected = false; }
     replaceChildren(...children) { for (const child of this.children) child.isConnected = false; this.children = children; }
     querySelectorAll(selectors) { return this.children.flatMap(child => [ ...(selectors.split(",").includes(child.tag) ? [child] : []), ...child.querySelectorAll(selectors) ]); }
-    setAttribute() {}
+    setAttribute(name, value) { (this.attributes ||= {})[name] = String(value); }
+    getAttribute(name) { return this.attributes?.[name] ?? null; }
+    focus() { this.focused = true; }
     reset() {}
     click(trusted = true) { this.listeners.click?.({ preventDefault() {}, isTrusted: trusted }); }
     get tagName() { return this.tag.toUpperCase(); }
@@ -28,15 +30,15 @@ function environment() {
     elements.name.tag = "input"; elements.username.tag = "input"; elements.notes.tag = "textarea";
     elements.multilineLabel.hidden = true;
     elements.editForm.reset = () => { elements.password.value = ""; elements.secretMultiline.value = ""; elements.kind.value = "login"; };
-    const calls = [], timers = new Map(), responses = new Map(); let timerId = 0, confirmations = 0, listener;
+    const calls = [], timers = new Map(), responses = new Map(), windowEvents = new Map(); let timerId = 0, confirmations = 0, listener, confirmResult = true;
     let pending = [{ id: "test-request", application: "Example VPN", username: "alice", location: "Example City", summary: "Login", expires_at: Math.floor(Date.now()/1000)+300, code_digits: 3, unsupported: null, fingerprint: "a".repeat(128) }];
     const context = vm.createContext({ module: { exports: {} }, require: name => name === "./password_generator.js" ? { defaults: {}, validate: () => ({}) } : require(name), document: { getElementById: id => elements[id], createElement: tag => new Element(tag), createTextNode: () => new Element() },
-        window: { addEventListener() {}, confirm: () => { confirmations++; return true; } },
+        window: { addEventListener: (name, handler) => windowEvents.set(name, handler), confirm: () => { confirmations++; return confirmResult; } },
         setTimeout: callback => { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id),
         PasswordManagerGenerator: { defaults: {}, validate: () => ({}) },
         chrome: { runtime: { onMessage: { addListener: handler => { listener = handler; } }, sendMessage: (request, callback) => {
             calls.push(request);
-            if (responses.has(request.action)) { callback(responses.get(request.action)); return; }
+            if (responses.has(request.action)) { const response = responses.get(request.action); if (typeof response === "function") response(request, callback); else callback(response); return; }
             if (request.action === "getStatus") { callback({ native: true, running: true, locked: false, sessionId: "a".repeat(64) }); return; }
             let data;
             if (request.action === "managerVaults") data = [];
@@ -49,7 +51,7 @@ function environment() {
     });
     vm.runInContext(fs.readFileSync(path.join(__dirname, "manager.js"), "utf8"), context);
     context.api = context.module.exports.create();
-    return { context, elements, calls, timers, publishStatus: status => listener({ action: "statusChanged", status }), setResponse: (action, value) => value === undefined ? responses.delete(action) : responses.set(action, value), setPending: value => { pending = value; }, lock: () => listener({ action: "statusChanged", status: { native: true, running: true, locked: true } }), confirmations: () => confirmations };
+    return { context, elements, calls, timers, windowEvents, publishStatus: status => listener({ action: "statusChanged", status }), setResponse: (action, value) => value === undefined ? responses.delete(action) : responses.set(action, value), setPending: value => { pending = value; }, lock: () => listener({ action: "statusChanged", status: { native: true, running: true, locked: true } }), setConfirm: value => { confirmResult = value; }, confirmations: () => confirmations };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
@@ -273,4 +275,184 @@ test("the manager clears the old editor after a missed lock/unlock and binds rea
     assert.equal(env.elements.editor.hidden, true);
     await vm.runInContext("api.openItem(1);", env.context);
     assert.equal(env.calls.filter(call => call.action === "managerItem").at(-1).expectedSession, "b".repeat(64));
+});
+
+
+test("manager keeps dirty drafts when switching, adding, or closing is canceled", async () => {
+    const env = environment(); await flush(); await vm.runInContext("api.openItem(1)", env.context);
+    env.elements.name.value = "Unsaved account";
+    env.elements.editForm.listeners.input();
+    env.setConfirm(false);
+    const before = env.calls.length;
+    await vm.runInContext("api.openItem(2)", env.context);
+    env.elements.new.click(); env.elements.cancel.click();
+    assert.equal(env.elements.name.value, "Unsaved account");
+    assert.equal(env.calls.length, before, "canceled navigation must not request another item");
+    assert.equal(env.confirmations(), 3);
+    env.setConfirm(true); env.elements.cancel.click();
+    assert.equal(env.elements.editor.hidden, true);
+});
+
+test("generator mode hides and disables irrelevant controls", async () => {
+    const env = environment(); await flush();
+    env.elements.genMode.value = "passphrase"; env.elements.genMode.listeners.change();
+    assert.equal(env.elements.passwordOptions.hidden, true);
+    assert.equal(env.elements.passwordOptions.disabled, true);
+    assert.equal(env.elements.passphraseOptions.hidden, false);
+    env.elements.genMode.value = "password"; env.elements.genMode.listeners.change();
+    assert.equal(env.elements.passphraseOptions.disabled, true);
+    assert.equal(env.elements.passwordOptions.hidden, false);
+});
+
+
+test("dirty drafts warn on page exit but never prevent lock cleanup", async () => {
+    const env = environment(); await flush(); await vm.runInContext("api.openItem(1)", env.context);
+    env.elements.editForm.listeners.input();
+    let warned = false;
+    env.windowEvents.get("beforeunload")({ preventDefault() { warned = true; } });
+    assert.equal(warned, true);
+    env.lock(); warned = false;
+    env.windowEvents.get("beforeunload")({ preventDefault() { warned = true; } });
+    assert.equal(warned, false);
+    assert.equal(env.elements.editor.hidden, true);
+    assert.equal(env.elements.password.value, "");
+});
+
+
+test("pending saves prevent editor interaction and navigation until the reply", async () => {
+    const env = environment(); await flush(); await vm.runInContext("api.openItem(1)", env.context);
+    let finish;
+    env.setResponse("managerUpdate", (_request, callback) => { finish = callback; });
+    env.elements.editForm.listeners.submit({ preventDefault() {} }); await flush();
+    assert.equal(env.elements.editForm.inert, true);
+    env.elements.new.click(); env.elements.cancel.click();
+    assert.equal(env.elements.editor.hidden, false);
+    assert.match(env.elements.message.textContent, /Wait/);
+    finish({ success: true, data: "saved" }); await flush();
+    assert.equal(env.elements.editForm.inert, false);
+    assert.equal(env.elements.editor.hidden, true);
+});
+
+test("reveals offer immediate hiding without losing edits", async () => {
+    const env = environment(); await flush(); await vm.runInContext("api.openItem(1)", env.context);
+    env.setResponse("managerItem", { success: true, data: { password: "stored secret", fields: [] } });
+    env.elements.reveal.click(); await flush();
+    assert.match(env.elements.reveal.textContent, /Hide now/);
+    env.elements.password.value = "my edited value";
+    env.elements.reveal.click(); await flush();
+    assert.equal(env.elements.password.value, "my edited value");
+    assert.equal(env.elements.password.type, "password");
+    assert.match(env.elements.reveal.textContent, /30 seconds/);
+});
+
+
+test("manager pages every match including items beyond the first hundred", async () => {
+    const env = environment();
+    const items = Array.from({length:151}, (_, index) => ({ id:index+1, name:`Item ${index}`, kind:"login" }));
+    env.setResponse("managerList", (request, callback) => callback({ success:true, data:{ total:151, items:items.slice(request.offset || 0, (request.offset || 0) + 50) } }));
+    await flush();
+    assert.equal(env.elements.items.children.length, 50);
+    env.elements.itemPage.value = "4"; env.elements.itemPage.listeners.change(); await flush();
+    assert.equal(env.elements.items.children.length, 1);
+    assert.match(env.elements.items.children[0].textContent, /Item 150/);
+    env.elements.previousItems.click(); await flush();
+    assert.equal(env.elements.items.children.length, 50);
+});
+
+test("the item list identifies the open item and clears selection on close", async () => {
+    const env = environment();
+    env.setResponse("managerList", {success:true,data:{total:1,items:[{id:1,name:"work",kind:"login"}]}});
+    await flush(); await vm.runInContext("api.openItem(1)", env.context);
+    assert.equal(env.elements.items.children[0].getAttribute("aria-pressed"),"true");
+    env.elements.cancel.click();
+    assert.equal(env.elements.items.children[0].getAttribute("aria-pressed"),"false");
+});
+
+test("a failed page request preserves the displayed page for retry", async () => {
+    const env = environment();
+    const items = Array.from({length:151}, (_, index) => ({id:index+1,name:`Item ${index}`,kind:"login"}));
+    const respond = (request, callback) => callback({success:true,data:{total:items.length,items:items.slice(request.offset || 0,(request.offset || 0)+50)}});
+    env.setResponse("managerList", respond); await flush();
+    env.setResponse("managerList", {success:false,error:"Synthetic connection failure"});
+    env.elements.nextItems.click(); await flush();
+    assert.match(env.elements.count.textContent, /page 1 of 4/);
+    env.setResponse("managerList", respond);
+    env.elements.nextItems.click(); await flush();
+    assert.match(env.elements.count.textContent, /page 2 of 4/);
+    assert.match(env.elements.items.children[0].textContent, /Item 50/);
+});
+
+test("explicit list refresh discovers external items while preserving a dirty draft", async () => {
+    const env = environment(); await flush();
+    await vm.runInContext("api.openItem(1)", env.context);
+    env.elements.name.value = "Unsaved local change"; env.elements.editForm.listeners.input();
+    env.setResponse("managerList", {success:true,data:{total:1,items:[{id:2,name:"External addition",kind:"login"}]}});
+    env.elements.refreshItems.click(); await flush();
+    assert.equal(env.elements.name.value,"Unsaved local change");
+    assert.equal(env.elements.editor.hidden,false);
+    assert.match(env.elements.items.children[0].textContent,/External addition/);
+    env.setConfirm(false); env.elements.cancel.click();
+    assert.equal(env.elements.editor.hidden,false);
+});
+
+test("list refresh during add preserves the save completion and prevents duplicate drafts", async () => {
+    const env = environment(); await flush(); env.elements.new.click();
+    env.elements.name.value = "New draft"; env.elements.editForm.listeners.input();
+    let finish;
+    env.setResponse("managerAdd", (_request, callback) => { finish = callback; });
+    env.elements.editForm.listeners.submit({preventDefault(){}}); await flush();
+    env.elements.refreshItems.click(); await flush();
+    finish({success:true,data:"saved"}); await flush();
+    assert.equal(env.elements.editor.hidden,true);
+    assert.equal(env.elements.editForm.inert,false);
+    assert.equal(env.calls.filter(call => call.action === "managerAdd").length,1);
+});
+
+test("typed replacements reveal explicitly and hide on expiry without being erased", async () => {
+    const env = environment(); await flush(); await vm.runInContext("api.openItem(1)", env.context);
+    env.elements.password.value = "typed replacement";
+    env.setResponse("managerItem", {success:true,data:{password:"old stored secret",fields:[]}});
+    env.elements.reveal.click(); await flush();
+    assert.equal(env.elements.password.type, "text");
+    assert.equal(env.elements.password.value, "typed replacement");
+    for (const expire of [...env.timers.values()]) expire();
+    assert.equal(env.elements.password.type, "password");
+    assert.equal(env.elements.password.value, "typed replacement");
+});
+
+test("a new draft can reveal its own secret without fetching another item", async () => {
+    const env = environment(); await flush(); env.elements.new.click();
+    env.elements.password.value = "new typed value"; env.elements.editForm.listeners.input();
+    assert.equal(env.elements.reveal.disabled, false);
+    const reads = env.calls.filter(call => call.action === "managerItem").length;
+    env.elements.reveal.click(); await flush();
+    assert.equal(env.elements.password.type, "text");
+    assert.equal(env.calls.filter(call => call.action === "managerItem").length, reads);
+    env.elements.reveal.click(); await flush();
+    assert.equal(env.elements.password.value, "new typed value");
+    assert.equal(env.elements.password.type, "password");
+});
+
+test("revision conflicts preserve edits and reapply onto the reviewed revision", async () => {
+    const env = environment(); await flush();
+    env.setResponse("managerItem", {success:true,data:{id:1,revision:1,name:"Original",username:"old owner",kind:"login",notes:"",urls:[],fields:[]}});
+    await vm.runInContext("api.openItem(1)", env.context);
+    env.elements.name.value = "My local edit"; env.elements.editForm.listeners.input();
+    env.setResponse("managerUpdate", {success:false,code:4,error:"Item changed since opened"});
+    env.elements.editForm.listeners.submit({preventDefault(){}}); await flush();
+    assert.equal(env.elements.conflict.hidden, false);
+    assert.equal(env.elements.name.value, "My local edit");
+    assert.equal(env.elements.saveItem.disabled, true);
+    env.setResponse("managerItem", {success:true,data:{id:1,revision:2,name:"Remote name",username:"remote owner",kind:"login",notes:"remote notes",urls:[],fields:[{name:"region",secret:false,value:"remote region"}]}});
+    env.elements.reviewConflict.click(); await flush();
+    assert.match(env.elements.conflictDiff.textContent, /also changed elsewhere/);
+    env.elements.reapplyConflict.click(); await flush();
+    assert.equal(env.elements.name.value, "My local edit");
+    assert.equal(env.elements.username.value, "remote owner");
+    assert.equal(env.elements.notes.value, "remote notes");
+    env.setResponse("managerUpdate", {success:true,data:"saved"});
+    env.elements.editForm.listeners.submit({preventDefault(){}}); await flush();
+    const write = env.calls.filter(call => call.action === "managerUpdate").at(-1);
+    assert.equal(write.expectedRevision, 2);
+    assert.equal(write.item.fields[0].value, "remote region");
 });

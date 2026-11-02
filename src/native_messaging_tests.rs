@@ -226,10 +226,33 @@ fn native_bridge_rejects_oversized_and_truncated_frames() {
         Value::String(secret.repeat(MAX_NATIVE_MESSAGE / secret.len() + 1)),
     ));
     let mut output = Vec::new();
-    let error = write_message(&mut output, &response).unwrap_err();
-    assert!(error.contains("1 MiB limit"));
-    assert!(!error.contains(secret));
-    assert!(output.is_empty());
+    write_message(&mut output, &response).unwrap();
+    // Another frame remains usable after an oversized read result.
+    write_message(&mut output, &NativeResponse::success(2, json!({"ok":true}))).unwrap();
+    let mut frames = Cursor::new(output);
+    let fallback: Value =
+        serde_json::from_slice(&read_message(&mut frames).unwrap().unwrap()).unwrap();
+    assert_eq!(fallback["id"], 1);
+    assert_eq!(fallback["success"], false);
+    assert!(fallback["error"].as_str().unwrap().contains("1 MiB limit"));
+    assert!(!fallback.to_string().contains(secret));
+    let next: Value = serde_json::from_slice(&read_message(&mut frames).unwrap().unwrap()).unwrap();
+    assert_eq!(next["id"], 2);
+
+    let mut mutation = response;
+    mutation.operation_id = Some("oversized-result-operation".into());
+    mutation.operation = Some(OperationReceipt {
+        operation_id: "oversized-result-operation".into(),
+        state: OperationState::Committed,
+        revision: Some(8),
+    });
+    let mut output = Vec::new();
+    write_message(&mut output, &mutation).unwrap();
+    let fallback: Value =
+        serde_json::from_slice(&read_message(&mut Cursor::new(output)).unwrap().unwrap()).unwrap();
+    assert_eq!(fallback["uncertain"], true);
+    assert_eq!(fallback["operationId"], "oversized-result-operation");
+    assert_eq!(fallback["operation"]["revision"], 8);
 
     let response = Zeroizing::new(NativeResponse::success(1, json!({ "password": secret })));
     let mut header_only = [0u8; 4];
@@ -514,4 +537,28 @@ fn browser_native_reads_require_session_revision_and_site_for_otp() {
             );
         }
     }
+}
+
+#[test]
+fn manager_pages_bound_native_frames_and_preserve_ids_and_total() {
+    let items: Vec<_> = (1..=201)
+        .map(|id| crate::vault::ItemSummary {
+            id,
+            revision: 1,
+            name: "\u{0001}".repeat(4096),
+            username: Some("\u{0002}".repeat(4096)),
+            kind: crate::types::ItemKind::Login,
+            urls: vec!["\u{0003}".repeat(4096); 100],
+            has_totp: false,
+            has_duo: false,
+        })
+        .collect();
+    let page = super::native_item_page(crate::vault::ItemPage { items, total: 201 }, 150, 50);
+    assert_eq!(page["total"], 201);
+    assert_eq!(page["offset"], 150);
+    assert_eq!(page["items"].as_array().unwrap().len(), 50);
+    assert_eq!(page["items"][0]["id"], 151);
+    assert_eq!(page["items"][49]["id"], 200);
+    assert_eq!(page["displayTruncated"], true);
+    assert!(serde_json::to_vec(&page).unwrap().len() < super::MAX_NATIVE_MESSAGE - 4096);
 }
