@@ -99,6 +99,6 @@ version = "0.1.14"
 optional = true
 
 [dependencies.zbus]
-version = "5.5"
-features = ["async-io"]
+version = "6.1"
+features = ["default-rt", "proxy", "service"]
 default-features = false

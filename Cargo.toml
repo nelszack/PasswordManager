@@ -51,6 +51,11 @@ rfd = { version = "0.17.2", optional = true }
 proptest = "1"
 
 [patch.crates-io]
+zbus-lockstep = { path = "vendor/zbus-lockstep" }
+zbus-lockstep-macros = { path = "vendor/zbus-lockstep-macros" }
+atspi-common = { path = "vendor/atspi-common" }
+atspi-proxies = { path = "vendor/atspi-proxies" }
+accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
 accesskit_unix = { path = "vendor/accesskit_unix" }
 iced_core = { path = "vendor/iced_core" }
 iced_widget = { path = "vendor/iced_widget" }
@@ -70,3 +75,8 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSDate", "NSNotification", "NSDistributedNotificationCenter", "NSRunLoop", "NSString", "NSOperation"] }
+
+[workspace]
+members = ["vendor/atspi-common", "vendor/zbus-lockstep"]
+default-members = ["."]
+exclude = ["fuzz", "vendor/iced_core", "vendor/iced_widget", "vendor/iced_winit", "vendor/iced_tiny_skia", "vendor/fontdb-compat", "vendor/accesskit_unix", "vendor/accesskit_atspi_common", "vendor/atspi-proxies", "vendor/zbus-lockstep-macros"]

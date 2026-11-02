@@ -8,7 +8,7 @@ use accesskit_atspi_common::{NodeId, PlatformNode};
 use serde::{Serialize, Serializer};
 use zbus::{
     names::UniqueName,
-    zvariant::{ObjectPath, OwnedObjectPath, Signature, Structure, Type},
+    wire::{ObjectPath, OwnedObjectPath, Signature, Structure, Type},
 };
 
 const ACCESSIBLE_PATH_PREFIX: &str = "/org/a11y/atspi/accessible/";

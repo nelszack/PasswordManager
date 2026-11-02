@@ -12,3 +12,10 @@ appropriate for the native accessibility bus. No desktop preferences are changed
 The root accessible also retains the desktop address returned by the registry's
 `Embed` handshake and exposes it as `Parent`. Returning a null parent caused
 Orca 51 to reject the application's focus events as unknown to the desktop.
+
+The adapter and its local AT-SPI protocol helpers use maintained `zbus` 6 rather
+than the abandoned standalone `zvariant` and `zbus_names` crates. Connection IO
+is driven by zbus's runtime; the old manual executor tick tasks are removed.
+Object-server insertion follows the new optional previous-interface return.
+Protocol signatures and serialization are checked by the crate's wire tests,
+and the application acceptance script exercises the real DBus/Orca interaction.

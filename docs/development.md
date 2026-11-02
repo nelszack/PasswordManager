@@ -112,6 +112,16 @@ the accessibility tree. The Unix adapter uses the AT-SPI `IsEnabled` property
 for compatibility with AT-SPI 2.62.1. This integration needs native validation;
 compilation and a semantic tree do not demonstrate complete Orca usability.
 
+The Linux protocol helpers are local zbus 6 ports so the desktop does not bring
+back the abandoned standalone zvariant/zbus_names implementations. Their
+READMEs describe the changes and upstream versions. The protocol and XML helper
+crates are workspace members for their upstream tests; the application remains
+the default workspace member. `npm run validate` runs those tests on Linux along
+with the Unix adapter's wire-signature and serialization checks. Registry audits
+do not cover path sources, so local ports still need source review and native
+validation when updated. The actual DBus codec/transport and XML parser remain
+maintained registry dependencies checked by the dependency audit.
+
 On Linux with Orca, GTK3, PyGObject, AT-SPI, and DBus installed, run
 `python scripts/test_gui_accessibility.py` after building. The smoke check uses
 private profiles and buses, a GTK reference control, and the real desktop app.

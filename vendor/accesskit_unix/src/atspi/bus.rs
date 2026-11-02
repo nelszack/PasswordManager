@@ -6,7 +6,7 @@
 use crate::{
     atspi::{ObjectId, interfaces::*},
     context::get_or_init_app_context,
-    executor::{Executor, Task},
+    executor::Executor,
 };
 use accesskit_atspi_common::{
     NodeId, NodeIdOrRoot, ObjectEvent, PlatformNode, PlatformRoot, Property, WindowEvent,
@@ -21,42 +21,28 @@ use zbus::{
     Address, Connection, Result,
     connection::Builder,
     names::{BusName, InterfaceName, MemberName, OwnedUniqueName},
-    zvariant::{Str, Value},
+    wire::{Str, Variant as Value},
 };
 
 pub(crate) struct Bus {
     conn: Connection,
-    _task: Task<()>,
     socket_proxy: SocketProxy<'static>,
 }
 
 impl Bus {
     pub(crate) async fn new(
         session_bus: &Connection,
-        executor: &Executor<'_>,
+        _executor: &Executor<'_>,
     ) -> zbus::Result<Self> {
         let address = match var("AT_SPI_BUS_ADDRESS") {
             Ok(address) if !address.is_empty() => address,
             _ => BusProxy::new(session_bus).await?.get_address().await?,
         };
         let address: Address = address.as_str().try_into()?;
-        let conn = Builder::address(address)?
-            .internal_executor(false)
-            .build()
-            .await?;
-        let conn_copy = conn.clone();
-        let _task = executor.spawn(
-            async move {
-                loop {
-                    conn_copy.executor().tick().await;
-                }
-            },
-            "accesskit_atspi_bus_task",
-        );
+        let conn = Builder::address(address).build().await?;
         let socket_proxy = SocketProxy::new(&conn).await?;
         let mut bus = Bus {
             conn,
-            _task,
             socket_proxy,
         };
         bus.register_root_node().await?;
@@ -76,6 +62,7 @@ impl Bus {
             .object_server()
             .at(path.clone(), ApplicationInterface(node.clone()))
             .await?
+            .is_none()
         {
             let parent = self.socket_proxy
                 .embed(&(self.unique_name().as_str(), ObjectId::Root.path().into()))
@@ -151,7 +138,7 @@ impl Bus {
         map_or_ignoring_broken_pipe(
             self.conn.object_server().at(path, interface).await,
             false,
-            |result| result,
+            |result| result.is_none(),
         )
     }
 

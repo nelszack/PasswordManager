@@ -55,11 +55,8 @@ pub(crate) fn get_or_init_messages() -> Sender<Message> {
             thread::spawn(|| {
                 let executor = Executor::new();
                 block_on(executor.run(async {
-                    if let Ok(session_bus) = Builder::session() {
-                        if let Ok(session_bus) = session_bus.internal_executor(false).build().await
-                        {
-                            run_event_loop(&executor, session_bus, rx).await.unwrap();
-                        }
+                    if let Ok(session_bus) = Builder::session().build().await {
+                        run_event_loop(&executor, session_bus, rx).await.unwrap();
                     }
                 }))
             });
@@ -140,16 +137,6 @@ async fn run_event_loop(
     session_bus: Connection,
     rx: Receiver<Message>,
 ) -> zbus::Result<()> {
-    let session_bus_copy = session_bus.clone();
-    let _session_bus_task = executor.spawn(
-        async move {
-            loop {
-                session_bus_copy.executor().tick().await;
-            }
-        },
-        "accesskit_session_bus_task",
-    );
-
     let status = StatusProxy::new(&session_bus).await?;
     let changes = status.receive_is_enabled_changed().await.fuse();
     pin!(changes);

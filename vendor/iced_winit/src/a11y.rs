@@ -983,6 +983,7 @@ mod tests {
     /// Runs a closure inside a winit event loop with access to
     /// [`ActiveEventLoop`]. Requires a running Wayland compositor
     /// (e.g. headless weston via `WAYLAND_DISPLAY`).
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     fn with_event_loop(f: impl FnOnce(&ActiveEventLoop) + 'static) {
         use winit::application::ApplicationHandler;
         use winit::event_loop::EventLoop;
@@ -1017,6 +1018,7 @@ mod tests {
 
     /// Returns true if a Wayland compositor is available for
     /// integration tests.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     fn has_wayland() -> bool {
         std::env::var_os("WAYLAND_DISPLAY").is_some()
     }
@@ -1027,6 +1029,7 @@ mod tests {
     ///
     /// Requires `WAYLAND_DISPLAY` to be set (e.g. headless weston).
     #[test]
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
     fn adapter_lifecycle() {
         if !has_wayland() {
             eprintln!("skipping adapter_lifecycle: WAYLAND_DISPLAY not set");

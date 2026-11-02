@@ -44,6 +44,11 @@ run(process.execPath, ["extension/check_unit_coverage.cjs"]);
 const artifacts = [];
 run("cargo", ["test", "--locked", "-p", "iced_tiny_skia", "--lib"]);
 run("cargo", ["test", "--locked", "-p", "iced_winit", "--lib"]);
+if (process.platform === "linux") {
+    run("cargo", ["test", "--locked", "-p", "accesskit_unix", "--lib"]);
+    run("cargo", ["test", "--locked", "-p", "atspi-common", "--lib"]);
+    run("cargo", ["test", "--locked", "-p", "zbus-lockstep", "--lib"]);
+}
 run("cargo", ["test", "--locked", "--all-features", "--message-format=json-render-diagnostics"], true, artifacts);
 // Cargo reports the exact executable path, including custom target directories
 // and platform suffixes. Reuse it without another build or feature resolution.

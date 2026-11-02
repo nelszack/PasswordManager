@@ -7,7 +7,7 @@ use atspi::ObjectRef;
 use serde::{Deserialize, Serialize};
 use zbus::{
     names::UniqueName,
-    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value},
+    wire::{ObjectPath, OwnedObjectPath, OwnedVariant as OwnedValue, Type, Variant as Value},
 };
 
 // https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/const.DBUS_PATH_NULL.html
