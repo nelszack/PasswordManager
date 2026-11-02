@@ -105,6 +105,71 @@ fn unused_port() -> u16 {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn failed_human_output_is_reported_with_a_nonzero_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let output = isolated_pm(root.path())
+        .args(["genpass", "--no-copy", "--no-stats"])
+        .stdout(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not write command output"));
+}
+
+#[test]
+#[cfg(unix)]
+fn human_and_json_output_close_cleanly_when_the_reader_closes() {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    let root = tempfile::tempdir().unwrap();
+    for (args, expected_code) in [
+        (vec!["vaults", "--json"], 0),
+        (vec!["genpass", "--json", "--no-copy", "--no-stats"], 0),
+        (vec!["genpass", "--no-copy", "--no-stats"], 0),
+        (vec!["genpass", "--json", "--length", "0"], 2),
+    ] {
+        let (writer, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        let output = isolated_pm(root.path())
+            .args(args)
+            .stdout(Stdio::from(OwnedFd::from(writer)))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected_code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn json_argument_errors_are_structured_without_echoing_rejected_values() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--json", "genpass", "--length", "0"],
+        vec!["genpass", "--json", "--length", "synthetic-private-value"],
+    ] {
+        let output = isolated_pm(root.path())
+            .args(args)
+            .output_timeout("JSON argument error");
+        assert_eq!(output.status.code(), Some(2));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], 2);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-private-value"));
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
 fn desktop_dispatch_rejects_script_output_flags_without_starting_a_server() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
@@ -797,6 +862,11 @@ fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() 
         assert!(!text.contains(['\x1b', '\x07', '\u{009b}']));
         assert!(text.contains("\\u{1b}]52;"));
         assert!(text.contains("\\nForged row"));
+        assert!(!text.contains("Some("));
+        if args[0] != "audit" {
+            assert!(text.contains("Username: alice"));
+            assert!(text.contains("URLs: https://example.com"));
+        }
     }
     let result = run(root.path(), port, &["get", "--id", "1", "--password-only"]);
     assert!(result.status.success());
@@ -1455,6 +1525,7 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
         &[
             "delete",
             "--vault",
+            "--yes",
             "--vault-file",
             &ids[1],
             "--key",
@@ -1473,6 +1544,7 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
         &[
             "delete",
             "--vault",
+            "--yes",
             "--vault-file",
             &ids[1],
             "--key",
@@ -1488,7 +1560,13 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
     let deleted = run(
         root.path(),
         port,
-        &["delete", "--vault", "--key", keys[0].to_str().unwrap()],
+        &[
+            "delete",
+            "--vault",
+            "--yes",
+            "--key",
+            keys[0].to_str().unwrap(),
+        ],
     );
     assert!(deleted.status.success(), "{deleted:?}");
     assert!(!keys[0].exists());
@@ -1739,4 +1817,186 @@ fn output_capture_returns_when_launcher_exits_while_descendant_holds_handles() {
         !stdout.contains("descendant waited for pipe EOF timeout"),
         "output capture waited for the descendant instead of the launcher"
     );
+}
+
+#[test]
+fn permanent_deletion_requires_explicit_noninteractive_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    let _guard = ServerGuard::start(root.path(), port);
+    let key = root.path().join("vault.key");
+    assert!(
+        run(root.path(), port, &["new", "--key", key.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["unlock", "--key", key.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            root.path(),
+            port,
+            &[
+                "add",
+                "--name",
+                "Disposable",
+                "--generate-password",
+                "--no-copy"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(root.path(), port, &["delete", "--id", "1"])
+            .status
+            .success()
+    );
+    for args in [
+        vec!["purge", "--all"],
+        vec!["delete", "--vault", "--key", key.to_str().unwrap()],
+    ] {
+        let refused = run(root.path(), port, &args);
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+        assert!(key.exists());
+    }
+    assert!(
+        run(root.path(), port, &["purge", "--all", "--yes"])
+            .status
+            .success()
+    );
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["delete", "--vault", "--key", key.to_str().unwrap(), "--yes"]
+        )
+        .status
+        .success()
+    );
+    assert!(!key.exists());
+}
+
+#[test]
+fn lost_mutation_replies_report_the_operation_id_without_suggesting_blind_retry() {
+    use password_manager::protocol::{
+        RequestEnvelope, ResponsePayload, RpcResponse, SECURE_PREFACE, SECURE_RECORD_HEADER_LEN,
+        ServerStatus, decrypt_record, encode_rpc_response, encrypt_record, server_hello,
+    };
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = "a".repeat(64);
+    std::fs::create_dir_all(root.path().join("data")).unwrap();
+    std::fs::create_dir_all(root.path().join("config")).unwrap();
+    std::fs::write(
+        root.path()
+            .join("data")
+            .join(password_manager::file::TOKEN_FILE),
+        &token,
+    )
+    .unwrap();
+    let mut conf = password_manager::config::Config::default();
+    conf.server.port = port;
+    std::fs::write(
+        root.path().join("config/config.toml"),
+        toml::to_string(&conf).unwrap(),
+    )
+    .unwrap();
+    let server = thread::spawn(move || {
+        let mut operation = None;
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut preface = [0; 4];
+            stream.read_exact(&mut preface).unwrap();
+            assert_eq!(&preface, SECURE_PREFACE);
+            let (hello, keys) = server_hello(&token).unwrap();
+            stream.write_all(&hello).unwrap();
+            let mut header = [0; SECURE_RECORD_HEADER_LEN];
+            stream.read_exact(&mut header).unwrap();
+            let len = u32::from_be_bytes(header[24..].try_into().unwrap()) as usize;
+            let mut payload = vec![0; len];
+            stream.read_exact(&mut payload).unwrap();
+            let plain = decrypt_record(&keys.request, &header[..24], &payload).unwrap();
+            let envelope: RequestEnvelope = rmp_serde::from_slice(&plain).unwrap();
+            if let Some(id) = envelope.operation_id {
+                operation = Some(id);
+            } else {
+                let response =
+                    RpcResponse::success(ResponsePayload::Status(ServerStatus::new(false, None)));
+                stream
+                    .write_all(
+                        &encrypt_record(&keys.response, &encode_rpc_response(&response).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+        operation.unwrap()
+    });
+    let output = run(
+        root.path(),
+        port,
+        &[
+            "--json",
+            "add",
+            "--name",
+            "Synthetic",
+            "--generate-password",
+            "--no-copy",
+        ],
+    );
+    let id = server.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["uncertain"], true);
+    assert_eq!(result["operationId"], id);
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Do not retry blindly")
+    );
+}
+
+#[test]
+fn operation_inspection_and_empty_audits_have_clear_outcomes() {
+    let root = tempfile::tempdir().unwrap();
+    let port = unused_port();
+    let _guard = ServerGuard::start(root.path(), port);
+    let key = root.path().join("vault.key");
+    assert!(
+        run(root.path(), port, &["new", "--key", key.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        run(
+            root.path(),
+            port,
+            &["unlock", "--key", key.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    let report = run(root.path(), port, &["audit"]);
+    assert!(report.status.success());
+    let text = String::from_utf8(report.stdout).unwrap();
+    assert!(text.contains("No login items to assess"));
+    assert!(!text.contains("100/100"));
+    let outcome = run(root.path(), port, &["operation", "--id", &"a".repeat(32)]);
+    assert!(outcome.status.success(), "{outcome:?}");
+    assert!(String::from_utf8_lossy(&outcome.stdout).contains("Inspect the vault"));
 }

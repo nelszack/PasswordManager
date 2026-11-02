@@ -34,6 +34,23 @@ pub fn render(payload: &ResponsePayload) -> String {
             "Encrypted backup restored as {}. Unlock it with the backup password/key.",
             reference.vault_file
         ),
+        ResponsePayload::Operation(receipt) => format!(
+            "Operation {}: {:?}. {}",
+            receipt.operation_id,
+            receipt.state,
+            match receipt.state {
+                crate::protocol::OperationState::Committed =>
+                    "The change completed; do not repeat it.",
+                crate::protocol::OperationState::CommittedDurabilityUnknown =>
+                    "The change committed, but storage durability is uncertain. Inspect the vault and storage before continuing.",
+                crate::protocol::OperationState::Pending =>
+                    "The change is still running. Check again before making another change.",
+                crate::protocol::OperationState::Failed =>
+                    "The change failed. Inspect the vault before trying again.",
+                crate::protocol::OperationState::Unknown =>
+                    "The server has no retained outcome. Inspect the vault; do not assume the change failed.",
+            }
+        ),
         ResponsePayload::ItemPage(page) => {
             if page.items.is_empty() {
                 return "No entries.".into();
@@ -42,12 +59,12 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .iter()
                 .map(|item| {
                     format!(
-                        "{}. {} [{}] {:?} {:?}{}\n",
+                        "{}. {} [{}]\n   Username: {}\n   URLs: {}{}\n",
                         item.id,
                         metadata(&item.name).as_str(),
                         item.kind,
-                        item.username,
-                        item.urls,
+                        optional_metadata(item.username.as_deref()),
+                        urls(&item.urls),
                         if item.has_totp { " [OTP]" } else { "" }
                     )
                 })
@@ -70,11 +87,11 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
-                "Name: {}\nType: {}\nUsername: {:?}\nURLs: {:?}\nNotes: {}\nPassword: {}\nCustom fields:\n{}\n",
+                "Name: {}\nType: {}\nUsername: {}\nURLs: {}\nNotes: {}\nPassword: {}\nCustom fields:\n{}\n",
                 metadata(&item.name).as_str(),
                 item.kind,
-                item.username,
-                item.urls,
+                optional_metadata(item.username.as_deref()),
+                urls(&item.urls),
                 item.notes
                     .as_ref()
                     .map(|v| metadata(v.expose()).to_string())
@@ -122,6 +139,10 @@ pub fn render(payload: &ResponsePayload) -> String {
 }
 
 pub(crate) fn audit(findings: &crate::vault::AuditReport) -> String {
+    if findings.total == 0 {
+        return "No login items to assess. Add or import a login before checking vault health.\n"
+            .into();
+    }
     let score = findings.score;
     let healthy = findings.healthy;
     let weak = &findings.weak;
@@ -143,10 +164,10 @@ pub(crate) fn audit(findings: &crate::vault::AuditReport) -> String {
     );
     for entry in weak {
         report.push_str(&format!(
-            "Weak: {}. {} {:?}\n",
+            "Weak: {}. {} ({})\n",
             entry.id,
             metadata(&entry.name).as_str(),
-            entry.username
+            optional_metadata(entry.username.as_deref())
         ));
     }
     for entries in reused {
@@ -240,4 +261,23 @@ fn import_report(report: &crate::vault::ImportReport) -> String {
         }
     }
     output
+}
+
+fn optional_metadata(value: Option<&str>) -> String {
+    value
+        .filter(|v| !v.is_empty())
+        .map(|v| metadata(v).to_string())
+        .unwrap_or_else(|| "—".into())
+}
+
+fn urls(values: &[String]) -> String {
+    if values.is_empty() {
+        "—".into()
+    } else {
+        values
+            .iter()
+            .map(|v| metadata(v).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }

@@ -89,28 +89,38 @@ pub fn validate_new_password(password: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn prompt_for_confirmed_password(require_minimum: bool) -> String {
+pub fn try_prompt_for_confirmed_password(
+    require_minimum: bool,
+    retry: impl Fn(&str),
+) -> Result<String, String> {
     loop {
-        let mut p1 = rpassword::prompt_password("Enter a password: ").unwrap_or_else(|error| {
-            eprintln!("Error: could not read password: {error}");
-            std::process::exit(1);
-        });
-        let mut p2 =
-            rpassword::prompt_password("Re-enter the password: ").unwrap_or_else(|error| {
-                eprintln!("Error: could not read password confirmation: {error}");
-                std::process::exit(1);
-            });
+        let mut p1 = Zeroizing::new(
+            rpassword::prompt_password("Enter a password: ")
+                .map_err(|error| format!("could not read password: {error}"))?,
+        );
+        let mut p2 = Zeroizing::new(
+            rpassword::prompt_password("Re-enter the password: ")
+                .map_err(|error| format!("could not read password confirmation: {error}"))?,
+        );
         if require_minimum && let Err(error) = validate_new_password(&p1) {
-            println!("{error}. Try again.");
+            retry(&format!("{error}. Try again."));
         } else if p1 == p2 {
             p2.zeroize();
-            return p1;
+            return Ok(std::mem::take(&mut *p1));
         } else {
-            println!("Passwords don't match. Try again.")
+            retry("Passwords don't match. Try again.");
         }
         p1.zeroize();
         p2.zeroize();
     }
+}
+
+fn prompt_for_confirmed_password(require_minimum: bool) -> String {
+    try_prompt_for_confirmed_password(require_minimum, |message| eprintln!("{message}"))
+        .unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        })
 }
 
 pub fn prompt_for_password() -> String {

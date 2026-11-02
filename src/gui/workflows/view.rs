@@ -146,14 +146,19 @@ pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, App
                     button("Cancel")
                         .padding([11, 14])
                         .on_press_maybe(enabled.then_some(event(Event::Cancel))),
-                    button("Confirm")
+                    button(prepared.action.confirm_label())
                         .padding([11, 14])
-                        .style(button_style::danger)
+                        .style(if prepared.action.dangerous(state.force) {
+                            button_style::danger
+                        } else {
+                            button_style::primary
+                        })
                         .on_press_maybe(
                             (enabled && app.pending.is_none()).then_some(event(Event::Confirm))
                         ),
                 ]
-                .spacing(10),
+                .spacing(10)
+                .wrap(),
             );
     }
     form
@@ -442,6 +447,7 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
         .push(text(if item.has_duo { "Duo Push configured" } else { "No Duo Push enrollment" }).size(14))
         .push(field("Fresh Duo activation link", state.activation.expose(), Field::Activation, true, enabled))
         .push(pick_list([Mode::Automatic, Mode::Hotp, Mode::Totp], Some(state.mode), |value| event(Event::Mode(value)))
+            .placeholder("Duo passcode mode")
             .padding(10))
         .push(toggle("Replace existing enrollment when enrolling Push & passcodes", state.replace_duo, Toggle::ReplaceDuo, enabled))
         .push(row![
@@ -528,7 +534,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             pick_list(choices, state.selected.clone(), |value| {
                 event(Event::Select(value))
             })
-            .placeholder("Select an item")
+            .placeholder("Item for password history")
             .padding(10)
             .width(Fill),
         );
@@ -552,47 +558,55 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             .push(action("Check vault health", Action::Audit, unlocked)),
         Section::Files => {
             let saving = matches!(state.file_operation, FileOperation::Backup | FileOperation::Export);
-            let mut form = form
-                .push(path("File", &state.path, Field::Path, saving, enabled));
+            let operation = match state.file_operation { FileOperation::Backup => Action::Backup, FileOperation::Restore => Action::RestoreBackup, FileOperation::Import => Action::Import, FileOperation::Export => Action::Export };
+            let readiness = state.prepare(operation, app);
+            let file_ready = readiness.is_ok();
+            let preview_ready = state.prepare(Action::PreviewImport, app).is_ok();
+            let mut form = form.push(path("File", &state.path, Field::Path, saving, enabled));
+            if let Err(message) = readiness { form = form.push(text(message).size(14).style(text::danger)); }
             match state.file_operation {
                 FileOperation::Backup => {
                     // Backups use an existing key; only password backups need confirmation.
                     form = form.push(credentials(state, false, enabled));
                     if !state.use_key { form = form.push(field("Confirm backup password", state.confirmation.expose(), Field::Confirmation, true, enabled)); }
                     form.push(toggle("Replace an existing backup file", state.force, Toggle::Force, enabled))
-                        .push(action("Create encrypted backup", Action::Backup, writes))
+                        .push(action("Create encrypted backup", Action::Backup, writes && file_ready))
                 }
                 FileOperation::Restore => form
                     .push(text("Restores a separate locked vault. Lock the current vault first.").size(14))
                     .push(credentials(state, false, enabled))
-                    .push(action("Restore backup", Action::RestoreBackup, server_writes && app.session.is_none())),
+                    .push(action("Restore backup", Action::RestoreBackup, server_writes && app.session.is_none() && file_ready)),
                 FileOperation::Import => {
                     form = form
                         .push(text("Supports CSV, JSON, Bitwarden JSON, and portable JSON. Preview counts, conflicts, and data loss before importing.").size(14))
-                        .push(pick_list([Policy::Skip, Policy::Replace, Policy::KeepBoth], Some(state.policy), |value| event(Event::Policy(value))).padding(10))
+                        .push(pick_list([Policy::Skip, Policy::Replace, Policy::KeepBoth], Some(state.policy), |value| event(Event::Policy(value))).placeholder("Import duplicate policy").padding(10))
                         .push(toggle("Import into a new vault", state.import_new, Toggle::ImportNew, enabled));
                     if state.import_new { form = form.push(credentials(state, true, enabled)); }
                     form.push(row![
-                        action("Preview import", Action::PreviewImport, server_writes && (state.import_new || app.session.is_some())),
-                        action("Import", Action::Import, server_writes && (state.import_new || app.session.is_some()))
-                    ].spacing(10))
+                        action("Preview import", Action::PreviewImport, server_writes && preview_ready),
+                        action("Import", Action::Import, server_writes && file_ready)
+                    ].spacing(10).wrap())
                 }
                 FileOperation::Export => form
                     .push(text("Exports plaintext secrets. Use .json to preserve rich metadata; other extensions produce CSV. Prefer an encrypted backup for safekeeping.").size(14))
                     .push(toggle("Replace an existing export file", state.force, Toggle::Force, enabled))
-                    .push(action("Export plaintext", Action::Export, writes)),
+                    .push(action("Export plaintext", Action::Export, writes && file_ready)),
             }
         }
         Section::Security => {
+            let operation = match state.vault_operation { VaultOperation::Rekey => Action::Rekey, VaultOperation::Create => Action::NewVault, VaultOperation::Delete => Action::DeleteVault };
+            let readiness = state.prepare(operation, app);
+            let credentials_ready = readiness.is_ok();
+            if let Err(message) = readiness { form = form.push(text(message).size(14).style(text::danger)); }
             form.push(text("Vault credentials").size(19))
                 .push(text("New vaults and rekeying create a new external key when key mode is selected. Deleting a vault authenticates using its existing credentials. Select the vault on the Vault tab.").size(14))
-                .push(pick_list([VaultOperation::Rekey, VaultOperation::Create, VaultOperation::Delete], Some(state.vault_operation), |value| event(Event::VaultOperation(value))).padding(10))
+                .push(pick_list([VaultOperation::Rekey, VaultOperation::Create, VaultOperation::Delete], Some(state.vault_operation), |value| event(Event::VaultOperation(value))).placeholder("Vault operation").padding(10))
                 .push(credentials(state, state.vault_operation != VaultOperation::Delete, enabled))
                 .push(toggle("Keep the external key when deleting a vault", state.keep_key, Toggle::KeepKey, enabled))
                 .push(match state.vault_operation {
-                    VaultOperation::Rekey => action("Change vault credentials", Action::Rekey, writes),
-                    VaultOperation::Create => action("Create vault", Action::NewVault, server_writes),
-                    VaultOperation::Delete => action("Delete selected vault", Action::DeleteVault, server_writes && app.session.is_none()).style(button_style::danger),
+                    VaultOperation::Rekey => action("Change vault credentials", Action::Rekey, writes && credentials_ready),
+                    VaultOperation::Create => action("Create vault", Action::NewVault, server_writes && credentials_ready),
+                    VaultOperation::Delete => action("Delete selected vault", Action::DeleteVault, server_writes && app.session.is_none() && credentials_ready).style(button_style::danger),
                 })
         }
         Section::Search => {
@@ -608,9 +622,9 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
                 ("Notes contain", state.notes.expose(), Field::Notes),
                 ("Passwords at least this many days old (optional)", state.stale_days.as_str(), Field::StaleDays),
             ] { form = form.push(field(label, value, key, matches!(key, Field::Notes), enabled)); }
-            form.push(pick_list(kinds, Some(selected), |value| event(Event::Kind(model::KINDS.iter().find(|kind| kind.to_string() == value).copied()))).padding(10))
-                .push(pick_list(["Any authenticator", "With authenticator", "Without authenticator"], Some(match state.has_otp { None => "Any authenticator", Some(true) => "With authenticator", Some(false) => "Without authenticator" }), |value| event(Event::HasOtp(match value { "With authenticator" => Some(true), "Without authenticator" => Some(false), _ => None }))).padding(10))
-                .push(pick_list(["ID", "Name", "Created", "Modified", "Password age"], Some(match state.sort { SortField::Id => "ID", SortField::Name => "Name", SortField::Created => "Created", SortField::Modified => "Modified", SortField::PasswordAge => "Password age" }), |value| event(Event::Sort(match value { "Name" => SortField::Name, "Created" => SortField::Created, "Modified" => SortField::Modified, "Password age" => SortField::PasswordAge, _ => SortField::Id }))).padding(10))
+            form.push(pick_list(kinds, Some(selected), |value| event(Event::Kind(model::KINDS.iter().find(|kind| kind.to_string() == value).copied()))).placeholder("Filter item type").padding(10))
+                .push(pick_list(["Any authenticator", "With authenticator", "Without authenticator"], Some(match state.has_otp { None => "Any authenticator", Some(true) => "With authenticator", Some(false) => "Without authenticator" }), |value| event(Event::HasOtp(match value { "With authenticator" => Some(true), "Without authenticator" => Some(false), _ => None }))).placeholder("Filter authenticator").padding(10))
+                .push(pick_list(["ID", "Name", "Created", "Modified", "Password age"], Some(match state.sort { SortField::Id => "ID", SortField::Name => "Name", SortField::Created => "Created", SortField::Modified => "Modified", SortField::PasswordAge => "Password age" }), |value| event(Event::Sort(match value { "Name" => SortField::Name, "Created" => SortField::Created, "Modified" => SortField::Modified, "Password age" => SortField::PasswordAge, _ => SortField::Id }))).placeholder("Sort search results").padding(10))
                 .push(toggle("Only weak primary secrets", state.weak, Toggle::Weak, enabled))
                 .push(toggle("Descending order", state.descending, Toggle::Descending, enabled))
                 .push(action("Search vault", Action::Search, unlocked))
@@ -618,7 +632,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
         Section::Browser => form
             .push(text("Register the browser extension").size(19))
             .push(text("Load extension/ as an unpacked extension first, then enter its ID. Reload the extension afterward. On Windows, fully close the browser before installing or updating its native host.").size(14))
-            .push(pick_list([Browser::Chrome, Browser::Chromium, Browser::Helium], Some(state.browser), |value| event(Event::Browser(value))).padding(10))
+            .push(pick_list([Browser::Chrome, Browser::Chromium, Browser::Helium], Some(state.browser), |value| event(Event::Browser(value))).placeholder("Browser to register").padding(10))
             .push(field("32-character extension ID", &state.extension_id, Field::ExtensionId, false, enabled))
             .push(row![
                 action("Register browser bridge", Action::InstallHost, enabled),

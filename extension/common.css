@@ -1,0 +1,28 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  --accent: light-dark(#2850be, #9cb7ff);
+  --on-accent: light-dark(white, #121722);
+  --edge: light-dark(#68758b, #8c99af);
+  --surface: light-dark(#f6f8fc, #171e2c);
+}
+* { box-sizing: border-box; }
+body { background: Canvas; color: CanvasText; }
+button, input, select, textarea { font: inherit; }
+button, a { touch-action: manipulation; }
+button { min-height: 40px; padding: 9px 14px; border: 1px solid var(--edge); border-radius: 8px; background: ButtonFace; color: ButtonText; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .55; cursor: default; }
+a { color: var(--accent); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+input:not([type=checkbox]), select, textarea { background: Field; color: FieldText; border: 1px solid var(--edge); border-radius: 6px; }
+section, details { background: var(--surface); }
+summary { cursor: pointer; font-weight: 600; }
+code { overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+#new, #editForm button:not([type]), #unlockForm button, #generatorForm button:not([type]), #add {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+}
+@media (forced-colors: active) { :focus-visible { outline-color: Highlight; } }

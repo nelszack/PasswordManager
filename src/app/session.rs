@@ -21,10 +21,11 @@ impl<'a> SessionClient<'a> {
     pub fn request(&mut self, command: ServerCommand) -> Result<ResponsePayload, String> {
         let mut envelope = RequestEnvelope::new(command);
         envelope.expected_session = self.session_id.clone();
+        let operation_id = envelope.operation_id.clone();
         let response = self
             .client
             .request_envelope_tracked(envelope)
-            .map_err(|error| error.message)?;
+            .map_err(|error| error.describe(operation_id.as_deref()))?;
         if response.code != 0 {
             return Err(response.error_message());
         }

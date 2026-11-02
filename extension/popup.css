@@ -1,43 +1,7 @@
-body {
-  width: 250px;
-  font-family: Arial, sans-serif;
-  padding: 10px;
-}
-
-button {
-  width: 100%;
-  margin-top: 5px;
-  padding: 8px;
-  cursor: pointer;
-}
-
-label,
-#output {
-  font-size: 12px;
-}
-
-#nativeHint {
-  color: #555;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-#statusRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 6px 0 10px;
-  font-size: 13px;
-}
-
-#statusDot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #6b7280;
-  display: inline-block;
-}
-
-#output {
-  margin-top: 10px;
-}
+body { width: 300px; margin: 0; padding: 18px; }
+h3 { margin: 0 0 14px; font-size: 19px; }
+button { width: 100%; margin: 8px 0 12px; }
+#nativeHint, #output { font-size: 13px; line-height: 1.5; }
+#statusRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+#statusDot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: #6b7280; }
+#output { margin-top: 12px; overflow-wrap: anywhere; }

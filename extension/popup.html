@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
   <meta charset="utf-8">
   <title>Password Manager</title>
-  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="common.css"><link rel="stylesheet" href="popup.css">
     <script src="ui_session.js" defer></script>
 </head>
 
@@ -12,17 +12,17 @@
 
   <h3>Password Manager</h3>
 
-  <div id="statusRow">
+  <div id="statusRow" role="status" aria-live="polite">
     <span id="statusDot"></span>
     <span id="statusText">Checking...</span>
   </div>
 
-  <p id="nativeHint">Connected through the installed native messaging host.</p>
+  <p id="nativeHint">Checking the local vault connection…</p>
 
-  <button id="lockBtn">Lock Vault</button>
+  <button id="lockBtn" disabled>Lock Vault</button>
   <a href="manager.html" target="_blank" rel="noopener">Open vault manager</a>
 
-  <div id="output"></div>
+  <div id="output" role="status" aria-live="polite"></div>
 
   <script src="popup_state.js"></script>
   <script src="popup.js"></script>

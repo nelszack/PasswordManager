@@ -110,6 +110,14 @@ Relative paths resolve from the current directory.</dd>
 Zero disables automatic locking for this unlock session. If omitted, uses the configured unlock timeout.</dd>
       </dl>
     </section>
+    <section class="command" id="pm-operation">
+      <h2><code>pm operation</code></h2>
+      <p>Inspect a previous change after a lost response; never retries the change</p>
+      <pre><code>Usage: pm operation --id &lt;ID&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Operation identifier reported by the original command</dd>
+      </dl>
+    </section>
     <section class="command" id="pm-vaults">
       <h2><code>pm vaults</code></h2>
       <p>List opaque vault filenames without decrypting them or requiring a server</p>
@@ -248,6 +256,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
         <dt><code>--keep-key</code></dt><dd>Preserve the key file after deleting its vault.
 
 Use this only when the key is intentionally shared or retained as a backup.</dd>
+        <dt><code>--yes</code></dt><dd>Confirm permanent vault deletion without prompting (required for scripts)</dd>
       </dl>
     </section>
     <section class="command" id="pm-history">
@@ -289,6 +298,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <dl class="flags">
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID of a trashed entry shown by `pm trash`</dd>
         <dt><code>--all</code></dt><dd>Permanently erase every entry in trash</dd>
+        <dt><code>--yes</code></dt><dd>Confirm permanent trash deletion without prompting (required for scripts)</dd>
       </dl>
     </section>
     <section class="command" id="pm-audit">

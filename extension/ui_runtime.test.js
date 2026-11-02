@@ -67,7 +67,7 @@ function execute(name, context) {
 }
 
 test("popup runtime renders cached/live status and performs an explicit lock", async () => {
-    const env = environment(["statusDot", "statusText", "lockBtn", "output"], {
+    const env = environment(["statusDot", "statusText", "lockBtn", "output", "nativeHint"], {
         pmStatus: { native: true, running: true, locked: true },
         getStatus: { native: true, running: true, locked: false },
         lockVault: { success: true, data: "Vault locked." }
@@ -82,6 +82,13 @@ test("popup runtime renders cached/live status and performs an explicit lock", a
     assert.equal(env.elements.output.innerText, "Vault locked.");
     env.runtimeListener()({ action: "statusChanged", status: { native: true } });
     assert.equal(env.elements.statusText.innerText, "Server not running");
+    assert.match(env.elements.nativeHint.textContent, /pm start/);
+    env.runtimeListener()({ action: "statusChanged", status: { native: false } });
+    assert.match(env.elements.nativeHint.textContent, /setup/);
+    env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: true } });
+    assert.match(env.elements.nativeHint.textContent, /unlock/);
+    env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: false } });
+    assert.match(env.elements.nativeHint.textContent, /key button/);
 });
 
 test("picker runtime discloses destinations and requires trusted, confirmed selections", async () => {
@@ -89,7 +96,7 @@ test("picker runtime discloses destinations and requires trusted, confirmed sele
         const item = crossOrigin ? { id: 2, name: "Visa" } : { id: 7, name: "Personal", username: "alice" };
         const origin = crossOrigin ? "https://embedded.example" : "https://example.com";
         const env = environment([
-            "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin", "crossOriginText"
+            "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin", "crossOriginText", "search", "recovery", "retry"
         ], {
             getSecurePickerData: {
                 success: true, kind: crossOrigin ? "payment-card" : "login", origin,

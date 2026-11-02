@@ -1769,3 +1769,146 @@ fn invalid_guided_sync_host_never_starts_an_operation() {
     assert!(!app.busy);
     assert!(app.notice.contains("SSH hostname"));
 }
+
+#[test]
+fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
+    let mut app = unlocked();
+    app.draft.as_mut().unwrap().name = "My unsaved name".into();
+    app.draft.as_mut().unwrap().dirty = true;
+    let mut response = RpcResponse::success(ResponsePayload::Message("Item changed".into()));
+    response.code = ResponseCode::Conflict as i32;
+    response.session_id = app.session.clone();
+    let _ = app.complete(
+        Job::Save,
+        Reply::Server {
+            response: Box::new(response),
+            vaults: vec![],
+            pending: vec![],
+        },
+    );
+    assert!(app.ui.draft_conflict);
+    assert_eq!(app.draft.as_ref().unwrap().name, "My unsaved name");
+    assert!(app.item.as_ref().unwrap().password.is_none());
+    let old_revision = app.draft.as_ref().unwrap().revision;
+    let _ = app.save_item(Job::Save);
+    assert_eq!(app.draft.as_ref().unwrap().revision, old_revision);
+    let mut latest = item();
+    latest.revision = 4;
+    latest.username = Some("Other client username".into());
+    let session = app.session.clone();
+    let _ = app.complete(
+        Job::ConflictReview,
+        reply(ResponsePayload::Item(latest), session.as_deref()),
+    );
+    let _ = app.update(Message::ReapplyConflict);
+    assert!(!app.ui.draft_conflict);
+    let draft = app.draft.as_ref().unwrap();
+    assert_eq!(draft.name, "My unsaved name");
+    assert_eq!(draft.username, "Other client username");
+    assert_eq!(draft.revision, Some(4));
+    assert!(draft.dirty);
+}
+
+#[test]
+fn conflict_from_another_session_erases_draft_instead_of_reusing_it() {
+    let mut app = unlocked();
+    let mut response = RpcResponse::success(ResponsePayload::Message("Changed".into()));
+    response.code = ResponseCode::Conflict as i32;
+    response.session_id = Some("other-session".into());
+    let _ = app.complete(
+        Job::Save,
+        Reply::Server {
+            response: Box::new(response),
+            vaults: vec![],
+            pending: vec![],
+        },
+    );
+    assert!(app.draft.is_none());
+    assert!(app.ui.conflict_latest.is_none());
+    assert!(!app.ui.draft_conflict);
+}
+
+#[test]
+fn generator_transfer_preserves_draft_fields_and_works_without_clipboard() {
+    let mut app = unlocked();
+    app.busy = false;
+    app.conf.clipboard.timeout = 0;
+    app.tab = Tab::Generator;
+    app.generated = "exact-generated-value".into();
+    let name = app.draft.as_ref().unwrap().name.clone();
+    let _ = app.update(Message::UseGenerated);
+    assert!(app.ui.transfer_generated);
+    let _ = app.update(Message::ConfirmGenerated);
+    assert_eq!(app.tab, Tab::Vault);
+    let draft = app.draft.as_ref().unwrap();
+    assert_eq!(draft.name, name);
+    assert_eq!(draft.password.expose(), "exact-generated-value");
+    assert!(draft.replace_password && draft.dirty);
+    assert!(!app.ui.editor_show_secret);
+}
+
+#[test]
+fn generated_transfer_never_reuses_expired_or_other_session_values() {
+    let mut app = unlocked();
+    app.busy = false;
+    app.tab = Tab::Generator;
+    let _ = app.update(Message::UseGenerated);
+    app.clear_vault();
+    let _ = app.update(Message::ConfirmGenerated);
+    assert!(app.draft.is_none());
+    assert!(!app.ui.transfer_generated);
+}
+
+#[test]
+fn window_close_requires_a_discard_decision_for_unsaved_work() {
+    let mut app = unlocked();
+    app.busy = false;
+    app.draft.as_mut().unwrap().dirty = true;
+    let id = iced::window::Id::unique();
+    let _ = app.update(Message::CloseRequested(id));
+    assert_eq!(app.ui.confirm_close, Some(id));
+    assert!(app.draft.is_some());
+    assert!(app.item.as_ref().unwrap().password.is_none());
+    let _ = app.update(Message::CancelClose);
+    assert!(app.ui.confirm_close.is_none());
+    assert!(app.draft.is_some());
+}
+
+#[test]
+fn saved_default_changes_do_not_retarget_the_active_vault() {
+    let mut app = unlocked();
+    app.vault = Some("active.enc".into());
+    app.ui.active_vault = Some(("active.enc".into(), app.session.clone().unwrap()));
+    let mut conf = app.conf.clone();
+    conf.unlock.vault_id = Some("next-unlock.enc".into());
+    let _ = app.complete(
+        Job::Settings,
+        Reply::Settings {
+            conf,
+            restart_required: false,
+        },
+    );
+    assert_eq!(app.vault.as_deref(), Some("active.enc"));
+    assert_eq!(app.ui.active_vault.as_ref().unwrap().0, "active.enc");
+    assert_eq!(app.conf.unlock.vault_id.as_deref(), Some("next-unlock.enc"));
+}
+
+#[test]
+fn connecting_requires_discard_even_when_reusing_the_same_port() {
+    let mut app = unlocked();
+    app.busy = false;
+    app.draft.as_mut().unwrap().dirty = true;
+    let port = app.client.port;
+    let _ = app.update(Message::UseConnectionPort);
+    assert!(matches!(app.deferred, Some(Navigate::Connect(value)) if value == port));
+    assert!(app.draft.is_some());
+    assert!(app.session.is_some());
+    let _ = app.update(Message::KeepEditing);
+    assert!(app.deferred.is_none());
+    assert!(app.draft.is_some());
+    let _ = app.update(Message::UseConnectionPort);
+    let _ = app.update(Message::Discard);
+    assert!(app.draft.is_none());
+    assert!(app.session.is_none());
+    assert_eq!(app.client.port, port);
+}

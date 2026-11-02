@@ -58,6 +58,10 @@ struct NativeRequest {
     #[serde(default)]
     query: Option<String>,
     #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
     reveal: Option<bool>,
     #[serde(default)]
     item: Option<ManagementInput>,
@@ -121,6 +125,8 @@ impl NativeRequest {
             ("vaultFile", self.vault_file.is_some()),
             ("keyPath", self.key_path.is_some()),
             ("query", self.query.is_some()),
+            ("offset", self.offset.is_some()),
+            ("limit", self.limit.is_some()),
             ("reveal", self.reveal.is_some()),
             ("item", self.item.is_some()),
             ("requestId", self.request_id.is_some()),
@@ -134,6 +140,13 @@ impl NativeRequest {
             .is_some_and(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
         {
             return Err("invalid unlock session identifier".into());
+        }
+        if self.limit.is_some_and(|limit| limit == 0 || limit > 50)
+            || self
+                .offset
+                .is_some_and(|offset| offset as u64 > 9_007_199_254_740_991)
+        {
+            return Err("invalid native page bounds".into());
         }
         if self.id == 0 || self.id > 9_007_199_254_740_991 {
             return Err("invalid native request identifier".into());
@@ -506,13 +519,71 @@ fn write_message(writer: &mut impl Write, response: &NativeResponse) -> Result<(
     serde_json::to_writer(&mut *payload, response)
         .map_err(|error| format!("could not encode native response: {error}"))?;
     if payload.len() > MAX_NATIVE_MESSAGE {
-        return Err("native response exceeds Chrome's 1 MiB limit".to_string());
+        // Keep the host connected and return an actionable, bounded error.
+        // A mutation may already have committed before its result was encoded;
+        // preserve the receipt and require review instead of inviting a retry.
+        let mut fallback = Zeroizing::new(NativeResponse::error(
+            response.id,
+            "This result exceeds the browser's 1 MiB limit. Use the desktop app or CLI to view it.",
+        ));
+        fallback.session_id = response.session_id.clone();
+        fallback.operation = response.operation.clone();
+        fallback.operation_id = response.operation_id.clone();
+        fallback.uncertain = response.uncertain || response.operation_id.is_some();
+        if fallback.uncertain {
+            fallback.error.as_mut().unwrap().push_str(
+                " The change may already have completed. Review its operation outcome before retrying.",
+            );
+        }
+        payload.zeroize();
+        serde_json::to_writer(&mut *payload, &*fallback)
+            .map_err(|error| format!("could not encode native response: {error}"))?;
     }
     writer
         .write_all(&(payload.len() as u32).to_ne_bytes())
         .and_then(|_| writer.write_all(&payload))
         .and_then(|_| writer.flush())
         .map_err(|error| format!("could not write native response: {error}"))
+}
+
+/// Native responses must fit Chromium's 1 MiB frame limit. List summaries use
+/// bounded display previews; opening an item still returns its stored values.
+fn native_item_page(
+    page: crate::vault::ItemPage,
+    offset: usize,
+    limit: usize,
+) -> serde_json::Value {
+    fn preview(value: &str, shortened: &mut bool) -> String {
+        if value.chars().count() <= 512 {
+            value.to_owned()
+        } else {
+            *shortened = true;
+            format!("{}…", value.chars().take(512).collect::<String>())
+        }
+    }
+    let total = page.total;
+    let mut shortened = false;
+    let items: Vec<_> = page
+        .items
+        .into_iter()
+        .skip(offset)
+        .take(limit.min(50))
+        .map(|mut item| {
+            item.name = preview(&item.name, &mut shortened);
+            item.username = item.username.map(|value| preview(&value, &mut shortened));
+            if item.urls.len() > 2 {
+                shortened = true;
+            }
+            item.urls = item
+                .urls
+                .into_iter()
+                .take(2)
+                .map(|value| preview(&value, &mut shortened))
+                .collect();
+            item
+        })
+        .collect();
+    json!({"items":items,"total":total,"offset":offset,"displayTruncated":shortened})
 }
 
 fn required(value: Option<String>, field: &str, max_length: usize) -> Result<String, String> {
@@ -568,6 +639,10 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
                     error_code=Some(response.code);
                     uncertain=response.code==crate::protocol::ResponseCode::Durability as i32 && request.action.policy().mutates;
                     return Err(if response.code==crate::protocol::ResponseCode::Durability as i32 {format!("{} The operation committed; durability could not be confirmed.",response.error_message())}else{response.error_message()});
+                }
+                if request.action == NativeAction::ManagerList {
+                    let ResponsePayload::ItemPage(page) = response.payload else { return Err("unexpected list response".into()); };
+                    return Ok(native_item_page(page, request.offset.unwrap_or(0), request.limit.unwrap_or(50)));
                 }
                 Ok(response.payload.into_json())
             })

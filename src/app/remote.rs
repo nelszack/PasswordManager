@@ -2,7 +2,7 @@ use super::output::Output;
 use password_manager::{
     cli::{BackupCommands, CliCommands, DeleteArgs, EntryArgs, TotpCommands},
     client, config,
-    encryption::{prompt_for_new_master_password, prompt_for_password},
+    encryption::try_prompt_for_confirmed_password,
     file::{resolve_key_path, resolve_new_key_path},
     password::generate_password as make_password,
     types::{
@@ -11,6 +11,11 @@ use password_manager::{
     },
     vault,
 };
+
+fn confirmed_password(console: &Output, require_minimum: bool) -> String {
+    try_prompt_for_confirmed_password(require_minimum, |message| console.print_warning(message))
+        .unwrap_or_else(|error| console.exit_error(&error, 1))
+}
 
 pub(super) fn target_type(target: EntryArgs) -> Target {
     if let Some(id) = target.id {
@@ -127,6 +132,7 @@ pub(super) async fn run(
 
 fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output) -> ServerCommand {
     match command {
+        CliCommands::Operation { id } => ServerCommand::OperationStatus(id),
         CliCommands::Lock => ServerCommand::Lock(true),
 
         CliCommands::Unlock {
@@ -160,12 +166,12 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
         CliCommands::New { key_path } => ServerCommand::New(if let Some(kp) = key_path {
             resolved_new_key(kp, console)
         } else {
-            PasswordType::Password(prompt_for_new_master_password())
+            PasswordType::Password(confirmed_password(console, true))
         }),
         CliCommands::Rekey { key_path } => ServerCommand::Rekey(if let Some(kp) = key_path {
             resolved_new_key(kp, console)
         } else {
-            PasswordType::Password(prompt_for_new_master_password())
+            PasswordType::Password(confirmed_password(console, true))
         }),
 
         CliCommands::Add {
@@ -194,7 +200,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             let password = if matches!(kind, types::ItemKind::Identity) {
                 String::new()
             } else if !generate_password {
-                prompt_for_password()
+                confirmed_password(console, false)
             } else {
                 make_password(conf.genpass.length)
             };
@@ -227,18 +233,22 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             vault_file,
             key,
             keep_key,
+            yes,
         }) => match (id, entry_name, vault) {
             (Some(i), None, _) => ServerCommand::Delete(Target::Id(i)),
             (None, Some(n), _) => ServerCommand::Delete(Target::Name(n)),
-            (None, None, true) => ServerCommand::Delete(Target::Vault {
-                key: if let Some(k) = key {
-                    resolved_key(k, console)
-                } else {
-                    PasswordType::Password(prompt_for_password())
-                },
-                keep_key,
-                vault_file: vault_file.or(conf.unlock.vault_id.clone()),
-            }),
+            (None, None, true) => {
+                confirm_permanent(yes, "Permanently delete this vault?", console);
+                ServerCommand::Delete(Target::Vault {
+                    key: if let Some(k) = key {
+                        resolved_key(k, console)
+                    } else {
+                        PasswordType::Password(confirmed_password(console, false))
+                    },
+                    keep_key,
+                    vault_file: vault_file.or(conf.unlock.vault_id.clone()),
+                })
+            }
             _ => unreachable!("clap requires exactly one delete target"),
         },
         CliCommands::View(options) => ServerCommand::View(options.into()),
@@ -257,7 +267,14 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
         },
         CliCommands::Trash => ServerCommand::Trash,
         CliCommands::Restore { id } => ServerCommand::RestoreTrash(id),
-        CliCommands::Purge(args) => ServerCommand::PurgeTrash(args.id),
+        CliCommands::Purge(args) => {
+            let prompt = args.id.map_or_else(
+                || "Permanently erase all trashed items?".into(),
+                |id| format!("Permanently erase trashed item {id}?"),
+            );
+            confirm_permanent(args.yes, &prompt, console);
+            ServerCommand::PurgeTrash(args.id)
+        }
 
         CliCommands::Audit {
             stale_days,
@@ -311,7 +328,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             } => ServerCommand::Backup(BackupRequest {
                 path: resolved_file(path, console),
                 key_pass: key_path.map_or_else(
-                    || PasswordType::Password(prompt_for_new_master_password()),
+                    || PasswordType::Password(confirmed_password(console, true)),
                     |path| resolved_key(path, console),
                 ),
                 force,
@@ -347,7 +364,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
         } => {
             let password = if add.password {
                 if !add.generate_password {
-                    Some(prompt_for_password())
+                    Some(confirmed_password(console, false))
                 } else {
                     Some(make_password(conf.genpass.length))
                 }
@@ -427,7 +444,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             } else {
                 Some(match key_path {
                     Some(path) => resolved_new_key(path, console),
-                    None => PasswordType::Password(prompt_for_new_master_password()),
+                    None => PasswordType::Password(confirmed_password(console, true)),
                 })
             };
             ServerCommand::Import(ImportRequest {
@@ -440,6 +457,25 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             })
         }
         _ => unreachable!("local commands are handled before remote dispatch"),
+    }
+}
+
+fn confirm_permanent(yes: bool, prompt: &str, console: &Output) {
+    use std::io::{self, Write};
+    if yes {
+        return;
+    }
+    if !console.can_prompt() {
+        console.exit_error(
+            "Permanent deletion requires confirmation. Rerun with --yes to confirm.",
+            2,
+        );
+    }
+    eprint!("{prompt} This cannot be undone. Type yes to continue: ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
+        console.exit_error("Deletion canceled; nothing was deleted.", 2);
     }
 }
 

@@ -10,7 +10,7 @@ path = "src/main.rs"
 [features]
 default = ["desktop"]
 fuzzing = []
-desktop = ["dep:iced", "dep:rfd"]
+desktop = ["dep:iced", "dep:iced_winit", "dep:rfd"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -44,12 +44,16 @@ aws-lc-rs = "1.18"
 pem-rfc7468 = { version = "1.0", features = ["alloc"] }
 html-escape = "0.3"
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "crisp", "advanced"], optional = true }
+iced_winit = { version = "0.14", default-features = false, features = ["a11y"], optional = true }
 rfd = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
 proptest = "1"
 
 [patch.crates-io]
+accesskit_unix = { path = "vendor/accesskit_unix" }
+iced_core = { path = "vendor/iced_core" }
+iced_widget = { path = "vendor/iced_widget" }
 iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
 iced_winit = { path = "vendor/iced_winit" }
 fontdb = { path = "vendor/fontdb-compat" }

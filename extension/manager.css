@@ -9,6 +9,7 @@ input:not([type=checkbox]), select, textarea { display: block; box-sizing: borde
 button { font: inherit; cursor: pointer; padding: 9px 12px; border: 1px solid #888; border-radius: 5px; }
 button:disabled { cursor: default; opacity: .5; }
 #items button { width: 100%; text-align: left; margin: 5px 0; overflow-wrap: anywhere; }
+#items button[aria-pressed="true"] { border-color: var(--accent); outline: 2px solid currentColor; outline-offset: -2px; }
 #message { min-height: 1.5em; overflow-wrap: anywhere; }
 .custom-field { padding: 12px; border: 1px solid #8886; border-radius: 5px; margin: 10px 0; }
 [hidden] { display: none !important; }
@@ -16,3 +17,12 @@ button:disabled { cursor: default; opacity: .5; }
 
 .duo-request { border: 1px solid #8886; border-radius: 5px; padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
 .duo-request p { margin: 6px 0; }
+fieldset { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
+legend { font-weight: 600; }
+details { border: 1px solid #8886; border-radius: 10px; padding: 16px 20px; margin: 18px 0; }
+li { margin: 8px 0; }
+#editor { min-width: 0; }
+#editForm > .actions:last-child { position: sticky; bottom: 0; background: var(--surface); padding: 12px 0; border-top: 1px solid #8886; }
+#delete { color: light-dark(#b22336, #ff96a4); }
+
+#conflictDiff { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

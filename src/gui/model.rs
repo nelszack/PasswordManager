@@ -215,6 +215,181 @@ impl Draft {
         }
     }
 
+    /// Public metadata and note previews only; primary and secret field values
+    /// are deliberately excluded, even if a caller accidentally supplied them.
+    pub fn conflict_summary(&self, original: &ItemDetail, latest: &ItemDetail) -> Vec<String> {
+        fn preview(value: &str) -> String {
+            let text: String = value.chars().take(240).collect();
+            format!(
+                "{}{}",
+                text,
+                if value.chars().count() > 240 {
+                    "… (preview)"
+                } else {
+                    ""
+                }
+            )
+        }
+        fn comparison(label: &str, before: &str, latest: &str, local: &str) -> String {
+            format!(
+                "{label} · {}\nOriginal: {}\nLatest: {}\nYour edit: {}",
+                if before != latest {
+                    "also changed in another client"
+                } else {
+                    "only your edit"
+                },
+                preview(before),
+                preview(latest),
+                preview(local)
+            )
+        }
+        let mut rows = Vec::new();
+        if self.name != original.name {
+            rows.push(comparison("Name", &original.name, &latest.name, &self.name));
+        }
+        if self.username != original.username.as_deref().unwrap_or_default() {
+            rows.push(comparison(
+                "Username / owner",
+                original.username.as_deref().unwrap_or_default(),
+                latest.username.as_deref().unwrap_or_default(),
+                &self.username,
+            ));
+        }
+        if self.kind != original.kind {
+            rows.push(comparison(
+                "Item type",
+                &original.kind.to_string(),
+                &latest.kind.to_string(),
+                &self.kind.to_string(),
+            ));
+        }
+        if self.urls != original.urls {
+            rows.push(comparison(
+                "Websites",
+                &original.urls.join("\n"),
+                &latest.urls.join("\n"),
+                &self.urls.join("\n"),
+            ));
+        }
+        if self.notes_changed {
+            rows.push(comparison(
+                "Notes",
+                original
+                    .notes
+                    .as_ref()
+                    .map(SecretString::expose)
+                    .unwrap_or_default(),
+                latest
+                    .notes
+                    .as_ref()
+                    .map(SecretString::expose)
+                    .unwrap_or_default(),
+                &self.notes.text(),
+            ));
+        }
+        if self.replace_password {
+            rows.push("Primary secret · your replacement will replace the latest stored value. Stored values stay hidden; secret changes cannot be compared.".into());
+        }
+        for field in &self.fields {
+            if !(field.changed || field.removed || field.original_name.is_none()) {
+                continue;
+            }
+            let find = |item: &ItemDetail| {
+                item.fields
+                    .iter()
+                    .find(|candidate| {
+                        field
+                            .original_name
+                            .as_ref()
+                            .is_some_and(|name| candidate.name.eq_ignore_ascii_case(name))
+                    })
+                    .cloned()
+            };
+            let before = find(original);
+            let remote = find(latest);
+            let secret = field.secret
+                || before.as_ref().is_some_and(|f| f.secret)
+                || remote.as_ref().is_some_and(|f| f.secret);
+            if secret {
+                rows.push(format!("Custom field {} · {}. Secret values stay hidden; your change replaces or removes the latest field.", field.name, if field.removed { "remove field" } else { "set field" }));
+            } else {
+                rows.push(comparison(
+                    &format!("Custom field {}", field.name),
+                    before
+                        .as_ref()
+                        .and_then(|f| f.value.as_ref())
+                        .map(SecretString::expose)
+                        .unwrap_or("(absent)"),
+                    remote
+                        .as_ref()
+                        .and_then(|f| f.value.as_ref())
+                        .map(SecretString::expose)
+                        .unwrap_or("(absent)"),
+                    if field.removed {
+                        "(removed)"
+                    } else {
+                        field.value.expose()
+                    },
+                ));
+            }
+        }
+        rows
+    }
+
+    pub fn rebase(&self, original: &ItemDetail, latest: &ItemDetail) -> Self {
+        let mut merged = Self::from_item(latest);
+        if self.name != original.name {
+            merged.name = self.name.clone();
+        }
+        if self.username != original.username.as_deref().unwrap_or_default() {
+            merged.username = self.username.clone();
+        }
+        if self.kind != original.kind {
+            merged.kind = self.kind;
+        }
+        if self.urls != original.urls {
+            merged.urls = self.urls.clone();
+        }
+        if self.notes_changed {
+            merged.notes = text_editor::Content::with_text(&self.notes.text());
+            merged.notes_changed = true;
+        }
+        if self.replace_password {
+            merged.password = self.password.clone();
+            merged.replace_password = true;
+        }
+        for field in &self.fields {
+            if !(field.changed || field.removed || field.original_name.is_none()) {
+                continue;
+            }
+            if let Some(name) = &field.original_name {
+                for existing in &mut merged.fields {
+                    if existing
+                        .original_name
+                        .as_ref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(name))
+                    {
+                        existing.removed = true;
+                    }
+                }
+            }
+            if !field.removed {
+                merged.fields.push(FieldDraft {
+                    original_name: None,
+                    name: field.name.clone(),
+                    value: field.value.clone(),
+                    secret: field.secret,
+                    hidden: field.hidden,
+                    value_edited: field.value_edited,
+                    changed: true,
+                    removed: false,
+                });
+            }
+        }
+        merged.dirty = true;
+        merged
+    }
+
     pub fn field_error(&self, index: usize) -> Option<String> {
         let field = self.fields.get(index).filter(|field| !field.removed)?;
         let name = field.name.trim();
@@ -562,5 +737,55 @@ mod tests {
         };
         assert!(!entry.entry.copy);
         assert_eq!(copy_timeout, 0);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    #[test]
+    fn reapply_preserves_concurrent_metadata_and_unedited_hidden_fields() {
+        let original = ItemDetail {
+            id: 5,
+            revision: 1,
+            name: "Original".into(),
+            username: Some("old-owner".into()),
+            kind: ItemKind::Login,
+            urls: vec!["https://old.test".into()],
+            notes: None,
+            password: None,
+            has_secret: true,
+            fields: vec![],
+            has_totp: false,
+            has_duo: false,
+            created: String::new(),
+            modified: String::new(),
+        };
+        let mut draft = Draft::from_item(&original);
+        draft.name = "My edit".into();
+        draft.replace_password = true;
+        draft.password = "my-secret".into();
+        let mut latest = original.clone();
+        latest.revision = 2;
+        latest.username = Some("new-owner".into());
+        latest.urls = vec!["https://new.test".into()];
+        latest.fields.push(password_manager::vault::ItemField {
+            name: "server-added-token".into(),
+            secret: true,
+            value: None,
+        });
+        let merged = draft.rebase(&original, &latest);
+        assert_eq!(merged.name, "My edit");
+        assert_eq!(merged.username, "new-owner");
+        assert_eq!(merged.urls, latest.urls);
+        assert_eq!(merged.fields[0].name, "server-added-token");
+        assert!(merged.fields[0].hidden);
+        assert_eq!(merged.password.expose(), "my-secret");
+        assert_eq!(merged.revision, Some(2));
+        let ServerCommand::Update(update) = merged.command().unwrap() else {
+            panic!()
+        };
+        assert!(update.set_fields.is_empty());
+        assert!(update.remove_fields.is_empty());
     }
 }

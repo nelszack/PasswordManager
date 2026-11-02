@@ -57,6 +57,8 @@
                 case "expectedSession": valid = text(value) && /^[a-fA-F0-9]{64}$/.test(value); break;
                 case "entryId": valid = positive(value); break;
                 case "expectedRevision": valid = integer(value); break;
+                case "offset": valid = integer(value); break;
+                case "limit": valid = integer(value) && value >= 1 && value <= 50; break;
                 case "item": valid = validManagementInput(value); break;
                 case "reveal": case "approve": valid = typeof value === "boolean"; break;
                 case "domain": valid = bounded(value, 2048, true) && value.length > 0; break;

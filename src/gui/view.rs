@@ -103,6 +103,7 @@ fn navigation(app: &App) -> Element<'_, Message> {
         let selected = app.tab == tab;
         tabs = tabs.push(
             action(title, Message::Tab(tab), !app.busy)
+                .selected(selected)
                 .padding(if app.compact() { [9, 10] } else { [11, 14] })
                 .style(move |theme: &Theme, status| {
                     if selected {
@@ -174,7 +175,37 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    let mut page = column![header, navigation(app)].spacing(12);
+    // Keep dynamic banners inside a stable child so edits do not replace the
+    // main content's widget state (focus, cursor, and scroll positions).
+    let mut chrome = column![navigation(app)].spacing(12);
+    if app.draft.as_ref().is_some_and(|draft| draft.dirty) {
+        chrome = chrome.push(text("Unsaved item changes · Locking discards this draft.").size(13));
+    }
+    if app.ui.confirm_close.is_some() {
+        chrome = chrome.push(panel(column![text("Close this window?").size(20),
+            text("Unsaved item and settings changes will be discarded. A running operation may still finish; check its outcome before retrying. The local service stays running.").size(14),
+            row![primary("Keep window open", Message::CancelClose, true).id("keep-window-open"), action("Close and discard changes", Message::ConfirmClose, true).style(quiet_danger)].spacing(8).wrap()
+        ].spacing(10)));
+    }
+    if app.deferred.is_some() {
+        chrome = chrome.push(panel(
+            column![
+                text("Keep your unsaved changes?").size(18),
+                text(
+                    "Your item has not been saved. Keep editing, or discard the draft to continue."
+                )
+                .size(14),
+                row![
+                    primary("Keep editing", Message::KeepEditing, !app.busy).id("keep-editing"),
+                    action("Discard changes", Message::Discard, !app.busy)
+                        .style(button_style::danger)
+                ]
+                .spacing(8)
+                .wrap(),
+            ]
+            .spacing(10),
+        ));
+    }
     if let Some(id) = &app.pending {
         let mut recovery = column![
             text("Review the last change before continuing").size(17),
@@ -189,10 +220,10 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
                 !app.busy,
             ));
         }
-        page = page.push(scrollable(panel(recovery)).height(Length::Fixed(150.0)));
+        chrome = chrome.push(scrollable(panel(recovery)).height(Length::Fixed(150.0)));
     }
     if let Some(warning) = &app.warning {
-        page = page.push(panel(text(warning).size(14).style(text::danger)));
+        chrome = chrome.push(panel(text(warning).size(14).style(text::danger)));
     }
     if let Some(target) = app
         .workspace
@@ -200,7 +231,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
         .as_ref()
         .filter(|_| app.workspace.watch_duo)
     {
-        page = page.push(
+        chrome = chrome.push(
             row![
                 text(format!("Watching Duo · {}", target.choice))
                     .size(14)
@@ -220,6 +251,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
             .wrap(),
         );
     }
+    let mut page = column![header, chrome].spacing(12);
     let content = if app.ui.shortcuts {
         shortcuts()
     } else {
@@ -280,6 +312,7 @@ fn shortcuts() -> Element<'static, Message> {
         ("N", "Add an item"),
         ("S", "Save the current item or settings"),
         ("E", "Edit the selected item"),
+        ("R", "Refresh your items"),
         ("Shift+C", "Copy username"),
         ("Shift+O", "Open the first website"),
         ("1–4", "Switch between the four main tabs"),
@@ -294,7 +327,7 @@ fn shortcuts() -> Element<'static, Message> {
             .spacing(12),
         );
     }
-    keys = keys.push(text("Enter / Space activates a control. Arrow keys change selections. Escape hides revealed secrets.").size(14));
+    keys = keys.push(text("Focus a message pane and use Up/Down or Page Up/Page Down to scroll it. Enter / Space activates a control. Arrow keys change selections. Escape hides revealed secrets.").size(14));
     panel(
         column![
             scrollable(keys).height(Fill),
@@ -312,21 +345,45 @@ fn shortcuts() -> Element<'static, Message> {
 }
 
 fn feedback(app: &App) -> Element<'_, Message> {
+    let progress;
     let message = if app.busy {
-        "Working…"
+        progress = format!(
+            "{} · {}s elapsed",
+            if app.ui.progress.is_empty() {
+                "Working…"
+            } else {
+                &app.ui.progress
+            },
+            app.ui
+                .progress_started
+                .map(|start| start.elapsed().as_secs())
+                .unwrap_or(0)
+        );
+        progress.as_str()
     } else if app.notice.is_empty() {
         "Ready"
     } else {
         &app.notice
     };
     let mut content = column![].spacing(3);
+    if app.busy {
+        content = content.push(text("Operation in progress").size(14));
+    }
     if app.ui.notice_error {
         content = content.push(text("Needs attention").size(14));
     }
-    content = content.push(text(message).size(14));
-    let mut line = row![container(scrollable(content)).width(Fill).height(Fill)]
-        .spacing(10)
-        .align_y(Alignment::Center);
+    content = content.push(text(message.to_owned()).size(14));
+    let mut line = row![
+        container(crate::gui::widgets::keyboard_scrollable(
+            content,
+            "notice",
+            (!app.busy && !app.notice.is_empty()).then_some((message, app.ui.notice_error))
+        ))
+        .width(Fill)
+        .height(Fill)
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
     if app
         .ui
         .undo_trash
@@ -443,6 +500,7 @@ fn unlock(app: &App) -> Element<'_, Message> {
             pick_list(choices, selected, |choice: vault_names::Choice| {
                 Message::Vault(choice.id)
             })
+            .placeholder("Vault to unlock")
             .width(Fill)
             .padding(12),
         );
@@ -453,6 +511,7 @@ fn unlock(app: &App) -> Element<'_, Message> {
             column![
                 label("Vault name"),
                 text_input("Personal or Work", &app.ui.vault_name)
+                    .accessibility_label("Vault name")
                     .padding(12)
                     .on_input(Message::VaultName),
             ]
@@ -481,10 +540,12 @@ fn unlock(app: &App) -> Element<'_, Message> {
     if app.creating {
         form = form
             .push(text("Use 14+ characters, such as several unrelated words.").size(14))
+            .push(text("Keep this password somewhere safe. It cannot be reset; a backup still needs its original password or key file.").size(14))
             .push(
                 column![
                     label("Confirm master password"),
                     text_input("Enter it again", app.confirmation.expose())
+                        .accessibility_label("Confirm master password")
                         .secure(true)
                         .padding(12)
                         .on_input_maybe(
@@ -510,6 +571,8 @@ fn unlock(app: &App) -> Element<'_, Message> {
             form = form.push(error("The passwords do not match yet."));
         }
     } else {
+        form = form.push(text("Forgot your password? There is no reset. Use the key file for a key-based vault, or restore a backup using its original credentials.").size(14))
+            .push(action("Restore an encrypted backup", Message::OpenFileTool(workflows::FileOperation::Restore), enabled));
         form = form.push(disclosure(
             "Advanced unlock options",
             app.ui.unlock_advanced,
@@ -523,6 +586,7 @@ fn unlock(app: &App) -> Element<'_, Message> {
                 ))
                 .push(
                     text_input("15m", &app.unlock_timeout)
+                        .accessibility_label("Lock after inactivity")
                         .padding(12)
                         .on_input(Message::UnlockTimeout),
                 );
@@ -605,9 +669,19 @@ fn unlock(app: &App) -> Element<'_, Message> {
 
 fn vault(app: &App) -> Element<'_, Message> {
     let mut entries = Column::new().spacing(6);
-    let mut count = 0;
-    for item in app.items.iter().filter(|item| app.item_matches(item)) {
-        count += 1;
+    const PAGE_SIZE: usize = 50;
+    let mut matching: Vec<_> = app
+        .items
+        .iter()
+        .filter(|item| app.item_matches(item))
+        .collect();
+    if app.ui.reverse_items {
+        matching.reverse();
+    }
+    let count = matching.len();
+    let pages = count.div_ceil(PAGE_SIZE).max(1);
+    let page = app.ui.item_page.min(pages - 1);
+    for item in matching.into_iter().skip(page * PAGE_SIZE).take(PAGE_SIZE) {
         let selected = app
             .item
             .as_ref()
@@ -624,6 +698,7 @@ fn vault(app: &App) -> Element<'_, Message> {
         let entry_content = column![text(&item.name).size(16), text(subtitle).size(14)].spacing(5);
         entries = entries.push(
             button(entry_content)
+                .selected(selected)
                 .width(Fill)
                 .padding(12)
                 .style(if selected {
@@ -669,7 +744,7 @@ fn vault(app: &App) -> Element<'_, Message> {
         .kind
         .map(|kind| model::profile(kind).title.to_owned())
         .unwrap_or_else(|| "All types".into());
-    let sidebar = column![
+    let mut sidebar = column![
         row![
             text("Your items").size(22).width(Fill),
             primary(
@@ -681,7 +756,7 @@ fn vault(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center),
         row![
-            text_input("Search items", &app.query)
+            text_input("Name, username or website", &app.query)
                 .id("vault-search")
                 .padding(10)
                 .width(Fill)
@@ -692,29 +767,96 @@ fn vault(app: &App) -> Element<'_, Message> {
                     .find(|kind| model::profile(**kind).title == selected)
                     .copied()
             ))
+            .placeholder("Filter item type")
             .width(135)
             .padding(10),
         ]
         .spacing(8),
         row![
-            text(format!("{count} of {} items", app.items.len()))
-                .size(14)
-                .width(Fill),
-            action("Refresh", Message::Navigate(Navigate::Refresh), !app.busy)
+            text(if app.compact() {
+                format!("{count} / {}", app.items.len())
+            } else {
+                format!("{count} of {} items", app.items.len())
+            })
+            .size(13)
+            .width(Fill),
+            pick_list(
+                ["A–Z", "Z–A"],
+                Some(if app.ui.reverse_items {
+                    "Z–A"
+                } else {
+                    "A–Z"
+                }),
+                |value| Message::SortItems(value == "Z–A")
+            )
+            .placeholder("Sort items")
+            .padding(8)
+            .width(85),
+            action(
+                "Advanced search",
+                Message::OpenTools(workflows::Section::Search),
+                !app.busy
+            )
+            .padding([7, 8]),
         ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-        scrollable(entries.push(action(
-            "Advanced search",
-            Message::OpenTools(workflows::Section::Search),
-            !app.busy
-        )))
-        .id("item-list")
-        .spacing(8)
-        .height(Fill),
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .wrap(),
+        scrollable(entries).id("item-list").spacing(8).height(Fill),
     ]
-    .spacing(12)
+    .spacing(10)
     .height(Fill);
+    if pages > 1 {
+        sidebar = sidebar
+            .push(
+                text(format!(
+                    "Page {} of {pages} · {PAGE_SIZE} per page",
+                    page + 1
+                ))
+                .size(13),
+            )
+            .push(
+                row![
+                    action(
+                        "Previous page",
+                        Message::ItemPage(page.saturating_sub(1)),
+                        !app.busy && page > 0
+                    )
+                    .padding([7, 8]),
+                    action(
+                        "Next page",
+                        Message::ItemPage((page + 1).min(pages - 1)),
+                        !app.busy && page + 1 < pages
+                    )
+                    .padding([7, 8])
+                ]
+                .spacing(8)
+                .wrap(),
+            )
+            .push(
+                row![
+                    text_input("Page number", &app.ui.page_input)
+                        .padding(8)
+                        .width(Fill)
+                        .on_input(Message::PageInput)
+                        .on_submit(Message::JumpItemPage),
+                    action(
+                        "Go",
+                        Message::JumpItemPage,
+                        !app.busy && !app.ui.page_input.is_empty()
+                    )
+                    .padding([7, 8])
+                ]
+                .spacing(8),
+            );
+    }
+    if !app.compact() {
+        sidebar = sidebar.push(action(
+            "Refresh items",
+            Message::Navigate(Navigate::Refresh),
+            !app.busy,
+        ));
+    }
     let detail = if let Some(draft) = &app.draft {
         editor(app, draft)
     } else if let Some(item) = &app.item {
@@ -762,26 +904,7 @@ fn vault(app: &App) -> Element<'_, Message> {
         .height(Fill)
         .into()
     };
-    let mut body = column![].spacing(12).height(Fill);
-    if app.deferred.is_some() {
-        body = body.push(panel(
-            column![
-                text("Keep your unsaved changes?").size(18),
-                text(
-                    "Your item has not been saved. Keep editing, or discard the draft to continue."
-                )
-                .size(14),
-                row![
-                    primary("Keep editing", Message::KeepEditing, !app.busy),
-                    action("Discard changes", Message::Discard, !app.busy)
-                        .style(button_style::danger)
-                ]
-                .spacing(8)
-                .wrap(),
-            ]
-            .spacing(10),
-        ));
-    }
+    let body = column![].spacing(12).height(Fill);
     body.push(panes).into()
 }
 
@@ -802,7 +925,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
             .push(text("Move this item to encrypted trash?"))
             .push(
                 row![
-                    action("Cancel", Message::CancelDelete, !app.busy),
+                    action("Cancel", Message::CancelDelete, !app.busy).id("cancel-delete"),
                     action(
                         "Move to trash",
                         Message::ConfirmDelete,
@@ -1004,6 +1127,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
     let mut name = column![
         label("Name (required)"),
         text_input(profile.name_hint, &draft.name)
+            .accessibility_label("Item name")
             .id("item-name")
             .padding(10)
             .on_input_maybe(enabled.then_some(Message::Name)),
@@ -1020,11 +1144,16 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             Some(model::KindChoice(draft.kind)),
             |choice| Message::Kind(choice.0)
         )
+        .placeholder("Item type")
         .padding(8)
         .width(Fill)
     ]
     .spacing(4)
-    .width(168);
+    .width(if app.compact() {
+        Length::Fill
+    } else {
+        Length::Fixed(168.0)
+    });
     let owner = column![
         label(profile.owner),
         text_input(profile.owner, &draft.username)
@@ -1092,7 +1221,26 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
         } else {
             column![owner, secret].spacing(8).into()
         };
-    let mut form = column![row![name, kind].spacing(12), credentials].spacing(8);
+    let identity: Element<'_, Message> = if app.compact() {
+        column![name, kind].spacing(10).into()
+    } else {
+        row![name, kind].spacing(12).into()
+    };
+    let mut form = column![identity, credentials].spacing(8);
+    if app.ui.draft_conflict {
+        let mut conflict = column![text("This item changed in another client").size(19), text("Your unsaved edits are kept and masked. Review the latest version, then reapply only your changes. Nothing is saved automatically.").size(14), action("Review latest version", Message::ReviewConflict, enabled)].spacing(8);
+        if let Some(latest) = &app.ui.conflict_latest {
+            conflict = conflict.push(text(format!("Latest: {} · {}\nWebsites: {}\nRevision {} · {} custom fields. Stored secrets stay hidden.", latest.name, latest.username.as_deref().unwrap_or("No username"), latest.urls.join(", "), latest.revision, latest.fields.len())).size(14))
+                .push(text("Reapplying replaces fields you edited, including edits to the same fields in the other client. Untouched fields keep their latest values.").size(14))
+                .push(primary("Reapply my edits to this version", Message::ReapplyConflict, enabled));
+            if let Some(original) = &app.item {
+                for comparison in draft.conflict_summary(original, latest) {
+                    conflict = conflict.push(text(comparison).size(14));
+                }
+            }
+        }
+        form = form.push(panel(conflict));
+    }
     if !profile.suggested.is_empty() {
         form = form.push(text(format!("{} details", profile.title)).size(19));
         for &(name, secret) in profile.suggested {
@@ -1114,6 +1262,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                     value,
                 )
                 .id(format!("template-{name}"))
+                .accessibility_label(name)
                 .secure(secret || existing.is_some_and(|field| field.secret))
                 .padding(12)
                 .on_input_maybe(enabled.then_some(move |value: String| {
@@ -1138,6 +1287,8 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
         websites = websites.push(
             row![
                 text_input("https://example.com", url)
+                    .id(format!("website-{index}"))
+                    .accessibility_label(format!("Website {}", index + 1))
                     .padding(10)
                     .on_input_maybe(enabled.then_some(move |value| Message::Url(index, value))),
                 action("Remove", Message::RemoveUrl(index), enabled).padding([9, 10])
@@ -1151,6 +1302,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             column![
                 label("Notes (optional)"),
                 text_editor(&draft.notes)
+                    .id("item-notes")
                     .placeholder("Private notes")
                     .height(88)
                     .padding(10)
@@ -1176,6 +1328,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                         Some(draft.copy_policy),
                         Message::CopyPolicy,
                     )
+                    .placeholder("Copy primary secret after saving")
                     .padding(12)
                     .width(Fill),
                 )
@@ -1199,6 +1352,8 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             let mut custom = column![
                 label("Field name"),
                 text_input("e.g. Account number", &field.name)
+                    .id(format!("custom-field-{index}"))
+                    .accessibility_label(format!("Custom field {} name", index + 1))
                     .padding(12)
                     .on_input_maybe(
                         enabled.then_some(move |value| Message::FieldName(index, value))
@@ -1213,6 +1368,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                     field.value.expose()
                 )
                 .secure(field.secret)
+                .accessibility_label(format!("Custom field {} value", index + 1))
                 .padding(12)
                 .on_input_maybe(
                     enabled
@@ -1252,6 +1408,12 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
         form = form.push(app.workspace.authenticator_editor(app));
     }
     let mut footer = column![].spacing(8);
+    for url in draft.urls.iter().filter(|url| !url.trim().is_empty()) {
+        if website::address(url).is_err() {
+            footer = footer.push(text("A website cannot be opened. Use an http:// or https:// address. Other values can still be stored.").size(13));
+            break;
+        }
+    }
     if draft.dirty
         && let Err(message) = draft.validate()
     {
@@ -1262,7 +1424,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             primary(
                 "Save item",
                 Message::Save,
-                app.writes_allowed() && draft.validate().is_ok()
+                app.writes_allowed() && !app.ui.draft_conflict && draft.validate().is_ok()
             ),
             action("Cancel", Message::Navigate(Navigate::Close), enabled),
             text(if draft.dirty {
@@ -1317,6 +1479,11 @@ fn generator(app: &App) -> Element<'_, Message> {
                 &app.generator_length
             }
         )
+        .accessibility_label(if app.passphrase {
+            "Number of words (1–255)"
+        } else {
+            "Password length (1–255)"
+        })
         .padding(12)
         .on_input(if app.passphrase {
             Message::Words
@@ -1329,6 +1496,7 @@ fn generator(app: &App) -> Element<'_, Message> {
     if app.passphrase {
         form = form.push(label("Word separator")).push(
             text_input("-", &app.generator.separator)
+                .accessibility_label("Word separator")
                 .padding(12)
                 .on_input(|value| Message::Generator(Event::Separator(value))),
         );
@@ -1396,6 +1564,7 @@ fn generator(app: &App) -> Element<'_, Message> {
                 pick_list(Policy::ALL.as_slice(), Some(app.generator.stats), |value| {
                     Message::Generator(Event::Stats(value))
                 })
+                .placeholder("Show strength and statistics")
                 .padding(12)
                 .width(Fill),
             )
@@ -1404,6 +1573,7 @@ fn generator(app: &App) -> Element<'_, Message> {
                 pick_list(Policy::ALL.as_slice(), Some(app.generator.copy), |value| {
                     Message::Generator(Event::Copy(value))
                 })
+                .placeholder("Copy automatically after generation")
                 .padding(12)
                 .width(Fill),
             )
@@ -1412,6 +1582,7 @@ fn generator(app: &App) -> Element<'_, Message> {
             ))
             .push(
                 text_input("Use saved setting", &app.generator.copy_timeout)
+                    .accessibility_label("Clipboard timeout override in seconds")
                     .padding(12)
                     .on_input(|value| Message::Generator(Event::CopyTimeout(value))),
             )
@@ -1462,12 +1633,17 @@ fn generator(app: &App) -> Element<'_, Message> {
         text("Create a unique secret for every account.").size(15)
     ]
     .spacing(14);
+    if app.ui.transfer_generated && !app.generated.is_empty() {
+        body = body.push(panel(column![text(if app.draft.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.session.is_some() && !app.busy), action("Keep current draft", Message::CancelGenerated, !app.busy)].spacing(8).wrap()].spacing(10)));
+    }
     if !app.generated.is_empty() {
         body = body.push(panel(column![
             text("Your generated secret").size(18),
             text_input("Generated value", app.generated.expose()).secure(!app.show_generated).padding(12),
             row![primary("Copy", Message::CopyGenerated, !app.busy && app.generator.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
                 checkbox(app.show_generated).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
+            action(if app.draft.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy && app.session.is_some()),
+            text(if app.session.is_none() { "Unlock a vault to save this value directly into an item." } else { "Transfer directly to an item without using the clipboard." }).size(14),
             text("Cleared from this screen after 60 seconds. Stored only when you save it in an item.").size(14),
         ].spacing(12)));
         if !app.generated_stats.is_empty() {
@@ -1501,9 +1677,12 @@ fn settings(app: &App) -> Element<'_, Message> {
     let field = |name: &'static str, value: &str, field: SettingsField| {
         let mut control = column![
             label(name),
-            text_input("", value).padding(12).on_input_maybe(
-                (!app.busy).then_some(move |value| Message::SettingChanged(field, value))
-            )
+            text_input("", value)
+                .accessibility_label(name)
+                .padding(12)
+                .on_input_maybe(
+                    (!app.busy).then_some(move |value| Message::SettingChanged(field, value))
+                )
         ]
         .spacing(6);
         if let Some(message) = app.settings.field_error(field, value) {
@@ -1526,6 +1705,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                         Some(app.settings.appearance),
                         Message::Appearance
                     )
+                    .placeholder("Color theme")
                     .padding(10)
                     .width(Fill)
                 ]
@@ -1539,6 +1719,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                         Some(presentation::ScaleChoice(app.settings.scale)),
                         |choice| Message::InterfaceScale(choice.0)
                     )
+                    .placeholder("Text and control size")
                     .padding(10)
                     .width(Fill)
                 ]
@@ -1607,6 +1788,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                 pick_list(choices, selected, |choice: vault_names::Choice| {
                     Message::SettingChanged(SettingsField::DefaultVault, choice.id)
                 })
+                .placeholder("Default vault")
                 .width(Fill)
                 .padding(12),
             )
@@ -1630,13 +1812,13 @@ fn settings(app: &App) -> Element<'_, Message> {
             ))
             .push(text("Restart the local service after changing recovery settings.").size(14))
             .push(action(
-                "Open recovery tools",
-                Message::OpenTools(workflows::Section::Overview),
+                "Open deleted items",
+                Message::OpenTools(workflows::Section::Trash),
                 !app.busy,
             ))
             .push(action(
-                "Import, export & backups",
-                Message::OpenTools(workflows::Section::Overview),
+                "Create encrypted backup",
+                Message::OpenFileTool(workflows::FileOperation::Backup),
                 !app.busy,
             )),
         SettingsSection::Connection => {
@@ -1682,6 +1864,7 @@ fn settings(app: &App) -> Element<'_, Message> {
             .push(text("Vault name on this device").size(19))
             .push(
                 text_input("Personal or Work", &app.ui.vault_name)
+                    .accessibility_label("Vault name")
                     .padding(12)
                     .on_input(Message::VaultName),
             )
@@ -1736,6 +1919,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                 Some(app.ui.settings_section),
                 Message::SettingsSection
             )
+            .placeholder("Settings category")
             .width(Fill)
             .padding(10),
             action("Refresh", Message::ReloadSettings, !app.busy),
@@ -1793,11 +1977,14 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         ready && !app.conf.sync.server_url.is_empty(),
     ));
     if !app.cloud_vaults.is_empty() {
-        form = form.push(pick_list(
-            app.cloud_vaults.as_slice(),
-            app.cloud_vault.as_ref(),
-            Message::CloudVault,
-        ));
+        form = form.push(
+            pick_list(
+                app.cloud_vaults.as_slice(),
+                app.cloud_vault.as_ref(),
+                Message::CloudVault,
+            )
+            .placeholder("Cloud vault"),
+        );
         if let Some(id) = &app.cloud_vault {
             form = form.push(action(
                 "Download selected vault",

@@ -13,6 +13,12 @@ function renderStatus(status) {
     dot.style.background = presentation.color;
     text.innerText = presentation.text;
     lockButton.disabled = !presentation.canLock;
+    const hint = document.getElementById("nativeHint");
+    if (hint) hint.textContent = !status.native
+        ? "Open the vault manager for browser connection setup and troubleshooting."
+        : !status.running ? "Run pm start, then open the vault manager to unlock your vault."
+        : status.locked ? "Open the vault manager to unlock your vault."
+        : "Use the key button beside a website’s login field to choose an account.";
 }
 
 async function refreshStatus() {

@@ -188,3 +188,19 @@ test("a lookup without a valid unlock session cannot authorize a picker", async 
     await assert.rejects(env.service.complete({ token, id: 1 }, env.popup), /Unlock session unavailable/);
     assert.deepEqual(env.calls, ["getLoginItems"]);
 });
+
+
+test("picker retry reloads summaries only and rejects untrusted requests", async () => {
+    const env = environment(); const {token} = await env.open(); await flush();
+    const before = env.calls.length;
+    assert.equal(env.service.data({token,retry:true}, env.sender).success, false);
+    assert.equal(env.calls.length, before);
+    const retry = env.service.data({token,retry:true}, env.popup);
+    assert.equal(retry.loading, true);
+    await flush();
+    assert.equal(env.service.data({token}, env.popup).loading, false);
+    assert.equal(env.calls.filter(action => action === "getLoginItems").length, 2);
+    assert.equal(env.calls.includes("getLoginItem"), false);
+    env.service.invalidate();
+    assert.equal(env.service.data({token,retry:true}, env.popup).success, false);
+});
