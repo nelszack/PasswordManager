@@ -181,6 +181,7 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
                 review_key: None,
             }),
             lifecycle: item.lifecycle,
+            strength: CachedStrength::default(),
         };
         if data.items.insert(item.id, value).is_some() {
             return Err(VaultError::Validation(
@@ -718,6 +719,34 @@ pub(crate) fn delete_vault(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overlay_preserves_document_bytes_for_replacements_deletions_and_insertions() {
+        let entry = |id, name: &str| VaultEntry {
+            id,
+            name: name.into(),
+            ..Default::default()
+        };
+        let live = Vault::from_entries(
+            vec![entry(1, "old"), entry(2, "deleted"), entry(4, "last")],
+            None,
+        );
+        let mut staged =
+            Vault::from_entries(vec![entry(1, "replacement"), entry(3, "inserted")], None);
+        staged.data.next_item_id = 5;
+        staged.data.revision = 9;
+        let selected = HashSet::from([ItemId::from_public(2).unwrap()]);
+        let mut expected = live.data.clone();
+        expected.items.remove(&ItemId::from_public(2).unwrap());
+        expected.items.extend(staged.data.items.clone());
+        expected.next_item_id = 5;
+        expected.revision = 9;
+        let bytes = encode_document(&live.data, Some((&staged.data, &selected))).unwrap();
+        assert_eq!(*bytes, *encode_document(&expected, None).unwrap());
+        assert_eq!(decode_document(&bytes).unwrap(), expected);
+        // The serializer must keep the existing named-field/vector wire shape.
+        let document: VaultDocument = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(*bytes, rmp_serde::to_vec_named(&document).unwrap());
+    }
     fn session(byte: u8) -> PasswordType {
         PasswordType::Session {
             encryption_key: [byte; 32],

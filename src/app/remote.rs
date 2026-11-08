@@ -251,8 +251,11 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             }
             _ => unreachable!("clap requires exactly one delete target"),
         },
-        CliCommands::View(options) => ServerCommand::View(options.into()),
-        CliCommands::Search(args) => ServerCommand::Search(SearchFilter {
+        CliCommands::View(options) => ServerCommand::List(SearchFilter {
+            list: options.into(),
+            ..Default::default()
+        }),
+        CliCommands::Search(args) => ServerCommand::List(SearchFilter {
             query: args.query,
             name: args.name,
             username: args.username,

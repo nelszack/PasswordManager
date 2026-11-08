@@ -4,41 +4,13 @@ For normal setup, start with [Sync with a self-hosted server](cloud-sync.md).
 For terminal commands, use the [CLI walkthrough](cloud-sync-cli.md).
 This page covers manual installation, credentials, recovery, and storage.
 
-## Guided setup requirements and permissions
+## Hosting requirements
 
-Guided setup installs a service on a Linux x86_64 or ARM64 host over SSH.
-The client doing setup or updates needs SSH and Go 1.24 or newer, or a matching
-prebuilt server supplied with `--binary PATH`. Other clients only need SSH for
-enrollment. Device names come from the local Tailscale CLI unless you supply
-a name manually.
-
-The server needs `systemctl --user`, `ss`, and a connected Tailscale CLI, with
-HTTPS enabled for its tailnet. The SSH account must be able to manage Tailscale
-Serve. If Serve reports an access-denied error, a server administrator can grant
-that account operator permission. Run this **on the server as the SSH user**:
-
-```bash
-sudo tailscale set --operator="$(id -un)"
-```
-
-This is a one-time host permission change; Password Manager installs and runs
-the sync service as that user. See [Tailscale operator permissions](https://tailscale.com/docs/reference/troubleshooting/linux/linux-operator-permission).
-Guided setup chooses unused ports and preserves existing Serve routes. Use the
-server URL it reports rather than assuming a particular port.
-
-The server must remain online for peers to exchange updates. For a user service
-to start at boot and continue after logout, the host may need lingering enabled.
-An administrator can run the following **on the server as the SSH user**:
-
-```bash
-sudo loginctl enable-linger "$(id -un)"
-```
-
-See the [systemd loginctl reference](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html).
-For a container or virtual machine, also arrange for that environment to start
-and stay running. Guided setup does not manage its lifecycle. Its systemd user
-session, Tailscale, and service must all be in the environment reached over SSH;
-otherwise use manual hosting.
+The server targets Linux and builds with Go 1.24 or newer. Clients connect to a
+private HTTPS endpoint, such as Tailscale Serve. Install and update the server
+separately; Password Manager no longer manages SSH destinations or remote services.
+For a user service to run after logout, arrange an appropriate systemd user
+session and unattended startup policy on the host.
 
 ## Manual server installation
 
@@ -89,8 +61,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now pm-sync.service
 ```
 
-This starts with the user's systemd session. See the unattended startup notes
-above if the server must run without an active login. Service logs contain
+This starts with the user's systemd session. Configure unattended startup on
+the host if the server must run without an active login. Service logs contain
 startup/errors, not vault contents or tokens.
 
 ## Manual device enrollment
@@ -127,8 +99,8 @@ Revoke a device immediately, without restarting the server:
 ```
 
 Enrollment is an administration command, not an unauthenticated network endpoint.
-SSH enrollment transfers credentials automatically; there is currently no
-single-use pairing-code exchange.
+Transfer each device credential privately. There is no client-side SSH enrollment
+or single-use pairing-code exchange.
 
 ## Conflicts and password changes
 
@@ -200,14 +172,13 @@ Repository Rust/GUI checks and command-reference generation apply as usual.
 
 ## Device names
 
-Guided setup and SSH connection run `tailscale status --json --peers=false`
-on the device being registered. See the [Tailscale CLI reference](https://tailscale.com/docs/reference/tailscale-cli).
-The label uses the first component of
-`Self.DNSName`, so a name assigned in Tailscale takes precedence over the OS
-hostname. `Self.HostName` is used when no DNS name is reported. Names are
-recorded when a device credential is created; existing credential labels are
-kept when that credential is reused.
+The label supplied to the server's `--add-device` command identifies that device's
+credential. Labels do not grant different access rights: every credential on this
+personal server can access its encrypted vault snapshots.
 
-If the local Tailscale CLI is unavailable, enter a device name under **Manual
-connection options**, or use `--name NAME` with `sync setup` or `sync connect
---ssh`. The server SSH address and the local device's name are separate values.
+## Updates
+
+Build a replacement server binary, stop the service, replace the executable, and
+restart it. Retain a known working binary for administrator-managed rollback.
+The client does not ship server source or perform remote updates. Keep the server
+storage directory and issued credentials when replacing the executable.

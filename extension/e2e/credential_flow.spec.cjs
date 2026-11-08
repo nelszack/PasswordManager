@@ -1,7 +1,7 @@
 const { test, expect } = require("@playwright/test");
 const http = require("node:http");
 
-const { launchExtension, waitForNativeRequest } = require("./harness.cjs");
+const { withExtension, waitForNativeRequest } = require("./harness.cjs");
 
 function pageHtml(step) {
     const fields = {
@@ -49,66 +49,65 @@ test("adds and updates credentials across username, password, and TOTP pages", a
     const server = await startFixtureServer();
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
-    let browser;
     try {
-        browser = await launchExtension();
-        const { context, nativeLog } = browser;
-        const page = context.pages()[0] || await context.newPage();
-        async function submitCredentials(password) {
-            await page.goto(`${origin}/username`);
-            await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
-            await page.locator("#username").focus();
-            await page.keyboard.press("Tab");
-            await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeFocused();
-            const target = await page.getByRole("button", { name: "Choose saved credentials" }).boundingBox();
-            expect(target.width).toBeGreaterThanOrEqual(28);
-            expect(target.height).toBeGreaterThanOrEqual(28);
-            await page.locator("#username").fill("alice@example.com");
-            await Promise.all([
-                page.waitForURL(`${origin}/password`),
-                page.locator("#next").click()
-            ]);
-            await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
-            await page.locator("#password").fill(password);
-            const opened = context.waitForEvent("page", candidate =>
-                candidate.url().includes("credential_prompt.html")
-            );
-            await page.locator("#next").click();
-            const prompt = await opened;
-            await expect(page).toHaveURL(`${origin}/totp`);
-            await expect(page.locator("#totp")).toBeVisible();
-            await expect(prompt.locator("#credentials")).toBeVisible();
-            await expect(prompt.locator("#username")).toHaveValue("alice@example.com");
-            return prompt;
-        }
+        await withExtension({}, async browser => {
+            const { context, nativeLog } = browser;
+            const page = context.pages()[0] || await context.newPage();
+            async function submitCredentials(password) {
+                await page.goto(`${origin}/username`);
+                await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
+                await page.locator("#username").focus();
+                await page.keyboard.press("Tab");
+                await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeFocused();
+                const target = await page.getByRole("button", { name: "Choose saved credentials" }).boundingBox();
+                expect(target.width).toBeGreaterThanOrEqual(28);
+                expect(target.height).toBeGreaterThanOrEqual(28);
+                await page.locator("#username").fill("alice@example.com");
+                await Promise.all([
+                    page.waitForURL(`${origin}/password`),
+                    page.locator("#next").click()
+                ]);
+                await expect(page.getByRole("button", { name: "Choose saved credentials" })).toBeVisible();
+                await page.locator("#password").fill(password);
+                const opened = context.waitForEvent("page", candidate =>
+                    candidate.url().includes("credential_prompt.html")
+                );
+                await page.locator("#next").click();
+                const prompt = await opened;
+                await expect(page).toHaveURL(`${origin}/totp`);
+                await expect(page.locator("#totp")).toBeVisible();
+                await expect(prompt.locator("#credentials")).toBeVisible();
+                await expect(prompt.locator("#username")).toHaveValue("alice@example.com");
+                return prompt;
+            }
 
-        const prompt = await submitCredentials("new-secret-password");
-        await prompt.locator("#name").fill("End-to-end account");
-        await prompt.locator("#add").click();
-        await expect.poll(() => prompt.isClosed()).toBe(true);
+            const prompt = await submitCredentials("new-secret-password");
+            await prompt.locator("#name").fill("End-to-end account");
+            await prompt.locator("#add").click();
+            await expect.poll(() => prompt.isClosed()).toBe(true);
 
-        const save = await waitForNativeRequest(nativeLog, request => request.action === "saveCredentials");
-        expect(save).toMatchObject({
-            domain: origin,
-            username: "alice@example.com",
-            password: "new-secret-password",
-            name: "End-to-end account"
-        });
+            const save = await waitForNativeRequest(nativeLog, request => request.action === "saveCredentials");
+            expect(save).toMatchObject({
+                domain: origin,
+                username: "alice@example.com",
+                password: "new-secret-password",
+                name: "End-to-end account"
+            });
 
-        const updatePrompt = await submitCredentials("changed-secret-password");
-        await expect(updatePrompt.locator("#update")).toHaveText("Update End-to-end account");
-        await updatePrompt.locator("#update").click();
-        await expect.poll(() => updatePrompt.isClosed()).toBe(true);
+            const updatePrompt = await submitCredentials("changed-secret-password");
+            await expect(updatePrompt.locator("#update")).toHaveText("Update End-to-end account");
+            await updatePrompt.locator("#update").click();
+            await expect.poll(() => updatePrompt.isClosed()).toBe(true);
 
-        const update = await waitForNativeRequest(nativeLog, request => request.action === "updateCredentials");
-        expect(update).toMatchObject({
-            domain: origin,
-            username: "alice@example.com",
-            password: "changed-secret-password",
-            entryId: 7
+            const update = await waitForNativeRequest(nativeLog, request => request.action === "updateCredentials");
+            expect(update).toMatchObject({
+                domain: origin,
+                username: "alice@example.com",
+                password: "changed-secret-password",
+                entryId: 7
+            });
         });
     } finally {
-        try { await browser?.close(); }
-        finally { await new Promise(resolve => server.close(resolve)); }
+        await new Promise(resolve => server.close(resolve));
     }
 });

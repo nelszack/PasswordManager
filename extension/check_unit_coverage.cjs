@@ -6,7 +6,6 @@ const result = spawnSync(process.execPath, [
     "--test-coverage-include=extension/*.js",
     "--test-coverage-include-all",
     "--test-coverage-exclude=extension/content_runtime.js",
-    "--test-coverage-exclude=extension/manager_runtime.js",
     "--test-coverage-lines=58",
     "--test-coverage-branches=78",
     "extension/*.test.js"

@@ -113,10 +113,8 @@ enum Job {
     List,
     SavedList,
     Item,
-    EditorList(usize),
-    EditorItem(usize),
-    AccountList(usize),
-    AccountItem(usize),
+    RefreshItem(usize, ItemIntent),
+    OpenItem(usize, ItemIntent),
     Reveal,
     Field(FieldTarget),
     FieldCopy,
@@ -139,7 +137,6 @@ enum Job {
     Local,
     Cloud,
     CloudList,
-    CloudSetup,
 }
 
 #[derive(Clone, Debug)]
@@ -156,10 +153,6 @@ enum Message {
     Tick(Instant),
     Cloud(password_manager::cloud::Action),
     CloudToken(SecretString),
-    CloudSsh(String),
-    CloudDeviceName(String),
-    CloudAdvanced,
-    SetupCloud(password_manager::cloud::setup::Operation),
     CloudVault(String),
     SaveCloudToken,
     Finished(u64, Job, Arc<Result<Reply, Failure>>),
@@ -282,6 +275,21 @@ struct Creation {
     name: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RequestState {
+    #[default]
+    Idle,
+    Busy,
+    Revealing,
+    Polling,
+    Passive,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemIntent {
+    View,
+    Edit,
+}
+
 struct App {
     names: vault_names::Names,
     creation: Option<Creation>,
@@ -308,10 +316,8 @@ struct App {
     deferred: Option<Navigate>,
     delete_confirm: bool,
     reveal_until: Option<Instant>,
-    busy: bool,
-    polling: bool,
-    revealing: bool,
     serial: u64,
+    request_state: RequestState,
     last_status: Instant,
     notice: String,
     warning: Option<String>,
@@ -326,9 +332,6 @@ struct App {
     generated_stats: String,
     settings: SettingsDraft,
     cloud_token: SecretString,
-    cloud_ssh: String,
-    cloud_device_name: String,
-    cloud_advanced: bool,
     cloud_vaults: Vec<String>,
     cloud_vault: Option<String>,
     vault_revision: Option<u64>,
@@ -348,9 +351,6 @@ impl App {
             generator_length: conf.genpass.length.to_string(),
             settings: SettingsDraft::from(&conf),
             cloud_token: SecretString::default(),
-            cloud_ssh: conf.sync.ssh_target.clone().unwrap_or_default(),
-            cloud_device_name: String::new(),
-            cloud_advanced: false,
             cloud_vaults: vec![],
             cloud_vault: None,
             vault_revision: None,
@@ -374,10 +374,8 @@ impl App {
             deferred: None,
             delete_confirm: false,
             reveal_until: None,
-            busy: false,
-            polling: false,
-            revealing: false,
             serial: 0,
+            request_state: RequestState::Idle,
             last_status: Instant::now(),
             notice: "Connecting to the vault server…".into(),
             warning: None,
@@ -469,6 +467,19 @@ impl App {
         ])
     }
 
+    fn busy(&self) -> bool {
+        matches!(
+            self.request_state,
+            RequestState::Busy | RequestState::Revealing
+        )
+    }
+    fn polling(&self) -> bool {
+        self.request_state == RequestState::Polling
+    }
+    fn revealing(&self) -> bool {
+        self.request_state == RequestState::Revealing
+    }
+
     fn launch(
         &mut self,
         job: Job,
@@ -478,19 +489,18 @@ impl App {
         let serial = self.serial;
         // Passive status reads must not disable focused inputs or drop typing.
         // A user operation supersedes the poll via its newer serial number.
-        self.polling = job == Job::Status;
-        self.revealing = matches!(
-            job,
+        self.request_state = match job {
+            Job::Status => RequestState::Polling,
+            Job::OpenWebsite => RequestState::Passive,
             Job::Reveal
-                | Job::Field(_)
-                | Job::WatchOtpDefaults
-                | Job::WorkflowDefaults(workflows::Action::ShowOtp(true))
-        );
-        self.busy = !self.polling && job != Job::OpenWebsite;
-        if self.busy {
+            | Job::Field(_)
+            | Job::WatchOtpDefaults
+            | Job::WorkflowDefaults(workflows::Action::ShowOtp(true)) => RequestState::Revealing,
+            _ => RequestState::Busy,
+        };
+        if self.busy() {
             self.ui.progress_started = Some(Instant::now());
             self.ui.progress = match job {
-                Job::CloudSetup => self.notice.clone(),
                 Job::Save | Job::SaveEditor => "Saving item…".into(),
                 Job::Unlock => "Unlocking vault…".into(),
                 Job::Create => "Creating encrypted vault…".into(),
@@ -507,7 +517,7 @@ impl App {
                 _ => "Working…".into(),
             };
         }
-        if !self.polling {
+        if !self.polling() {
             self.ui.notice_error = false;
         }
         Task::perform(
@@ -561,7 +571,7 @@ impl App {
     fn load_items_for(&mut self, job: Job) -> Task<Message> {
         self.request(
             job,
-            ServerCommand::ManagementList(SearchFilter {
+            ServerCommand::List(SearchFilter {
                 list: ListOptions {
                     sort: SortField::Name,
                     ..Default::default()
@@ -574,7 +584,7 @@ impl App {
 
     fn refresh_account(&mut self, id: usize) -> Task<Message> {
         self.item = None;
-        self.load_items_for(Job::AccountList(id))
+        self.load_items_for(Job::RefreshItem(id, ItemIntent::View))
     }
 
     fn refresh_editor(&mut self, id: usize) -> Task<Message> {
@@ -583,7 +593,7 @@ impl App {
         self.draft = None;
         self.workspace.prepared = None;
         self.workspace.clear_inputs();
-        self.load_items_for(Job::EditorList(id))
+        self.load_items_for(Job::RefreshItem(id, ItemIntent::Edit))
     }
 
     fn hide_secrets(&mut self) {
@@ -595,12 +605,11 @@ impl App {
             draft.multiline = false;
             draft.secret_editor = text_editor::Content::new();
         }
-        if self.revealing {
+        if self.revealing() {
             // Focus loss/Escape can arrive before a reveal or OTP settings
             // preflight completes. Neither may dispatch new secret work later.
             self.serial += 1;
-            self.revealing = false;
-            self.busy = false;
+            self.request_state = RequestState::Idle;
         }
         self.reveal_until = None;
         self.show_generated = false;
@@ -618,7 +627,7 @@ impl App {
         self.hide_secrets();
         self.session = None;
         self.workspace.clear_vault();
-        self.items.clear();
+        self.replace_items(Vec::new());
         self.query.zeroize();
         self.ui.item_page = 0;
         self.ui.kind = None;
@@ -645,9 +654,9 @@ impl App {
     }
 
     fn cancel_passive_read(&mut self) {
-        if self.polling {
+        if self.polling() {
             self.serial += 1;
-            self.polling = false;
+            self.request_state = RequestState::Idle;
         }
     }
 
@@ -703,7 +712,7 @@ impl App {
     }
 
     fn writes_allowed(&self) -> bool {
-        !self.busy && self.pending.is_none()
+        !self.busy() && self.pending.is_none()
     }
 
     fn copying_allowed(&self) -> bool {
@@ -732,13 +741,13 @@ impl App {
                 | Message::Notes(_)
                 | Message::Generate
         ) && self.draft.is_some()
-            && !self.busy
+            && !self.busy()
         {
             self.workspace.prepared = None;
         }
         match message {
             Message::CloseRequested(id) => {
-                if self.busy
+                if self.busy()
                     || self.draft.as_ref().is_some_and(|draft| draft.dirty)
                     || self.settings.is_dirty()
                 {
@@ -763,33 +772,6 @@ impl App {
                 };
                 return self.request(job, ServerCommand::Cloud(action), None);
             }
-            Message::CloudSsh(value) => self.cloud_ssh = value,
-            Message::CloudDeviceName(value) => self.cloud_device_name = value,
-            Message::CloudAdvanced => self.cloud_advanced = !self.cloud_advanced,
-            Message::SetupCloud(operation) => {
-                if self.busy {
-                    return Task::none();
-                }
-                if let Err(error) =
-                    password_manager::cloud::setup::validate_ssh_target(&self.cloud_ssh)
-                {
-                    self.notice = error;
-                    return Task::none();
-                }
-                let request = password_manager::cloud::setup::Request {
-                    operation,
-                    ssh_target: Some(self.cloud_ssh.clone()),
-                    binary: None,
-                    device_name: (!self.cloud_device_name.trim().is_empty())
-                        .then(|| self.cloud_device_name.clone()),
-                };
-                self.notice=match operation {
-                    password_manager::cloud::setup::Operation::Setup=>"Setting up the sync server and connecting this device. Building may take a few minutes…",
-                    password_manager::cloud::setup::Operation::Connect=>"Authorizing this device over SSH…",
-                    password_manager::cloud::setup::Operation::Update=>"Building and updating the sync server. Your vault data will be kept…",
-                }.into();
-                return self.launch(Job::CloudSetup, move || backend::setup_sync(request));
-            }
             Message::CloudToken(token) => self.cloud_token = token,
             Message::CloudVault(id) => self.cloud_vault = Some(id),
             Message::SaveCloudToken => {
@@ -804,9 +786,7 @@ impl App {
                 if serial != self.serial {
                     return Task::none();
                 }
-                self.busy = false;
-                self.polling = false;
-                self.revealing = false;
+                self.request_state = RequestState::Idle;
                 let result = Arc::try_unwrap(result).unwrap_or_else(|shared| (*shared).clone());
                 return match result {
                     Ok(reply) => self.complete(job, reply),
@@ -862,18 +842,18 @@ impl App {
                         self.notice = "Generated secret cleared after 60 seconds. Generate another when you need it.".into();
                     }
                 }
-                if !self.busy
-                    && !self.polling
+                if !self.busy()
+                    && !self.polling()
                     && now.saturating_duration_since(self.last_status) < Duration::from_secs(2)
                 {
                     let task = self.poll_tool_watches(now);
-                    if self.polling || self.busy {
+                    if self.polling() || self.busy() {
                         return task;
                     }
                 }
                 if self.running
-                    && !self.busy
-                    && !self.polling
+                    && !self.busy()
+                    && !self.polling()
                     && now.duration_since(self.last_status) >= Duration::from_secs(2)
                 {
                     return self.status();
@@ -917,7 +897,7 @@ impl App {
                 self.notice.clear();
                 self.ui.notice_error = false;
             }
-            _ if self.busy => return Task::none(),
+            _ if self.busy() => return Task::none(),
             Message::Disclosure(section) => {
                 use presentation::Disclosure;
                 let expanded = match section {
@@ -950,13 +930,7 @@ impl App {
                 self.ui.page_input.clear();
             }
             Message::JumpItemPage => {
-                let pages = self
-                    .items
-                    .iter()
-                    .filter(|item| self.item_matches(item))
-                    .count()
-                    .div_ceil(50)
-                    .max(1);
+                let pages = self.matching_items().len().div_ceil(50).max(1);
                 if let Ok(page) = self.ui.page_input.parse::<usize>()
                     && page > 0
                     && page <= pages
@@ -1153,8 +1127,7 @@ impl App {
             Message::UnlockTimeout(value) => self.unlock_timeout = value,
             Message::BrowseKey if !self.creating && self.session.is_none() => {
                 self.serial += 1;
-                self.busy = true;
-                self.polling = false;
+                self.request_state = RequestState::Busy;
                 return file_picker::pick_key_file(self.serial);
             }
             Message::Creating(creating) => {
@@ -1686,19 +1659,6 @@ impl App {
                         return self.connect();
                     }
                 }
-                Reply::CloudSetup { conf, message } => {
-                    self.cloud_ssh = conf.sync.ssh_target.clone().unwrap_or_default();
-                    self.apply_configuration(conf);
-                    self.settings.sync_server = self.conf.sync.server_url.clone();
-                    self.notice = message;
-                    if self.running {
-                        return self.request(
-                            Job::CloudList,
-                            ServerCommand::Cloud(password_manager::cloud::Action::List),
-                            None,
-                        );
-                    }
-                }
                 Reply::Configuration(conf) => {
                     self.apply_configuration(conf);
                     if job != Job::ReloadSettings && self.notice == "Settings reloaded." {
@@ -2131,7 +2091,7 @@ impl App {
                     self.ui.conflict_latest = Some(item);
                 }
             }
-            (Job::List, ResponsePayload::ItemPage(page)) => self.items = page.items,
+            (Job::List, ResponsePayload::ItemPage(page)) => self.replace_items(page.items),
             (Job::SavedList, ResponsePayload::ItemPage(page)) => {
                 let selected = self.ui.saved_item.take().and_then(|saved| {
                     let mut matches = page.items.iter().filter(|item| {
@@ -2142,47 +2102,36 @@ impl App {
                     let id = matches.next()?.id;
                     matches.next().is_none().then_some(id)
                 });
-                self.items = page.items;
+                self.replace_items(page.items);
                 if let Some(id) = selected {
                     let item = self.items.iter().find(|item| item.id == id).unwrap();
                     return self.request(
-                        Job::AccountItem(id),
+                        Job::OpenItem(id, ItemIntent::View),
                         ServerCommand::ManagementItem { id, reveal: false },
                         Some(item.revision),
                     );
                 }
                 self.notice = "Item saved. Select it from your items to continue.".into();
             }
-            (Job::EditorList(id), ResponsePayload::ItemPage(page)) => {
-                self.items = page.items;
+            (Job::RefreshItem(id, intent), ResponsePayload::ItemPage(page)) => {
+                self.replace_items(page.items);
                 if let Some(item) = self.items.iter().find(|item| item.id == id) {
                     return self.request(
-                        Job::EditorItem(id),
-                        ServerCommand::ManagementItem { id, reveal: false },
-                        Some(item.revision),
-                    );
-                }
-                self.notice = "This item is no longer available. Refresh the vault.".into();
-            }
-            (Job::EditorItem(id), ResponsePayload::Item(item)) if item.id == id => {
-                self.draft = Some(Draft::from_item(&item));
-                self.item = Some(item);
-                return iced::widget::operation::snap_to_end("credential-editor");
-            }
-            (Job::AccountList(id), ResponsePayload::ItemPage(page)) => {
-                self.items = page.items;
-                if let Some(item) = self.items.iter().find(|item| item.id == id) {
-                    return self.request(
-                        Job::AccountItem(id),
+                        Job::OpenItem(id, intent),
                         ServerCommand::ManagementItem { id, reveal: false },
                         Some(item.revision),
                     );
                 }
                 self.workspace.hide_secrets();
-                self.notice = "This account is no longer available. Refresh the vault.".into();
+                self.notice = "This item is no longer available. Refresh the vault.".into();
             }
-            (Job::Item | Job::AccountItem(_), ResponsePayload::Item(item)) => {
-                if let Job::AccountItem(id) = job
+            (Job::OpenItem(id, ItemIntent::Edit), ResponsePayload::Item(item)) if item.id == id => {
+                self.draft = Some(Draft::from_item(&item));
+                self.item = Some(item);
+                return iced::widget::operation::snap_to_end("credential-editor");
+            }
+            (Job::Item | Job::OpenItem(_, ItemIntent::View), ResponsePayload::Item(item)) => {
+                if let Job::OpenItem(id, ItemIntent::View) = job
                     && item.id != id
                 {
                     self.workspace.hide_secrets();

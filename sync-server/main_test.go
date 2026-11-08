@@ -11,9 +11,173 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type gatedReader struct {
+	io.Reader
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *gatedReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.entered); <-r.release })
+	return r.Reader.Read(p)
+}
+
+func await(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("request blocked behind another client's transfer")
+	}
+}
+
+func TestSlowUploadDoesNotBlockReadsAndRechecksTheBase(t *testing.T) {
+	s, h, token := fixture(t)
+	path := "/v1/vaults/" + strings.Repeat("e", 32)
+	base := request(t, h, token, "PUT", path, "*", "initial").Header.Get("ETag")
+	body := &gatedReader{Reader: strings.NewReader("slow"), entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(body.release)
+	req := httptest.NewRequest("PUT", path, body)
+	requestHeaders(req, token, base)
+	result := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(result, req); close(done) }()
+	await(t, body.entered)
+	// Both reads and another commit must finish before the slow body resumes.
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for _, method := range []string{"HEAD", "PUT"} {
+			r := httptest.NewRequest(method, path, strings.NewReader("winner"))
+			requestHeaders(r, token, base)
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Errorf("%s: %d", method, w.Code)
+			}
+		}
+	}()
+	await(t, finished)
+	// Let the defer release the body only after testing concurrent progress.
+	body.release <- struct{}{}
+	await(t, done)
+	if result.Code != 412 {
+		t.Fatalf("stale upload: %d", result.Code)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reserved != 0 {
+		t.Fatalf("leaked reservation: %d", s.reserved)
+	}
+}
+
+func TestConcurrentUploadsReserveAndReleaseQuota(t *testing.T) {
+	s, _, token := fixture(t)
+	s.budget = 128
+	body := &gatedReader{Reader: strings.NewReader("small"), entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(body.release)
+	r := httptest.NewRequest("PUT", "/v1/vaults/"+strings.Repeat("a", 32), body)
+	requestHeaders(r, token, "*")
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(w, r); close(done) }()
+	await(t, body.entered)
+	second := httptest.NewRequest("PUT", "/v1/vaults/"+strings.Repeat("b", 32), strings.NewReader("other"))
+	requestHeaders(second, token, "*")
+	denied := httptest.NewRecorder()
+	finished := make(chan struct{})
+	go func() { s.ServeHTTP(denied, second); close(finished) }()
+	await(t, finished)
+	if denied.Code != 507 {
+		t.Fatalf("unreserved quota: %d", denied.Code)
+	}
+	body.release <- struct{}{}
+	await(t, done)
+	if w.Code != 200 {
+		t.Fatalf("upload: %d", w.Code)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reserved != 0 {
+		t.Fatalf("leaked reservation: %d", s.reserved)
+	}
+}
+
+type interruptedUpload struct{}
+
+func (interruptedUpload) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestInterruptedUploadReleasesQuotaAndRemovesItsStagingFile(t *testing.T) {
+	s, _, token := fixture(t)
+	r := httptest.NewRequest("PUT", "/v1/vaults/"+strings.Repeat("c", 32),
+		io.MultiReader(strings.NewReader("partial"), interruptedUpload{}))
+	requestHeaders(r, token, "*")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 413 {
+		t.Fatalf("interrupted upload: %d", w.Code)
+	}
+	if s.reserved != 0 {
+		t.Fatalf("leaked reservation: %d", s.reserved)
+	}
+	files, err := filepath.Glob(filepath.Join(s.root, ".upload-*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("staging files: %v, %v", files, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(s.root, "vaults"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("uncommitted vault: %v, %v", entries, err)
+	}
+}
+
+type gatedWriter struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *gatedWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered); <-w.release })
+	return w.ResponseRecorder.Write(p)
+}
+
+func TestDownloadSurvivesPruningWithoutBlockingAnotherCommit(t *testing.T) {
+	s, h, token := fixture(t)
+	s.keep = 1
+	path := "/v1/vaults/" + strings.Repeat("f", 32)
+	base := request(t, h, token, "PUT", path, "*", "original").Header.Get("ETag")
+	w := &gatedWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(w.release)
+	r := httptest.NewRequest("GET", path, nil)
+	requestHeaders(r, token, "")
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(w, r); close(done) }()
+	await(t, w.entered)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		r := httptest.NewRequest("PUT", path, strings.NewReader("replacement"))
+		requestHeaders(r, token, base)
+		result := httptest.NewRecorder()
+		s.ServeHTTP(result, r)
+		if result.Code != 200 {
+			t.Errorf("commit: %d", result.Code)
+		}
+	}()
+	await(t, finished)
+	w.release <- struct{}{}
+	await(t, done)
+	if w.Body.String() != "original" {
+		t.Fatalf("download changed: %q", w.Body.String())
+	}
+}
 
 func fixture(t *testing.T) (*server, *httptest.Server, string) {
 	t.Helper()
@@ -33,12 +197,7 @@ func fixture(t *testing.T) (*server, *httptest.Server, string) {
 	t.Cleanup(h.Close)
 	return s, h, token
 }
-func request(t *testing.T, h *httptest.Server, token, method, path, base, body string) *http.Response {
-	t.Helper()
-	req, e := http.NewRequest(method, h.URL+path, bytes.NewBufferString(body))
-	if e != nil {
-		t.Fatal(e)
-	}
+func requestHeaders(req *http.Request, token, base string) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -47,6 +206,15 @@ func request(t *testing.T, h *httptest.Server, token, method, path, base, body s
 	} else if base != "" {
 		req.Header.Set("If-Match", base)
 	}
+}
+
+func request(t *testing.T, h *httptest.Server, token, method, path, base, body string) *http.Response {
+	t.Helper()
+	req, e := http.NewRequest(method, h.URL+path, bytes.NewBufferString(body))
+	if e != nil {
+		t.Fatal(e)
+	}
+	requestHeaders(req, token, base)
 	res, e := h.Client().Do(req)
 	if e != nil {
 		t.Fatal(e)
@@ -124,7 +292,7 @@ func TestNotificationsAndQuota(t *testing.T) {
 	done := make(chan string, 1)
 	go func() {
 		req, _ := http.NewRequest("GET", h.URL+"/v1/events?since="+generation, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
+		requestHeaders(req, token, "")
 		res, e := h.Client().Do(req)
 		if e != nil {
 			done <- e.Error()
@@ -175,8 +343,7 @@ func TestOnlyOneConcurrentWriterCanCommitTheSameBase(t *testing.T) {
 		go func(contents string) {
 			<-start
 			req, _ := http.NewRequest("PUT", h.URL+path, strings.NewReader(contents))
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("If-Match", base)
+			requestHeaders(req, token, base)
 			res, err := h.Client().Do(req)
 			if err != nil {
 				statuses <- 0

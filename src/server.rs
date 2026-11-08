@@ -406,10 +406,8 @@ async fn finish_duo_enrollment(
     };
     let result = worker
         .with_session(move |session| {
-            let mut edit = session.edit();
-            let (key, vault) = edit.parts_mut();
-            crate::vault::available(vault)
-                .and_then(|v| v.finish_duo_enrollment(&prepared, material, key))
+            session
+                .with_unlocked(|vault, key| vault.finish_duo_enrollment(&prepared, material, key))
         })
         .await;
     match result {
@@ -438,9 +436,7 @@ async fn finish_duo(
     };
     let result = worker
         .with_session(move |session| {
-            let mut edit = session.edit();
-            let (key, vault) = edit.parts_mut();
-            crate::vault::available(vault).and_then(|v| v.finish_duo_poll(&review, &body, key))
+            session.with_unlocked(|vault, key| vault.finish_duo_poll(&review, &body, key))
         })
         .await;
     match result {
@@ -514,20 +510,6 @@ async fn handler(message: &mut TcpStream, token: &str) -> Option<AuthenticatedRe
     // TCP does not preserve write boundaries. handle_tcp reads the complete
     // preface under the connection's handshake timeout before validating it.
     handle_tcp(message, token).await
-}
-
-fn lock_vlt(
-    vlt: &mut Option<Vault>,
-    server_info: &mut ServerInfo,
-) -> Result<(), crate::vault::VaultError> {
-    vlt.zeroize();
-    server_info.zeroize();
-    crate::clipboard::clear_owned().map_err(|error| {
-        crate::vault::VaultError::Persistence(format!(
-            "vault locked, but clipboard cleanup failed: {error}"
-        ))
-    })?;
-    Ok(())
 }
 
 fn lock_session(session: &mut VaultSession) -> Result<(), crate::vault::VaultError> {

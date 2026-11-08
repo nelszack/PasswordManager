@@ -233,7 +233,7 @@ pub enum CliCommands {
     Vaults,
     /// Connect, download, and synchronize encrypted cloud vaults.
     #[command(
-        after_help = "Examples:\n  pm sync setup --ssh user@server\n  pm sync enable\n  pm sync connect --ssh user@server\n  pm sync pull\n  pm sync server update"
+        after_help = "Examples:\n  pm sync connect https://server.example --token-file device-token\n  pm sync enable\n  pm sync pull"
     )]
     Sync {
         #[command(subcommand)]
@@ -967,34 +967,10 @@ mod test;
 
 #[derive(Subcommand, Debug)]
 pub enum SyncCommands {
-    /// Build locally, install a sync server over SSH, and connect this device.
-    Setup {
-        /// SSH destination; defaults to the saved server host.
-        #[arg(long)]
-        ssh: Option<String>,
-        /// Use a prebuilt Linux server binary instead of building with local Go.
-        #[arg(long, value_hint = ValueHint::FilePath)]
-        binary: Option<PathBuf>,
-        /// Override the device name; defaults to this device's Tailscale name.
-        #[arg(long = "name")]
-        device_name: Option<String>,
-    },
-    /// Manage the saved sync server installation.
-    Server {
-        #[command(subcommand)]
-        command: SyncServerCommands,
-    },
     /// Save the server address and a device token (prompted privately by default).
     Connect {
         /// HTTPS origin of your private sync server.
-        #[arg(required_unless_present = "ssh", conflicts_with = "ssh")]
-        url: Option<String>,
-        /// Authorize this device over SSH without copying a credential file.
-        #[arg(long, conflicts_with = "token_file")]
-        ssh: Option<String>,
-        /// Override the Tailscale device name for SSH enrollment.
-        #[arg(long = "name", requires = "ssh")]
-        device_name: Option<String>,
+        url: String,
         /// Read the device credential from a private file instead of prompting.
         #[arg(long)]
         token_file: Option<PathBuf>,
@@ -1019,17 +995,4 @@ pub enum SyncCommands {
     Check,
     /// Upload or download changes, preserving both copies on conflict.
     Now,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum SyncServerCommands {
-    /// Install the bundled server version and restart with automatic rollback on failure.
-    Update {
-        /// SSH destination; defaults to the host saved during setup or connection.
-        #[arg(long)]
-        ssh: Option<String>,
-        /// Use a prebuilt Linux server binary instead of building with local Go.
-        #[arg(long, value_hint = ValueHint::FilePath)]
-        binary: Option<PathBuf>,
-    },
 }

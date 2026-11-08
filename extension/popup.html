@@ -20,7 +20,17 @@
   <p id="nativeHint">Checking the local vault connection…</p>
 
   <button id="lockBtn" disabled>Lock Vault</button>
-  <a href="manager.html" target="_blank" rel="noopener">Open vault manager</a>
+  <p>Open Password Manager on your desktop to unlock and edit your vault.</p>
+  <section id="recovery" hidden>
+    <label for="operation">A previous change needs review</label>
+    <select id="operation"></select>
+    <button id="reviewOperation">Check outcome</button>
+    <div id="unknownReview" hidden>
+      <p>Inspect the vault in the desktop app before continuing.</p>
+      <label><input id="inspected" type="checkbox"> I inspected the affected item</label>
+      <button id="acknowledgeOperation" disabled>Acknowledge reviewed outcome</button>
+    </div>
+  </section>
 
   <div id="output" role="status" aria-live="polite"></div>
 

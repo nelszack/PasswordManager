@@ -133,7 +133,7 @@ pub fn decrypt_record_stream(
     Ok(plaintext)
 }
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const DEFAULT_PORT: u16 = 7878;
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()

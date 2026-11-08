@@ -1,6 +1,6 @@
 const { test, expect } = require("@playwright/test");
 const fs = require("node:fs");
-const { launchExtension, readNativeRequests, waitForNativeRequest } = require("./harness.cjs");
+const { withExtension, readNativeRequests, waitForNativeRequest } = require("./harness.cjs");
 const origin = "https://login.example";
 const challenge = "<!doctype html><html><body><h1>Duo Push</h1><p>Push sent. Check your phone.</p></body></html>";
 const universalChallenge = '<!doctype html><html><body><h1>Check for a Duo Push</h1><p>Verify it\'s you by approving the notification...</p><p>Sent to "Password Manager"</p><button>Other options</button><p>Need help? Secured by Duo</p></body></html>';
@@ -8,28 +8,24 @@ const pending = options => ({ entryId: 7, id: "synthetic-request", application: 
     location: "Example City", summary: "Login", expires_at: Math.floor(Date.now() / 1000) + 300,
     fingerprint: "a".repeat(128), code_digits: null, unsupported: null, ...options });
 
-async function setup(options = {}) {
-    const browser = await launchExtension({ allowHttp: false, mode: options.mode, accounts: [
+async function withBrowser(options, run) {
+    return withExtension({ allowHttp: false, mode: options.mode, accounts: [
         { id: 7, name: "Work", username: "alice@example.com", password: "saved-secret", has_duo: true, domain: origin,
             duo_origin: options.issuer ? "https://api-test.duosecurity.com" : undefined }
     ], env: { PM_E2E_NATIVE_DUO_REQUESTS: JSON.stringify(options.noRequest ? [] : [pending(options.request)]),
-        ...(options.error ? { PM_E2E_NATIVE_DUO_ERROR: options.error } : {}) } });
-    await browser.context.route(`${origin}/**`, route => route.fulfill({ contentType: "text/html", body:
-        new URL(route.request().url()).pathname === "/login"
-            ? '<!doctype html><html><body><form><input id="username" autocomplete="username"><input id="password" type="password" autocomplete="current-password"></form></body></html>'
-            : options.universal ? universalChallenge : challenge }));
-    const page = browser.context.pages()[0] || await browser.context.newPage();
-    return { browser, page };
+        ...(options.error ? { PM_E2E_NATIVE_DUO_ERROR: options.error } : {}) } }, async browser => {
+        await browser.context.route(`${origin}/**`, route => route.fulfill({ contentType: "text/html", body:
+            new URL(route.request().url()).pathname === "/login"
+                ? '<!doctype html><html><body><form><input id="username" autocomplete="username"><input id="password" type="password" autocomplete="current-password"></form></body></html>'
+                : options.universal ? universalChallenge : challenge }));
+        const page = browser.context.pages()[0] || await browser.context.newPage();
+        return run({ browser, page });
+    });
 }
 function decisions(browser) {
-    return readNativeRequests(browser.nativeLog).filter(r => r.action === "managerDuoRespond");
+    return readNativeRequests(browser.nativeLog).filter(r => r.action === "duoRespond");
 }
 
-async function withBrowser(options, run) {
-    const env = await setup(options);
-    try { await run(env); }
-    finally { await env.browser.close(); }
-}
 async function openDuoWindow(browser, page, url = `${origin}/duo`, sourceOrigin = origin) {
     const opened = browser.context.waitForEvent("page", p => p.url().includes("duo_prompt.html"));
     await page.goto(url);
@@ -63,7 +59,7 @@ test("Duo decisions require one explicit click and the appropriate verification"
             await code.fill("012");
         }
         await popup.getByRole("button", { name: scenario.approve ? "Approve" : "Deny", exact: true }).click();
-        const response = await waitForNativeRequest(browser.nativeLog, r => r.action === "managerDuoRespond");
+        const response = await waitForNativeRequest(browser.nativeLog, r => r.action === "duoRespond");
         expect(response).toMatchObject({ approve: scenario.approve, entryId: 7, requestId: "synthetic-request",
             fingerprint: "a".repeat(128), verificationCode: scenario.request?.code_digits ? "012" : "" });
         expect(dialogs).toEqual([]);
@@ -83,7 +79,7 @@ test("dismissed windows stay dismissed while the same request is pending", () =>
         if (!result.active) throw new Error("challenge not active");
     }, tabId);
     // Wait for the next real content-script poll, rather than sending a privileged fake trigger.
-    await expect.poll(() => fs.readFileSync(browser.nativeLog, "utf8").split("managerDuoRequests").length, { timeout: 10_000 }).toBeGreaterThan(3);
+    await expect.poll(() => fs.readFileSync(browser.nativeLog, "utf8").split("duoRequests").length, { timeout: 10_000 }).toBeGreaterThan(3);
     expect(browser.context.pages().filter(p => p.url().includes("duo_prompt.html"))).toHaveLength(0);
     expect(decisions(browser)).toEqual([]);
 }));
@@ -136,7 +132,7 @@ test("embedded challenges and Duo redirects retain the original login site", asy
 
 test("no request produces no automatic window", () => withBrowser({ noRequest: true }, async ({ browser, page }) => {
     await page.goto(`${origin}/duo`);
-    await waitForNativeRequest(browser.nativeLog, r => r.action === "managerDuoRequests");
+    await waitForNativeRequest(browser.nativeLog, r => r.action === "duoRequests");
     expect(browser.context.pages().filter(p => p.url().includes("duo_prompt.html"))).toHaveLength(0);
     expect(decisions(browser)).toEqual([]);
 }));

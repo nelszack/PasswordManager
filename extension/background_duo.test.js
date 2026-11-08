@@ -29,11 +29,11 @@ function environment() {
             calls.push({ action, ...fields });
             if (action === "getLoginItems") return { success: true, sessionId: "a".repeat(64), data: items };
             if (action === "getDuoItems") return { success: true, sessionId: "a".repeat(64), data: issuerItems };
-            if (action === "managerDuoRequests") {
+            if (action === "duoRequests") {
                 if (holdPoll) await holdPoll;
                 return { success: true, data: pending };
             }
-            if (action === "managerDuoRespond") {
+            if (action === "duoRespond") {
                 if (holdDecision) await holdDecision;
                 if (decisionError) return { success: false, error: decisionError };
                 pending = []; return { success: true, data: "Answered" };
@@ -67,7 +67,7 @@ test("Duo windows require both a site enrollment and a live request; pages get n
         if (scenario === "inactive") env.setActive(false);
         await env.duo.observe({}, env.sender).catch(() => {});
         assert.equal(env.created.length, 0, scenario);
-        assert.equal(env.calls.some(r => r.action === "managerDuoRespond"), false);
+        assert.equal(env.calls.some(r => r.action === "duoRespond"), false);
     }
     const env = environment();
     const response = await env.duo.observe({ entryId: 999, domain: "https://evil.example" }, env.sender);
@@ -75,7 +75,7 @@ test("Duo windows require both a site enrollment and a live request; pages get n
     assert.equal(env.calls[0].domain, "https://login.example");
     assert.equal(env.created.length, 1);
     assert.equal(env.created[0].type, "popup");
-    assert.equal(env.calls.some(r => r.action === "managerDuoRespond"), false);
+    assert.equal(env.calls.some(r => r.action === "duoRespond"), false);
 });
 
 test("concurrent detections and dismissing a pending request cannot stack or reopen windows", async () => {
@@ -108,11 +108,11 @@ test("only the token-bearing Duo extension window can read or decide requests", 
     await assert.rejects(env.duo.complete({ ...env.decision(r, true), fingerprint: "old" }, env.popup), /changed/);
     await assert.rejects(env.duo.complete({ ...env.decision(r, true), approve: "yes" }, env.popup), /approve or deny/);
     await env.duo.complete(env.decision(r, true), env.popup);
-    const decisions = env.calls.filter(r => r.action === "managerDuoRespond");
+    const decisions = env.calls.filter(r => r.action === "duoRespond");
     assert.equal(decisions.length, 1); assert.equal(decisions[0].approve, true);
     assert.equal(decisions[0].fingerprint, r.fingerprint);
     assert.equal(decisions[0].expectedSession, "a".repeat(64));
-    assert.equal(env.calls.find(call => call.action === "managerDuoRequests").expectedSession, "a".repeat(64));
+    assert.equal(env.calls.find(call => call.action === "duoRequests").expectedSession, "a".repeat(64));
     await assert.rejects(env.duo.complete(env.decision(r, true), env.popup), /expired/);
 });
 
@@ -127,7 +127,7 @@ test("Verified Push needs the typed login-page code; denial and unsupported requ
         await assert.rejects(env.duo.complete(env.decision(r, true, "12"), env.popup), unsupported ? /proximity/ : /verification code/);
         const approve = !unsupported;
         await env.duo.complete(env.decision(r, approve, "012"), env.popup);
-        const decision = env.calls.find(r => r.action === "managerDuoRespond");
+        const decision = env.calls.find(r => r.action === "duoRespond");
         assert.equal(decision.verificationCode, approve ? "012" : "");
         assert.equal(decision.approve, approve);
     }
@@ -143,7 +143,7 @@ test("navigation, locking and late poll results cannot create or answer a stale 
         if (scenario === "closed document") env.setActive(false);
         if (scenario === "timeout") env.timers.find(timer => timer.delay === 5 * 60_000).callback();
         await assert.rejects(env.duo.complete(env.decision(r, true), env.popup));
-        assert.equal(env.calls.some(call => call.action === "managerDuoRespond"), false);
+        assert.equal(env.calls.some(call => call.action === "duoRespond"), false);
         assert.ok(env.removed.includes(42));
     }
     const env = environment(), release = env.holdPoll();
@@ -161,7 +161,7 @@ test("duplicate decisions cannot send twice while the first response is pending"
     await flush();
     await assert.rejects(env.duo.complete(env.decision(r, false), env.popup), /already in progress/);
     release(); await first;
-    assert.equal(env.calls.filter(r => r.action === "managerDuoRespond").length, 1);
+    assert.equal(env.calls.filter(r => r.action === "duoRespond").length, 1);
 });
 
 test("locking during tab lookup cannot recreate a Duo session after invalidation", async () => {
@@ -181,7 +181,7 @@ test("a new login without Duo clears a previous account's redirect context", asy
     env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = "https://api-test.duosecurity.com";
     await env.duo.observe({}, env.sender);
     assert.equal(env.created.length, 0);
-    assert.equal(env.calls.some(call => call.action === "managerDuoRequests"), false);
+    assert.equal(env.calls.some(call => call.action === "duoRequests"), false);
 });
 
 test("an uncertain decision preserves an error window and blocks retries until a fresh page review", async () => {
@@ -193,7 +193,7 @@ test("an uncertain decision preserves an error window and blocks retries until a
     await assert.rejects(env.duo.data({ token }, env.popup), /Check the login before retrying/);
     await env.duo.observe({}, env.sender);
     assert.equal(env.created.length, 1);
-    assert.equal(env.calls.filter(r => r.action === "managerDuoRespond").length, 1);
+    assert.equal(env.calls.filter(r => r.action === "duoRespond").length, 1);
     assert.equal(env.removed.length, 0);
     await env.duo.complete({ token, cancel: true }, env.popup);
     assert.ok(env.removed.includes(42));
@@ -230,7 +230,7 @@ test("Duo-hosted challenges can find their enrolled issuer without a remembered 
             assert.equal(env.calls.find(call => call.action === "getDuoItems").domain, url);
             assert.equal((await env.duo.data({ token: env.token() }, env.popup)).requests[0].entryId, 1);
         }
-        assert.equal(env.calls.some(call => call.action === "managerDuoRespond"), false);
+        assert.equal(env.calls.some(call => call.action === "duoRespond"), false);
     }
 });
 

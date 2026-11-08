@@ -50,6 +50,17 @@ rfd = { version = "0.17.2", optional = true }
 [dev-dependencies]
 proptest = "1"
 
+# Keep production KDF parameters in integration tests without paying the cost of
+# unoptimized cryptographic loops. These also improve local debug CLI latency.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.zxcvbn]
+opt-level = 2
+
 [patch.crates-io]
 zbus-lockstep = { path = "vendor/zbus-lockstep" }
 zbus-lockstep-macros = { path = "vendor/zbus-lockstep-macros" }

@@ -1,8 +1,9 @@
 use super::{Vault, VaultError};
 use crate::types::PasswordType;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
-/// Credentials used while staging a command. Never the live session state.
+/// Boundary credentials for persistence and unlock. Live sessions validate that
+/// these contain cached keys; VaultSession owns the lock/unlock lifecycle.
 #[derive(Debug)]
 pub struct VaultCredentials {
     pub locked: bool,
@@ -28,61 +29,16 @@ impl Drop for VaultCredentials {
     }
 }
 
-/// An unlocked capability always owns both the vault and its encryption key.
+/// An unlocked capability owns a complete vault and validated cached credentials.
 #[derive(Debug)]
 pub struct UnlockedVault {
     pub(crate) vault: Vault,
-    key: SessionKey,
+    credentials: VaultCredentials,
     epoch: [u8; 16],
 }
-
-/// Cached encryption material cannot contain a master password or key path and
-/// has no serialization implementation. External credentials exist only during
-/// unlock/rekey; the live session keeps this dedicated key type.
-struct SessionKey {
-    encryption_key: Zeroizing<[u8; 32]>,
-    salt: [u8; 16],
-    kdf: u8,
-    memory_kib: u32,
-    iterations: u32,
-    parallelism: u32,
-}
-impl std::fmt::Debug for SessionKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SessionKey(<redacted>)")
-    }
-}
-impl SessionKey {
-    fn from_cached(mut key: PasswordType) -> Option<Self> {
-        let PasswordType::Session {
-            encryption_key,
-            salt,
-            kdf,
-            memory_kib,
-            iterations,
-            parallelism,
-        } = &mut key
-        else {
-            return None;
-        };
-        Some(Self {
-            encryption_key: Zeroizing::new(std::mem::take(encryption_key)),
-            salt: *salt,
-            kdf: *kdf,
-            memory_kib: *memory_kib,
-            iterations: *iterations,
-            parallelism: *parallelism,
-        })
-    }
-    fn into_staging(self) -> PasswordType {
-        PasswordType::Session {
-            encryption_key: *self.encryption_key,
-            salt: self.salt,
-            kdf: self.kdf,
-            memory_kib: self.memory_kib,
-            iterations: self.iterations,
-            parallelism: self.parallelism,
-        }
+impl VaultCredentials {
+    fn cached(&self) -> bool {
+        !self.locked && matches!(self.keypass, Some(PasswordType::Session { .. }))
     }
 }
 #[derive(Debug, Default)]
@@ -94,12 +50,32 @@ pub enum VaultSession {
 impl VaultSession {
     #[cfg(test)]
     pub fn unlock(vault: Vault, key: PasswordType) -> Self {
-        Self::Unlocked(Box::new(UnlockedVault {
+        let mut session = Self::Locked;
+        session
+            .install(
+                vault,
+                VaultCredentials {
+                    locked: false,
+                    keypass: Some(key),
+                },
+            )
+            .expect("cached test credentials");
+        session
+    }
+    pub(crate) fn install(
+        &mut self,
+        vault: Vault,
+        credentials: VaultCredentials,
+    ) -> Result<(), VaultError> {
+        if !credentials.cached() {
+            return Err(VaultError::Locked);
+        }
+        *self = Self::Unlocked(Box::new(UnlockedVault {
             vault,
-            key: SessionKey::from_cached(key)
-                .expect("test sessions require cached encryption material"),
+            credentials,
             epoch: rand::random(),
-        }))
+        }));
+        Ok(())
     }
     pub fn is_locked(&self) -> bool {
         matches!(self, Self::Locked)
@@ -129,96 +105,72 @@ impl VaultSession {
             Self::Unlocked(live) => Some(&live.vault),
         }
     }
-    /// Restore a complete unlocked capability or discard all staged secrets on
-    /// every return. The transient staging state never becomes live state.
-    pub(crate) fn edit(&mut self) -> SessionEdit<'_> {
-        let (credentials, vault, epoch) = match std::mem::take(self) {
-            Self::Locked => (VaultCredentials::default(), None, rand::random()),
-            Self::Unlocked(live) => {
-                let UnlockedVault { vault, key, epoch } = *live;
-                (
-                    VaultCredentials {
-                        locked: false,
-                        keypass: Some(key.into_staging()),
-                    },
-                    Some(vault),
-                    epoch,
-                )
-            }
+    /// Borrow complete unlocked state. A panic drops it and leaves this session
+    /// locked; normal reads and mutations retain the same capability and epoch.
+    pub(crate) fn with_unlocked<T>(
+        &mut self,
+        action: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, VaultError>,
+    ) -> Result<T, VaultError> {
+        let mut current = std::mem::take(self);
+        let Self::Unlocked(live) = &mut current else {
+            return Err(VaultError::Locked);
         };
-        SessionEdit {
-            session: self,
-            credentials,
-            vault,
-            epoch,
+        let result = action(&mut live.vault, &mut live.credentials);
+        if !live.credentials.cached() {
+            return Err(VaultError::Locked);
         }
+        *self = current;
+        result
     }
-}
-pub(crate) struct SessionEdit<'a> {
-    session: &'a mut VaultSession,
-    credentials: VaultCredentials,
-    vault: Option<Vault>,
-    epoch: [u8; 16],
-}
-impl SessionEdit<'_> {
-    pub(crate) fn parts_mut(&mut self) -> (&mut VaultCredentials, &mut Option<Vault>) {
-        (&mut self.credentials, &mut self.vault)
-    }
-}
-impl Drop for SessionEdit<'_> {
-    fn drop(&mut self) {
-        if !std::thread::panicking()
-            && !self.credentials.locked
-            && let (Some(vault), Some(key)) = (self.vault.take(), self.credentials.keypass.take())
-            && let Some(key) = SessionKey::from_cached(key)
-        {
-            *self.session = VaultSession::Unlocked(Box::new(UnlockedVault {
-                vault,
-                key,
-                epoch: self.epoch,
-            }));
-        }
-    }
-}
-pub(crate) fn available(vault: &mut Option<Vault>) -> Result<&mut Vault, VaultError> {
-    vault.as_mut().ok_or(VaultError::Locked)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn key() -> PasswordType {
+        PasswordType::Session {
+            encryption_key: [42; 32],
+            salt: [42; 16],
+            kdf: 1,
+            memory_kib: 8192,
+            iterations: 1,
+            parallelism: 1,
+        }
+    }
     #[test]
-    fn staging_cannot_install_an_unkeyed_or_missing_vault() {
-        let mut session = VaultSession::default();
-        {
-            let mut edit = session.edit();
-            edit.credentials.locked = false;
-            edit.vault = Some(Vault::default());
+    fn only_complete_cached_credentials_can_install_an_unlocked_session() {
+        let mut session = VaultSession::Locked;
+        for credentials in [
+            VaultCredentials::default(),
+            VaultCredentials {
+                locked: false,
+                keypass: Some(PasswordType::Password("synthetic".into())),
+            },
+        ] {
+            assert!(session.install(Vault::memory(), credentials).is_err());
+            assert!(session.is_locked());
         }
-        assert!(session.is_locked());
-        {
-            let mut edit = session.edit();
-            edit.credentials.locked = false;
-            edit.credentials.keypass = Some(PasswordType::Password("synthetic".into()));
-        }
+    }
+    #[test]
+    fn invalidated_credentials_cannot_escape_an_unlocked_operation() {
+        let mut session = VaultSession::unlock(Vault::memory(), key());
+        let result = session.with_unlocked(|_, credentials| {
+            credentials.keypass = Some(PasswordType::Password("external credential".into()));
+            Ok(())
+        });
+        assert!(result.is_err());
         assert!(session.is_locked());
     }
     #[test]
-    fn unwinding_fails_closed() {
-        let mut session = VaultSession::unlock(
-            Vault::default(),
-            PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [42; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            },
-        );
+    fn errors_preserve_the_session_and_panics_discard_it() {
+        let mut session = VaultSession::unlock(Vault::memory(), key());
+        let epoch = session.epoch();
+        let result: Result<(), _> =
+            session.with_unlocked(|_, _| Err(VaultError::NotFound("synthetic".into())));
+        assert!(result.is_err());
+        assert_eq!(session.epoch(), epoch);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _edit = session.edit();
-            panic!("synthetic command failure");
+            let _: Result<(), _> = session.with_unlocked(|_, _| panic!("synthetic failure"));
         }));
         assert!(result.is_err());
         assert!(session.is_locked());

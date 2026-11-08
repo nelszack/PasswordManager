@@ -191,7 +191,7 @@ impl Vault {
                     name: entry.name.clone(),
                     username: entry.username.clone(),
                     password_hash: password_hash(&entry.password),
-                    weak: zxcvbn::zxcvbn(&entry.password, &[]).score() <= zxcvbn::Score::Two,
+                    weak: self.item(entry.id).unwrap().password_score() <= zxcvbn::Score::Two,
                     stale: options
                         .stale_days
                         .is_some_and(|days| password_is_stale_at(changed, days, now)),

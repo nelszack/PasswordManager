@@ -24,7 +24,6 @@ use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::{Zeroize, Zeroizing};
 
 mod session;
-pub(crate) use session::available;
 pub use session::{VaultCredentials, VaultSession};
 mod error;
 pub use error::VaultError;
@@ -307,8 +306,23 @@ struct Item {
     authenticator: Option<Authenticator>,
     duo: Option<DuoRecord>,
     lifecycle: Lifecycle,
+    strength: CachedStrength,
+}
+// Derived runtime data never affects item equality, revisions, or persistence.
+#[derive(Debug, Default, Clone)]
+struct CachedStrength(std::sync::OnceLock<zxcvbn::Score>);
+impl PartialEq for CachedStrength {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 impl Item {
+    fn password_score(&self) -> zxcvbn::Score {
+        *self
+            .strength
+            .0
+            .get_or_init(|| run_blocking_io(|| zxcvbn::zxcvbn(&self.entry.password, &[]).score()))
+    }
     fn active(&self) -> bool {
         matches!(self.lifecycle, Lifecycle::Active)
     }
@@ -321,6 +335,7 @@ impl Item {
             authenticator: None,
             duo: None,
             lifecycle: Lifecycle::Active,
+            strength: CachedStrength::default(),
         }
     }
 }
@@ -400,7 +415,9 @@ impl Vault {
         self.data.items.get(&ItemId::from_public(id).ok()?)
     }
     fn item_mut(&mut self, id: usize) -> Option<&mut Item> {
-        self.data.items.get_mut(&ItemId::from_public(id).ok()?)
+        let item = self.data.items.get_mut(&ItemId::from_public(id).ok()?)?;
+        item.strength.0.take();
+        Some(item)
     }
     fn active_items(&self) -> impl Iterator<Item = &Item> {
         self.data.items.values().filter(|i| i.active())

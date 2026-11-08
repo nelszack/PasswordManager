@@ -23,15 +23,12 @@ pub struct Config {
 pub struct SyncConfig {
     pub server_url: String,
     pub automatic: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ssh_target: Option<String>,
 }
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             server_url: String::new(),
             automatic: true,
-            ssh_target: None,
         }
     }
 }
@@ -116,7 +113,6 @@ pub struct ConfigChanges {
     pub desktop_scale: Option<u16>,
     pub sync_server_url: Option<String>,
     pub sync_automatic: Option<bool>,
-    pub sync_ssh_target: Option<String>,
 }
 
 /// Shared duration syntax for CLI arguments and desktop settings.
@@ -360,14 +356,7 @@ pub fn try_update(
             crate::cloud::validate_server_url(&url)?;
         }
         let url = url.trim_end_matches('/').to_owned();
-        if config.sync.server_url != url {
-            config.sync.ssh_target = None;
-        }
         config.sync.server_url = url;
-    }
-    if let Some(target) = modify.sync_ssh_target {
-        crate::cloud::setup::validate_ssh_target(&target)?;
-        config.sync.ssh_target = Some(target);
     }
     if let Some(automatic) = modify.sync_automatic {
         config.sync.automatic = automatic;

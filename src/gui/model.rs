@@ -625,10 +625,7 @@ mod tests {
 
     #[test]
     fn gui_url_replacement_roundtrips_through_an_in_memory_vault() {
-        use password_manager::{
-            types::ListOptions,
-            vault::{Vault, VaultCredentials},
-        };
+        use password_manager::vault::{Vault, VaultCredentials};
 
         let mut vault = Vault::memory();
         let mut credentials = VaultCredentials::default();
@@ -663,12 +660,12 @@ mod tests {
         assert_eq!(saved.urls, vec!["https://new.test", "https://extra.test"]);
         assert_eq!(saved.password.unwrap().expose(), "retained secret");
         {
-            let entries = vault.view_entries(ListOptions::default()).unwrap();
-            assert_eq!(entries[0].entry.url.as_deref(), Some("https://new.test"));
+            let entries = vault.management_list(Default::default()).unwrap().items;
             assert_eq!(
-                entries[0].metadata.unwrap().additional_urls,
-                vec!["https://extra.test"]
+                entries[0].urls.first().map(String::as_str),
+                Some("https://new.test")
             );
+            assert_eq!(entries[0].urls[1..], vec!["https://extra.test"]);
         }
 
         let mut draft = Draft::from_item(&vault.target_detail(&target, false).unwrap());
@@ -683,9 +680,8 @@ mod tests {
                 .unwrap()
         );
         assert!(vault.target_detail(&target, false).unwrap().urls.is_empty());
-        let entries = vault.view_entries(ListOptions::default()).unwrap();
-        assert!(entries[0].entry.url.is_none());
-        assert!(entries[0].metadata.unwrap().additional_urls.is_empty());
+        let entries = vault.management_list(Default::default()).unwrap().items;
+        assert!(entries[0].urls.is_empty());
     }
 
     #[test]

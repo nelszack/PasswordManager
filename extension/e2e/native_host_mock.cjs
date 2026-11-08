@@ -67,9 +67,9 @@ function handle(request) {
     } else if (request.action === "lock") {
         locked = true;
         write({ id: request.id, success: true, data: "Locked" });
-    } else if (request.action === "managerDuoRequests") {
+    } else if (request.action === "duoRequests") {
         write({ id: request.id, success: true, data: duoRequests.filter(r => r.entryId === request.entryId) });
-    } else if (request.action === "managerDuoRespond") {
+    } else if (request.action === "duoRespond") {
         if (process.env.PM_E2E_NATIVE_DUO_ERROR) {
             write({ id: request.id, success: false, error: process.env.PM_E2E_NATIVE_DUO_ERROR });
             return;

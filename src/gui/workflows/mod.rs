@@ -1014,7 +1014,7 @@ impl State {
             Action::Search => {
                 revision = None;
                 let nonempty = |value: &String| (!value.is_empty()).then(|| value.clone());
-                ServerCommand::ManagementList(SearchFilter {
+                ServerCommand::List(SearchFilter {
                     query: nonempty(&self.query),
                     name: nonempty(&self.name),
                     username: nonempty(&self.username),
@@ -1151,9 +1151,9 @@ pub fn absolute(value: &str) -> Result<String, String> {
 }
 impl App {
     pub(super) fn stop_tool_watches(&mut self) {
-        if self.polling {
+        if self.polling() {
             self.serial += 1;
-            self.polling = false;
+            self.request_state = RequestState::Idle;
         }
         self.workspace.hide_secrets();
         self.workspace.reset_duo();
@@ -1188,8 +1188,8 @@ impl App {
     /// Tick integration: call without a tab/section restriction after the normal
     /// status-check fairness gate. This method also pauses during confirmations.
     pub(super) fn poll_tool_watches(&mut self, now: Instant) -> Task<super::Message> {
-        if self.busy
-            || self.polling
+        if self.busy()
+            || self.polling()
             || self.workspace.prepared.is_some()
             || self.pending.is_some()
             || self.session.is_none()
@@ -1372,7 +1372,7 @@ impl App {
     pub(super) fn workflow(&mut self, event: Event) -> Task<super::Message> {
         // Cancel obsolete passive reads when their selection or screen changes.
         // They never consume HOTP counters or send Duo decisions.
-        if self.polling
+        if self.polling()
             && matches!(
                 &event,
                 Event::Section(_)
@@ -1385,7 +1385,7 @@ impl App {
             )
         {
             self.serial += 1;
-            self.polling = false;
+            self.request_state = RequestState::Idle;
         }
         match event {
             Event::ShowResults(show) => {
@@ -1509,8 +1509,7 @@ impl App {
             Event::Pick(field, save) => {
                 self.workspace.prepared = None;
                 self.serial += 1;
-                self.busy = true;
-                self.polling = false;
+                self.request_state = RequestState::Busy;
                 return file_picker::pick_workflow_file(self.serial, field, save);
             }
             Event::ClearResult => {
@@ -1664,8 +1663,7 @@ impl App {
         let passive = matches!(prepared.action, Action::WatchOtp | Action::Requests);
         let task = self.request(Job::Workflow(prepared.action), command, prepared.revision);
         if passive {
-            self.busy = false;
-            self.polling = true;
+            self.request_state = RequestState::Polling;
         }
         task
     }

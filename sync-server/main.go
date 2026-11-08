@@ -34,6 +34,9 @@ func versionInfo() serverVersion { return serverVersion{1, version, buildID} }
 
 const maxVault = 128 << 20
 
+// Upper bound for the JSON head (32 hex version characters and a bounded size).
+const maxHeadBytes = 64
+
 type snapshot struct {
 	Version string `json:"version"`
 	Size    int64  `json:"size"`
@@ -49,6 +52,7 @@ type server struct {
 	mu         sync.Mutex
 	changed    chan struct{}
 	generation string
+	reserved   int64 // Upload space reserved while request bodies stream without mu.
 	slots      chan struct{}
 }
 
@@ -158,7 +162,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
+	unlock := func() { s.mu.Unlock(); locked = false }
 	if r.URL.Path == "/v1/vaults" && r.Method == "GET" {
 		entries, err := os.ReadDir(filepath.Join(s.root, "vaults"))
 		if err != nil {
@@ -179,6 +189,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				vaults = append(vaults, vaultInfo{e.Name(), h})
 			}
 		}
+		unlock()
 		writeJSON(w, vaults)
 		return
 	}
@@ -212,6 +223,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid snapshot", 500)
 			return
 		}
+		// Snapshots are immutable. An open descriptor remains valid if a later
+		// commit prunes its directory entry while this client is downloading.
+		unlock()
 		http.ServeContent(w, r, "vault", time.Time{}, f)
 	case "PUT":
 		if (exists && r.Header.Get("If-Match") != `"`+h.Version+`"`) || (!exists && r.Header.Get("If-None-Match") != "*") {
@@ -237,11 +251,24 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage unavailable", 500)
 			return
 		}
-		available := min(int64(maxVault), s.budget-used)
+		available := min(int64(maxVault), s.budget-used-s.reserved-maxHeadBytes)
 		if available <= 0 {
 			http.Error(w, "storage quota reached", 507)
 			return
 		}
+		if r.ContentLength > 0 {
+			available = min(available, r.ContentLength)
+		}
+		reservation := available + maxHeadBytes
+		s.reserved += reservation
+		defer func() {
+			if !locked {
+				s.mu.Lock()
+				locked = true
+			}
+			s.reserved -= reservation
+		}()
+		unlock()
 		dir := filepath.Join(s.root, "vaults", id)
 		// Stage outside vault directories so an interrupted first upload is never listed.
 		f, err := os.CreateTemp(s.root, ".upload-")
@@ -263,6 +290,20 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if err = f.Close(); err != nil {
 			http.Error(w, "could not save upload", 500)
+			return
+		}
+		// Serialize the durable commit, not the network transfer. A competing
+		// writer may have advanced this vault while this body was arriving.
+		s.mu.Lock()
+		locked = true
+		current, err := s.head(id)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "storage unavailable", 500)
+			return
+		}
+		if (err == nil && r.Header.Get("If-Match") != `"`+current.Version+`"`) ||
+			(errors.Is(err, os.ErrNotExist) && r.Header.Get("If-None-Match") != "*") {
+			http.Error(w, "vault changed; reconcile both copies", 412)
 			return
 		}
 		if err = os.MkdirAll(dir, 0700); err != nil {
@@ -302,6 +343,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.changed = make(chan struct{})
 		s.generation = randomID()
 		w.Header().Set("ETag", `"`+version+`"`)
+		// Drop the reservation before releasing the commit lock; the snapshot
+		// is now included in the on-disk quota scan for subsequent uploads.
+		s.reserved -= reservation
+		reservation = 0
+		unlock()
 		writeJSON(w, next)
 	default:
 		w.Header().Set("Allow", "GET, HEAD, PUT")
@@ -311,7 +357,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func main() {
 	showVersion := flag.Bool("version", false, "Print sync server version and protocol as JSON")
 	healthCheck := flag.String("health-check", "", "Verify a running local server matches this executable")
-	enroll := flag.String("enroll-stdio", "", "Create a device credential and return it as JSON over protected SSH stdout")
 	root := flag.String("data", "./sync-data", "Private storage directory")
 	listen := flag.String("listen", "127.0.0.1:8788", "Listen address; use an HTTPS reverse proxy such as Tailscale Serve")
 	budget := flag.Int64("max-storage", 256<<20, "Maximum vault storage bytes, including upload headroom")
@@ -348,21 +393,6 @@ func main() {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			log.Fatal(err)
 		}
-	}
-	if *enroll != "" {
-		if len(*enroll) > 128 || strings.ContainsAny(*enroll, "\r\n\x00") {
-			log.Fatal("invalid device name")
-		}
-		token := randomID() + randomID()
-		digest := sha256.Sum256([]byte(token))
-		id := hex.EncodeToString(digest[:])
-		b, _ := json.Marshal(map[string]string{"name": *enroll, "created": time.Now().UTC().Format(time.RFC3339)})
-		if err := atomicWrite(filepath.Join(*root, "devices", id+".json"), b); err != nil {
-			log.Fatal(err)
-		}
-		// Only the SSH provisioning helper consumes this output. Never log credentials.
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"token": token, "device_id": id})
-		return
 	}
 	if *add != "" {
 		if *credential == "" {

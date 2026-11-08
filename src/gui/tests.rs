@@ -59,35 +59,29 @@ fn unlocked() -> App {
 }
 
 #[test]
-fn external_lock_clears_displayed_secrets_drafts_and_generator() {
-    let mut app = unlocked();
-    let _ = app.complete(
-        Job::Status,
-        reply(ResponsePayload::Status(ServerStatus::new(true, None)), None),
-    );
-    assert!(app.session.is_none());
-    assert!(app.item.is_none());
-    assert!(app.draft.is_none());
-    assert!(app.master.is_empty());
-    assert!(app.generated.is_empty());
-    assert!(app.query.is_empty());
-}
-
-#[test]
-fn a_new_unlock_session_invalidates_the_previous_selection() {
-    let mut app = unlocked();
-    let session = "b".repeat(64);
-    let _ = app.complete(
-        Job::Status,
-        reply(
-            ResponsePayload::Status(ServerStatus::new(false, None)),
-            Some(&session),
-        ),
-    );
-    assert_eq!(app.session.as_deref(), Some(session.as_str()));
-    assert!(app.item.is_none());
-    assert!(app.draft.is_none());
-    assert!(app.generated.is_empty());
+fn session_changes_clear_displayed_secrets_drafts_and_generator() {
+    let new_session = "b".repeat(64);
+    for (label, locked, session) in [
+        ("external lock", true, None),
+        ("new unlock session", false, Some(new_session.as_str())),
+    ] {
+        let mut app = unlocked();
+        let _ = app.complete(
+            Job::Status,
+            reply(
+                ResponsePayload::Status(ServerStatus::new(locked, None)),
+                session,
+            ),
+        );
+        assert_eq!(app.session.as_deref(), session, "{label}");
+        assert!(app.item.is_none(), "{label}");
+        assert!(app.draft.is_none(), "{label}");
+        assert!(app.generated.is_empty(), "{label}");
+        if locked {
+            assert!(app.master.is_empty(), "{label}");
+            assert!(app.query.is_empty(), "{label}");
+        }
+    }
 }
 
 #[test]
@@ -123,8 +117,8 @@ fn ordinary_status_polling_preserves_an_unlock_form() {
 fn passive_polling_does_not_disable_inputs_or_swallow_edits() {
     let mut app = unlocked();
     let _ = app.status();
-    assert!(app.polling);
-    assert!(!app.busy);
+    assert!(app.polling());
+    assert!(!app.busy());
     let _ = app.update(Message::Name("Typed during a poll".into()));
     assert_eq!(app.draft.as_ref().unwrap().name, "Typed during a poll");
     assert!(app.draft.as_ref().unwrap().dirty);
@@ -201,7 +195,7 @@ fn recovered_operations_block_writes_after_reopening_the_gui() {
 fn revealing_expires_before_watch_refresh_and_focus_loss_hides_it_immediately() {
     let mut app = account_app(true);
     let _ = app.workflow(workflows::Event::Toggle(workflows::Toggle::WatchDuo, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let now = Instant::now();
     app.last_status = now;
     app.workspace.last_watch = now - Duration::from_secs(5);
@@ -218,7 +212,7 @@ fn revealing_expires_before_watch_refresh_and_focus_loss_hides_it_immediately() 
     assert!(app.generated_until.is_none());
     assert!(!app.show_generated);
     assert!(
-        app.polling,
+        app.polling(),
         "Duo watching should still refresh after expiry"
     );
     app.item = Some(item());
@@ -250,7 +244,7 @@ fn focus_loss_invalidates_a_reveal_that_has_not_returned_yet() {
         ))),
     ));
     assert!(app.item.as_ref().unwrap().password.is_none());
-    assert!(!app.busy);
+    assert!(!app.busy());
     assert!(app.reveal_until.is_none());
 }
 
@@ -356,7 +350,7 @@ fn choosing_a_key_fills_the_path_without_unlocking_and_cancel_preserves_input() 
     assert_eq!(app.key_path.expose(), "selected.key");
     assert!(app.master.is_empty());
     assert!(app.session.is_none());
-    assert!(!app.busy);
+    assert!(!app.busy());
 }
 
 #[test]
@@ -493,7 +487,7 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
             reply(payload, Some(&"a".repeat(64))),
         );
         assert!(
-            app.busy,
+            app.busy(),
             "controls must wait for the refreshed item revision"
         );
         let result = reply(
@@ -505,7 +499,7 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
             Job::List,
             Arc::new(Ok(result)),
         ));
-        assert!(!app.busy);
+        assert!(!app.busy());
         let next = app
             .workspace
             .prepare(workflows::Action::History, &app)
@@ -527,7 +521,7 @@ fn generation_uses_reloaded_defaults_without_overwriting_unsaved_settings() {
     assert_eq!(app.generated.len(), 24);
     assert!(!app.generated_stats.is_empty());
     assert!(
-        !app.busy,
+        !app.busy(),
         "external no-copy preference must prevent auto copying"
     );
     assert_eq!(app.settings.length, "40");
@@ -558,7 +552,7 @@ fn finish_editor_refresh(app: &mut App, mut updated: ItemDetail) {
     updated.password = None; // Management reads never reveal the primary secret.
     let _ = app.update(Message::Finished(
         app.serial,
-        Job::EditorList(updated.id),
+        Job::RefreshItem(updated.id, ItemIntent::Edit),
         Arc::new(Ok(reply(
             ResponsePayload::ItemPage(password_manager::vault::ItemPage {
                 items: vec![editor_summary(&updated)],
@@ -567,16 +561,16 @@ fn finish_editor_refresh(app: &mut App, mut updated: ItemDetail) {
             Some(&"a".repeat(64)),
         ))),
     ));
-    assert!(app.busy, "wait for the matching detail revision too");
+    assert!(app.busy(), "wait for the matching detail revision too");
     let _ = app.update(Message::Finished(
         app.serial,
-        Job::EditorItem(updated.id),
+        Job::OpenItem(updated.id, ItemIntent::Edit),
         Arc::new(Ok(reply(
             ResponsePayload::Item(updated),
             Some(&"a".repeat(64)),
         ))),
     ));
-    assert!(!app.busy);
+    assert!(!app.busy());
 }
 
 #[test]
@@ -660,7 +654,7 @@ fn authenticator_mutations_keep_the_editor_open_with_fresh_status_and_revision()
                 Some(&"a".repeat(64)),
             ),
         );
-        assert!(app.busy);
+        assert!(app.busy());
         assert!(
             app.draft.is_none(),
             "never edit using the previous revision during refresh"
@@ -695,14 +689,14 @@ fn save_and_continue_editing_preserves_edits_until_saved_and_reopens_the_current
     let mut app = editor_app();
     let _ = app.update(Message::Name("Updated credential".into()));
     let _ = app.update(Message::SaveAndEdit);
-    assert!(app.busy);
+    assert!(app.busy());
     assert_eq!(app.draft.as_ref().unwrap().name, "Updated credential");
     let _ = app.update(Message::Finished(
         app.serial,
         Job::SaveEditorDefaults,
         Arc::new(Ok(Reply::Configuration(Config::default()))),
     ));
-    assert!(app.busy);
+    assert!(app.busy());
     assert!(app.draft.as_ref().unwrap().dirty);
     let _ = app.update(Message::Finished(
         app.serial,
@@ -730,7 +724,7 @@ fn locking_during_editor_refresh_prevents_the_old_editor_from_reappearing() {
     let _ = app.update(Message::Lock);
     let _ = app.update(Message::Finished(
         old_serial,
-        Job::EditorItem(1),
+        Job::OpenItem(1, ItemIntent::Edit),
         Arc::new(Ok(reply(
             ResponsePayload::Item(item()),
             Some(&"a".repeat(64)),
@@ -774,7 +768,7 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
         Job::Item,
         reply(ResponsePayload::Item(selected), Some(&"a".repeat(64))),
     );
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     assert!(!app.workspace.watch_duo);
     assert!(app.workspace.duo_watch_target.is_none());
     let _ = app.update(Message::Finished(
@@ -795,7 +789,7 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
             app.serial, serial,
             "account navigation must not start repeated polling"
         );
-        assert!(!app.workspace.watch_duo && !app.polling);
+        assert!(!app.workspace.watch_duo && !app.polling());
     }
     app.workspace.code = "123".into();
     let _ = app.update(Message::Workflow(workflows::Event::Run(
@@ -865,7 +859,7 @@ fn returning_to_an_account_rebinds_requests_after_a_different_tools_selection() 
             .id,
         1
     );
-    assert!(app.polling && !app.workspace.watch_duo);
+    assert!(app.polling() && !app.workspace.watch_duo);
 }
 
 fn account_otp(counter: Option<u64>) -> ResponsePayload {
@@ -921,14 +915,14 @@ fn account_hotp_keeps_its_code_and_details_while_refreshing_for_repeated_actions
             Job::Workflow(workflows::Action::ShowOtp(false)),
             Arc::new(Ok(reply(account_otp(Some(counter)), Some(&"a".repeat(64))))),
         ));
-        assert!(app.busy && app.item.is_none());
+        assert!(app.busy() && app.item.is_none());
         assert!(app.workspace.otp_result_for(&app).is_some());
         let mut refreshed = item();
         refreshed.has_totp = true;
         refreshed.revision = 4 + counter;
         let _ = app.update(Message::Finished(
             app.serial,
-            Job::AccountList(1),
+            Job::RefreshItem(1, ItemIntent::View),
             Arc::new(Ok(reply(
                 ResponsePayload::ItemPage(password_manager::vault::ItemPage {
                     items: vec![editor_summary(&refreshed)],
@@ -939,13 +933,13 @@ fn account_hotp_keeps_its_code_and_details_while_refreshing_for_repeated_actions
         ));
         let _ = app.update(Message::Finished(
             app.serial,
-            Job::AccountItem(1),
+            Job::OpenItem(1, ItemIntent::View),
             Arc::new(Ok(reply(
                 ResponsePayload::Item(refreshed),
                 Some(&"a".repeat(64)),
             ))),
         ));
-        assert!(!app.busy && app.draft.is_none());
+        assert!(!app.busy() && app.draft.is_none());
         assert_eq!(app.item.as_ref().unwrap().id, 1);
         assert_eq!(
             app.workspace.otp_result_for(&app).unwrap().counter,
@@ -1030,7 +1024,7 @@ fn custom_field_reveal_only_shows_the_requested_secret_and_expires() {
     let (mut app, target) = field_account();
     app.item.as_mut().unwrap().fields[2].value = Some("previously shown".into());
     let _ = app.update(Message::RevealField(target));
-    assert!(app.revealing && app.busy);
+    assert!(app.revealing() && app.busy());
     assert!(app.item.as_ref().unwrap().password.is_none());
     assert!(app.item.as_ref().unwrap().fields[2].value.is_none());
     let _ = app.update(Message::Finished(
@@ -1095,7 +1089,7 @@ fn custom_field_copy_reloads_timeout_and_never_reveals_the_value() {
         Job::FieldCopyDefaults(target),
         Arc::new(Ok(Reply::Configuration(current))),
     ));
-    assert!(app.busy && app.serial > serial);
+    assert!(app.busy() && app.serial > serial);
     let (command, _) = app.custom_field_command(target, true).unwrap();
     assert!(matches!(
         command,
@@ -1161,7 +1155,7 @@ fn review_hiding_secrets_cancels_otp_preflights_before_dispatch() {
         let mut app = account_app(false);
         let _ = app.update(Message::Workflow(event));
         let preflight_serial = app.serial;
-        assert!(app.busy);
+        assert!(app.busy());
         let _ = app.update(Message::HideSecrets);
         let hidden_serial = app.serial;
         let _ = app.update(Message::Finished(
@@ -1172,7 +1166,7 @@ fn review_hiding_secrets_cancels_otp_preflights_before_dispatch() {
         assert!(!app.workspace.watch_otp);
         assert!(app.workspace.otp_watch_target.is_none());
         assert!(
-            !app.busy && !app.polling,
+            !app.busy() && !app.polling(),
             "a hidden preflight must not dispatch OTP work"
         );
         assert_eq!(app.serial, hidden_serial);
@@ -1276,7 +1270,7 @@ fn save_shortcut_routes_to_settings_and_preserves_the_item_draft() {
     app.tab = Tab::Settings;
     app.settings.edit(SettingsField::Length, "0".into());
     let _ = app.update(Message::Save);
-    assert!(!app.busy);
+    assert!(!app.busy());
     assert!(app.ui.notice_error);
     assert!(app.notice.contains("length"));
     assert!(app.draft.is_some());
@@ -1299,7 +1293,7 @@ fn weak_master_passwords_are_rejected_locally_without_clearing_the_form() {
     app.confirmation = app.master.clone();
     assert!(app.ui.master_error.is_some());
     let _ = app.update(Message::Create);
-    assert!(!app.busy);
+    assert!(!app.busy());
     assert!(app.ui.notice_error);
     assert_eq!(app.master.expose(), "aaaaaaaaaaaaaa");
     assert_eq!(app.confirmation, app.master);
@@ -1343,7 +1337,7 @@ fn gui_creation_opens_only_the_unambiguously_new_file() {
     ));
     assert_eq!(app.vault.as_deref(), Some("new.enc"));
     assert!(app.creation.is_none());
-    assert!(app.busy); // The exact-file unlock is queued; no test task is driven.
+    assert!(app.busy()); // The exact-file unlock is queued; no test task is driven.
 }
 
 #[test]
@@ -1363,7 +1357,7 @@ fn ambiguous_creation_discovery_never_guesses_which_vault_to_open() {
     ));
     assert!(app.creation.is_none());
     assert_eq!(app.serial, serial);
-    assert!(!app.busy);
+    assert!(!app.busy());
     assert!(app.notice.contains("Select"));
 }
 
@@ -1416,7 +1410,7 @@ fn username_copy_checks_timeout_and_the_selected_revision() {
         ))),
     ));
     assert_eq!(app.serial, serial); // No clipboard task for a stale revision.
-    assert!(!app.busy);
+    assert!(!app.busy());
 }
 
 #[test]
@@ -1517,11 +1511,11 @@ fn saved_edits_reopen_the_current_revision_without_clearing_filters() {
     assert!(app.ui.saved_item.is_none());
     assert_eq!(app.query, "query");
     assert_eq!(app.ui.kind, Some(ItemKind::Login));
-    assert!(app.busy);
+    assert!(app.busy());
     let mut updated = item();
     updated.revision += 1;
     let _ = app.complete(
-        Job::AccountList(updated.id),
+        Job::RefreshItem(updated.id, ItemIntent::View),
         reply(
             ResponsePayload::ItemPage(password_manager::vault::ItemPage {
                 items: vec![editor_summary(&updated)],
@@ -1531,7 +1525,7 @@ fn saved_edits_reopen_the_current_revision_without_clearing_filters() {
         ),
     );
     let _ = app.complete(
-        Job::AccountItem(updated.id),
+        Job::OpenItem(updated.id, ItemIntent::View),
         reply(
             ResponsePayload::Item(updated.clone()),
             Some(&"a".repeat(64)),
@@ -1567,7 +1561,7 @@ fn new_save_selects_only_a_unique_new_matching_item() {
             other.id = 3;
             rows.push(editor_summary(&other));
         }
-        app.busy = false;
+        app.request_state = RequestState::Idle;
         let _ = app.complete(
             Job::SavedList,
             reply(
@@ -1580,12 +1574,13 @@ fn new_save_selects_only_a_unique_new_matching_item() {
         );
         assert!(app.ui.saved_item.is_none());
         assert_eq!(
-            app.busy, !ambiguous,
+            app.busy(),
+            !ambiguous,
             "ambiguous additions must never be guessed"
         );
         if !ambiguous {
             let _ = app.complete(
-                Job::AccountItem(2),
+                Job::OpenItem(2, ItemIntent::View),
                 reply(ResponsePayload::Item(added), Some(&"a".repeat(64))),
             );
             assert_eq!(app.item.as_ref().unwrap().id, 2);
@@ -1649,7 +1644,7 @@ fn failed_restore_retains_undo_but_navigation_removes_it() {
     }
     let _ = app.complete(Job::Workflow(workflows::Action::RestoreTrash(1)), response);
     assert!(app.ui.undo_trash.is_some());
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     let _ = app.update(Message::Tab(Tab::Generator));
     assert!(app.ui.undo_trash.is_none());
     app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
@@ -1717,7 +1712,7 @@ fn cloud_revision_refresh_preserves_an_open_draft() {
     );
     assert_eq!(app.draft.as_ref().unwrap().name, "Unsaved local draft");
     assert!(app.notice.contains("draft is preserved"));
-    assert!(!app.busy);
+    assert!(!app.busy());
 }
 
 #[test]
@@ -1732,42 +1727,8 @@ fn cloud_revision_refresh_reloads_a_vault_without_an_editor() {
         Job::Status,
         reply(ResponsePayload::Status(status), Some(&session)),
     );
-    assert!(app.busy);
+    assert!(app.busy());
     assert!(app.item.is_none());
-}
-
-#[test]
-fn guided_sync_connection_preserves_other_unsaved_settings_and_lists_vaults() {
-    let mut app = app();
-    app.running = true;
-    app.settings.edit(SettingsField::Length, "31".into());
-    let mut conf = app.conf.clone();
-    conf.sync.server_url = "https://sync-server.example.ts.net:9443".into();
-    conf.sync.ssh_target = Some("user@server".into());
-    let _ = app.complete(
-        Job::CloudSetup,
-        Reply::CloudSetup {
-            conf,
-            message: "Server ready".into(),
-        },
-    );
-    assert_eq!(app.cloud_ssh, "user@server");
-    assert_eq!(app.settings.length, "31");
-    assert_eq!(
-        app.settings.sync_server,
-        "https://sync-server.example.ts.net:9443"
-    );
-    assert!(app.busy);
-}
-#[test]
-fn invalid_guided_sync_host_never_starts_an_operation() {
-    let mut app = app();
-    app.cloud_ssh = "-oProxyCommand=bad".into();
-    let _ = app.update(Message::SetupCloud(
-        password_manager::cloud::setup::Operation::Setup,
-    ));
-    assert!(!app.busy);
-    assert!(app.notice.contains("SSH hostname"));
 }
 
 #[test]
@@ -1831,7 +1792,7 @@ fn conflict_from_another_session_erases_draft_instead_of_reusing_it() {
 #[test]
 fn generator_transfer_preserves_draft_fields_and_works_without_clipboard() {
     let mut app = unlocked();
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.conf.clipboard.timeout = 0;
     app.tab = Tab::Generator;
     app.generated = "exact-generated-value".into();
@@ -1850,7 +1811,7 @@ fn generator_transfer_preserves_draft_fields_and_works_without_clipboard() {
 #[test]
 fn generated_transfer_never_reuses_expired_or_other_session_values() {
     let mut app = unlocked();
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.tab = Tab::Generator;
     let _ = app.update(Message::UseGenerated);
     app.clear_vault();
@@ -1862,7 +1823,7 @@ fn generated_transfer_never_reuses_expired_or_other_session_values() {
 #[test]
 fn window_close_requires_a_discard_decision_for_unsaved_work() {
     let mut app = unlocked();
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.draft.as_mut().unwrap().dirty = true;
     let id = iced::window::Id::unique();
     let _ = app.update(Message::CloseRequested(id));
@@ -1896,7 +1857,7 @@ fn saved_default_changes_do_not_retarget_the_active_vault() {
 #[test]
 fn connecting_requires_discard_even_when_reusing_the_same_port() {
     let mut app = unlocked();
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.draft.as_mut().unwrap().dirty = true;
     let port = app.client.port;
     let _ = app.update(Message::UseConnectionPort);

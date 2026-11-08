@@ -47,9 +47,6 @@ impl App {
     }
 
     pub(super) fn apply_configuration(&mut self, conf: Config) {
-        if self.cloud_ssh == self.conf.sync.ssh_target.clone().unwrap_or_default() {
-            self.cloud_ssh = conf.sync.ssh_target.clone().unwrap_or_default();
-        }
         let recovery_changed = self.running && conf.recovery != self.conf.recovery;
         self.settings.reload(&conf);
 
@@ -98,9 +95,7 @@ impl App {
         self.reviewed = false;
         self.warning = None;
         self.running = false;
-        self.polling = false;
-        self.revealing = false;
-        self.busy = false;
+        self.request_state = RequestState::Idle;
         self.select_created_vault = false;
         self.connect_after_discovery = false;
         self.client.port = port;
@@ -163,7 +158,7 @@ mod tests {
         app.workspace.watch_duo = true;
         app.select_created_vault = true;
         app.connect_after_discovery = true;
-        app.polling = true;
+        app.request_state = RequestState::Polling;
         let serial = app.serial;
         // Merely construct the Task. Do not execute an actual server request.
         app.connection_port = "8787".into();

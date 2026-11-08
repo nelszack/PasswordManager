@@ -102,7 +102,7 @@ fn navigation(app: &App) -> Element<'_, Message> {
     ] {
         let selected = app.tab == tab;
         tabs = tabs.push(
-            action(title, Message::Tab(tab), !app.busy)
+            action(title, Message::Tab(tab), !app.busy())
                 .selected(selected)
                 .padding(if app.compact() { [9, 10] } else { [11, 14] })
                 .style(move |theme: &Theme, status| {
@@ -163,7 +163,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
         action(
             "Shortcuts",
             Message::Disclosure(presentation::Disclosure::Shortcuts),
-            !app.busy
+            !app.busy()
         )
         .padding(if app.compact() { [9, 10] } else { [11, 14] }),
         action(
@@ -196,8 +196,8 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
                 )
                 .size(14),
                 row![
-                    primary("Keep editing", Message::KeepEditing, !app.busy).id("keep-editing"),
-                    action("Discard changes", Message::Discard, !app.busy)
+                    primary("Keep editing", Message::KeepEditing, !app.busy()).id("keep-editing"),
+                    action("Discard changes", Message::Discard, !app.busy())
                         .style(button_style::danger)
                 ]
                 .spacing(8)
@@ -211,13 +211,13 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
             text("Review the last change before continuing").size(17),
             text("The result of a previous change is uncertain. Inspect the vault before allowing new changes.").size(14),
             text(format!("Operation {id}")).size(14),
-            primary("Check last change", Message::Reconcile, !app.busy && app.running),
+            primary("Check last change", Message::Reconcile, !app.busy() && app.running),
         ].spacing(8);
         if app.reviewed {
             recovery = recovery.push(action(
                 "I inspected the vault; allow new changes",
                 Message::Acknowledge,
-                !app.busy,
+                !app.busy(),
             ));
         }
         chrome = chrome.push(scrollable(panel(recovery)).height(Length::Fixed(150.0)));
@@ -239,12 +239,12 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
                 action(
                     "Review requests",
                     Message::OpenToolItem(target.choice.id),
-                    !app.busy
+                    !app.busy()
                 ),
                 action(
                     "Stop watching",
                     Message::Workflow(workflows::Event::Toggle(workflows::Toggle::WatchDuo, false)),
-                    !app.busy
+                    !app.busy()
                 ),
             ]
             .spacing(8)
@@ -276,7 +276,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
         page = page.push(action(
             "Return to item draft",
             Message::Tab(Tab::Vault),
-            !app.busy,
+            !app.busy(),
         ));
     }
     page = page.push(feedback(app));
@@ -346,7 +346,7 @@ fn shortcuts() -> Element<'static, Message> {
 
 fn feedback(app: &App) -> Element<'_, Message> {
     let progress;
-    let message = if app.busy {
+    let message = if app.busy() {
         progress = format!(
             "{} · {}s elapsed",
             if app.ui.progress.is_empty() {
@@ -366,7 +366,7 @@ fn feedback(app: &App) -> Element<'_, Message> {
         &app.notice
     };
     let mut content = column![].spacing(3);
-    if app.busy {
+    if app.busy() {
         content = content.push(text("Operation in progress").size(14));
     }
     if app.ui.notice_error {
@@ -377,7 +377,7 @@ fn feedback(app: &App) -> Element<'_, Message> {
         container(crate::gui::widgets::keyboard_scrollable(
             content,
             "notice",
-            (!app.busy && !app.notice.is_empty()).then_some((message, app.ui.notice_error))
+            (!app.busy() && !app.notice.is_empty()).then_some((message, app.ui.notice_error))
         ))
         .width(Fill)
         .height(Fill)
@@ -395,11 +395,11 @@ fn feedback(app: &App) -> Element<'_, Message> {
         line = line.push(action(
             "Undo deletion",
             Message::UndoDelete,
-            !app.busy && app.pending.is_none(),
+            !app.busy() && app.pending.is_none(),
         ));
     }
     if !app.notice.is_empty() {
-        line = line.push(action("Dismiss", Message::DismissNotice, !app.busy));
+        line = line.push(action("Dismiss", Message::DismissNotice, !app.busy()));
     }
     container(line)
         .padding([4, 8])
@@ -424,12 +424,12 @@ fn connection_controls(app: &App) -> Column<'_, Message> {
         row![
             text_input("Port", &app.connection_port)
                 .padding(10)
-                .on_input_maybe((!app.busy).then_some(Message::ConnectionPort))
-                .on_submit_maybe((!app.busy && valid_port).then_some(Message::UseConnectionPort)),
+                .on_input_maybe((!app.busy()).then_some(Message::ConnectionPort))
+                .on_submit_maybe((!app.busy() && valid_port).then_some(Message::UseConnectionPort)),
             action(
                 "Connect",
                 Message::UseConnectionPort,
-                !app.busy && valid_port
+                !app.busy() && valid_port
             ),
         ]
         .spacing(10),
@@ -446,7 +446,7 @@ fn stopped(app: &App) -> Element<'_, Message> {
     let form = column![
         text("Connect to your vault").size(27),
         text("Start the local service to open your encrypted vault. The browser extension uses the same service.").size(15),
-        primary("Start local service", Message::Connect, !app.busy),
+        primary("Start local service", Message::Connect, !app.busy()),
         rule::horizontal(1),
         text("Connect to an existing service").size(18),
         connection_controls(app),
@@ -462,7 +462,7 @@ fn stopped(app: &App) -> Element<'_, Message> {
 }
 
 fn unlock(app: &App) -> Element<'_, Message> {
-    let enabled = !app.busy;
+    let enabled = !app.busy();
     if app.vaults.is_empty() && !app.creating {
         return container(container(scrollable(panel(column![
             text("Your passwords. Your vault.").size(28),
@@ -670,18 +670,17 @@ fn unlock(app: &App) -> Element<'_, Message> {
 fn vault(app: &App) -> Element<'_, Message> {
     let mut entries = Column::new().spacing(6);
     const PAGE_SIZE: usize = 50;
-    let mut matching: Vec<_> = app
-        .items
-        .iter()
-        .filter(|item| app.item_matches(item))
-        .collect();
-    if app.ui.reverse_items {
-        matching.reverse();
-    }
+    let matching = app.matching_items();
     let count = matching.len();
     let pages = count.div_ceil(PAGE_SIZE).max(1);
     let page = app.ui.item_page.min(pages - 1);
-    for item in matching.into_iter().skip(page * PAGE_SIZE).take(PAGE_SIZE) {
+    for offset in (page * PAGE_SIZE..count).take(PAGE_SIZE) {
+        let index = if app.ui.reverse_items {
+            count - 1 - offset
+        } else {
+            offset
+        };
+        let item = &app.items[matching[index]];
         let selected = app
             .item
             .as_ref()
@@ -707,7 +706,7 @@ fn vault(app: &App) -> Element<'_, Message> {
                     quiet_button
                 })
                 .on_press_maybe(
-                    (!app.busy).then_some(Message::Navigate(Navigate::Select(item.id))),
+                    (!app.busy()).then_some(Message::Navigate(Navigate::Select(item.id))),
                 ),
         );
     }
@@ -724,12 +723,12 @@ fn vault(app: &App) -> Element<'_, Message> {
             entries = entries.push(action(
                 "Clear search",
                 Message::Search(String::new()),
-                !app.busy,
+                !app.busy(),
             ));
             entries = entries.push(action(
                 "Show all types",
                 Message::FilterKind(None),
-                !app.busy,
+                !app.busy(),
             ));
         }
     }
@@ -795,7 +794,7 @@ fn vault(app: &App) -> Element<'_, Message> {
             action(
                 "Advanced search",
                 Message::OpenTools(workflows::Section::Search),
-                !app.busy
+                !app.busy()
             )
             .padding([7, 8]),
         ]
@@ -820,13 +819,13 @@ fn vault(app: &App) -> Element<'_, Message> {
                     action(
                         "Previous page",
                         Message::ItemPage(page.saturating_sub(1)),
-                        !app.busy && page > 0
+                        !app.busy() && page > 0
                     )
                     .padding([7, 8]),
                     action(
                         "Next page",
                         Message::ItemPage((page + 1).min(pages - 1)),
-                        !app.busy && page + 1 < pages
+                        !app.busy() && page + 1 < pages
                     )
                     .padding([7, 8])
                 ]
@@ -843,7 +842,7 @@ fn vault(app: &App) -> Element<'_, Message> {
                     action(
                         "Go",
                         Message::JumpItemPage,
-                        !app.busy && !app.ui.page_input.is_empty()
+                        !app.busy() && !app.ui.page_input.is_empty()
                     )
                     .padding([7, 8])
                 ]
@@ -854,7 +853,7 @@ fn vault(app: &App) -> Element<'_, Message> {
         sidebar = sidebar.push(action(
             "Refresh items",
             Message::Navigate(Navigate::Refresh),
-            !app.busy,
+            !app.busy(),
         ));
     }
     let detail = if let Some(draft) = &app.draft {
@@ -867,13 +866,13 @@ fn vault(app: &App) -> Element<'_, Message> {
                 text(if app.items.is_empty() { "Add your first item" } else { "Select an item" }).size(27),
                 text(if app.items.is_empty() { "Save a login, private note, card, or another secret. You can also import your passwords." } else { "Choose an item to copy its sign-in details, open a website, or make a change." }).size(16),
                 row![primary("Add item",Message::Navigate(Navigate::New),app.writes_allowed()),
-                    action("Import passwords",Message::OpenFileTool(workflows::FileOperation::Import),!app.busy)].spacing(10).wrap(),
+                    action("Import passwords",Message::OpenFileTool(workflows::FileOperation::Import),!app.busy())].spacing(10).wrap(),
             ].spacing(16)).width(Fill),
             panel(column![
                 text("Keep your vault in good shape").size(19),
                 text(format!("{} items · Encrypted on this device",app.items.len())).size(14),
-                row![action("Check vault health",Message::OpenTools(workflows::Section::Audit),!app.busy),
-                    action("Create a backup",Message::OpenFileTool(workflows::FileOperation::Backup),!app.busy)].spacing(10).wrap(),
+                row![action("Check vault health",Message::OpenTools(workflows::Section::Audit),!app.busy()),
+                    action("Create a backup",Message::OpenFileTool(workflows::FileOperation::Backup),!app.busy())].spacing(10).wrap(),
             ].spacing(12)).width(Fill),
         ].spacing(16).width(Fill).height(Fill).into()
     };
@@ -885,7 +884,7 @@ fn vault(app: &App) -> Element<'_, Message> {
                 action(
                     "Back to items",
                     Message::Navigate(Navigate::Close),
-                    !app.busy
+                    !app.busy()
                 ),
                 detail
             ]
@@ -925,7 +924,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
             .push(text("Move this item to encrypted trash?"))
             .push(
                 row![
-                    action("Cancel", Message::CancelDelete, !app.busy).id("cancel-delete"),
+                    action("Cancel", Message::CancelDelete, !app.busy()).id("cancel-delete"),
                     action(
                         "Move to trash",
                         Message::ConfirmDelete,
@@ -990,7 +989,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                             "Reveal for 15 seconds"
                         },
                         Message::Reveal,
-                        !app.busy && item.has_secret
+                        !app.busy() && item.has_secret
                     ),
                 ]
                 .spacing(10)
@@ -1015,7 +1014,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                     action(
                         "Open website",
                         Message::OpenWebsite(index),
-                        !app.busy && website::address(url).is_ok()
+                        !app.busy() && website::address(url).is_ok()
                     ),
                 ]
                 .spacing(10)
@@ -1051,7 +1050,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                     } else {
                         Message::RevealField(target)
                     },
-                    !app.busy,
+                    !app.busy(),
                 ));
             }
             controls = controls.push(action(
@@ -1081,7 +1080,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
             action(
                 "Password history",
                 Message::OpenItemTools(item.id),
-                !app.busy
+                !app.busy()
             ),
             action("Move to trash…", Message::Delete, app.writes_allowed()).style(quiet_danger),
         ]
@@ -1122,7 +1121,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
 }
 
 fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
-    let enabled = !app.busy;
+    let enabled = !app.busy();
     let profile = model::profile(draft.kind);
     let mut name = column![
         label("Name (required)"),
@@ -1548,7 +1547,7 @@ fn generator(app: &App) -> Element<'_, Message> {
         "Generation preferences & strength checker",
         app.ui.generator_advanced,
         presentation::Disclosure::Generator,
-        !app.busy,
+        !app.busy(),
     ));
     if app.ui.generator_advanced {
         if !app.passphrase && app.generator.symbols {
@@ -1598,7 +1597,7 @@ fn generator(app: &App) -> Element<'_, Message> {
             .push(action(
                 "Check strength",
                 Message::Generator(Event::Evaluate),
-                !app.busy && !app.generator.check.is_empty(),
+                !app.busy() && !app.generator.check.is_empty(),
             ));
         if !app.generator.assessment.is_empty() {
             form = form.push(text(&app.generator.assessment).size(14));
@@ -1616,7 +1615,7 @@ fn generator(app: &App) -> Element<'_, Message> {
                 "Generate another"
             },
             Message::Generate,
-            !app.busy
+            !app.busy()
                 && policy.is_ok()
                 && app
                     .generator
@@ -1634,15 +1633,15 @@ fn generator(app: &App) -> Element<'_, Message> {
     ]
     .spacing(14);
     if app.ui.transfer_generated && !app.generated.is_empty() {
-        body = body.push(panel(column![text(if app.draft.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.session.is_some() && !app.busy), action("Keep current draft", Message::CancelGenerated, !app.busy)].spacing(8).wrap()].spacing(10)));
+        body = body.push(panel(column![text(if app.draft.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.session.is_some() && !app.busy()), action("Keep current draft", Message::CancelGenerated, !app.busy())].spacing(8).wrap()].spacing(10)));
     }
     if !app.generated.is_empty() {
         body = body.push(panel(column![
             text("Your generated secret").size(18),
             text_input("Generated value", app.generated.expose()).secure(!app.show_generated).padding(12),
-            row![primary("Copy", Message::CopyGenerated, !app.busy && app.generator.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
+            row![primary("Copy", Message::CopyGenerated, !app.busy() && app.generator.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
                 checkbox(app.show_generated).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
-            action(if app.draft.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy && app.session.is_some()),
+            action(if app.draft.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy() && app.session.is_some()),
             text(if app.session.is_none() { "Unlock a vault to save this value directly into an item." } else { "Transfer directly to an item without using the clipboard." }).size(14),
             text("Cleared from this screen after 60 seconds. Stored only when you save it in an item.").size(14),
         ].spacing(12)));
@@ -1681,7 +1680,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                 .accessibility_label(name)
                 .padding(12)
                 .on_input_maybe(
-                    (!app.busy).then_some(move |value| Message::SettingChanged(field, value))
+                    (!app.busy()).then_some(move |value| Message::SettingChanged(field, value))
                 )
         ]
         .spacing(6);
@@ -1796,7 +1795,7 @@ fn settings(app: &App) -> Element<'_, Message> {
             .push(action(
                 "Vault credentials & security tools",
                 Message::OpenTools(workflows::Section::Security),
-                !app.busy,
+                !app.busy(),
             ))
         }
         SettingsSection::Recovery => form
@@ -1814,12 +1813,12 @@ fn settings(app: &App) -> Element<'_, Message> {
             .push(action(
                 "Open deleted items",
                 Message::OpenTools(workflows::Section::Trash),
-                !app.busy,
+                !app.busy(),
             ))
             .push(action(
                 "Create encrypted backup",
                 Message::OpenFileTool(workflows::FileOperation::Backup),
-                !app.busy,
+                !app.busy(),
             )),
         SettingsSection::Connection => {
             form = form.push(text(if app.running { "The local service is running. It keeps your vault available to the CLI and browser extension when this window closes." } else { "The local service is stopped." }).size(15));
@@ -1828,18 +1827,22 @@ fn settings(app: &App) -> Element<'_, Message> {
                     action(
                         "Stop local service…",
                         Message::ConfirmStop(true),
-                        !app.busy && app.pending.is_none(),
+                        !app.busy() && app.pending.is_none(),
                     )
                     .style(button_style::danger),
                 )
             } else {
-                form.push(primary("Start local service", Message::Connect, !app.busy))
+                form.push(primary(
+                    "Start local service",
+                    Message::Connect,
+                    !app.busy(),
+                ))
             };
             if app.ui.confirm_stop {
                 form = form.push(panel(column![
                     text("Stop the local service?").size(18),
                     text("This locks the vault, discards any open item draft, and disconnects the browser extension and CLI until you start it again.").size(14),
-                    row![primary("Keep running", Message::ConfirmStop(false), !app.busy), action("Stop service", Message::Stop, !app.busy && app.pending.is_none()).style(button_style::danger)].spacing(8).wrap(),
+                    row![primary("Keep running", Message::ConfirmStop(false), !app.busy()), action("Stop service", Message::Stop, !app.busy() && app.pending.is_none()).style(button_style::danger)].spacing(8).wrap(),
                 ].spacing(12)));
             }
             form.push(cloud_settings(app))
@@ -1854,7 +1857,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                 .push(action(
                     "Browser integration",
                     Message::OpenTools(workflows::Section::Browser),
-                    !app.busy,
+                    !app.busy(),
                 ))
         }
     };
@@ -1883,8 +1886,8 @@ fn settings(app: &App) -> Element<'_, Message> {
             .push(text("Reset all settings, including appearance, to their defaults?").size(15))
             .push(
                 row![
-                    primary("Keep settings", Message::CancelResetSettings, !app.busy),
-                    action("Reset settings", Message::ConfirmResetSettings, !app.busy)
+                    primary("Keep settings", Message::CancelResetSettings, !app.busy()),
+                    action("Reset settings", Message::ConfirmResetSettings, !app.busy())
                         .style(button_style::danger)
                 ]
                 .spacing(8)
@@ -1896,9 +1899,9 @@ fn settings(app: &App) -> Element<'_, Message> {
                 primary(
                     "Save settings",
                     Message::SaveSettings,
-                    !app.busy && app.settings.is_dirty() && app.settings.changes().is_ok()
+                    !app.busy() && app.settings.is_dirty() && app.settings.changes().is_ok()
                 ),
-                action("Reset to defaults…", Message::ResetSettings, !app.busy)
+                action("Reset to defaults…", Message::ResetSettings, !app.busy())
             ]
             .spacing(8)
             .wrap(),
@@ -1922,7 +1925,7 @@ fn settings(app: &App) -> Element<'_, Message> {
             .placeholder("Settings category")
             .width(Fill)
             .padding(10),
-            action("Refresh", Message::ReloadSettings, !app.busy),
+            action("Refresh", Message::ReloadSettings, !app.busy()),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -1949,25 +1952,16 @@ fn settings(app: &App) -> Element<'_, Message> {
 
 fn cloud_settings(app: &App) -> Element<'_, Message> {
     use password_manager::cloud::Action;
-    let ready = !app.busy && app.running;
-    use password_manager::cloud::setup::Operation;
-    let host_valid = password_manager::cloud::setup::validate_ssh_target(&app.cloud_ssh).is_ok();
-    let mut form=column![
+    let ready = !app.busy() && app.running;
+    let mut form = column![
         text("Cloud sync").size(22),
-        text("Set up a server once, then enable sync for each vault you want on your devices.").size(14),
-        label("Server SSH address"),
-        text_input("user@server",&app.cloud_ssh).padding(12)
-            .on_input_maybe((!app.busy).then_some(Message::CloudSsh)),
-        text("This device's name is taken from Tailscale automatically.").size(14),
-        row![
-            primary("Set up server",Message::SetupCloud(Operation::Setup),!app.busy && host_valid),
-            action("Connect to existing server",Message::SetupCloud(Operation::Connect),!app.busy && host_valid),
-            action("Update server",Message::SetupCloud(Operation::Update),!app.busy && host_valid && app.conf.sync.ssh_target.is_some()),
-        ].spacing(8).wrap(),
-        text("Uses your SSH key or agent. Setup installs the server and connects this device automatically; existing services are preserved.").size(14),
-        checkbox(app.settings.sync_automatic).label("Automatically synchronize enabled vaults")
-            .on_toggle(|value|Message::SettingToggled(SettingsToggle::SyncAutomatic,value)),
-    ].spacing(12);
+        text("Connect to a separately installed sync server, then enable sync for each vault.")
+            .size(14),
+        checkbox(app.settings.sync_automatic)
+            .label("Automatically synchronize enabled vaults")
+            .on_toggle(|value| Message::SettingToggled(SettingsToggle::SyncAutomatic, value)),
+    ]
+    .spacing(12);
     if !app.conf.sync.server_url.is_empty() {
         form = form.push(text(format!("Server: {}", app.conf.sync.server_url)).size(14));
     }
@@ -2024,50 +2018,35 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .wrap(),
     );
-    form = form.push(action(
-        if app.cloud_advanced {
-            "Hide manual connection options"
-        } else {
-            "Manual connection options"
-        },
-        Message::CloudAdvanced,
-        !app.busy,
-    ));
-    if app.cloud_advanced {
-        form = form.push(label("Device name override (optional)")).push(
-            text_input("Use this device's Tailscale name", &app.cloud_device_name)
-                .padding(12)
-                .on_input_maybe((!app.busy).then_some(Message::CloudDeviceName)),
-        );
-        form =
-            form.push(label("Server URL (save settings after editing)"))
-                .push(
-                    text_input(
-                        "https://server.your-tailnet.ts.net:8443",
-                        &app.settings.sync_server,
-                    )
-                    .padding(12)
-                    .on_input_maybe((!app.busy).then_some(|value| {
-                        Message::SettingChanged(SettingsField::SyncServer, value)
-                    })),
-                )
-                .push(label("Device credential"))
-                .push(
-                    text_input(
-                        "Paste a server-generated credential",
-                        app.cloud_token.expose(),
-                    )
-                    .secure(true)
-                    .padding(12)
-                    .on_input_maybe(
-                        (!app.busy).then_some(|value: String| Message::CloudToken(value.into())),
-                    ),
-                )
-                .push(action(
-                    "Save device credential",
-                    Message::SaveCloudToken,
-                    !app.busy && !app.cloud_token.is_empty(),
-                ));
-    }
+    form = form
+        .push(label("Server URL (save settings after editing)"))
+        .push(
+            text_input(
+                "https://server.your-tailnet.ts.net:8443",
+                &app.settings.sync_server,
+            )
+            .padding(12)
+            .on_input_maybe(
+                (!app.busy())
+                    .then_some(|value| Message::SettingChanged(SettingsField::SyncServer, value)),
+            ),
+        )
+        .push(label("Device credential"))
+        .push(
+            text_input(
+                "Paste a server-generated credential",
+                app.cloud_token.expose(),
+            )
+            .secure(true)
+            .padding(12)
+            .on_input_maybe(
+                (!app.busy()).then_some(|value: String| Message::CloudToken(value.into())),
+            ),
+        )
+        .push(action(
+            "Save device credential",
+            Message::SaveCloudToken,
+            !app.busy() && !app.cloud_token.is_empty(),
+        ));
     panel(form).into()
 }

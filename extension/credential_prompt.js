@@ -89,7 +89,7 @@ document.getElementById("reviewOutcome").addEventListener("click", event => {
         const state = response.data.state;
         if (["committed", "failed"].includes(state)) window.close();
         else if (state === "committed_durability_unknown") { status.textContent = "Saved, but storage durability is uncertain. Inspect your storage before closing the vault."; document.getElementById("reviewOutcome").hidden = true; }
-        else status.textContent = state === "pending" ? "The save is still running. Check again shortly." : "The save outcome is unknown. Open the vault manager, inspect the vault, and acknowledge the unknown operation there.";
+        else status.textContent = state === "pending" ? "The save is still running. Check again shortly." : "The save outcome is unknown. Inspect the vault in the desktop app, then acknowledge the unknown operation in the extension popup.";
     }).catch(showError);
 });
 load().catch(showError);

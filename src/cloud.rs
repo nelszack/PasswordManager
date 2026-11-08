@@ -14,8 +14,6 @@ use std::{
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
-pub mod setup;
-
 pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteVault {
@@ -23,7 +21,7 @@ pub struct RemoteVault {
     pub version: String,
     pub size: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub server_url: String,
@@ -128,7 +126,6 @@ pub fn connect_with_token(
     current: crate::config::Config,
     url: &str,
     token: &str,
-    ssh_target: Option<String>,
     path: &Path,
 ) -> Result<crate::config::Config, String> {
     CloudClient::with_token(url, Zeroizing::new(token.trim().to_owned()))?.list()?;
@@ -144,7 +141,6 @@ pub fn connect_with_token(
             current,
             crate::config::ConfigChanges {
                 sync_server_url: Some(url.into()),
-                sync_ssh_target: ssh_target,
                 ..Default::default()
             },
             path,
@@ -190,13 +186,22 @@ impl CloudClient {
         {
             return Err("Invalid sync device credential".into());
         }
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(35))
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .map_err(|e| e.to_string())?;
+        // The transport holds no credentials: authorization is attached per
+        // request. Reuse pools while rereading tokens for every new CloudClient.
+        static HTTP: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+        let http = if let Some(http) = HTTP.get() {
+            http.clone()
+        } else {
+            let http = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(35))
+                .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let _ = HTTP.set(http);
+            HTTP.get().expect("transport initialized").clone()
+        };
         Ok(Self {
             url: url.trim_end_matches('/').into(),
             token: std::sync::Arc::new(token),

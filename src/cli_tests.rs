@@ -35,15 +35,6 @@ fn global_port_override_parses_and_rejects_zero() {
 }
 
 #[test]
-fn server_port_config_option_parses() {
-    let cli = Cli::try_parse_from(["pm", "config", "--server-port", "8989"]).unwrap();
-    let Some(CliCommands::Config(config)) = cli.command else {
-        panic!("expected config command");
-    };
-    assert_eq!(config.server_port, Some(8989));
-}
-
-#[test]
 fn test_get_selectors_parse_and_reject_vault_targets() {
     for (selector, value, expected_id, expected_name) in [
         ("--entry-name", "foo", None, Some("foo")),
@@ -573,63 +564,26 @@ fn push_cli_requires_selected_entry_and_bounded_polling() {
 }
 
 #[test]
-fn sync_setup_connect_update_and_automatic_vault_selection_parse() {
+fn sync_connect_requires_a_url_and_retired_deployment_commands_are_rejected() {
     for args in [
-        vec!["pm", "sync", "setup", "--ssh", "user@server"],
-        vec![
-            "pm",
-            "sync",
-            "connect",
-            "--ssh",
-            "user@server",
-            "--name",
-            "laptop",
-        ],
-        vec!["pm", "sync", "server", "update"],
-        vec![
-            "pm",
-            "sync",
-            "server",
-            "update",
-            "--ssh",
-            "sync-server",
-            "--binary",
-            "server",
-        ],
         vec!["pm", "sync", "pull"],
         vec![
             "pm",
             "sync",
             "connect",
-            "https://sync-server.example.ts.net",
+            "https://sync.example",
             "--token-file",
             "token",
         ],
     ] {
-        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+        assert!(Cli::try_parse_from(args).is_ok());
     }
-    assert!(Cli::try_parse_from(["pm", "sync", "connect"]).is_err());
-    assert!(
-        Cli::try_parse_from([
-            "pm",
-            "sync",
-            "connect",
-            "https://example.com",
-            "--ssh",
-            "sync-server"
-        ])
-        .is_err()
-    );
-    assert!(
-        Cli::try_parse_from([
-            "pm",
-            "sync",
-            "connect",
-            "--ssh",
-            "sync-server",
-            "--token-file",
-            "token"
-        ])
-        .is_err()
-    );
+    for args in [
+        vec!["pm", "sync", "connect"],
+        vec!["pm", "sync", "setup"],
+        vec!["pm", "sync", "server", "update"],
+        vec!["pm", "sync", "connect", "--ssh", "host"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }

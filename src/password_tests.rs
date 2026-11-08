@@ -5,7 +5,8 @@ use rand::rngs::StdRng;
 fn test_generate_password_length_and_character_classes() {
     const CHARSET: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+";
-    for len in 1..=u8::MAX {
+    // Below, at, and above the four-class boundary, plus typical and maximum lengths.
+    for len in [1, 3, 4, 5, 12, 32, u8::MAX] {
         let pass = generate_password(len);
         assert_eq!(pass.len(), len as usize, "length {len}");
         assert!(

@@ -66,25 +66,35 @@ function execute(name, context) {
     vm.runInNewContext(fs.readFileSync(filename, "utf8"), context, { filename });
 }
 
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+async function popupEnvironment(responses) {
+    const env = environment([
+        "statusDot", "statusText", "lockBtn", "output", "nativeHint", "recovery", "operation",
+        "reviewOperation", "unknownReview", "inspected", "acknowledgeOperation"
+    ], responses);
+    env.context.PasswordManagerPopupState = require("./popup_state.js");
+    execute("popup.js", env.context);
+    env.documentListeners.get("DOMContentLoaded")();
+    await settle();
+    return env;
+}
+
 test("popup runtime renders cached/live status and performs an explicit lock", async () => {
-    const env = environment(["statusDot", "statusText", "lockBtn", "output", "nativeHint"], {
+    const env = await popupEnvironment({
         pmStatus: { native: true, running: true, locked: true },
         getStatus: { native: true, running: true, locked: false },
         lockVault: { success: true, data: "Vault locked." }
     });
-    env.context.PasswordManagerPopupState = require("./popup_state.js");
-    execute("popup.js", env.context);
-    env.documentListeners.get("DOMContentLoaded")();
-    await new Promise(resolve => setImmediate(resolve));
     assert.equal(env.elements.statusText.innerText, "Vault unlocked");
     assert.equal(env.elements.lockBtn.disabled, false);
     await env.elements.lockBtn.dispatch("click");
     assert.equal(env.elements.output.innerText, "Vault locked.");
     env.runtimeListener()({ action: "statusChanged", status: { native: true } });
     assert.equal(env.elements.statusText.innerText, "Server not running");
-    assert.match(env.elements.nativeHint.textContent, /pm start/);
+    assert.match(env.elements.nativeHint.textContent, /desktop app/);
     env.runtimeListener()({ action: "statusChanged", status: { native: false } });
-    assert.match(env.elements.nativeHint.textContent, /setup/);
+    assert.match(env.elements.nativeHint.textContent, /integration settings/);
     env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: true } });
     assert.match(env.elements.nativeHint.textContent, /unlock/);
     env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: false } });
@@ -107,7 +117,7 @@ test("picker runtime discloses destinations and requires trusted, confirmed sele
         }, crossOrigin ? "?token=card-token" : "?token=picker-token");
         env.context.PasswordManagerPickerState = require("./picker_state.js");
         execute("picker.js", env.context);
-        await new Promise(resolve => setImmediate(resolve));
+        await settle();
         assert.equal(env.elements.title.textContent, crossOrigin ? "Choose payment card" : "Choose saved credentials");
         assert.equal(env.elements.destination.textContent, `Fill on: ${origin}`);
         assert.equal(env.elements.crossOriginWarning.hidden, !crossOrigin);
@@ -117,13 +127,13 @@ test("picker runtime discloses destinations and requires trusted, confirmed sele
         if (crossOrigin) {
             assert.match(env.elements.crossOriginText.textContent, /https:\/\/shop.example/);
             env.elements.items.children[0].dispatch("click", { isTrusted: true });
-            await new Promise(resolve => setImmediate(resolve));
+            await settle();
             assert.equal(env.messages.length, 1, "unconfirmed selection is ignored");
             assert.match(env.elements.status.textContent, /Confirm/);
             env.elements.confirmCrossOrigin.checked = true;
         }
         env.elements.items.children[0].dispatch("click", { isTrusted: true });
-        await new Promise(resolve => setImmediate(resolve));
+        await settle();
         assert.equal(env.messages.at(-1).id, item.id);
         if (crossOrigin) assert.equal(env.messages.at(-1).confirmCrossOrigin, true);
         assert.equal(env.context.closed, true);
@@ -145,11 +155,11 @@ test("credential prompt runtime renders metadata and submits only trusted action
         completeCredentialPrompt: { success: true }
     }, "?token=prompt-token");
     execute("credential_prompt.js", env.context);
-    await new Promise(resolve => setImmediate(resolve));
+    await settle();
     assert.equal(env.elements.credentials.hidden, false);
     assert.equal(env.elements.update.textContent, "Update Personal");
     env.elements.update.dispatch("click", { isTrusted: true });
-    await new Promise(resolve => setImmediate(resolve));
+    await settle();
     assert.equal(env.context.closed, true);
     assert.equal(env.messages.at(-1).selection.action, "update");
 });
@@ -160,15 +170,41 @@ test("credential prompt disables writes after an uncertain save and still allows
         completeCredentialPrompt: { success: false, error: "Save may still complete. Review the vault.", uncertain: true }
     };
     const env = environment(["credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "add", "update", "cancel"], responses, "?token=prompt-token");
-    execute("credential_prompt.js", env.context); await new Promise(resolve => setImmediate(resolve));
-    env.elements.credentials.dispatch("submit", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
+    execute("credential_prompt.js", env.context); await settle();
+    env.elements.credentials.dispatch("submit", { isTrusted: true }); await settle();
     assert.equal(env.elements.add.disabled, true);
     assert.equal(env.elements.update.disabled, true);
     assert.match(env.elements.status.textContent, /may still complete/);
-    env.elements.update.dispatch("click", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
+    env.elements.update.dispatch("click", { isTrusted: true }); await settle();
     assert.equal(env.messages.filter(message => message.action === "completeCredentialPrompt").length, 1);
     responses.completeCredentialPrompt = { success: true };
-    env.elements.cancel.dispatch("click", { isTrusted: true }); await new Promise(resolve => setImmediate(resolve));
+    env.elements.cancel.dispatch("click", { isTrusted: true }); await settle();
     assert.equal(env.messages.at(-1).selection.action, "cancel");
     assert.equal(env.context.closed, true);
+});
+
+test("popup requires a reviewed unknown outcome and explicit inspection without replaying a save", async () => {
+    const responses = {
+        getStatus: { native: true, running: true, locked: false, pendingOperations: [{ operationId: "save-one", action: "saveCredentials" }] },
+        reconcileOperation: { success: true, data: { operationId: "save-one", state: "pending" } },
+        acknowledgeUnknownOperation: { success: true }
+    };
+    const env = await popupEnvironment(responses);
+    env.elements.operation.value = "save-one";
+    await env.elements.reviewOperation.dispatch("click");
+    assert.equal(env.elements.unknownReview.hidden, true);
+    env.elements.inspected.checked = true;
+    await env.elements.acknowledgeOperation.dispatch("click");
+    assert.equal(env.messages.some(message => message.action === "acknowledgeUnknownOperation"), false);
+    responses.reconcileOperation.data.state = "unknown";
+    await env.elements.reviewOperation.dispatch("click");
+    assert.equal(env.elements.unknownReview.hidden, false);
+    assert.equal(env.elements.inspected.checked, false);
+    env.elements.inspected.checked = true;
+    await env.elements.inspected.dispatch("change", { target: env.elements.inspected });
+    responses.getStatus.pendingOperations = [];
+    await env.elements.acknowledgeOperation.dispatch("click");
+    assert.equal(env.elements.recovery.hidden, true);
+    assert.equal(env.messages.filter(message => message.action === "acknowledgeUnknownOperation").length, 1);
+    assert.equal(env.messages.some(message => ["saveCredentials", "updateCredentials"].includes(message.action)), false);
 });

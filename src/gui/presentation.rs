@@ -51,6 +51,7 @@ impl std::fmt::Display for ScaleChoice {
 }
 
 pub(super) struct State {
+    matching: std::cell::RefCell<Option<MatchingItems>>,
     pub progress: String,
     pub progress_started: Option<Instant>,
     pub page_input: String,
@@ -90,6 +91,7 @@ pub(super) struct SavedItem {
 impl Default for State {
     fn default() -> Self {
         Self {
+            matching: std::cell::RefCell::default(),
             progress: String::new(),
             progress_started: None,
             page_input: String::new(),
@@ -233,18 +235,52 @@ impl App {
             .collect()
     }
 
-    pub(super) fn item_matches(&self, item: &ItemSummary) -> bool {
-        self.ui.kind.is_none_or(|kind| kind == item.kind)
-            && (self.query.trim().is_empty()
-                || std::iter::once(item.name.as_str())
-                    .chain(item.username.as_deref())
-                    .chain(item.urls.iter().map(String::as_str))
-                    .any(|value| {
-                        value
-                            .to_lowercase()
-                            .contains(&self.query.trim().to_lowercase())
-                    }))
+    pub(super) fn replace_items(&mut self, items: Vec<ItemSummary>) {
+        self.ui.matching.get_mut().take();
+        self.items = items;
     }
+
+    pub(super) fn matching_items(&self) -> std::cell::Ref<'_, Vec<usize>> {
+        let mut cache = self.ui.matching.borrow_mut();
+        if cache.as_ref().is_none_or(|cached| {
+            cached.query.as_str() != self.query
+                || cached.kind != self.ui.kind
+                || cached.source_len != self.items.len()
+        }) {
+            let query = self.query.trim().to_lowercase();
+            let indices = self
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    (self.ui.kind.is_none_or(|kind| kind == item.kind)
+                        && (query.is_empty()
+                            || std::iter::once(item.name.as_str())
+                                .chain(item.username.as_deref())
+                                .chain(item.urls.iter().map(String::as_str))
+                                .any(|value| value.to_lowercase().contains(&query))))
+                    .then_some(index)
+                })
+                .collect();
+            *cache = Some(MatchingItems {
+                query: zeroize::Zeroizing::new(self.query.clone()),
+                kind: self.ui.kind,
+                source_len: self.items.len(),
+                indices,
+            });
+        }
+        drop(cache);
+        std::cell::Ref::map(self.ui.matching.borrow(), |cached| {
+            &cached.as_ref().unwrap().indices
+        })
+    }
+}
+
+struct MatchingItems {
+    query: zeroize::Zeroizing<String>,
+    kind: Option<ItemKind>,
+    source_len: usize,
+    indices: Vec<usize>,
 }
 
 fn surface_text(color: Color) -> Color {
@@ -284,6 +320,34 @@ pub(super) fn display_date(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_matches_follow_search_kind_refresh_and_lock() {
+        let mut app = crate::gui::tests::app();
+        let summary = |name: &str, kind| ItemSummary {
+            id: 1,
+            revision: 1,
+            name: name.into(),
+            username: None,
+            kind,
+            urls: vec!["https://école.example".into()],
+            has_totp: false,
+            has_duo: false,
+        };
+        app.replace_items(vec![summary("ÉCOLE", ItemKind::Login)]);
+        let _ = app.update(Message::Search(" École ".into()));
+        assert_eq!(&*app.matching_items(), &[0]);
+        let _ = app.update(Message::FilterKind(Some(ItemKind::Identity)));
+        assert!(app.matching_items().is_empty());
+        let _ = app.update(Message::FilterKind(None));
+        assert_eq!(&*app.matching_items(), &[0]);
+        app.replace_items(vec![summary("other", ItemKind::Identity)]);
+        let _ = app.update(Message::Search("other".into()));
+        assert_eq!(&*app.matching_items(), &[0]);
+        app.replace_items(vec![summary("different", ItemKind::Identity)]);
+        assert!(app.matching_items().is_empty());
+        app.clear_vault();
+        assert!(app.matching_items().is_empty());
+    }
     fn luminance(color: Color) -> f32 {
         let channel = |value: f32| {
             if value <= 0.04045 {

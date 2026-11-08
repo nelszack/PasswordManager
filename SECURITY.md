@@ -58,15 +58,13 @@ The extension derives site identity from browser sender metadata and requires
 site-scoped selection rather than trusting a domain supplied by page scripts.
 Browser selections carry the reviewed vault/unlock-session identifier and item
 revision, checked by the vault worker before secret retrieval or HOTP consumption.
-OTP retrieval also revalidates the destination origin. Manager item operations and
-save/update prompts require their original unlock session, so a missed lock/unlock
+OTP retrieval also revalidates the destination origin. Desktop edits and save/update prompts require their original unlock session, so a missed lock/unlock
 between status polls cannot redirect them into another vault. Automatic site and
 Duo lookups do not extend the inactivity timeout.
-Vault-management requests are separately restricted to the extension's manager
-page using the browser-provided extension ID and page URL. List responses contain
-summaries only; explicit reveal requests fetch one selected item. OTP seeds and
-Duo signing keys are never returned by vault-management reads. Management copying uses the server's
-clipboard worker and existing lock cleanup.
+The extension has no full management/editing API. Site selectors receive summaries
+and release only the explicitly selected, origin-bound item. OTP seeds and Duo
+signing keys are never returned. Popup recovery checks and acknowledgements verify
+the browser-provided extension ID and popup URL; save prompts can check outcomes.
 Native OTP responses carry structured code, lifetime and counter data rather
 than parsed terminal output. Secret and custom-field data responses preserve
 the stored bytes, including whitespace and empty values.
@@ -147,9 +145,9 @@ on the filesystem. Keep both credentials until the rekey succeeds durably, or
 verify which credential opens the file after an interrupted operation.
 
 Mutation IDs provide bounded duplicate suppression within the current daemon,
-and expected item revisions prevent stale manager edits. The daemon retains at
+and expected item revisions prevent stale edits. The daemon retains at
 most 256 operation results and does not persist these receipts across restarts.
-Unknown outcomes require explicit state inspection before the manager permits
+Unknown outcomes require explicit state inspection before the desktop or extension permits
 another change; pending operations cannot be dismissed as unknown. Reconnection
 and acknowledgement never replay the original write. Operation IDs do not
 provide exactly-once guarantees for external Duo actions or clipboard effects.

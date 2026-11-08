@@ -20,14 +20,14 @@ const PasswordManagerBackgroundRouter = {
                 sendResponse({ success: false, error: "Invalid extension request" }); return false;
             }
             if (request.action === "acknowledgeUnknownOperation") {
-                const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("manager.html"));
+                const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("popup.html"));
                 if (!trusted || request.inspected !== true || typeof request.operationId !== "string") { sendResponse({ success: false, error: "Invalid operation acknowledgement" }); return false; }
                 try { sendResponse(acknowledgeUnknown(request.operationId)); }
                 catch (error) { sendResponse({ success: false, error: error.message }); }
                 return false;
             }
             if (request.action === "reconcileOperation") {
-                const trusted = ["manager.html", "credential_prompt.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
+                const trusted = ["popup.html", "credential_prompt.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
                 if (!trusted || typeof request.operationId !== "string") { sendResponse({ success: false, error: "Invalid operation review" }); return false; }
                 reconcile(request.operationId).then(sendResponse).catch(error => sendResponse({ success: false, error: error.message }));
                 return true;
@@ -36,18 +36,6 @@ const PasswordManagerBackgroundRouter = {
             if (Object.hasOwn(duoActions, request.action)) {
                 duo[duoActions[request.action]](request, sender).then(sendResponse)
                     .catch(error => sendResponse({ success: false, error: error.message }));
-                return true;
-            }
-            if (typeof request.action === "string" && request.action.startsWith("manager")) {
-                const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("manager.html"));
-                const policy = contract.operations[request.action];
-                if (!trusted || !policy?.allowedSenders.includes("manager")) {
-                    sendResponse({ success: false, error: "Invalid vault management request" });
-                    return false;
-                }
-                const { action, ...fields } = request;
-                sendAction(action, fields, sendResponse, policy.mutates);
-
                 return true;
             }
             if (request.action === "openCredentialPrompt") {
@@ -110,8 +98,8 @@ const PasswordManagerBackgroundRouter = {
                 return true;
             }
             if (request.action === "lockVault") {
-                const trusted = ["popup.html", "manager.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
-                if (!trusted || !contract.operations.lock.allowedSenders.some(role => ["popup", "manager"].includes(role))) { sendResponse({ success: false, error: "Invalid lock request" }); return false; }
+                const trusted = ["popup.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
+                if (!trusted || !contract.operations.lock.allowedSenders.some(role => ["popup"].includes(role))) { sendResponse({ success: false, error: "Invalid lock request" }); return false; }
                 pickers.invalidate();
                 prompts.invalidate();
                 duo.invalidate();

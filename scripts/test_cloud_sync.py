@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import socket
-import shutil
 import subprocess
 import tempfile
 import time
@@ -112,61 +111,18 @@ def main():
             version = json.loads(subprocess.run([str(server_binary), "--version"], check=True, capture_output=True, text=True).stdout)
             assert version["protocol"] == 1
             subprocess.run([str(server_binary), "--health-check", url], check=True, capture_output=True)
-            # Use a sandboxed SSH executable to exercise the actual enrollment
-            # helper without making any remote connection or changing host services.
-            tools = root / "tools"
-            tools.mkdir()
-            for tool in ("systemctl", "tailscale", "ss"):
-                stub = tools / tool
-                stub.write_text("#!/bin/sh\nexit 0\n")
-                stub.chmod(0o700)
-            (tools / "tailscale").write_text("#!/bin/sh\nprintf '%s\\n' " + repr(json.dumps({"BackendState": "Running", "Self": {"DNSName": "desktop-renamed.test.ts.net.", "HostName": "old-os-name"}})) + "\n")
-            ssh = tools / "ssh"
-            ssh.write_text("#!/usr/bin/env python3\nimport os, sys\nenv=dict(os.environ, HOME=" + repr(str(remote_home)) + ")\nos.execve('/bin/sh', ['sh', '-c', sys.argv[-1]], env)\n")
-            ssh.chmod(0o700)
-            remote_bin = remote_home / ".local" / "bin"
-            remote_bin.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(server_binary, remote_bin / "pm-sync")
-            manifest = storage / "deployment.json"
-            manifest.write_text(json.dumps({"schema": 1, "listen_port": cloud_port, "https_port": 8443, "server_url": url}))
             laptop.run("sync", "connect", url, "--token-file", str(token))
-            desktop.env["PATH"] = str(tools) + os.pathsep + os.environ["PATH"]
-            result = desktop.run("sync", "connect", "--ssh", "test-host")
+            desktop.run("sync", "connect", url, "--token-file", str(token))
             local_token = desktop.root / "config" / "sync-token"
-            assert local_token.read_text() not in result.stdout + result.stderr
-            count = len(list((storage / "devices").glob("*.json")))
-            labels = [json.loads(path.read_text())["name"] for path in (storage / "devices").glob("*.json")]
-            assert "desktop-renamed" in labels and "old-os-name" not in labels
-            desktop.run("sync", "connect", "--ssh", "test-host")
-            assert len(list((storage / "devices").glob("*.json"))) == count
-            assert 'ssh_target = "test-host"' in (desktop.root / "config" / "config.toml").read_text()
-            # A failed replacement connection must revoke its new credential
-            # while preserving this device's working local connection.
             old_config = (desktop.root / "config" / "config.toml").read_bytes()
             old_token = local_token.read_bytes()
-            bad_manifest = {"schema": 1, "listen_port": cloud_port, "https_port": 8443, "server_url": f"http://127.0.0.1:{free_port()}"}
-            manifest.write_text(json.dumps(bad_manifest))
-            desktop.run("sync", "connect", "--ssh", "test-host", "--name", "Desktop's credentials", ok=False)
-            assert (desktop.root / "config" / "config.toml").read_bytes() == old_config
-            assert local_token.read_bytes() == old_token
-            assert len(list((storage / "devices").glob("*.json"))) == count
-            manifest.write_text(json.dumps({"schema": 1, "listen_port": cloud_port, "https_port": 8443, "server_url": url}))
-            print("PASS: Tailscale naming, SSH enrollment, saved host, credential reuse, and failed-connection recovery")
-            # Manual connections must also preserve a working connection on
-            # authentication/network failure, including the previous SSH host.
             invalid_token = root / "invalid-token"
             invalid_token.write_text("f" * 64 + "\n")
-            for destination, credential in [(url, invalid_token), (bad_manifest["server_url"], token)]:
+            for destination, credential in [(url, invalid_token), (f"http://127.0.0.1:{free_port()}", token)]:
                 desktop.run("sync", "connect", destination, "--token-file", str(credential), ok=False)
                 assert (desktop.root / "config" / "config.toml").read_bytes() == old_config
                 assert local_token.read_bytes() == old_token
-            # A successful change of origin must not retain the previous
-            # server's SSH update destination. This alias reaches the same test server.
-            desktop.run("sync", "connect", f"http://localhost:{cloud_port}", "--token-file", str(token))
-            assert "ssh_target" not in (desktop.root / "config" / "config.toml").read_text()
-            desktop.run("sync", "connect", "--ssh", "test-host")
-            assert 'ssh_target = "test-host"' in (desktop.root / "config" / "config.toml").read_text()
-            print("PASS: manual connection failures preserve credentials and changing servers clears the saved SSH destination")
+            print("PASS: manual connection failures preserve configuration and credentials")
             key = root / "external-test.key"
             laptop.run("new", "--key", str(key))
             laptop.run("unlock", "--key", str(key))

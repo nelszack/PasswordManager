@@ -124,10 +124,8 @@ pub enum ServerCommand {
     Unlock(UnlockInfo),
     Status,
     Cloud(crate::cloud::Action),
-    View(ListOptions),
     BrowserAutofill,
     BrowserAutofillItem(usize),
-    Search(SearchFilter),
     Add {
         entry: TypedEntry,
         copy_timeout: u8,
@@ -169,7 +167,7 @@ pub enum ServerCommand {
         name: String,
         copy_timeout: Option<u8>,
     },
-    ManagementList(SearchFilter),
+    List(SearchFilter),
     ManagementItem {
         id: usize,
         reveal: bool,
@@ -195,8 +193,6 @@ impl ServerCommand {
             self,
             Self::Status
                 | Self::Cloud(_)
-                | Self::View(_)
-                | Self::Search(_)
                 | Self::History(_)
                 | Self::Trash
                 | Self::Audit(_)
@@ -205,7 +201,7 @@ impl ServerCommand {
                 | Self::BrowserLogins(_)
                 | Self::BrowserLogin { .. }
                 | Self::BrowserDuoItems(_)
-                | Self::ManagementList(_)
+                | Self::List(_)
                 | Self::ManagementItem { .. }
                 | Self::GetSecret(_)
                 | Self::OperationStatus(_)

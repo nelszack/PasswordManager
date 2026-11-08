@@ -338,19 +338,22 @@ fn summaries_and_search_never_include_secret_fields_or_passwords() {
     );
     assert!(
         vault
-            .search(SearchFilter {
+            .management_list(SearchFilter {
                 query: Some("secret-token".into()),
                 ..Default::default()
             })
-            .is_err()
+            .unwrap()
+            .items
+            .is_empty()
     );
     assert_eq!(
         vault
-            .search(SearchFilter {
+            .management_list(SearchFilter {
                 query: Some("accounts.example.com".into()),
                 ..Default::default()
             })
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -368,23 +371,29 @@ fn list_filters_type_authenticator_age_and_sorting_from_complete_items() {
     vault.set_test_metadata(2, ItemKind::Identity, vec![], vec![]);
     vault.set_test_totp(1, SECRET);
     let views = vault
-        .view_entries(ListOptions {
-            kind: Some(ItemKind::Login),
-            has_totp: Some(true),
-            stale_days: Some(365),
+        .management_list(SearchFilter {
+            list: ListOptions {
+                kind: Some(ItemKind::Login),
+                has_totp: Some(true),
+                stale_days: Some(365),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(views.len(), 1);
-    assert_eq!(views[0].entry.id, 1);
+    assert_eq!(views.items.len(), 1);
+    assert_eq!(views.items[0].id, 1);
     let ordered = vault
-        .view_entries(ListOptions {
-            sort: SortField::Id,
-            descending: true,
+        .management_list(SearchFilter {
+            list: ListOptions {
+                sort: SortField::Id,
+                descending: true,
+                ..Default::default()
+            },
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(ordered[0].entry.id, 2);
+    assert_eq!(ordered.items[0].id, 2);
 }
 #[test]
 fn trash_retention_handles_canonical_dates_and_extreme_thresholds() {
@@ -571,6 +580,111 @@ fn import_preview_conflicts_and_same_batch_replacements_share_a_plan() {
     );
     assert_eq!((report.added, report.replaced), (1, 1));
     assert_eq!(vault.item(3).unwrap().entry.password, "two");
+}
+
+#[test]
+fn keep_both_imports_fill_suffix_gaps_and_keep_username_namespaces_independent() {
+    let mut vault = Vault::from_entries(
+        vec![
+            entry(1, "same", "original"),
+            entry(2, "same (imported 2)", "original"),
+            entry(3, "same (imported 4)", "original"),
+        ],
+        None,
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("duplicates.json");
+    let mut records = vec![json!({"name":"same", "username":"bob", "password":"other"})];
+    records.extend((0..128).map(|_| json!({"name":"same", "username":"alice", "password":"copy", "url":"https://example.com"})));
+    records.push(records[0].clone());
+    fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+    let import = |vault: &mut Vault, preview| {
+        vault
+            .import_with_options(
+                path.display().to_string(),
+                ConflictPolicy::KeepBoth,
+                preview,
+                10,
+                &mut VaultCredentials::default(),
+            )
+            .unwrap()
+    };
+    let preview = import(&mut vault, true);
+    let report = import(&mut vault, false);
+    assert_eq!(
+        (preview.added, preview.renamed),
+        (report.added, report.renamed)
+    );
+    assert_eq!((report.added, report.renamed), (130, 129));
+    assert_eq!(vault.item(5).unwrap().entry.name, "same (imported)");
+    assert_eq!(vault.item(6).unwrap().entry.name, "same (imported 3)");
+    assert_eq!(vault.item(7).unwrap().entry.name, "same (imported 5)");
+    assert_eq!(vault.item(133).unwrap().entry.name, "same (imported)");
+    assert_eq!(
+        vault.item(133).unwrap().entry.username.as_deref(),
+        Some("bob")
+    );
+}
+
+#[test]
+fn cached_strength_tracks_committed_passwords_and_is_not_persisted() {
+    let (_dir, mut vault, mut key) = persisted();
+    let before = persistence::encode_document(&vault.data, None).unwrap();
+    let weak = vault.item(1).unwrap().password_score();
+    assert!(weak <= zxcvbn::Score::Two);
+    assert_eq!(
+        *before,
+        *persistence::encode_document(&vault.data, None).unwrap()
+    );
+    let strong = "Zu7!kR9$xP2&vN5@qL8#";
+    persistence::with_write_fault(1, || {
+        assert!(
+            vault
+                .update_typed_entry_with_limit(update(1, strong), &mut key, 10)
+                .is_err()
+        );
+    });
+    assert_eq!(vault.item(1).unwrap().password_score(), weak);
+    vault
+        .update_typed_entry_with_limit(update(1, strong), &mut key, 10)
+        .unwrap();
+    assert!(vault.item(1).unwrap().password_score() > zxcvbn::Score::Two);
+    let reopened = reopen(&vault);
+    assert!(reopened.item(1).unwrap().strength.0.get().is_none());
+    assert!(reopened.item(1).unwrap().password_score() > zxcvbn::Score::Two);
+}
+
+#[test]
+fn normalized_search_preserves_unicode_and_combined_field_filters() {
+    let mut record = entry(1, "ÉCOLE", "private-password");
+    record.username = Some("ÜSER".into());
+    record.notes = Some("ÖFFENTLICH".into());
+    let mut vault = Vault::from_entries(vec![record], None);
+    vault
+        .item_mut(1)
+        .unwrap()
+        .metadata
+        .additional_urls
+        .push("https://other.example/École".into());
+    let filter = SearchFilter {
+        query: Some("école".into()),
+        name: Some("école".into()),
+        username: Some("üser".into()),
+        url: Some("OTHER.EXAMPLE/école".into()),
+        notes: Some("öffentlich".into()),
+        ..Default::default()
+    };
+    assert_eq!(vault.management_list(filter).unwrap().items.len(), 1);
+    assert!(
+        vault
+            .management_list(SearchFilter {
+                query: Some("private-password".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .is_empty()
+    );
 }
 #[test]
 fn invalid_import_and_validation_errors_leave_live_state_unchanged() {

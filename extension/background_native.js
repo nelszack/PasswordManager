@@ -16,7 +16,12 @@ const PasswordManagerBackgroundNative = {
         const ready = session ? new Promise(resolve => session.get(storageKey, stored => {
             if (chrome.runtime.lastError) restoreError = new Error("Could not restore operation recovery state");
             for (const record of Array.isArray(stored?.[storageKey]) ? stored[storageKey] : []) {
-                if (typeof record.operationId === "string" && contract.operations[record.action]?.mutates) unresolved.set(record.operationId, { operationId: record.operationId, action: record.action });
+                // Retired operations still need review after an extension upgrade.
+                // Restore identities only; never replay their old command payloads.
+                if (typeof record?.operationId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(record.operationId)
+                    && typeof record.action === "string" && /^[a-zA-Z][a-zA-Z0-9]{0,127}$/.test(record.action)) {
+                    unresolved.set(record.operationId, { operationId: record.operationId, action: record.action });
+                }
             }
             initialized = true; resolve();
         })) : Promise.resolve();

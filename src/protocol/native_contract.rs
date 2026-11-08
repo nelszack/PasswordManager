@@ -6,16 +6,8 @@ pub enum NativeAction {
     #[default]
     Status,
     Lock,
-    ManagerVaults,
-    ManagerUnlock,
-    ManagerList,
-    ManagerItem,
-    ManagerCopy,
-    ManagerAdd,
-    ManagerUpdate,
-    ManagerDelete,
-    ManagerDuoRequests,
-    ManagerDuoRespond,
+    DuoRequests,
+    DuoRespond,
     GetAutofillItems,
     GetLoginItems,
     GetDuoItems,
@@ -38,19 +30,11 @@ pub struct NativePolicy {
     pub result_shape: &'static str,
 }
 impl NativeAction {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 13] = [
         Self::Status,
         Self::Lock,
-        Self::ManagerVaults,
-        Self::ManagerUnlock,
-        Self::ManagerList,
-        Self::ManagerItem,
-        Self::ManagerCopy,
-        Self::ManagerAdd,
-        Self::ManagerUpdate,
-        Self::ManagerDelete,
-        Self::ManagerDuoRequests,
-        Self::ManagerDuoRespond,
+        Self::DuoRequests,
+        Self::DuoRespond,
         Self::GetAutofillItems,
         Self::GetLoginItems,
         Self::GetDuoItems,
@@ -65,16 +49,8 @@ impl NativeAction {
         match self {
             Self::Status => "status",
             Self::Lock => "lock",
-            Self::ManagerVaults => "managerVaults",
-            Self::ManagerUnlock => "managerUnlock",
-            Self::ManagerList => "managerList",
-            Self::ManagerItem => "managerItem",
-            Self::ManagerCopy => "managerCopy",
-            Self::ManagerAdd => "managerAdd",
-            Self::ManagerUpdate => "managerUpdate",
-            Self::ManagerDelete => "managerDelete",
-            Self::ManagerDuoRequests => "managerDuoRequests",
-            Self::ManagerDuoRespond => "managerDuoRespond",
+            Self::DuoRequests => "duoRequests",
+            Self::DuoRespond => "duoRespond",
             Self::GetAutofillItems => "getAutofillItems",
             Self::GetLoginItems => "getLoginItems",
             Self::GetDuoItems => "getDuoItems",
@@ -90,58 +66,27 @@ impl NativeAction {
         let mutates = matches!(
             self,
             Self::Lock
-                | Self::ManagerUnlock
-                | Self::ManagerCopy
-                | Self::ManagerAdd
-                | Self::ManagerUpdate
-                | Self::ManagerDelete
-                | Self::ManagerDuoRespond
+                | Self::DuoRespond
                 | Self::GetTotp
                 | Self::SaveCredentials
                 | Self::UpdateCredentials
         );
         let lane = match self {
             Self::Status | Self::Lock | Self::OperationStatus => "control",
-            Self::ManagerDuoRequests | Self::ManagerDuoRespond | Self::GetDuoItems => "duo",
+            Self::DuoRequests | Self::DuoRespond | Self::GetDuoItems => "duo",
             _ => "work",
         };
         let allowed_senders: &[&str] = match self {
-            Self::Lock => &["manager", "popup", "background"],
-            Self::OperationStatus => &["manager", "prompt", "background"],
-            Self::ManagerVaults
-            | Self::ManagerUnlock
-            | Self::ManagerList
-            | Self::ManagerItem
-            | Self::ManagerCopy
-            | Self::ManagerAdd
-            | Self::ManagerUpdate
-            | Self::ManagerDelete
-            | Self::ManagerDuoRequests
-            | Self::ManagerDuoRespond => &["manager", "background"],
+            Self::Lock => &["popup", "background"],
+            Self::OperationStatus => &["popup", "prompt", "background"],
             _ => &["background"],
         };
         let (required_fields, optional_fields, result_shape): (&[&str], &[&str], &str) = match self
         {
             Self::Status => (&[], &[], "status"),
             Self::Lock => (&[], &[], "message"),
-            Self::ManagerVaults => (&[], &[], "vaultArray"),
-            Self::ManagerUnlock => (&[], &["vaultFile", "password", "keyPath"], "message"),
-            Self::ManagerList => (&[], &["query", "offset", "limit"], "itemPage"),
-            Self::ManagerItem => (&["entryId", "expectedSession"], &["reveal"], "item"),
-            Self::ManagerCopy => (&["entryId", "expectedSession"], &[], "message"),
-            Self::ManagerAdd => (&["item", "expectedSession"], &[], "message"),
-            Self::ManagerUpdate => (
-                &["entryId", "expectedRevision", "expectedSession", "item"],
-                &[],
-                "message",
-            ),
-            Self::ManagerDelete => (
-                &["entryId", "expectedRevision", "expectedSession"],
-                &[],
-                "message",
-            ),
-            Self::ManagerDuoRequests => (&["entryId", "expectedSession"], &[], "duoArray"),
-            Self::ManagerDuoRespond => (
+            Self::DuoRequests => (&["entryId", "expectedSession"], &[], "duoArray"),
+            Self::DuoRespond => (
                 &[
                     "entryId",
                     "requestId",
@@ -194,7 +139,7 @@ impl NativeAction {
             required_fields,
             optional_fields,
             result_shape,
-            timeout_ms: if matches!(self, Self::ManagerDuoRequests | Self::ManagerDuoRespond) {
+            timeout_ms: if matches!(self, Self::DuoRequests | Self::DuoRespond) {
                 65_000
             } else {
                 15_000
@@ -245,10 +190,7 @@ pub fn browser_declarations() -> String {
         let result = match policy.result_shape {
             "message" => "string",
             "status" => "ServerStatus",
-            "vaultArray" => "string[]",
             "summaryArray" => "ItemSummary[]",
-            "itemPage" => "ItemPage",
-            "item" => "ItemDetail",
             "login" => "BrowserLogin",
             "autofill" => "AutofillItem",
             "authenticator" => "Authenticator",
@@ -274,9 +216,8 @@ pub fn browser_declarations() -> String {
 }
 fn typescript_field(field: &str) -> &'static str {
     match field {
-        "entryId" | "expectedRevision" | "offset" | "limit" => "number",
-        "approve" | "reveal" => "boolean",
-        "item" => "ManagementInput",
+        "entryId" | "expectedRevision" => "number",
+        "approve" => "boolean",
         _ => "string",
     }
 }

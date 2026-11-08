@@ -25,25 +25,6 @@
             && bounded(field.value, 65536) && typeof field.secret === "boolean"
             && Object.keys(field).every(key => ["name", "value", "secret"].includes(key));
     }
-    function validManagementInput(item) {
-        if (!object(item) || !bounded(item.name, 4096, true) || !item.name.trim()) return false;
-        const allowed = ["name", "username", "password", "kind", "urls", "notes", "fields", "removeFields", "removeUrls"];
-        if (Object.keys(item).some(key => !allowed.includes(key))) return false;
-        if (item.username != null && !bounded(item.username, 4096, true)) return false;
-        if (item.password != null && !bounded(item.password, 65536)) return false;
-        if (item.notes != null && !bounded(item.notes, 65536)) return false;
-        if (item.kind != null && !kinds.has(item.kind)) return false;
-        for (const key of ["urls", "removeUrls"]) {
-            if (item[key] != null && (!Array.isArray(item[key]) || item[key].length > 100 || !item[key].every(url => bounded(url, 2048, true)))) return false;
-        }
-        if (item.removeFields != null && (!Array.isArray(item.removeFields) || item.removeFields.length > 100 || !item.removeFields.every(name => bounded(name, 4096) && name.length > 0))) return false;
-        if (item.fields != null) {
-            if (!Array.isArray(item.fields) || item.fields.length > 100 || !item.fields.every(validField)) return false;
-            const names = item.fields.map(field => field.name.toLowerCase());
-            if (new Set(names).size !== names.length) return false;
-        }
-        return true;
-    }
     function validateRequest(action, fields = {}) {
         const policy = operations[action];
         if (!policy || !object(fields)) fail("Unsupported native operation");
@@ -57,16 +38,10 @@
                 case "expectedSession": valid = text(value) && /^[a-fA-F0-9]{64}$/.test(value); break;
                 case "entryId": valid = positive(value); break;
                 case "expectedRevision": valid = integer(value); break;
-                case "offset": valid = integer(value); break;
-                case "limit": valid = integer(value) && value >= 1 && value <= 50; break;
-                case "item": valid = validManagementInput(value); break;
-                case "reveal": case "approve": valid = typeof value === "boolean"; break;
+                case "approve": valid = typeof value === "boolean"; break;
                 case "domain": valid = bounded(value, 2048, true) && value.length > 0; break;
                 case "password": valid = bounded(value, 65536); break;
                 case "username": case "name": valid = bounded(value, 4096, true); break;
-                case "query": valid = bounded(value, 4096, true); break;
-                case "vaultFile": valid = bounded(value, 255, true) && /^[a-zA-Z0-9._-]+$/.test(value); break;
-                case "keyPath": valid = bounded(value, 4096, true) && value.length > 0; break;
                 case "requestId": valid = bounded(value, 256, true) && /^[a-zA-Z0-9_-]+$/.test(value); break;
                 case "fingerprint": valid = text(value) && /^[a-fA-F0-9]{128}$/.test(value); break;
                 case "verificationCode": valid = text(value) && /^\d{0,6}$/.test(value); break;
@@ -76,9 +51,7 @@
         }
         for (const key of policy.requiredFields) if (fields[key] === undefined || fields[key] === null) fail("Missing native request field");
         if (policy.mutates && !identifier(fields.operationId)) fail("Mutation requires an operation ID");
-        if (action === "managerUnlock" && !fields.password && !fields.keyPath) fail("Choose a master password or key path");
-        if (action === "managerUnlock" && fields.password && fields.keyPath) fail("Choose one unlock credential");
-        if (action === "managerDuoRespond" && !fields.approve && fields.verificationCode) fail("Denial cannot include a verification code");
+        if (action === "duoRespond" && !fields.approve && fields.verificationCode) fail("Denial cannot include a verification code");
         return fields;
     }
     function summary(item) {
@@ -89,12 +62,6 @@
     function receipt(value) {
         return object(value) && identifier(value.operationId) && outcomeStates.has(value.state)
             && (value.revision === null || integer(value.revision));
-    }
-    function detail(item) {
-        return summary(item) && nullableText(item.notes) && nullableText(item.password)
-            && typeof item.has_secret === "boolean" && text(item.created) && text(item.modified)
-            && Array.isArray(item.fields) && item.fields.every(field => object(field) && text(field.name)
-                && typeof field.secret === "boolean" && nullableText(field.value));
     }
     function authenticator(value) {
         return object(value) && text(value.code) && /^\d{6,8}$/.test(value.code)
@@ -116,10 +83,7 @@
         switch (policy.resultShape) {
             case "message": valid = text(data); break;
             case "status": valid = object(data) && typeof data.locked === "boolean" && text(data.version) && nullableText(data.warning); break;
-            case "vaultArray": valid = Array.isArray(data) && data.every(text); break;
             case "summaryArray": valid = Array.isArray(data) && data.every(summary); break;
-            case "itemPage": valid = object(data) && Array.isArray(data.items) && data.items.every(summary) && integer(data.total) && data.total >= data.items.length; break;
-            case "item": valid = detail(data); break;
             case "login": valid = object(data) && positive(data.id) && integer(data.revision) && text(data.name) && nullableText(data.username) && text(data.password) && typeof data.has_totp === "boolean"; break;
             case "autofill": valid = object(data) && positive(data.id) && integer(data.revision) && text(data.name) && kinds.has(data.kind) && nullableText(data.username) && text(data.primary_secret) && Array.isArray(data.custom_fields) && data.custom_fields.every(validField); break;
             case "authenticator": valid = authenticator(data); break;

@@ -24,7 +24,7 @@ function environment(options = {}) {
     const request = bridge.request;
     bridge.request = (action, fields = {}) => {
         const defaults = nativeFields(action);
-        return request(action, { ...defaults, ...fields, ...(fields.item ? { item: { ...defaults.item, ...fields.item } } : {}) });
+        return request(action, { ...defaults, ...fields });
     };
     function answer(port, index = -1, extra = {}) {
         const request = port.requests.at(index);
@@ -44,8 +44,8 @@ function environment(options = {}) {
 
 test("lock and status have a control host independent of ordinary work and Duo", async () => {
     const env = environment();
-    const save = env.bridge.request("managerUpdate", { item: { password: "synthetic" } });
-    const duo = env.bridge.request("managerDuoRequests");
+    const save = env.bridge.request("updateCredentials", { password: "synthetic" });
+    const duo = env.bridge.request("duoRequests");
     assert.equal(env.timers.get(2).ms, 65_000);
     const lock = env.bridge.request("lock");
     assert.equal(env.timers.get(3).ms, 15000);
@@ -61,8 +61,8 @@ test("lock and status have a control host independent of ordinary work and Duo",
 
 test("a queued mutation expires without ever reaching the native host", async () => {
     const env = environment();
-    const first = env.bridge.request("managerList");
-    const queued = env.bridge.request("managerDelete", { entryId: 1 });
+    const first = env.bridge.request("getLoginItems");
+    const queued = env.bridge.request("updateCredentials", { entryId: 1 });
     const rejected = assert.rejects(queued, error => !error.uncertain && /before it was sent/.test(error.message));
     env.expire(2); await rejected;
     assert.equal(env.ports[0].requests.length, 1);
@@ -73,13 +73,13 @@ test("a queued mutation expires without ever reaching the native host", async ()
 
 test("a timed-out sent mutation stays ordered before review and never resolves from a late reply", async () => {
     const env = environment();
-    const save = env.bridge.request("managerAdd");
+    const save = env.bridge.request("saveCredentials");
     const rejected = assert.rejects(save, error => error.uncertain && /may still complete/.test(error.message));
     env.expire(1); await rejected;
-    const review = env.bridge.request("managerList");
+    const review = env.bridge.request("getLoginItems");
     assert.equal(env.ports[0].requests.length, 1);
     env.answer(env.ports[0], 0);
-    assert.equal(env.ports[0].requests[1].action, "managerList");
+    assert.equal(env.ports[0].requests[1].action, "getLoginItems");
     // A duplicate old reply cannot settle the review.
     env.answer(env.ports[0], 0);
     assert.equal(env.timers.size, 1);
@@ -88,11 +88,11 @@ test("a timed-out sent mutation stays ordered before review and never resolves f
 });
 
 test("disconnect isolates item and Duo hosts and distinguishes sent mutations from queued work", async t => {
-    for (const action of ["saveCredentials", "managerDuoRequests"]) {
+    for (const action of ["saveCredentials", "duoRequests"]) {
         await t.test(action, async () => {
             const env = environment();
             const invalidations = action === "saveCredentials" ? 1 : 0;
-            const queuedAction = action === "managerDuoRequests" ? action : "managerList";
+            const queuedAction = action === "duoRequests" ? action : "getLoginItems";
             const active = env.bridge.request(action);
             const read = env.bridge.request(queuedAction);
             const status = env.bridge.request("status");
@@ -115,7 +115,7 @@ test("disconnect isolates item and Duo hosts and distinguishes sent mutations fr
 
 test("malformed and cross-channel replies cannot confirm a mutation", async () => {
     const env = environment();
-    const save = env.bridge.request("managerUpdate");
+    const save = env.bridge.request("updateCredentials");
     const status = env.bridge.request("status");
     const rejected = assert.rejects(save, error => error.uncertain && /Invalid native/.test(error.message));
     env.ports[0].receive({ id: env.ports[1].requests[0].id, success: true, data: {} });
@@ -126,7 +126,7 @@ test("malformed and cross-channel replies cannot confirm a mutation", async () =
 
 test("a lost native reply reports uncertainty even before the browser deadline", async () => {
     const env = environment();
-    const save = env.bridge.request("managerDelete");
+    const save = env.bridge.request("updateCredentials");
     env.answer(env.ports[0], 0, { success: false, error: "Reply lost", uncertain: true });
     assert.equal((await save).uncertain, true);
     assert.equal(env.bridge.unresolved().length, 1);
@@ -134,25 +134,25 @@ test("a lost native reply reports uncertainty even before the browser deadline",
 
 test("read timeouts and failures before sending are safe to retry", async () => {
     const env = environment();
-    const read = env.bridge.request("managerList");
+    const read = env.bridge.request("getLoginItems");
     const rejected = assert.rejects(read, error => !error.uncertain && /timed out/.test(error.message));
     env.expire(1); await rejected;
     env.ports[0].disconnect();
     env.failConnect("Host not installed");
-    await assert.rejects(env.bridge.request("managerAdd"), error => !error.uncertain && /not installed/.test(error.message));
+    await assert.rejects(env.bridge.request("saveCredentials"), error => !error.uncertain && /not installed/.test(error.message));
     env.failConnect(null); env.failPost("Port closed");
-    await assert.rejects(env.bridge.request("managerAdd"), error => !error.uncertain && /Port closed/.test(error.message));
+    await assert.rejects(env.bridge.request("saveCredentials"), error => !error.uncertain && /Port closed/.test(error.message));
     assert.equal(env.timers.size, 0);
 });
 
 test("native queues are bounded and request metadata cannot be overridden", async () => {
     const env = environment();
-    const active = env.bridge.request("managerList", { id: 999, action: "managerDelete" });
-    assert.equal(env.ports[0].requests[0].action, "managerList");
+    const active = env.bridge.request("getLoginItems", { id: 999, action: "updateCredentials" });
+    assert.equal(env.ports[0].requests[0].action, "getLoginItems");
     assert.equal(env.ports[0].requests[0].id, 1);
-    const queued = Array.from({ length: 32 }, () => env.bridge.request("managerList"));
+    const queued = Array.from({ length: 32 }, () => env.bridge.request("getLoginItems"));
     const rejections = queued.map(call => assert.rejects(call, /disconnected/));
-    await assert.rejects(env.bridge.request("managerAdd"), /Too many/);
+    await assert.rejects(env.bridge.request("saveCredentials"), /Too many/);
     const activeRejection = assert.rejects(active, /disconnected/);
     env.ports[0].disconnect();
     await Promise.all([activeRejection, ...rejections]);
@@ -161,23 +161,23 @@ test("native queues are bounded and request metadata cannot be overridden", asyn
 
 test("a silent live host is disconnected at a bounded recovery deadline without replaying its mutation", async () => {
     const env = environment();
-    const mutation = env.bridge.request("managerAdd", { item: { name: "Example" } });
+    const mutation = env.bridge.request("saveCredentials", { name: "Example" });
     const rejected = assert.rejects(mutation, error => error.uncertain && typeof error.operationId === "string");
     const operationId = env.ports[0].requests[0].operationId;
     env.expire(1); await rejected;
-    const queued = env.bridge.request("managerList");
+    const queued = env.bridge.request("getLoginItems");
     const queuedRejected = assert.rejects(queued, /recovery deadline/);
     env.expire(2); await queuedRejected;
     assert.equal(env.ports[0].requests.length, 1);
-    assert.deepEqual(env.bridge.unresolved(), [{ operationId, action: "managerAdd" }]);
+    assert.deepEqual(env.bridge.unresolved(), [{ operationId, action: "saveCredentials" }]);
     const review = env.bridge.reconcile(operationId);
     env.answer(env.ports[1], 0, { data: { state: "pending", operationId } });
     await review;
-    await assert.rejects(env.bridge.request("managerDelete", { entryId: 1 }), error => error.uncertain && error.operationId === operationId);
+    await assert.rejects(env.bridge.request("updateCredentials", { entryId: 1 }), error => error.uncertain && error.operationId === operationId);
     const finished = env.bridge.reconcile(operationId);
     env.answer(env.ports[1], 1, { data: { state: "committed", operationId, revision: 1 } });
     await finished;
-    const next = env.bridge.request("managerDelete", { entryId: 1 });
+    const next = env.bridge.request("updateCredentials", { entryId: 1 });
     assert.equal(env.ports.length, 3);
     env.answer(env.ports[2]); await next;
     assert.equal(env.bridge.unresolved().length, 0);
@@ -185,16 +185,16 @@ test("a silent live host is disconnected at a bounded recovery deadline without 
 
 test("idle native connections close without invalidating current decisions and reopen on demand", async () => {
     const env = environment({ idleTimeoutMs: 20_000 });
-    const read = env.bridge.request("managerList"); env.answer(env.ports[0]); await read;
+    const read = env.bridge.request("getLoginItems"); env.answer(env.ports[0]); await read;
     assert.equal(env.timers.get(2).ms, 20_000);
     env.expire(2);
     assert.equal(env.invalidations(), 0);
-    const next = env.bridge.request("managerList");
+    const next = env.bridge.request("getLoginItems");
     assert.equal(env.ports.length, 2); env.answer(env.ports[1]); await next;
 });
 
-test("worker restart retains only operation identities and requires reconciliation before another write", async () => {
-    const stored = { pmUnresolvedOperations: [{ operationId: "save-before-crash", action: "managerAdd" }] };
+test("worker restart preserves retired operation identities and requires review without replay", async () => {
+    const stored = { pmUnresolvedOperations: [null, { operationId: {}, action: "saveCredentials" }, { operationId: "invalid-action", action: "" }, { operationId: "save-before-crash", action: "managerUpdate", password: "must-not-persist" }] };
     const session = {
         get(key, callback) { callback({ [key]: structuredClone(stored[key]) }); },
         set(value, callback) { Object.assign(stored, structuredClone(value)); callback(); }
@@ -204,8 +204,9 @@ test("worker restart retains only operation identities and requires reconciliati
     const bridge = native.create({ chrome: { ...env.chrome, storage: { session } }, protocol,
         contract: require("./command_contract.js"), crypto: require("node:crypto").webcrypto,
         onDisconnect() {}, setTimeout, clearTimeout, idleTimeoutMs: 0 });
-    await assert.rejects(bridge.request("managerAdd", { item: { name: "Another" }, expectedSession: "a".repeat(64) }), /reconciled/);
+    await assert.rejects(bridge.request("saveCredentials", { ...nativeFields("saveCredentials"), name: "Another" }), /reconciled/);
     assert.equal(env.ports.length, 0);
+    assert.deepEqual(bridge.unresolved(), [{ operationId: "save-before-crash", action: "managerUpdate" }]);
     const review = bridge.reconcile("save-before-crash");
     const request = env.ports[0].requests[0];
     env.ports[0].receive({ id: request.id, protocolVersion: require("./command_contract.js").protocolVersion, success: true, data: { state: "failed", operationId: "save-before-crash", revision: null } });
@@ -226,7 +227,7 @@ test("a committed HOTP result with a full-width counter returns its code without
 
 test("unknown operation outcomes require an explicit acknowledgement and pending operations cannot be acknowledged", async () => {
     const env = environment();
-    const mutation = env.bridge.request("managerAdd", { item: { name: "Example" } });
+    const mutation = env.bridge.request("saveCredentials", { name: "Example" });
     const rejected = assert.rejects(mutation, error => error.uncertain);
     const operationId = env.ports[0].requests[0].operationId;
     env.expire(1); await rejected;

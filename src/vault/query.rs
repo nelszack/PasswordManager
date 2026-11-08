@@ -2,8 +2,7 @@ use super::*;
 impl Vault {
     fn is_weak(&self, entry: &VaultEntry) -> bool {
         !entry.password.is_empty()
-            && run_blocking_io(|| zxcvbn::zxcvbn(&entry.password, &[]).score())
-                <= zxcvbn::Score::Two
+            && self.item(entry.id).unwrap().password_score() <= zxcvbn::Score::Two
     }
     fn password_changed<'a>(&'a self, entry: &'a VaultEntry) -> &'a str {
         self.metadata(entry.id)
@@ -51,56 +50,46 @@ impl Vault {
         }
         entries
     }
-    fn entry_views<'a>(&'a self, entries: Vec<&'a VaultEntry>) -> Vec<EntryView<'a>> {
-        entries
-            .into_iter()
-            .filter_map(|e| self.view_id(e.id))
-            .collect()
-    }
-    pub fn view_entries(&self, options: ListOptions) -> Result<Vec<EntryView<'_>>, VaultError> {
-        let entries = self.apply_list_options(self.active_entries().collect(), &options);
-        if entries.is_empty() && self.active_entries().next().is_some() {
-            return Err(VaultError::NotFound("no matching entries".into()));
-        }
-        Ok(self.entry_views(entries))
-    }
     pub(super) fn search_entries(&self, filter: &SearchFilter) -> Vec<&VaultEntry> {
         fn contains(value: Option<&str>, needle: Option<&String>) -> bool {
-            needle
-                .is_none_or(|n| value.is_some_and(|v| v.to_lowercase().contains(&n.to_lowercase())))
+            needle.is_none_or(|n| value.is_some_and(|v| v.to_lowercase().contains(n)))
         }
-        self.active_entries()
-            .filter(|e| {
-                let m = self.metadata(e.id).unwrap();
-                let query = filter.query.as_ref().map(|q| q.to_lowercase());
+        let query = filter.query.as_ref().map(|q| q.to_lowercase());
+        let name = filter.name.as_ref().map(|q| q.to_lowercase());
+        let username = filter.username.as_ref().map(|q| q.to_lowercase());
+        let url = filter.url.as_ref().map(|q| q.to_lowercase());
+        let notes = filter
+            .notes
+            .as_ref()
+            .map(|q| Zeroizing::new(q.to_lowercase()));
+        self.active_items()
+            .filter(|item| {
+                let e = &item.entry;
+                let m = &item.metadata;
+                let urls = || {
+                    e.url
+                        .as_deref()
+                        .into_iter()
+                        .chain(m.additional_urls.iter().map(String::as_str))
+                };
                 query.as_ref().is_none_or(|q| {
                     e.name.to_lowercase().contains(q)
                         || contains(e.username.as_deref(), Some(q))
-                        || self.all_urls(e).any(|u| u.to_lowercase().contains(q))
+                        || urls().any(|u| u.to_lowercase().contains(q))
                         || contains(e.notes.as_ref().map(|s| s.as_str()), Some(q))
                         || m.custom_fields.iter().any(|f| {
                             f.name.to_lowercase().contains(q)
                                 || (!f.secret && f.value.to_lowercase().contains(q))
                         })
-                }) && contains(Some(&e.name), filter.name.as_ref())
-                    && contains(e.username.as_deref(), filter.username.as_ref())
-                    && filter.url.as_ref().is_none_or(|q| {
-                        self.all_urls(e)
-                            .any(|u| u.to_lowercase().contains(&q.to_lowercase()))
-                    })
-                    && contains(
-                        e.notes.as_ref().map(|s| s.as_str()),
-                        filter.notes.as_deref(),
-                    )
+                }) && contains(Some(&e.name), name.as_ref())
+                    && contains(e.username.as_deref(), username.as_ref())
+                    && url
+                        .as_ref()
+                        .is_none_or(|q| urls().any(|u| u.to_lowercase().contains(q)))
+                    && contains(e.notes.as_ref().map(|s| s.as_str()), notes.as_deref())
             })
+            .map(|item| &item.entry)
             .collect()
-    }
-    pub fn search(&self, filter: SearchFilter) -> Result<Vec<EntryView<'_>>, VaultError> {
-        let entries = self.apply_list_options(self.search_entries(&filter), &filter.list);
-        if entries.is_empty() {
-            return Err(VaultError::NotFound("no matching entries".into()));
-        }
-        Ok(self.entry_views(entries))
     }
     pub fn get_secret(&self, target: &Target) -> Result<Zeroizing<String>, VaultError> {
         let id = self

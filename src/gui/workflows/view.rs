@@ -127,7 +127,7 @@ fn credentials<'a>(state: &'a State, new: bool, enabled: bool) -> Column<'a, App
 }
 
 pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
-    let enabled = !app.busy;
+    let enabled = !app.busy();
     let mut form = column![].spacing(12);
     if let Some(prepared) = &state.prepared {
         form = form
@@ -182,13 +182,13 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             &state.duo_interval,
             Field::DuoInterval,
             false,
-            !app.busy,
+            !app.busy(),
         ))
         .push(toggle(
             "Show private desktop alerts for new Duo requests",
             state.notify_duo,
             Toggle::NotifyDuo,
-            !app.busy,
+            !app.busy(),
         ));
     if let Err(error) = state.duo_interval_seconds() {
         form = form.push(text(error).size(14));
@@ -211,7 +211,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             .iter()
             .any(|item| item.id == choice.id && item.has_duo)
     });
-    let unlocked = !app.busy && app.running && app.session.is_some() && enrolled;
+    let unlocked = !app.busy() && app.running && app.session.is_some() && enrolled;
     let writes = unlocked && app.pending.is_none() && state.prepared.is_none();
     let mut form = column![
         text("Duo Push requests").size(19),
@@ -245,7 +245,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
     }
     let Some(requests) = state.duo_requests_for(app) else {
         return form
-            .push(text(if app.polling || app.busy {
+            .push(text(if app.polling() || app.busy() {
                 "Fetching Push requests…"
             } else {
                 "Fetch requests to check for a pending login."
@@ -374,7 +374,7 @@ pub(super) fn account_authenticators<'a>(
             "OTP options",
             state.otp_options_open,
             Toggle::OtpOptions,
-            !app.busy,
+            !app.busy(),
         ));
         if state.otp_options_open {
             form = form
@@ -383,7 +383,7 @@ pub(super) fn account_authenticators<'a>(
                     &state.otp_copy_timeout,
                     Field::OtpCopyTimeout,
                     false,
-                    !app.busy,
+                    !app.busy(),
                 ))
                 .push(
                     text(
@@ -467,7 +467,7 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
 }
 
 pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
-    let enabled = !app.busy;
+    let enabled = !app.busy();
     let unlocked = enabled && app.running && app.session.is_some();
     let writes = unlocked && app.pending.is_none();
     let server_writes = enabled && app.running && app.pending.is_none();
@@ -648,7 +648,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
 }
 
 fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
-    let enabled = !app.busy;
+    let enabled = !app.busy();
     let writes = enabled && app.session.is_some() && app.pending.is_none();
     let result = state.result.as_ref().unwrap();
     let mut form = column![].spacing(14);
@@ -814,7 +814,7 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
                 195.0
             }))
             .style(crate::gui::view::quiet_button)
-            .on_press_maybe((!app.busy).then_some(event(value)))
+            .on_press_maybe((!app.busy()).then_some(event(value)))
     };
     let recovery = row![
         card(

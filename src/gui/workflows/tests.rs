@@ -287,7 +287,7 @@ fn history_confirmation_rechecks_the_reviewed_context_before_sending() {
             app.serial, serial,
             "stale restoration must not send a request"
         );
-        assert!(!app.busy);
+        assert!(!app.busy());
     }
 }
 
@@ -371,7 +371,7 @@ fn current_history_preserves_valid_password_restoration() {
     let serial = app.serial;
     let _ = app.execute_workflow(prepared);
     assert!(app.serial > serial);
-    assert!(app.busy);
+    assert!(app.busy());
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn confirmation_holds_the_reviewed_command_and_cannot_cross_sessions() {
     );
     app.session = Some("b".repeat(64));
     let _ = app.execute_workflow(prepared);
-    assert!(!app.busy);
+    assert!(!app.busy());
     assert!(app.notice.contains("session changed"));
 }
 
@@ -413,7 +413,7 @@ fn editing_inputs_cancels_the_pending_confirmation() {
     app.workspace.prepared = Some(app.workspace.prepare(Action::SetOtp, &app).unwrap());
     let _ = app.workflow(Event::Field(Field::Configuration, "second".into()));
     assert!(app.workspace.prepared.is_none());
-    assert!(!app.busy);
+    assert!(!app.busy());
 }
 
 #[test]
@@ -605,7 +605,7 @@ fn advanced_search_keeps_all_cli_filters_and_never_requests_secrets() {
     app.workspace.sort = SortField::Modified;
     app.workspace.descending = true;
     let prepared = app.workspace.prepare(Action::Search, &app).unwrap();
-    let ServerCommand::ManagementList(filter) = &prepared.command else {
+    let ServerCommand::List(filter) = &prepared.command else {
         panic!()
     };
     assert_eq!(filter.notes.as_ref().unwrap().expose(), "note text");
@@ -630,8 +630,8 @@ fn passive_watch_does_not_extend_unlock_or_starve_status_checks() {
     app.workspace.last_watch = now - Duration::from_secs(1);
     app.last_status = now - Duration::from_secs(2);
     let _ = app.update(super::super::Message::Tick(now));
-    assert!(app.polling);
-    assert!(!app.busy);
+    assert!(app.polling());
+    assert!(!app.busy());
 }
 
 #[test]
@@ -643,8 +643,8 @@ fn passive_watch_preserves_inputs_and_watch_target_when_selection_changes() {
     app.workspace.duo_watch_target = Some(WatchTarget::selected(&app).unwrap());
     let prepared = app.workspace.prepare(Action::Requests, &app).unwrap();
     let _ = app.execute_workflow(prepared);
-    assert!(app.polling);
-    assert!(!app.busy);
+    assert!(app.polling());
+    assert!(!app.busy());
     assert_eq!(app.workspace.code.expose(), "123");
     assert_eq!(app.workspace.password.expose(), "pending backup password");
     let serial = app.serial;
@@ -653,7 +653,7 @@ fn passive_watch_preserves_inputs_and_watch_target_when_selection_changes() {
         label: "Other".into(),
     }));
     assert!(app.serial > serial);
-    assert!(!app.polling);
+    assert!(!app.polling());
     assert!(app.workspace.watch_duo);
     assert_eq!(
         app.workspace.duo_watch_target.as_ref().unwrap().choice.id,
@@ -699,7 +699,7 @@ fn confirmation_cannot_discard_edits_started_on_another_tab() {
         ..Default::default()
     });
     let _ = app.execute_workflow(prepared);
-    assert!(!app.busy);
+    assert!(!app.busy());
     assert!(app.draft.as_ref().unwrap().dirty);
     assert!(app.notice.contains("Save or discard"));
 }
@@ -710,7 +710,7 @@ fn opening_tools_does_not_enable_duo_watching_or_fetch_requests() {
     let _ = app.update(super::super::Message::OpenItemTools(7));
     assert!(!app.workspace.watch_duo);
     assert!(app.workspace.duo_watch_target.is_none());
-    assert!(!app.polling && !app.busy);
+    assert!(!app.polling() && !app.busy());
 }
 
 #[test]
@@ -750,16 +750,16 @@ fn duo_polling_pauses_during_review_and_refreshes_after_a_decision() {
     app.workspace.last_watch = now - Duration::from_secs(5);
     app.last_status = now;
     let _ = app.update(super::super::Message::Tick(now));
-    assert!(!app.polling && !app.busy);
+    assert!(!app.polling() && !app.busy());
     let _ = app.workflow(Event::Confirm);
-    assert!(app.busy && !app.polling);
+    assert!(app.busy() && !app.polling());
     let reply = workflow_reply(&app, ResponsePayload::Message("Denied".into()));
     let _ = app.update(super::super::Message::Finished(
         app.serial,
         Job::Workflow(Action::Respond(0, false)),
         Arc::new(Ok(reply)),
     ));
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     assert!(app.workspace.duo_requests.is_none());
     assert!(app.workspace.prepared.is_none());
 }
@@ -770,7 +770,7 @@ fn duo_selection_and_section_changes_preserve_watch_but_hide_other_items_request
     app.workspace.section = Section::Security;
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
     let bound = app.workspace.duo_watch_target.clone().unwrap();
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     receive_duo(&mut app, vec![duo_request()]);
     let _ = app.workflow(Event::Section(Section::Recovery));
     assert!(app.workspace.watch_duo);
@@ -831,7 +831,7 @@ fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
     app.workspace.copy_watched_otp = true;
     app.workspace.otp_copy_timeout = "22".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     let passive = app.workspace.prepare(Action::WatchOtp, &app).unwrap();
     assert!(matches!(
         passive.command,
@@ -840,10 +840,10 @@ fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
             ..
         })
     ));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
     assert!(
-        app.busy && !app.polling,
+        app.busy() && !app.polling(),
         "a clipboard mutation must retain its completion"
     );
     let copied = app.workspace.prepare(Action::CopyWatchedOtp, &app).unwrap();
@@ -856,7 +856,7 @@ fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
     ));
     assert!(!copied.command.extends_unlock());
     assert!(copied.command.is_mutation());
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::CopyWatchedOtp, totp("123456"));
     let serial = app.serial;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
@@ -866,7 +866,7 @@ fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
     );
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("654321"));
     assert!(app.serial > serial);
-    assert!(app.busy && !app.polling);
+    assert!(app.busy() && !app.polling());
 }
 
 #[test]
@@ -875,9 +875,9 @@ fn otp_copy_refetch_at_a_code_boundary_becomes_the_previous_code() {
     app.workspace.copy_watched_otp = true;
     app.workspace.otp_copy_timeout = "10".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::CopyWatchedOtp, totp("654321"));
     let serial = app.serial;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("654321"));
@@ -891,10 +891,10 @@ fn watch_copy_cannot_start_with_zero_timeout_or_continue_after_focus_loss() {
     app.workspace.copy_watched_otp = true;
     app.workspace.otp_copy_timeout = "0".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    assert!(!app.workspace.watch_otp && !app.busy && !app.polling);
+    assert!(!app.workspace.watch_otp && !app.busy() && !app.polling());
     app.workspace.otp_copy_timeout = "10".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     app.workspace.hide_secrets();
     let serial = app.serial;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
@@ -937,7 +937,7 @@ fn duo_watch_interval_is_bounded_and_invalid_start_is_rejected() {
         let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
         assert!(!app.workspace.watch_duo);
         assert!(app.workspace.duo_watch_target.is_none());
-        assert!(!app.polling && !app.busy);
+        assert!(!app.polling() && !app.busy());
     }
 }
 
@@ -945,7 +945,7 @@ fn duo_watch_interval_is_bounded_and_invalid_start_is_rejected() {
 fn background_watch_uses_bound_target_and_pauses_for_confirmation() {
     let mut app = app();
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     app.workspace.duo_interval = "12".into();
     let now = Instant::now();
     app.workspace.selected = Some(Choice {
@@ -960,7 +960,7 @@ fn background_watch_uses_bound_target_and_pauses_for_confirmation() {
     assert_eq!(app.serial, serial);
     app.workspace.last_watch = now - Duration::from_secs(12);
     let _ = app.poll_tool_watches(now);
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     assert_eq!(
         app.workspace
             .duo_inflight_target
@@ -970,7 +970,7 @@ fn background_watch_uses_bound_target_and_pauses_for_confirmation() {
             .id,
         7
     );
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_duo_requests(ResponsePayload::DuoRequests(vec![duo_request()]));
     assert!(app.workspace.duo_requests_for(&app).is_none());
     app.workspace.selected = Some(Choice {
@@ -987,14 +987,14 @@ fn background_watch_uses_bound_target_and_pauses_for_confirmation() {
     let serial = app.serial;
     let _ = app.poll_tool_watches(now);
     assert_eq!(app.serial, serial);
-    assert!(!app.polling && !app.busy);
+    assert!(!app.polling() && !app.busy());
 }
 
 #[test]
 fn duo_cache_and_polling_reject_item_revision_and_session_changes() {
     let mut app = app();
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     receive_duo(&mut app, vec![duo_request()]);
     app.items[0].revision += 1;
     assert!(app.workspace.duo_requests_for(&app).is_none());
@@ -1007,7 +1007,7 @@ fn duo_cache_and_polling_reject_item_revision_and_session_changes() {
     assert!(!app.workspace.watch_duo);
     assert!(app.workspace.duo_requests.is_none());
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     app.session = Some("b".repeat(64));
     let _ = app.complete_duo_requests(ResponsePayload::DuoRequests(vec![duo_request()]));
     assert!(app.workspace.duo_requests.is_none());
@@ -1017,7 +1017,7 @@ fn duo_cache_and_polling_reject_item_revision_and_session_changes() {
 fn duo_response_cache_binds_to_inflight_item_and_never_current_selection() {
     let mut app = app();
     let _ = app.workflow(Event::Run(Action::Requests));
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.workspace.selected = Some(Choice {
         id: 8,
         label: "Other".into(),
@@ -1094,9 +1094,9 @@ fn automatic_copy_reloads_defaults_and_honors_external_disable() {
     let mut app = app();
     app.workspace.copy_watched_otp = true;
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
-    assert!(app.busy && !app.polling);
+    assert!(app.busy() && !app.polling());
     let serial = app.serial;
     let mut conf = app.conf.clone();
     conf.clipboard.timeout = 0;
@@ -1109,7 +1109,7 @@ fn automatic_copy_reloads_defaults_and_honors_external_disable() {
         app.serial, serial,
         "a disabled copy must never launch a mutation"
     );
-    assert!(!app.busy && !app.polling);
+    assert!(!app.busy() && !app.polling());
     assert!(app.workspace.watch_otp);
     assert!(!app.workspace.copy_watched_otp);
     assert!(app.notice.contains("timeout is zero"));
@@ -1120,7 +1120,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
     let mut app = app();
     app.workspace.copy_watched_otp = true;
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
     let mut conf = app.conf.clone();
     conf.clipboard.timeout = 44;
@@ -1129,7 +1129,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
         Job::WatchCopyDefaults,
         Arc::new(Ok(Reply::Configuration(conf.clone()))),
     ));
-    assert!(app.busy && !app.polling);
+    assert!(app.busy() && !app.polling());
     let prepared = app.workspace.prepare(Action::CopyWatchedOtp, &app).unwrap();
     assert!(matches!(
         prepared.command,
@@ -1140,7 +1140,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
     ));
     // Complete that mutation, observe another code, then leave the window during
     // its defaults preflight. The read may finish; the next copy must not start.
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::CopyWatchedOtp, totp("123456"));
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("654321"));
     let serial = app.serial;
@@ -1151,7 +1151,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
         Arc::new(Ok(Reply::Configuration(conf))),
     ));
     assert_eq!(app.serial, serial);
-    assert!(!app.busy && !app.polling && !app.workspace.watch_otp);
+    assert!(!app.busy() && !app.polling() && !app.workspace.watch_otp);
     assert!(app.workspace.result.is_none());
 }
 
@@ -1210,7 +1210,7 @@ fn pending_duo_request_stays_reviewable_across_refresh_ticks_and_status_checks()
             app.serial, serial,
             "automatic fetch must not replace a request under review"
         );
-        assert!(!app.busy && !app.polling);
+        assert!(!app.busy() && !app.polling());
         assert_eq!(
             app.workspace.duo_requests_for(&app).unwrap()[0].id,
             "request-1"
@@ -1220,7 +1220,7 @@ fn pending_duo_request_stays_reviewable_across_refresh_ticks_and_status_checks()
     // Pausing Duo refresh must not pause detection of vault locks or switches.
     app.last_status = now - Duration::from_secs(2);
     let _ = app.update(super::super::Message::Tick(now));
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     let reply = workflow_reply(
         &app,
         ResponsePayload::Status(password_manager::protocol::ServerStatus::new(false, None)),
@@ -1244,11 +1244,11 @@ fn pending_duo_request_stays_reviewable_across_refresh_ticks_and_status_checks()
 fn manual_duo_refresh_still_replaces_a_paused_review_and_resumes_monitoring() {
     let mut app = app();
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     receive_duo(&mut app, vec![duo_request()]);
     assert!(app.workspace.duo_review_pending(&app));
     let _ = app.workflow(Event::Run(Action::Requests));
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     let reply = workflow_reply(&app, ResponsePayload::DuoRequests(vec![]));
     let _ = app.update(super::super::Message::Finished(
         app.serial,
@@ -1261,14 +1261,14 @@ fn manual_duo_refresh_still_replaces_a_paused_review_and_resumes_monitoring() {
     app.last_status = now;
     app.workspace.last_watch = now - Duration::from_secs(5);
     let _ = app.update(super::super::Message::Tick(now));
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
 }
 
 #[test]
 fn expired_duo_request_resumes_fetching_without_extending_its_deadline() {
     let mut app = app();
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let mut expired = duo_request();
     expired.expires_at = 0;
     receive_duo(&mut app, vec![expired]);
@@ -1282,7 +1282,7 @@ fn expired_duo_request_resumes_fetching_without_extending_its_deadline() {
     app.last_status = now;
     app.workspace.last_watch = now - Duration::from_secs(5);
     let _ = app.update(super::super::Message::Tick(now));
-    assert!(app.polling && !app.busy);
+    assert!(app.polling() && !app.busy());
     assert_eq!(
         app.workspace.duo_requests.as_ref().unwrap()[0].expires_at,
         0
@@ -1293,7 +1293,7 @@ fn expired_duo_request_resumes_fetching_without_extending_its_deadline() {
 fn otp_watch_results_bind_to_the_prepared_account_even_if_selection_changes() {
     let mut app = app();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let mut other = app.items[0].clone();
     other.id = 8;
     app.items.push(other);
@@ -1313,7 +1313,7 @@ fn otp_watch_results_bind_to_the_prepared_account_even_if_selection_changes() {
             .id,
         7
     );
-    app.polling = false;
+    app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
     assert_eq!(
         app.workspace.otp_result_target.as_ref().unwrap().choice.id,

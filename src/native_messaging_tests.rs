@@ -2,30 +2,8 @@ use super::*;
 use proptest::prelude::*;
 use std::io::Cursor;
 
-#[test]
-fn management_edits_validate_fields_and_preserve_unmodified_secrets() {
-    let mut request: NativeRequest = serde_json::from_value(json!({ "id": 1, "action": "managerUpdate", "entryId": 4,
-        "item": { "name": "Example", "password": null, "urls": ["https://new.example"], "removeUrls": ["https://old.example"],
-            "fields": [{ "name": "environment", "value": "prod", "secret": false }] } })).unwrap();
-    let command = command_for_request(&mut request).unwrap();
-    let ServerCommand::Update(update) = command else {
-        panic!("expected update")
-    };
-    assert!(update.entry.password.is_none());
-    assert!(!update.clear_urls);
-    assert_eq!(
-        update.entry.update.url.as_deref(),
-        Some("https://new.example")
-    );
-    assert_eq!(update.remove_url, ["https://old.example"]);
-    let mut invalid: NativeRequest = serde_json::from_value(
-        json!({ "id": 1, "action": "managerAdd", "item": { "name": "", "password": "synthetic" } }),
-    )
-    .unwrap();
-    assert!(command_for_request(&mut invalid).is_err());
-    let mut invalid: NativeRequest = serde_json::from_value(json!({ "id": 1, "action": "managerAdd", "item": { "name": "Example", "fields": [
-        { "name": "same", "value": "synthetic", "secret": true }, { "name": "SAME", "value": "synthetic", "secret": false } ] } })).unwrap();
-    assert!(command_for_request(&mut invalid).is_err());
+fn read_json_frame(reader: &mut impl std::io::Read) -> Value {
+    serde_json::from_slice(&read_message(reader).unwrap().unwrap()).unwrap()
 }
 
 proptest! {
@@ -230,13 +208,12 @@ fn native_bridge_rejects_oversized_and_truncated_frames() {
     // Another frame remains usable after an oversized read result.
     write_message(&mut output, &NativeResponse::success(2, json!({"ok":true}))).unwrap();
     let mut frames = Cursor::new(output);
-    let fallback: Value =
-        serde_json::from_slice(&read_message(&mut frames).unwrap().unwrap()).unwrap();
+    let fallback = read_json_frame(&mut frames);
     assert_eq!(fallback["id"], 1);
     assert_eq!(fallback["success"], false);
     assert!(fallback["error"].as_str().unwrap().contains("1 MiB limit"));
     assert!(!fallback.to_string().contains(secret));
-    let next: Value = serde_json::from_slice(&read_message(&mut frames).unwrap().unwrap()).unwrap();
+    let next = read_json_frame(&mut frames);
     assert_eq!(next["id"], 2);
 
     let mut mutation = response;
@@ -248,8 +225,7 @@ fn native_bridge_rejects_oversized_and_truncated_frames() {
     });
     let mut output = Vec::new();
     write_message(&mut output, &mutation).unwrap();
-    let fallback: Value =
-        serde_json::from_slice(&read_message(&mut Cursor::new(output)).unwrap().unwrap()).unwrap();
+    let fallback = read_json_frame(&mut Cursor::new(output));
     assert_eq!(fallback["uncertain"], true);
     assert_eq!(fallback["operationId"], "oversized-result-operation");
     assert_eq!(fallback["operation"]["revision"], 8);
@@ -300,7 +276,7 @@ fn native_bridge_does_not_echo_validation_or_deserialization_inputs() {
         ),
         (
             "invalid decision type",
-            json!({ "id": 1, "action": "managerDuoRespond", "approve": secret }),
+            json!({ "id": 1, "action": "duoRespond", "approve": secret }),
             0,
         ),
         (
@@ -319,8 +295,7 @@ fn native_bridge_does_not_echo_validation_or_deserialization_inputs() {
             &mut output,
         )
         .unwrap();
-        let length = u32::from_ne_bytes(output[..4].try_into().unwrap()) as usize;
-        let response: Value = serde_json::from_slice(&output[4..4 + length]).unwrap();
+        let response = read_json_frame(&mut Cursor::new(&output));
         assert_eq!(response["id"], expected_id, "{label}");
         assert_eq!(response["success"], false, "{label}");
         if expected_id == 0 {
@@ -376,7 +351,7 @@ fn native_mutations_report_committed_durability_as_uncertain() {
                 rmp_serde::from_slice::<RequestEnvelope>(&request)
                     .unwrap()
                     .command,
-                ServerCommand::Delete(Target::Id(7))
+                ServerCommand::Lock(true)
             ));
             // Identical wording proves uncertainty follows the authenticated
             // error code, rather than parsing a human-readable error.
@@ -392,11 +367,8 @@ fn native_mutations_report_committed_durability_as_uncertain() {
             &client,
             NativeRequest {
                 id: 77,
-                action: NativeAction::ManagerDelete,
+                action: NativeAction::Lock,
                 operation_id: Some("test-delete-77".into()),
-                expected_revision: Some(1),
-                expected_session: Some("a".repeat(64)),
-                entry_id: Some(7),
                 ..Default::default()
             },
         ));
@@ -447,7 +419,7 @@ fn native_status_requires_and_preserves_structured_server_state() {
 
 #[test]
 fn duo_decisions_require_exact_identifiers_boolean_and_bounded_code() {
-    let base = json!({"id":1,"action":"managerDuoRespond","entryId":4,"requestId":"test-request","fingerprint":"a".repeat(128),"approve":true,"verificationCode":"012"});
+    let base = json!({"id":1,"action":"duoRespond","entryId":4,"requestId":"test-request","fingerprint":"a".repeat(128),"approve":true,"verificationCode":"012"});
     let mut request: NativeRequest = serde_json::from_value(base.clone()).unwrap();
     let command = command_for_request(&mut request).unwrap();
     assert!(
@@ -477,16 +449,12 @@ fn duo_decisions_require_exact_identifiers_boolean_and_bounded_code() {
 fn native_policy_rejects_cross_operation_fields_and_requires_reviewed_revisions() {
     for request in [
         json!({"id":1,"action":"status","password":"must-not-appear"}),
-        json!({"id":1,"action":"managerDelete","entryId":1,"operationId":"delete-one"}),
-        json!({"id":1,"action":"managerAdd","item":{"name":"Example"}}),
         json!({"id":1,"action":"getTotp","entryId":0,"operationId":"otp-one"}),
     ] {
         let request: NativeRequest = serde_json::from_value(request).unwrap();
         let error = request.validate().unwrap_err();
         assert!(!error.contains("must-not-appear"));
     }
-    let request:NativeRequest=serde_json::from_value(json!({"id":1,"action":"managerDelete","entryId":1,"operationId":"delete-one","expectedRevision":3,"expectedSession":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})).unwrap();
-    request.validate().unwrap();
     let mut request: NativeRequest = serde_json::from_value(
         json!({"id":2,"action":"operationStatus","operationId":"delete-one"}),
     )
@@ -537,28 +505,4 @@ fn browser_native_reads_require_session_revision_and_site_for_otp() {
             );
         }
     }
-}
-
-#[test]
-fn manager_pages_bound_native_frames_and_preserve_ids_and_total() {
-    let items: Vec<_> = (1..=201)
-        .map(|id| crate::vault::ItemSummary {
-            id,
-            revision: 1,
-            name: "\u{0001}".repeat(4096),
-            username: Some("\u{0002}".repeat(4096)),
-            kind: crate::types::ItemKind::Login,
-            urls: vec!["\u{0003}".repeat(4096); 100],
-            has_totp: false,
-            has_duo: false,
-        })
-        .collect();
-    let page = super::native_item_page(crate::vault::ItemPage { items, total: 201 }, 150, 50);
-    assert_eq!(page["total"], 201);
-    assert_eq!(page["offset"], 150);
-    assert_eq!(page["items"].as_array().unwrap().len(), 50);
-    assert_eq!(page["items"][0]["id"], 151);
-    assert_eq!(page["items"][49]["id"], 200);
-    assert_eq!(page["displayTruncated"], true);
-    assert!(serde_json::to_vec(&page).unwrap().len() < super::MAX_NATIVE_MESSAGE - 4096);
 }

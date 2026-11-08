@@ -141,7 +141,7 @@ fn accessibility_tree(app: &App, focus: Option<&str>) -> iced_winit::a11y::A11yT
 fn accessibility_tree_keeps_button_labels_focus_and_passwords_protected() {
     let mut app = tests::app();
     app.running = true;
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.creating = true;
     app.master = "synthetic-native-protected-value".into();
     let accessible = accessibility_tree(&app, Some("master-password"));
@@ -182,7 +182,7 @@ fn accessibility_tree_keeps_button_labels_focus_and_passwords_protected() {
 fn accessible_names_feedback_and_selection_follow_the_visible_form() {
     let mut app = tests::app();
     app.running = true;
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.tab = Tab::Generator;
     app.notice = "Synthetic item saved".into();
     let tree = accessibility_tree(&app, None);
@@ -239,7 +239,7 @@ fn accessible_names_feedback_and_selection_follow_the_visible_form() {
 fn ordinary_inputs_expose_text_runs_and_caret_without_exposing_passwords() {
     let mut app = tests::app();
     app.running = true;
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.creating = true;
     app.ui.vault_name = "Café 👩🏽‍💻".into();
     let tree = accessibility_tree(&app, None);
@@ -280,7 +280,7 @@ fn ordinary_inputs_expose_text_runs_and_caret_without_exposing_passwords() {
 fn multiline_notes_expose_readable_text_and_selection() {
     let mut app = tests::app();
     app.running = true;
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.session = Some("synthetic-session".into());
     let mut notes = text_editor::Content::with_text("first\ncafé 👩🏽‍💻");
     notes.move_to(text_editor::Cursor {
@@ -322,7 +322,7 @@ fn rendered_screens_fit_supported_windows() {
         app.ui.width = width as f32 / scale;
         app.ui.height = 800.0 / scale;
         app.running = true;
-        app.busy = false;
+        app.request_state = RequestState::Idle;
         app.notice.clear();
         render(&app, "onboarding", width, 800, scale);
         app.creating = true;
@@ -368,7 +368,7 @@ fn rendered_edge_cases_fit_minimum_windows_and_all_themes() {
         Appearance::HighContrast,
     ] {
         let mut app = tests::app();
-        app.busy = false;
+        app.request_state = RequestState::Idle;
         app.notice.clear();
         app.running = true;
         app.session = Some("synthetic-session".into());
@@ -401,7 +401,7 @@ fn rendered_edge_cases_fit_minimum_windows_and_all_themes() {
 #[test]
 fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() {
     let mut app = tests::app();
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.notice.clear();
     app.running = true;
     app.session = Some("synthetic-session".into());
@@ -428,21 +428,9 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
     assert!(!last.1.iter().any(|label| label == "Account 0000"));
     eprintln!("2000-item real layout and render: {:?}", started.elapsed());
     app.query = "site1734.example.test".into();
-    let matches: Vec<_> = app
-        .items
-        .iter()
-        .filter(|item| app.item_matches(item))
-        .collect();
-    assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0].id, 1735);
+    assert_eq!(&*app.matching_items(), &[1734]);
     app.query = "user1900@".into();
-    assert_eq!(
-        app.items
-            .iter()
-            .filter(|item| app.item_matches(item))
-            .count(),
-        1
-    );
+    assert_eq!(&*app.matching_items(), &[1900]);
 }
 
 #[test]
@@ -450,7 +438,7 @@ fn dynamic_banners_preserve_editor_focus_across_view_updates() {
     use renderer::Renderer as _;
     let mut app = tests::app();
     app.running = true;
-    app.busy = false;
+    app.request_state = RequestState::Idle;
     app.session = Some("synthetic-session".into());
     app.draft = Some(Draft::default());
     let size = Size::new(1060.0, 760.0);

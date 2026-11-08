@@ -376,6 +376,7 @@ impl Vault {
             .map(|e| (e.name.clone(), e.username.clone()))
             .collect();
         let mut operations = Vec::new();
+        let mut next_suffix = HashMap::new();
         let mut next_index = self.next_entry_id()?;
         for mut item in imported {
             let key = (
@@ -397,18 +398,20 @@ impl Vault {
                 (Some(_), ConflictPolicy::KeepBoth) => {
                     report.renamed += 1;
                     let base = item.entry.name.clone();
-                    let mut suffix = 1usize;
+                    let suffix = next_suffix
+                        .entry((base.clone(), item.entry.username.clone()))
+                        .or_insert(1usize);
                     loop {
-                        let candidate = if suffix == 1 {
+                        let candidate = if *suffix == 1 {
                             format!("{base} (imported)")
                         } else {
                             format!("{base} (imported {suffix})")
                         };
+                        *suffix += 1;
                         if !names.contains(&(candidate.clone(), item.entry.username.clone())) {
                             item.entry.name = candidate;
                             break;
                         }
-                        suffix += 1;
                     }
                 }
                 (None, _) => {}

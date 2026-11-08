@@ -385,7 +385,6 @@ impl SettingsDraft {
                 .then(|| self.sync_server.clone()),
             sync_automatic: (self.sync_automatic != base.sync.automatic)
                 .then_some(self.sync_automatic),
-            sync_ssh_target: None,
         })
     }
 

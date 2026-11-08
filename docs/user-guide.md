@@ -774,12 +774,12 @@ including when SSO used a different saved login. Enrollment credentials and
 account summaries stay in the background; this lookup does not release passwords.
 Automatic detection polls about every five seconds while the challenge is visible,
 for up to five minutes. Detection uses visible challenge text; unusual or localized
-pages may need the manual **Vault manager → Duo Push** panel instead. Requests and
+pages may need the manual **desktop account → Duo Push** panel instead. Requests and
 decisions stay inside the extension; the website receives no request details.
 Rebuild and restart the server, update the native host, and reload the extension
 after updating, so login summaries include Duo enrollment availability.
 
-In **Vault manager**, select the enrolled item and use its **Duo Push** panel for
+In the desktop app, select the enrolled item and use its **Duo Push** panel for
 manual request checks or monitoring. Monitoring polls while this
 item is open; CLI monitoring runs until Ctrl+C, an error, or vault lock. It does
 not register with Android/iOS notification services. `--notify` provides passive
@@ -1201,39 +1201,17 @@ source ~/.local/share/bash-completion/completions/pm
 
 ## Browser Extension
 
-Choose **Open vault manager** in the extension popup to open the extension-owned
-management page. It can unlock a selected vault using its master password or an
-absolute external-key path, search items, add/edit all supported item types,
-manage custom fields and URLs, reveal selected secrets, copy primary secrets,
-and move entries to encrypted trash. Blank password and hidden-field values
-preserve existing secrets during an edit. Use **Reveal secrets** before changing
-the name or visibility of a hidden field whose value is not currently shown.
-Revealed values clear after 30 seconds; locking or disconnecting clears the editor.
-Copying uses the configured server clipboard timeout and lock cleanup.
-Multiline secrets use a dedicated editor. Changing an item's type preserves the
-secret being edited, including line breaks, and retains the reveal timeout.
+Use the desktop app or CLI to unlock and edit your vault. The extension popup
+shows connection status and can lock the vault. Website pickers, credential-save
+prompts, signup generation, and Duo decisions remain available; the extension has
+no full vault-management page or browser generator-settings editor.
 
-Lock and status requests use a separate native-host connection from item work
-and Duo polling. Requests that expire while queued are never sent. If a sent
-save loses its response, it may still complete: the manager clears its editor
-and requires **Review vault state** before another change. Review the refreshed
-items before retrying. A save prompt with an uncertain outcome disables saving;
-dismiss it and inspect the vault manager. Closing a native connection cannot
-cancel a mutation already accepted by the server.
-
-Items enrolled with `pm duo enroll` show a **Duo Push** panel with request checks,
-monitoring, and explicit **Approve login** / **Deny login** controls. See
-[Duo Push](#duo-push) for enrollment, verification codes, and backup behavior.
-
-The manager also contains browser generator settings: password length,
-uppercase/lowercase/digits, a custom symbol set, ambiguous-character exclusion,
-or passphrases with a word count and separator. **Save browser defaults** applies
-these options to generation buttons on signup forms, including already-open
-pages. These browser settings are independent of CLI defaults. Only settings
-are saved in extension storage; generated values and vault secrets are not.
-Enter an exact HTTPS origin in **Site origin** to save an override for that site
-instead. Origins include the scheme and port; overrides do not extend to other
-subdomains. **Remove site override** returns that site to the browser defaults.
+Lock and status requests use a separate native-host connection from site work
+and Duo polling. Requests that expire while queued are never sent. If a sent save
+loses its response, it may still complete. Inspect the affected item in the desktop
+app, then use **Check outcome** in the extension popup. A pending operation stays
+blocked; an unknown operation additionally requires the inspection checkbox and
+explicit acknowledgement. Neither review nor acknowledgement replays the write.
 
 The browser extension injects credential-handling code only into HTTPS pages.
 It does not offer autofill or save prompts on plaintext HTTP pages.
@@ -1347,9 +1325,9 @@ continuously, including changes made through the CLI and automatic locking.
 They also show a warning when the extension release, installed native host,
 and running password-manager server are not the same version. Restart the
 server and reinstall/reload the extension after an upgrade to clear it.
-The popup can lock the vault and open the vault manager. Management requests are
-accepted only from that extension-owned page; website content scripts retain
-their existing site-scoped permissions.
+The popup can lock the vault and review uncertain operations. Recovery controls
+accept requests only from the trusted popup (and save prompts for outcome checks);
+website content scripts retain their site-scoped permissions.
 
 ## Clipboard behavior
 

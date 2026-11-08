@@ -1,6 +1,6 @@
 const { test: base, expect } = require("@playwright/test");
 const http = require("node:http");
-const { launchExtension, readNativeRequests, waitForNativeRequest } = require("./harness.cjs");
+const { launchExtension, withExtension, readNativeRequests, waitForNativeRequest } = require("./harness.cjs");
 
 function html(body, script = "") {
     return `<!doctype html><html><head><meta charset="utf-8"></head><body>${body}<script>${script}</script></body></html>`;
@@ -102,15 +102,14 @@ const test = base.extend({
     isolatedExtension: async ({ extensionOptions }, use) => {
         base.skip(process.platform !== "linux");
         const server = await startServer();
-        let browser;
         try {
-            browser = await launchExtension(extensionOptions);
-            const origin = `http://127.0.0.1:${server.address().port}`;
-            const page = browser.context.pages()[0] || await browser.context.newPage();
-            await use({ browser, origin, page });
+            await withExtension(extensionOptions, async browser => {
+                const origin = `http://127.0.0.1:${server.address().port}`;
+                const page = browser.context.pages()[0] || await browser.context.newPage();
+                await use({ browser, origin, page });
+            });
         } finally {
-            try { await browser?.close(); }
-            finally { await new Promise(resolve => server.close(resolve)); }
+            await new Promise(resolve => server.close(resolve));
         }
     }
 });
@@ -168,8 +167,8 @@ test.describe("extended credential flows", () => {
     });
 
     test.afterAll(async () => {
-        await browser?.close();
-        if (server) await new Promise(resolve => server.close(resolve));
+        try { await browser?.close(); }
+        finally { if (server) await new Promise(resolve => server.close(resolve)); }
     });
 
     test.afterEach(async () => {
@@ -568,20 +567,21 @@ test("stopping the extension worker closes orphan secret decisions on its next s
     test.skip(process.platform !== "linux");
     const server = await startServer();
     const origin = `http://127.0.0.1:${server.address().port}`;
-    const browser = await launchExtension({ accounts: [{ id: 1, name: "Example", username: "alice", password: "synthetic", domain: origin }] });
     try {
-        const page = browser.context.pages()[0] || await browser.context.newPage();
-        await page.goto(`${origin}/simple`);
-        const picker = await openPicker(browser.context, page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await expect(picker.getByRole("button", { name: /Example/ })).toBeVisible();
-        const cdp = await browser.context.newCDPSession(page);
-        await cdp.send("ServiceWorker.enable");
-        await cdp.send("ServiceWorker.stopAllWorkers");
-        const popup = await browser.context.newPage();
-        await popup.goto(`chrome-extension://${browser.extensionId}/popup.html`);
-        await expect.poll(() => picker.isClosed()).toBe(true);
-        expect(readNativeRequests(browser.nativeLog).filter(request => request.action === "getLoginItem")).toHaveLength(0);
+        await withExtension({ accounts: [{ id: 1, name: "Example", username: "alice", password: "synthetic", domain: origin }] }, async browser => {
+            const page = browser.context.pages()[0] || await browser.context.newPage();
+            await page.goto(`${origin}/simple`);
+            const picker = await openPicker(browser.context, page.getByRole("button", { name: "Choose saved credentials" }).first());
+            await expect(picker.getByRole("button", { name: /Example/ })).toBeVisible();
+            const cdp = await browser.context.newCDPSession(page);
+            await cdp.send("ServiceWorker.enable");
+            await cdp.send("ServiceWorker.stopAllWorkers");
+            const popup = await browser.context.newPage();
+            await popup.goto(`chrome-extension://${browser.extensionId}/popup.html`);
+            await expect.poll(() => picker.isClosed()).toBe(true);
+            expect(readNativeRequests(browser.nativeLog).filter(request => request.action === "getLoginItem")).toHaveLength(0);
+        });
     } finally {
-        await browser.close(); await new Promise(resolve => server.close(resolve));
+        await new Promise(resolve => server.close(resolve));
     }
 });

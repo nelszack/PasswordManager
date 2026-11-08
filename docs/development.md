@@ -24,7 +24,6 @@
 - `src/cli.rs` - CLI argument parsing
 - `src/config.rs` - Configuration management
 - `src/cloud.rs` - Encrypted cloud transport, device credentials, and local sync checkpoints
-- `src/cloud/setup.rs` and its shell templates - SSH setup, local cross-compilation, device enrollment, and rollback updates
 - `src/server/cloud.rs` - Automatic sync and change notifications outside the vault owner queue
 - `src/vault/sync.rs` - Authenticated application of downloaded snapshots on the vault owner
 - `sync-server/` - Independent Go snapshot server, device enrollment, quotas, and Linux service unit
@@ -104,6 +103,26 @@ editing, timed reveal, copy cleanup, external locking, and GUI close/reopen whil
 the server remains up. Native widget state, keyboard/IME behavior, accessibility,
 and compositor integration require platform testing; browser tests do not exercise
 the Iced window.
+
+For short edit/test cycles, run the affected boundary first:
+
+```bash
+cargo test --locked --no-default-features --lib vault::test::normalized_search
+cargo test --locked --bin pm gui::presentation::tests
+node --test extension/background_native.test.js
+```
+
+Use a test-name prefix to select related cases. The direct Node command is a
+fast unit-only iteration; `npm run test:extension:coverage` also checks generated
+bundles and coverage gates. Run `npm run validate` once the changes are stable,
+plus the browser/cloud/native checks appropriate to the change.
+
+The dev/test profiles optimize Argon2, Blake2, and zxcvbn while leaving application
+debug information intact. This adds a one-time dependency compilation cost but
+avoids repeatedly running cryptographic and strength-estimation loops without
+optimization. Production KDF parameters and release optimization are unchanged.
+Browser tests use two file-level workers with separate profiles and vaults;
+use `npm run test:e2e -- --workers=1` to diagnose an ordering/resource issue.
 
 The desktop build also enables the local AccessKit bridge in
 [`iced_winit`](../vendor/iced_winit/README.pm.md), with semantic widget metadata
@@ -332,11 +351,11 @@ results instead of terminating the process.
 
 Mutation IDs deduplicate requests within a running daemon, with up to 256 retained
 results and a 64 KiB limit on each cached result. Large reads/reports retain only
-a receipt. Expected item revisions reject stale manager edits. Receipts distinguish
+a receipt. Expected item revisions reject stale edits. Receipts distinguish
 pending, committed, failed, unknown, and committed-but-durability-uncertain states.
 Locking discards cached secret responses while retaining nonsecret receipts.
 Receipts are not durable across daemon restarts or unlimited retention. An unknown
-outcome requires state inspection and explicit acknowledgement in the manager;
+outcome requires state inspection and explicit acknowledgement in the desktop client or extension popup;
 a pending operation cannot be acknowledged. Neither reconnect nor acknowledgement
 replays an uncertain write. Remote Duo effects can remain uncertain even when the
 local vault is healthy.
@@ -349,7 +368,7 @@ storage; secret decision windows are invalidated on worker restart. Idle status
 uses a one-minute alarm, with two-second polling while extension UI is open.
 Native lanes close when idle and reconnect after a bounded silent-port deadline.
 
-Content and manager entrypoints use explicit modules. A per-document/root
+The content entrypoint uses explicit modules. A per-document/root
 controller captures credentials from supported nested open shadow roots and
 cleans up its observers and listeners. Closed shadow roots are not supported.
 After editing frontend modules, regenerate the checked-in bundles:
@@ -358,7 +377,7 @@ After editing frontend modules, regenerate the checked-in bundles:
 npm run build:extension
 ```
 
-The dependency-free build writes `content_runtime.js` and `manager_runtime.js`;
+The dependency-free build writes `content_runtime.js`;
 unit tests, browser tests and shared validation check that they are current.
 Browser operation policies, runtime validators and TypeScript declarations come
 from `src/protocol/native_contract.rs` and its template. Regenerate them with:
@@ -369,3 +388,27 @@ cargo run -- generate-command-contract --check
 ```
 
 See [Testing](#testing) for prerequisites and CI checks.
+
+## Simplified boundaries
+
+The desktop is the full vault editor; the browser extension handles site-scoped
+selection, autofill, credential-save decisions, signup generation, Duo prompts,
+status, locking, and operation review. The full browser manager and its native
+editing API are removed. Popup acknowledgement requires a server review reporting
+an unknown operation plus explicit inspection; it never replays the original write. Recovery identities for
+retired editor operations remain reviewable after an extension upgrade.
+
+CLI `view` and `search` and desktop search translate into one `List(SearchFilter)`
+RPC. Protocol version 3 rejects older contracts. Stop the daemon with the previous
+build before replacing it, then update the native host (`pm native-host update`),
+reload the extension, and start the new daemon. An older daemon cannot accept a
+version-3 stop command. The durable vault schema is unchanged.
+
+Session lifecycle commands run before unlocked dispatch. Other commands borrow a
+complete vault and its cached credentials through `with_unlocked`; ordinary errors
+retain the same session epoch, while a panic leaves the session locked. Desktop
+request activity is one `RequestState`; edit/view refreshes share an `ItemIntent`.
+The persistence encoder uses a reference map and vector with the existing schema.
+
+Sync server deployment is an independent administration task. The Rust binary no
+longer embeds Go source, installer scripts, SSH state, or remote-update logic.

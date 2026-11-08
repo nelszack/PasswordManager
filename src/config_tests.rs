@@ -162,35 +162,6 @@ fn test_default_config_values() {
     assert_eq!(read_config(&config_path), config);
 }
 #[test]
-fn test_config_with_alternate_values() {
-    let (_directory, config_path) = isolated_config();
-    let content = r#"
-[genpass]
-length = 20
-stats = true
-copy = false
-
-[clipboard]
-timeout = 30
-
-[unlock]
-timeout = 5
-
-[copy]
-passwords = false
-"#;
-    fs::write(&config_path, content).unwrap();
-    let conf = read_config(&config_path);
-    assert_eq!(conf.genpass.length, 20);
-    assert!(conf.genpass.stats);
-    assert!(!conf.genpass.copy);
-    assert_eq!(conf.clipboard.timeout, 30);
-    assert_eq!(conf.unlock.timeout, 5);
-    assert!(!conf.copy.passwords);
-    assert_eq!(conf.server.port, crate::server::DEFAULT_PORT);
-}
-
-#[test]
 fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
     let (_directory, config_path) = isolated_config();
     default_test_config(true, &config_path);
@@ -290,7 +261,18 @@ fn missing_settings_are_added_with_defaults() {
     fs::write(
         &config_path,
         r#"[genpass]
-length = 24
+length = 20
+stats = true
+copy = false
+
+[clipboard]
+timeout = 30
+
+[unlock]
+timeout = 5
+
+[copy]
+passwords = false
 
 [recovery]
 password_history_limit = 4
@@ -300,12 +282,30 @@ password_history_limit = 4
 
     let config = try_read_config(&config_path).unwrap();
 
-    assert_eq!(config.genpass.length, 24);
-    assert_eq!(config.recovery.password_history_limit, 4);
-    assert_eq!(config.recovery.trash_retention_days, 0);
-    assert_eq!(config.server.port, crate::server::DEFAULT_PORT);
+    assert_eq!(
+        config,
+        Config {
+            genpass: GeneratorConfig {
+                length: 20,
+                stats: true,
+                copy: false
+            },
+            clipboard: ClipboardConfig { timeout: 30 },
+            unlock: UnlockConfig {
+                timeout: 5,
+                vault_id: None
+            },
+            copy: CopyConfig { passwords: false },
+            recovery: RecoveryConfig {
+                password_history_limit: 4,
+                trash_retention_days: 0
+            },
+            ..Config::default()
+        }
+    );
+    assert_eq!(try_read_config(&config_path).unwrap(), config);
     let updated = fs::read_to_string(&config_path).unwrap();
-    assert!(updated.contains("stats = false"));
+    assert!(updated.contains("scale = 100"));
     assert!(updated.contains("trash_retention_days = 0"));
     assert!(updated.contains(&format!("port = {}", crate::server::DEFAULT_PORT)));
 }
@@ -387,54 +387,4 @@ fn desktop_preferences_persist_without_changing_cli_defaults() {
     )
     .unwrap();
     assert_eq!(reset.desktop, DesktopConfig::default());
-}
-
-#[test]
-fn older_configuration_files_receive_desktop_defaults() {
-    let (_root, path) = isolated_config();
-    fs::write(&path, "[genpass]\nlength = 37\n").unwrap();
-    let config = try_read_config(&path).unwrap();
-    assert_eq!(config.genpass.length, 37);
-    assert_eq!(config.desktop, DesktopConfig::default());
-    assert_eq!(try_read_config(&path).unwrap(), config);
-}
-
-#[test]
-fn changing_sync_origin_clears_the_previous_servers_ssh_destination() {
-    let (_root, path) = isolated_config();
-    let mut original = default_test_config(true, &path);
-    original.sync.server_url = "https://old.example.com".into();
-    original.sync.ssh_target = Some("user@old-server".into());
-    let unchanged = try_update(
-        original.clone(),
-        ConfigChanges {
-            sync_server_url: Some("https://old.example.com/".into()),
-            ..Default::default()
-        },
-        &path,
-    )
-    .unwrap();
-    assert_eq!(unchanged.sync.ssh_target, original.sync.ssh_target);
-    let changed = try_update(
-        original.clone(),
-        ConfigChanges {
-            sync_server_url: Some("https://new.example.com".into()),
-            ..Default::default()
-        },
-        &path,
-    )
-    .unwrap();
-    assert_eq!(changed.sync.ssh_target, None);
-    let guided = try_update(
-        original,
-        ConfigChanges {
-            sync_server_url: Some("https://new.example.com".into()),
-            sync_ssh_target: Some("user@new-server".into()),
-            ..Default::default()
-        },
-        &path,
-    )
-    .unwrap();
-    assert_eq!(guided.sync.ssh_target.as_deref(), Some("user@new-server"));
-    assert_eq!(read_config(&path), guided);
 }

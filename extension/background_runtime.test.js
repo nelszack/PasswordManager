@@ -118,15 +118,12 @@ test("vault management cannot be called by websites, content scripts, or other e
     const env = securityEnvironment();
     await new Promise(resolve => setImmediate(resolve));
     const manager = { id: "abcdefghijklmnopabcdefghijklmnop", url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/manager.html" };
-    for (const action of ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "managerDuoRequests", "managerDuoRespond"]) {
+    for (const action of ["managerVaults", "managerUnlock", "managerList", "managerItem", "managerCopy", "managerAdd", "managerUpdate", "managerDelete", "duoRequests", "duoRespond"]) {
         for (const sender of [env.sender, env.pickerSender, { ...manager, id: "different" }, { ...manager, url: manager.url + ".evil" }]) {
             const before = env.requests.length;
             assert.equal((await env.message({ action, entryId: 1, password: "synthetic" }, sender)).success, false);
             assert.equal(env.requests.length, before);
         }
-        const before = env.requests.length;
-        assert.equal((await env.message({ action, ...nativeFields(action) }, manager)).success, true);
-        assert.equal(env.requests.slice(before).filter(request => request.action === action).length, 1);
     }
     assert.equal((await env.message({ action: "managerUnknown" }, manager)).success, false);
 });
@@ -389,7 +386,7 @@ test("a fresh worker closes orphan decision windows and rejects their tokens bef
     assert.equal((await env.message({ action: "getSecurePickerData", token }, env.pickerSender)).success, true);
 });
 
-test("only the manager may acknowledge unknown outcomes and content scripts cannot request a native lock", async () => {
+test("only the popup may acknowledge unknown outcomes and content scripts cannot request a native lock", async () => {
     const env = securityEnvironment();
     const before = env.requests.length;
     for (const sender of [env.sender, env.pickerSender]) {
@@ -397,6 +394,6 @@ test("only the manager may acknowledge unknown outcomes and content scripts cann
         assert.equal((await env.message({ action: "lockVault" }, sender)).success, false);
     }
     assert.equal(env.requests.length, before);
-    const manager = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "manager.html") };
-    assert.equal((await env.message({ action: "acknowledgeUnknownOperation", operationId: "unchecked", inspected: true }, manager)).success, false);
+    const popup = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "popup.html") };
+    assert.equal((await env.message({ action: "acknowledgeUnknownOperation", operationId: "unchecked", inspected: true }, popup)).success, false);
 });

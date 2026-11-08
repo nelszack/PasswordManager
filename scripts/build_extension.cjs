@@ -27,4 +27,3 @@ function bundle(entryName, outputName) {
 
 }
 bundle("content_entry.js", "content_runtime.js");
-bundle("manager_entry.js", "manager_runtime.js");

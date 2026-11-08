@@ -1100,14 +1100,14 @@ async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let worker = test_worker(session(vault), &state);
     let mut prepared = worker
         .with_session(|session| {
-            let mut edit = session.edit();
-            let (key, vault) = edit.parts_mut();
-            crate::vault::available(vault).unwrap().prepare_duo_poll(
-                DuoCommand::Requests {
-                    target: Target::Id(1),
-                },
-                key,
-            )
+            session.with_unlocked(|vault, key| {
+                vault.prepare_duo_poll(
+                    DuoCommand::Requests {
+                        target: Target::Id(1),
+                    },
+                    key,
+                )
+            })
         })
         .await
         .unwrap()

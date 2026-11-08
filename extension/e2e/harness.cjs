@@ -32,83 +32,99 @@ function installNativeManifest(testHome, profile, extensionId, hostPath) {
 
 async function launchExtension(options = {}) {
     const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pm-browser-e2e-"));
-    const testExtensionPath = path.join(temporaryRoot, "extension");
-    fs.cpSync(EXTENSION_PATH, testExtensionPath, { recursive: true });
-    const testManifestPath = path.join(testExtensionPath, "manifest.json");
-    const testManifest = JSON.parse(fs.readFileSync(testManifestPath, "utf8"));
-    // Most local fixtures deliberately use HTTP. Tests can opt into the exact
-    // production manifest to verify downgrade protection.
-    if (options.allowHttp !== false) {
-        testManifest.content_scripts[0].matches.push("http://*/*");
-    }
-    fs.writeFileSync(testManifestPath, JSON.stringify(testManifest, null, 2));
-    const testHome = path.join(temporaryRoot, "home");
-    const profile = path.join(temporaryRoot, "profile");
-    const nativeLog = path.join(temporaryRoot, "native-messages.jsonl");
-    fs.mkdirSync(testHome, { recursive: true });
-    const context = await chromium.launchPersistentContext(profile, {
-        // The Chromium channel supports extensions in headless mode, keeping
-        // test windows and focus changes off the user's desktop.
-        channel: "chromium",
-        headless: process.env.PM_E2E_HEADED !== "1",
-        env: {
-            ...process.env,
-            HOME: testHome,
-            XDG_CONFIG_HOME: path.join(testHome, ".config"),
-            XDG_DATA_HOME: path.join(testHome, ".local", "share"),
-            PM_E2E_NATIVE_LOG: nativeLog,
-            PM_E2E_NATIVE_MODE: options.mode || "normal",
-            PM_E2E_NATIVE_ACCOUNTS: JSON.stringify(options.accounts || []),
-            ...(options.env || {})
-        },
-        args: [
-            `--disable-extensions-except=${testExtensionPath}`,
-            `--load-extension=${testExtensionPath}`
-        ]
-    });
-    const coveredPages = new Map();
-    const completedCoverage = [];
-    async function coverPage(page, restart = false) {
-        if (!COVERAGE_DIR) return false;
-        if (coveredPages.has(page)) {
-            if (!restart) return coveredPages.get(page);
-            if (await coveredPages.get(page)) {
-                completedCoverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
-            }
+    let context;
+    try {
+        const testExtensionPath = path.join(temporaryRoot, "extension");
+        fs.cpSync(EXTENSION_PATH, testExtensionPath, { recursive: true });
+        const testManifestPath = path.join(testExtensionPath, "manifest.json");
+        const testManifest = JSON.parse(fs.readFileSync(testManifestPath, "utf8"));
+        // Most local fixtures deliberately use HTTP. Tests can opt into the exact
+        // production manifest to verify downgrade protection.
+        if (options.allowHttp !== false) {
+            testManifest.content_scripts[0].matches.push("http://*/*");
         }
-        const started = page.coverage.startJSCoverage({ resetOnNavigation: false })
-            .then(() => true, () => false);
-        coveredPages.set(page, started);
-        return started;
-    }
-    context.on("page", page => void coverPage(page));
-    await Promise.all(context.pages().map(coverPage));
-    let worker = context.serviceWorkers()[0];
-    if (!worker) worker = await context.waitForEvent("serviceworker");
-    const extensionId = new URL(worker.url()).host;
-    if (options.installHost !== false) {
-        const hostPath = options.hostPath || MOCK_HOST;
-        fs.chmodSync(hostPath, 0o755);
-        installNativeManifest(testHome, profile, extensionId, hostPath);
-    }
-    return {
-        context, extensionId, nativeLog, profile, temporaryRoot, testHome, coverPage,
-        async close() {
-            if (COVERAGE_DIR) {
-                const coverage = [...completedCoverage];
-                for (const [page, started] of coveredPages) {
-                    if (await started && !page.isClosed()) {
-                        coverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
-                    }
+        fs.writeFileSync(testManifestPath, JSON.stringify(testManifest, null, 2));
+        const testHome = path.join(temporaryRoot, "home");
+        const profile = path.join(temporaryRoot, "profile");
+        const nativeLog = path.join(temporaryRoot, "native-messages.jsonl");
+        fs.mkdirSync(testHome, { recursive: true });
+        context = await chromium.launchPersistentContext(profile, {
+            // The Chromium channel supports extensions in headless mode, keeping
+            // test windows and focus changes off the user's desktop.
+            channel: "chromium",
+            headless: process.env.PM_E2E_HEADED !== "1",
+            env: {
+                ...process.env,
+                HOME: testHome,
+                XDG_CONFIG_HOME: path.join(testHome, ".config"),
+                XDG_DATA_HOME: path.join(testHome, ".local", "share"),
+                PM_E2E_NATIVE_LOG: nativeLog,
+                PM_E2E_NATIVE_MODE: options.mode || "normal",
+                PM_E2E_NATIVE_ACCOUNTS: JSON.stringify(options.accounts || []),
+                ...(options.env || {})
+            },
+            args: [
+                `--disable-extensions-except=${testExtensionPath}`,
+                `--load-extension=${testExtensionPath}`
+            ]
+        });
+        const coveredPages = new Map();
+        const completedCoverage = [];
+        async function coverPage(page, restart = false) {
+            if (!COVERAGE_DIR) return false;
+            if (coveredPages.has(page)) {
+                if (!restart) return coveredPages.get(page);
+                if (await coveredPages.get(page)) {
+                    completedCoverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
                 }
-                fs.mkdirSync(COVERAGE_DIR, { recursive: true });
-                const name = `coverage-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
-                fs.writeFileSync(path.join(COVERAGE_DIR, name), JSON.stringify(coverage));
             }
-            await context.close();
-            fs.rmSync(temporaryRoot, { recursive: true, force: true });
+            const started = page.coverage.startJSCoverage({ resetOnNavigation: false })
+                .then(() => true, () => false);
+            coveredPages.set(page, started);
+            return started;
         }
-    };
+        context.on("page", page => void coverPage(page));
+        await Promise.all(context.pages().map(coverPage));
+        let worker = context.serviceWorkers()[0];
+        if (!worker) worker = await context.waitForEvent("serviceworker");
+        const extensionId = new URL(worker.url()).host;
+        if (options.installHost !== false) {
+            const hostPath = options.hostPath || MOCK_HOST;
+            fs.chmodSync(hostPath, 0o755);
+            installNativeManifest(testHome, profile, extensionId, hostPath);
+        }
+        return {
+            context, extensionId, nativeLog, profile, temporaryRoot, testHome, coverPage,
+            async close() {
+                try {
+                    if (COVERAGE_DIR) {
+                        const coverage = [...completedCoverage];
+                        for (const [page, started] of coveredPages) {
+                            if (await started && !page.isClosed()) {
+                                coverage.push(...await page.coverage.stopJSCoverage().catch(() => []));
+                            }
+                        }
+                        fs.mkdirSync(COVERAGE_DIR, { recursive: true });
+                        const name = `coverage-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
+                        fs.writeFileSync(path.join(COVERAGE_DIR, name), JSON.stringify(coverage));
+                    }
+                } finally {
+                    try { await context.close(); }
+                    finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
+                }
+            }
+        };
+    } catch (error) {
+        try { await context?.close(); }
+        finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
+        throw error;
+    }
+}
+
+async function withExtension(options, run) {
+    const browser = await launchExtension(options);
+    try { return await run(browser); }
+    finally { await browser.close(); }
 }
 
 function readNativeRequests(logPath) {
@@ -131,6 +147,7 @@ module.exports = {
     HOST_NAME,
     installNativeManifest,
     launchExtension,
+    withExtension,
     readNativeRequests,
     waitForNativeRequest
 };

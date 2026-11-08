@@ -42,10 +42,14 @@ for (const entry of fs.readdirSync(path.join(root, "extension"), { recursive: tr
 }
 run(process.execPath, ["extension/check_unit_coverage.cjs"]);
 const artifacts = [];
-run("cargo", ["test", "--locked", "-p", "iced_tiny_skia", "--lib"]);
-run("cargo", ["test", "--locked", "-p", "iced_winit", "--lib"]);
+// These desktop packages share the same resolved dependency features. Build and
+// run their harnesses together rather than resolving the graph for each one.
+const desktopPackages = ["iced_tiny_skia", "iced_winit"];
+if (process.platform === "linux") desktopPackages.push("accesskit_unix");
+run("cargo", ["test", "--locked", ...desktopPackages.flatMap(name => ["-p", name]), "--lib"]);
 if (process.platform === "linux") {
-    run("cargo", ["test", "--locked", "-p", "accesskit_unix", "--lib"]);
+    // Keep workspace protocol packages separate: combining them changes their
+    // dependency feature sets and stops testing the existing configurations.
     run("cargo", ["test", "--locked", "-p", "atspi-common", "--lib"]);
     run("cargo", ["test", "--locked", "-p", "zbus-lockstep", "--lib"]);
 }

@@ -1,11 +1,8 @@
 use super::output::Output;
 use password_manager::{
-    cli::{SyncCommands, SyncServerCommands},
+    cli::SyncCommands,
     client::AuthenticatedClient,
-    cloud::{
-        self, Action,
-        setup::{Operation, Request},
-    },
+    cloud::{self, Action},
     config::Config,
     protocol::ResponsePayload,
     server::start,
@@ -24,40 +21,8 @@ pub(super) async fn run(
     running: bool,
     console: &Output,
 ) {
-    let request = match command {
-        SyncCommands::Setup {
-            ssh,
-            binary,
-            device_name,
-        } => Some(Request {
-            operation: Operation::Setup,
-            ssh_target: ssh,
-            binary,
-            device_name,
-        }),
-        SyncCommands::Server {
-            command: SyncServerCommands::Update { ssh, binary },
-        } => Some(Request {
-            operation: Operation::Update,
-            ssh_target: ssh,
-            binary,
-            device_name: None,
-        }),
-        SyncCommands::Connect {
-            ssh: Some(ssh),
-            device_name,
-            ..
-        } => Some(Request {
-            operation: Operation::Connect,
-            ssh_target: Some(ssh),
-            binary: None,
-            device_name,
-        }),
-        SyncCommands::Connect {
-            url, token_file, ..
-        } => {
-            let url =
-                url.unwrap_or_else(|| console.exit_error("Provide a server URL or --ssh HOST", 2));
+    match command {
+        SyncCommands::Connect { url, token_file } => {
             cloud::validate_server_url(&url).unwrap_or_else(|e| console.exit_error(&e, 2));
             let token = match token_file {
                 Some(path) => {
@@ -71,7 +36,7 @@ pub(super) async fn run(
             let config = conf.clone();
             let path = path.to_owned();
             let result = tokio::task::spawn_blocking(move || {
-                cloud::connect_with_token(config, &url, &token, None, &path)
+                cloud::connect_with_token(config, &url, &token, &path)
             })
             .await;
             match result {
@@ -79,7 +44,6 @@ pub(super) async fn run(
                 Ok(Err(e)) => console.exit_error(&format!("Connection failed: {e}"), 1),
                 Err(e) => console.exit_error(&e.to_string(), 1),
             }
-            None
         }
         command => {
             if !running {
@@ -100,19 +64,12 @@ pub(super) async fn run(
                 SyncCommands::Status => Action::Status,
                 SyncCommands::Check => Action::Check,
                 SyncCommands::Now => Action::Now,
-                _ => unreachable!("setup and connect handled above"),
+                _ => unreachable!("connect handled above"),
             };
             if let Err(code) = console.send_command(client, ServerCommand::Cloud(action)) {
                 std::process::exit(code);
             }
-            None
         }
-    };
-    if let Some(request) = request {
-        let path = path.to_owned();
-        let result =
-            tokio::task::spawn_blocking(move || cloud::setup::execute(request, &path)).await;
-        match result{Ok(Ok(outcome))=>console.print_data(serde_json::json!({"server_url":outcome.config.sync.server_url,"message":outcome.message}),&outcome.message),Ok(Err(e))=>console.exit_error(&e,1),Err(e)=>console.exit_error(&e.to_string(),1)}
     }
 }
 fn choose_vault(client: &AuthenticatedClient, console: &Output) -> String {

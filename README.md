@@ -10,8 +10,8 @@ XChaCha20-Poly1305 encryption.
 - Generate passwords or passphrases; search, filter, and audit for weak, reused,
   duplicate, stale, or breached passwords and missing authenticators.
 - Use TOTP/HOTP codes and experimental Duo passcode and manual Push enrollment.
-- Autofill logins, cards, identities, and OTP codes; generate passwords and manage
-  vault entries from the extension.
+- Autofill logins, cards, identities, and OTP codes; generate signup passwords
+  and save credentials through site-scoped browser prompts. Edit vaults in the desktop app or CLI.
 - Recover password history and deleted entries; import/export CSV or portable
   JSON, preview import conflicts and data loss, and create encrypted full-vault backups.
 - Keep stable entry IDs, timed clipboard cleanup, and inactivity/system-event locking.
@@ -135,9 +135,10 @@ custom fields, history, rekeying, authenticators, Duo Push, and scripted JSON ou
 ## Cloud sync
 
 Optional self-hosted sync stores encrypted vault snapshots on a small Go server
-and supports downloading existing vaults onto a new device. Set up the server
-with `pm sync setup --ssh USER@HOST`, then run `pm sync enable` for an unlocked
-vault. Connect another device with `pm sync connect --ssh USER@HOST`. See the
+and supports downloading existing vaults onto a new device. Install the server
+separately, issue a credential per device, and connect with
+`pm sync connect https://SERVER --token-file TOKEN_FILE`. Then run
+`pm sync enable` for an unlocked vault. See the
 [cloud sync setup and current limitations](docs/cloud-sync.md).
 
 ## Browser extension
@@ -152,12 +153,13 @@ vault. Connect another device with `pm sync connect --ssh USER@HOST`. See the
    Use `--browser chromium` or `--browser helium` as appropriate, then reload
    the extension. On Windows, fully exit and reopen Helium after registration.
 3. Start and unlock the server. Use the key button beside a login field to
-   choose an account, or **Open vault manager** in the popup to unlock and manage items.
+   choose an account. Unlock and edit vaults in the desktop app or CLI.
+   The popup shows status, locks the vault, and reviews uncertain operation outcomes.
 
 Autofill and save prompts operate on HTTPS pages. Credentials match saved
 origins, including scheme and port; subdomain sharing requires an explicit
 wildcard URL. See the [browser guide](docs/user-guide.md#browser-extension) for
-matching rules, generator settings, card/identity fields, and recovery after an
+matching rules, signup generation, card/identity fields, and recovery after an
 uncertain save. [Duo Push](docs/user-guide.md#duo-push) requires separate enrollment
 and an explicit decision for each request.
 
