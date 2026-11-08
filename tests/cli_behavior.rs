@@ -615,6 +615,136 @@ impl ServerGuard {
 }
 
 #[test]
+fn kill_exits_during_stalled_cloud_headers_and_body() {
+    use std::io::Write;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    struct Process(Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    for partial_body in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let port = unused_port();
+        assert!(run(root.path(), port, &["config"]).status.success());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let config_path = root.path().join("config/config.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["sync"]["server_url"] = toml::Value::String(url);
+        std::fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
+        std::fs::write(root.path().join("config/sync-token"), "ab".repeat(32)).unwrap();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let _stop = Stop(stopping.clone());
+        let mock_stop = stopping.clone();
+        let (received, requests) = mpsc::channel();
+        let mock = thread::spawn(move || {
+            let mut connections = Vec::new();
+            while !mock_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let stop = mock_stop.clone();
+                        let received = received.clone();
+                        connections.push(thread::spawn(move || {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(5)))
+                                .unwrap();
+                            let mut header = Vec::new();
+                            let mut byte = [0];
+                            while header.len() < 16 * 1024 && !header.ends_with(b"\r\n\r\n") {
+                                if stream.read_exact(&mut byte).is_err() {
+                                    return;
+                                }
+                                header.push(byte[0]);
+                            }
+                            if header.starts_with(b"GET /v1/vaults ") {
+                                if partial_body {
+                                    stream
+                                        .write_all(
+                                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n[",
+                                        )
+                                        .unwrap();
+                                }
+                                let _ = received.send(());
+                            }
+                            // Hold both foreground requests and event polling
+                            // open until the server has actually exited.
+                            while !stop.load(Ordering::Acquire) {
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("mock accept failed: {error}"),
+                }
+            }
+            for connection in connections {
+                connection.join().unwrap();
+            }
+        });
+        let mut server = Process(
+            isolated_pm(root.path())
+                .args(["--port", &port.to_string(), "run"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn_timeout("test server"),
+        );
+        let ready = Instant::now() + Duration::from_secs(10);
+        while !run(root.path(), port, &["status"]).status.success() {
+            assert!(Instant::now() < ready, "server startup timed out");
+            thread::sleep(Duration::from_millis(25));
+        }
+        let mut sync = Process(
+            isolated_pm(root.path())
+                .args(["--port", &port.to_string(), "sync", "vaults"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn_timeout("stalled sync"),
+        );
+        requests
+            .recv_timeout(Duration::from_secs(10))
+            .expect("cloud request did not start");
+        let before_kill = Instant::now();
+        let killed = run(root.path(), port, &["kill"]);
+        assert!(killed.status.success(), "{killed:?}");
+        #[cfg(target_os = "windows")]
+        assert!(
+            server.0.try_wait().unwrap().is_some(),
+            "kill must wait for process exit"
+        );
+        let deadline = before_kill + Duration::from_secs(5);
+        while server.0.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown waited for stalled cloud I/O"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(before_kill.elapsed() < Duration::from_secs(5));
+        let _ = sync.0.wait();
+        stopping.store(true, Ordering::Release);
+        mock.join().unwrap();
+    }
+}
+
+#[test]
 fn servers_on_different_ports_cannot_share_a_data_directory() {
     let root = tempfile::tempdir().unwrap();
     let first_port = unused_port();

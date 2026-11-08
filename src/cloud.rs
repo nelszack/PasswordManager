@@ -7,7 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -122,13 +122,15 @@ pub fn read_token_file(path: &Path) -> Result<Zeroizing<String>, String> {
 }
 
 /// Verify replacement credentials before changing an existing connection.
-pub fn connect_with_token(
+pub async fn connect_with_token(
     current: crate::config::Config,
     url: &str,
     token: &str,
     path: &Path,
 ) -> Result<crate::config::Config, String> {
-    CloudClient::with_token(url, Zeroizing::new(token.trim().to_owned()))?.list()?;
+    CloudClient::with_token(url, Zeroizing::new(token.trim().to_owned()))?
+        .list()
+        .await?;
     let previous_config = fs::read(path).map_err(|e| e.to_string())?;
     let token_path = config_dir().join("sync-token");
     let previous = match read_token_file(&token_path) {
@@ -161,7 +163,7 @@ pub fn connect_with_token(
 pub struct CloudClient {
     pub url: String,
     token: std::sync::Arc<Zeroizing<String>>,
-    http: reqwest::blocking::Client,
+    http: reqwest::Client,
 }
 impl CloudClient {
     pub fn new(config: &SyncConfig) -> Result<Self, String> {
@@ -188,11 +190,11 @@ impl CloudClient {
         }
         // The transport holds no credentials: authorization is attached per
         // request. Reuse pools while rereading tokens for every new CloudClient.
-        static HTTP: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+        static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
         let http = if let Some(http) = HTTP.get() {
             http.clone()
         } else {
-            let http = reqwest::blocking::Client::builder()
+            let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(35))
                 .connect_timeout(Duration::from_secs(5))
                 .redirect(reqwest::redirect::Policy::none())
@@ -208,14 +210,12 @@ impl CloudClient {
             http,
         })
     }
-    fn request(&self, method: reqwest::Method, suffix: &str) -> reqwest::blocking::RequestBuilder {
+    fn request(&self, method: reqwest::Method, suffix: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}{suffix}", self.url))
             .bearer_auth(self.token.as_str())
     }
-    fn checked(
-        response: reqwest::blocking::Response,
-    ) -> Result<reqwest::blocking::Response, String> {
+    fn checked(response: reqwest::Response) -> Result<reqwest::Response, String> {
         match response.status().as_u16() {
             200..=299 => Ok(response),
             401 | 403 => Err("Sync device is unauthorized or revoked".into()),
@@ -227,28 +227,29 @@ impl CloudClient {
             code => Err(format!("Sync server returned HTTP {code}")),
         }
     }
-    fn read(response: reqwest::blocking::Response, limit: u64) -> Result<Vec<u8>, String> {
+    async fn read(mut response: reqwest::Response, limit: u64) -> Result<Vec<u8>, String> {
         if response.content_length().is_some_and(|n| n > limit) {
             return Err("Sync response exceeds size limit".into());
         }
         let mut bytes = Vec::new();
-        response
-            .take(limit + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > limit {
-            return Err("Sync response exceeds size limit".into());
+        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
+                return Err("Sync response exceeds size limit".into());
+            }
+            bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
     }
-    pub fn list(&self) -> Result<Vec<RemoteVault>, String> {
+    pub async fn list(&self) -> Result<Vec<RemoteVault>, String> {
         let response = Self::checked(
             self.request(reqwest::Method::GET, "/v1/vaults")
                 .send()
+                .await
                 .map_err(|e| e.to_string())?,
         )?;
-        let vaults: Vec<RemoteVault> = serde_json::from_slice(&Self::read(response, 1024 * 1024)?)
-            .map_err(|e| e.to_string())?;
+        let vaults: Vec<RemoteVault> =
+            serde_json::from_slice(&Self::read(response, 1024 * 1024).await?)
+                .map_err(|e| e.to_string())?;
         if vaults
             .iter()
             .any(|v| !valid_id(&v.id) || !valid_id(&v.version) || v.size == 0 || v.size > MAX_BYTES)
@@ -257,13 +258,14 @@ impl CloudClient {
         }
         Ok(vaults)
     }
-    pub fn download(&self, id: &str) -> Result<(String, Vec<u8>), String> {
+    pub async fn download(&self, id: &str) -> Result<(String, Vec<u8>), String> {
         if !valid_id(id) {
             return Err("Invalid cloud vault ID".into());
         }
         let response = Self::checked(
             self.request(reqwest::Method::GET, &format!("/v1/vaults/{id}"))
                 .send()
+                .await
                 .map_err(|e| e.to_string())?,
         )?;
         let version = response
@@ -273,11 +275,11 @@ impl CloudClient {
             .map(|v| v.trim_matches('"').to_owned())
             .filter(|v| valid_id(v))
             .ok_or("Missing or invalid cloud version")?;
-        let bytes = Self::read(response, MAX_BYTES)?;
+        let bytes = Self::read(response, MAX_BYTES).await?;
         crate::encryption::validate_vault_header(&bytes).map_err(str::to_owned)?;
         Ok((version, bytes))
     }
-    pub fn upload(
+    pub async fn upload(
         &self,
         id: &str,
         version: Option<&str>,
@@ -293,9 +295,15 @@ impl CloudClient {
         } else {
             request.header(reqwest::header::IF_NONE_MATCH, "*")
         };
-        let response = Self::checked(request.body(bytes).send().map_err(|e| e.to_string())?)?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&Self::read(response, 4096)?).map_err(|e| e.to_string())?;
+        let response = Self::checked(
+            request
+                .body(bytes)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?,
+        )?;
+        let value: serde_json::Value = serde_json::from_slice(&Self::read(response, 4096).await?)
+            .map_err(|e| e.to_string())?;
         value
             .get("version")
             .and_then(|v| v.as_str())
@@ -303,17 +311,18 @@ impl CloudClient {
             .map(str::to_owned)
             .ok_or("Invalid upload acknowledgement".into())
     }
-    pub fn events(&self, since: &str) -> Result<String, String> {
+    pub async fn events(&self, since: &str) -> Result<String, String> {
         if !since.is_empty() && !valid_id(since) {
             return Err("Invalid event cursor".into());
         }
         let response = Self::checked(
             self.request(reqwest::Method::GET, &format!("/v1/events?since={since}"))
                 .send()
+                .await
                 .map_err(|e| e.to_string())?,
         )?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&Self::read(response, 4096)?).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_slice(&Self::read(response, 4096).await?)
+            .map_err(|e| e.to_string())?;
         value
             .get("generation")
             .and_then(|v| v.as_str())

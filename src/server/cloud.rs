@@ -103,14 +103,14 @@ pub(super) async fn command(
     match action {
         Action::List => {
             let client = client().await?;
-            let list = blocking(move || client.list()).await?;
+            let list = client.list().await?;
             serde_json::to_string_pretty(&list).map_err(|e| e.to_string())
         }
         Action::Pull(id) | Action::PullCopy(id) => {
             let client = client().await?;
             let url = client.url.clone();
             let remote_id = id.clone();
-            let (version, bytes) = blocking(move || client.download(&remote_id)).await?;
+            let (version, bytes) = client.download(&remote_id).await?;
             let filename = worker
                 .with_session(move |_| {
                     if stopping.load(Ordering::Acquire) {
@@ -201,7 +201,7 @@ async fn sync(
     }
     let remote_id = snap.id.clone();
     let c = client.clone();
-    let remote = blocking(move || Ok(c.list()?.into_iter().find(|v| v.id == remote_id))).await?;
+    let remote = c.list().await?.into_iter().find(|v| v.id == remote_id);
     let local_digest = digest(&snap.bytes);
     let local_changed = state.digest.as_deref() != Some(&local_digest);
     let remote_version = remote.as_ref().map(|v| v.version.clone());
@@ -220,7 +220,7 @@ async fn sync(
     {
         let id = snap.id.clone();
         let c = client.clone();
-        let (version, bytes) = blocking(move || c.download(&id)).await?;
+        let (version, bytes) = c.download(&id).await?;
         if bytes == snap.bytes {
             state.version = Some(version);
             state.digest = Some(local_digest);
@@ -271,7 +271,7 @@ async fn sync(
     let id = snap.id;
     let base = state.version.clone();
     let bytes = snap.bytes;
-    let version = blocking(move || client.upload(&id, base.as_deref(), bytes)).await?;
+    let version = client.upload(&id, base.as_deref(), bytes).await?;
     state.version = Some(version);
     state.digest = Some(local_digest);
     save_binding(&snap.path, &state)?;
@@ -288,7 +288,7 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
                 let result = async {
                     let c = client().await?;
                     let old = generation.clone();
-                    blocking(move || c.events(&old)).await
+                    c.events(&old).await
                 }
                 .await;
                 match result {

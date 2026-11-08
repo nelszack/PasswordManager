@@ -35,14 +35,9 @@ pub(super) async fn run(
             };
             let config = conf.clone();
             let path = path.to_owned();
-            let result = tokio::task::spawn_blocking(move || {
-                cloud::connect_with_token(config, &url, &token, &path)
-            })
-            .await;
-            match result {
-                Ok(Ok(_)) => console.print_success("Connected to encrypted vault sync server"),
-                Ok(Err(e)) => console.exit_error(&format!("Connection failed: {e}"), 1),
-                Err(e) => console.exit_error(&e.to_string(), 1),
+            match cloud::connect_with_token(config, &url, &token, &path).await {
+                Ok(_) => console.print_success("Connected to encrypted vault sync server"),
+                Err(e) => console.exit_error(&format!("Connection failed: {e}"), 1),
             }
         }
         command => {

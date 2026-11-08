@@ -166,6 +166,14 @@ pub async fn server(
 ) -> Result<(), String> {
     let directory = data_dir();
     let instance_lock = Arc::new(acquire_server_lock(&directory)?);
+    #[cfg(target_os = "windows")]
+    // Use a sidecar: Windows byte-range locks also prevent other handles from
+    // reading the ownership file. Publish before the authenticated listener.
+    crate::cloud::write_private(
+        &directory.join(crate::file::SERVER_PID_FILE),
+        std::process::id().to_string().as_bytes(),
+        true,
+    )?;
     let address = server_addr(port);
     let listener = TcpListener::bind(address)
         .await
@@ -228,6 +236,8 @@ pub async fn server(
     worker.lock().await;
     let _ = crate::clipboard::clear_owned();
     remove_token_file_if_current(&token_path, &token);
+    #[cfg(target_os = "windows")]
+    let _ = fs::remove_file(directory.join(crate::file::SERVER_PID_FILE));
     token.zeroize();
     Ok(())
 }

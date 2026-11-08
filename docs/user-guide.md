@@ -24,6 +24,14 @@ windows or require a graphical session. Builds made with
 `cargo build --release --locked --no-default-features` provide only CLI/server
 functionality and report that the desktop interface is unavailable.
 
+On Windows, `pm kill` waits for the server process to exit before reporting
+success. If shutdown takes more than ten seconds after acknowledgement, it
+reports that the server is still stopping. Pending cloud network requests are
+cancelled during shutdown; vault writes already in progress finish safely.
+Close any open PM windows before replacing `pm.exe`, and allow clipboard
+helpers to finish their configured cleanup timeout. The browser's separate
+native-host copy must be updated with Chrome fully closed.
+
 On Linux, put the binary at a stable path and run:
 
 ```bash

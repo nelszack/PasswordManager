@@ -147,6 +147,12 @@ impl AuthenticatedClient {
             .map_err(|e| format!("could not authenticate the password manager server: {e}"))?;
         let keys = verify_server_hello(&token, &hello)
             .ok_or_else(|| "password manager server authentication failed".to_string())?;
+        #[cfg(target_os = "windows")]
+        let shutdown_wait = if matches!(command, ServerCommand::Kill) {
+            super::shutdown::ShutdownWait::capture(&self.token_path)?
+        } else {
+            None
+        };
         let data = Zeroizing::new(
             rmp_serde::to_vec_named(envelope)
                 .map_err(|e| format!("could not encode command: {e}"))?,
@@ -201,6 +207,19 @@ impl AuthenticatedClient {
             }
         });
         plaintext.zeroize();
+        #[cfg(target_os = "windows")]
+        let response = response.and_then(|mut response| {
+            if matches!(command, ServerCommand::Kill) && response.code == 0 {
+                if let Some(waiter) = shutdown_wait {
+                    waiter.wait()?;
+                } else {
+                    response.payload = crate::protocol::ResponsePayload::Message(
+                        "Server shutdown requested. This older server does not support process-exit verification; restart it to enable shutdown waiting.".into(),
+                    );
+                }
+            }
+            Ok(response)
+        });
         response
     }
 }

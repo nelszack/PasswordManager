@@ -1,4 +1,6 @@
 pub(crate) mod presentation;
+#[cfg(target_os = "windows")]
+mod shutdown;
 mod transport;
 pub use transport::{AuthenticatedClient, RequestFailure};
 pub fn render_response(payload: &crate::protocol::ResponsePayload) -> String {

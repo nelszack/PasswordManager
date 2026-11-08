@@ -61,6 +61,8 @@ pub(crate) fn hidden_windows_command(
 
 pub const TOKEN_FILE: &str = "session.key";
 pub(crate) const SERVER_LOCK_FILE: &str = "server.lock";
+#[cfg(target_os = "windows")]
+pub(crate) const SERVER_PID_FILE: &str = "server.pid";
 pub const CONFIG_DIR_ENV: &str = "PM_CONFIG_DIR";
 pub const DATA_DIR_ENV: &str = "PM_DATA_DIR";
 
