@@ -27,38 +27,47 @@ function run(command, args, announce = true, artifacts = null) {
     if (result.status !== 0) process.exit(result.status || 1);
 }
 
-run(process.execPath, ["scripts/build_extension.cjs", "--check"]);
-run("cargo", ["fmt", "--all", "--", "--check"]);
-const manifest = JSON.parse(fs.readFileSync(path.join(root, "extension/manifest.json"), "utf8"));
-for (const entry of [manifest.background.service_worker, manifest.action.default_popup,
-    ...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon),
-    ...manifest.content_scripts.flatMap(script => script.js)]) {
-    if (!fs.statSync(path.join(root, "extension", entry)).isFile()) throw new Error(`Missing extension entry: ${entry}`);
+const mode = process.argv[2] || "all";
+if (process.argv.length > 3 || !["all", "rust", "extension"].includes(mode)) {
+    throw new Error("Usage: node scripts/validate.cjs [all|rust|extension]");
 }
-// Check every script, including extracted services and browser-test helpers.
-console.log("\n> Check all extension scripts");
-for (const entry of fs.readdirSync(path.join(root, "extension"), { recursive: true }).sort()) {
-    if (/\.(?:js|cjs)$/.test(entry)) run(process.execPath, ["--check", path.join("extension", entry)], false);
+
+if (mode !== "rust") {
+    run(process.execPath, ["scripts/build_extension.cjs", "--check"]);
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, "extension/manifest.json"), "utf8"));
+    for (const entry of [manifest.background.service_worker, manifest.action.default_popup,
+        ...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon),
+        ...manifest.content_scripts.flatMap(script => script.js)]) {
+        if (!fs.statSync(path.join(root, "extension", entry)).isFile()) throw new Error(`Missing extension entry: ${entry}`);
+    }
+    // Check every script, including extracted services and browser-test helpers.
+    console.log("\n> Check all extension scripts");
+    for (const entry of fs.readdirSync(path.join(root, "extension"), { recursive: true }).sort()) {
+        if (/\.(?:js|cjs)$/.test(entry)) run(process.execPath, ["--check", path.join("extension", entry)], false);
+    }
+    run(process.execPath, ["extension/check_unit_coverage.cjs"]);
 }
-run(process.execPath, ["extension/check_unit_coverage.cjs"]);
-const artifacts = [];
-// These desktop packages share the same resolved dependency features. Build and
-// run their harnesses together rather than resolving the graph for each one.
-const desktopPackages = ["iced_tiny_skia", "iced_winit"];
-if (process.platform === "linux") desktopPackages.push("accesskit_unix");
-run("cargo", ["test", "--locked", ...desktopPackages.flatMap(name => ["-p", name]), "--lib"]);
-if (process.platform === "linux") {
-    // Keep workspace protocol packages separate: combining them changes their
-    // dependency feature sets and stops testing the existing configurations.
-    run("cargo", ["test", "--locked", "-p", "atspi-common", "--lib"]);
-    run("cargo", ["test", "--locked", "-p", "zbus-lockstep", "--lib"]);
+if (mode !== "extension") {
+    run("cargo", ["fmt", "--all", "--", "--check"]);
+    const artifacts = [];
+    // These desktop packages share the same resolved dependency features. Build and
+    // run their harnesses together rather than resolving the graph for each one.
+    const desktopPackages = ["iced_tiny_skia", "iced_winit"];
+    if (process.platform === "linux") desktopPackages.push("accesskit_unix");
+    run("cargo", ["test", "--locked", ...desktopPackages.flatMap(name => ["-p", name]), "--lib"]);
+    if (process.platform === "linux") {
+        // Keep workspace protocol packages separate: combining them changes their
+        // dependency feature sets and stops testing the existing configurations.
+        run("cargo", ["test", "--locked", "-p", "atspi-common", "--lib"]);
+        run("cargo", ["test", "--locked", "-p", "zbus-lockstep", "--lib"]);
+    }
+    run("cargo", ["test", "--locked", "--all-features", "--message-format=json-render-diagnostics"], true, artifacts);
+    // Cargo reports the exact executable path, including custom target directories
+    // and platform suffixes. Reuse it without another build or feature resolution.
+    const executable = artifacts.find(artifact => artifact.target.name === "pm"
+        && artifact.target.kind.includes("bin") && !artifact.profile.test && artifact.executable)?.executable;
+    if (!executable) throw new Error("Cargo did not report the pm integration-test executable");
+    run(executable, ["generate-command-reference", "--check"]);
+    run(executable, ["generate-command-contract", "--check"]);
+    run("cargo", ["clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"]);
 }
-run("cargo", ["test", "--locked", "--all-features", "--message-format=json-render-diagnostics"], true, artifacts);
-// Cargo reports the exact executable path, including custom target directories
-// and platform suffixes. Reuse it without another build or feature resolution.
-const executable = artifacts.find(artifact => artifact.target.name === "pm"
-    && artifact.target.kind.includes("bin") && !artifact.profile.test && artifact.executable)?.executable;
-if (!executable) throw new Error("Cargo did not report the pm integration-test executable");
-run(executable, ["generate-command-reference", "--check"]);
-run(executable, ["generate-command-contract", "--check"]);
-run("cargo", ["clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"]);

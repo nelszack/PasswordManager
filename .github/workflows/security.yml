@@ -2,24 +2,8 @@ name: Security
 
 on:
   push:
-    branches: [main, 'feature/**']
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - package.json
-      - package-lock.json
-      - fuzz/Cargo.toml
-      - fuzz/Cargo.lock
-      - .github/workflows/security.yml
+    branches: [main]
   pull_request:
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - package.json
-      - package-lock.json
-      - fuzz/Cargo.toml
-      - fuzz/Cargo.lock
-      - .github/workflows/security.yml
   schedule:
     - cron: "17 7 * * 1"
   workflow_dispatch:
@@ -28,11 +12,43 @@ permissions:
   contents: read
 
 concurrency:
-  group: security-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: security-${{ github.event.pull_request.number || github.run_id }}
+  # Preserve checks for earlier direct pushes; PR updates may cancel old PR runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: Select checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.plan.outputs.rust }}
+      extension: ${{ steps.plan.outputs.extension }}
+      browser: ${{ steps.plan.outputs.browser }}
+      cloud: ${{ steps.plan.outputs.cloud }}
+      fuzz: ${{ steps.plan.outputs.fuzz }}
+      rust_audit: ${{ steps.plan.outputs.rust_audit }}
+      npm_audit: ${{ steps.plan.outputs.npm_audit }}
+      reused: ${{ steps.plan.outputs.reused }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Test CI selection and reuse safeguards
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Select suites or reuse successful PR result
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/plan.py --workflow security
+
   rustsec:
+    needs: plan
+    if: needs.plan.outputs.rust_audit == 'true'
     name: RustSec dependency audit
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +65,8 @@ jobs:
           cargo audit --deny warnings --file fuzz/Cargo.lock
 
   npm-audit:
+    needs: plan
+    if: needs.plan.outputs.npm_audit == 'true'
     name: Browser test dependency audit
     runs-on: ubuntu-latest
     steps:
@@ -62,7 +80,8 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    if: github.event_name == 'pull_request'
+    needs: plan
+    if: github.event_name == 'pull_request' && (needs.plan.outputs.rust_audit == 'true' || needs.plan.outputs.npm_audit == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,3 +91,28 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           comment-summary-in-pr: always
+
+  result:
+    name: Security result
+    if: always()
+    needs: [plan, rustsec, npm-audit, dependency-review]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require successful selected checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/plan.py --workflow security --finish
+      - name: Record the tested source tree
+        env:
+          SELECTED: ${{ toJSON(needs.plan.outputs) }}
+        run: python3 scripts/ci/plan.py --workflow security --record
+      - name: Upload successful source-tree proof
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: security-tested-tree
+          path: tested-tree.json
+          overwrite: true
+          retention-days: 14
+          if-no-files-found: error

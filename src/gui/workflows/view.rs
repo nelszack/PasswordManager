@@ -539,7 +539,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             .width(Fill),
         );
     }
-    if app.session.is_none() && state.section != Section::Browser {
+    if app.session.is_none() && !matches!(state.section, Section::Browser | Section::Utilities) {
         form = form.push(text("Unlock a vault to use item tools. Creating a vault, restoring a backup, and importing into a new vault are available while locked.").size(14));
     }
     form = match state.section {
@@ -629,6 +629,16 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
                 .push(toggle("Descending order", state.descending, Toggle::Descending, enabled))
                 .push(action("Search vault", Action::Search, unlocked))
         }
+        Section::Utilities => form
+            .push(text("Inspect a previous operation").size(19))
+            .push(text("Enter an operation ID reported by the CLI or another client. Checking its outcome never retries it or clears this window's pending changes.").size(14))
+            .push(field("Operation ID", &state.operation_id, Field::OperationId, false, enabled))
+            .push(action("Check operation outcome", Action::OperationStatus, enabled && app.running && state.prepare(Action::OperationStatus, app).is_ok()))
+            .push(rule::horizontal(1))
+            .push(text("Save shell completions").size(19))
+            .push(pick_list([clap_complete::Shell::Bash, clap_complete::Shell::Elvish, clap_complete::Shell::Fish, clap_complete::Shell::PowerShell, clap_complete::Shell::Zsh], Some(state.shell), |shell| event(Event::Shell(shell))).padding(10))
+            .push(path("Completion file (must not already exist)", &state.path, Field::Path, true, enabled))
+            .push(action("Save shell completions", Action::Completions, enabled && !state.path.trim().is_empty())),
         Section::Browser => form
             .push(text("Register the browser extension").size(19))
             .push(text("Load extension/ as an unpacked extension first, then enter its ID. Reload the extension afterward. On Windows, fully close the browser before installing or updating its native host.").size(14))
@@ -861,6 +871,11 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
     .wrap();
     let advanced = row![
         card(
+            "CLI utilities",
+            "Look up an operation or save shell completions.",
+            Event::Section(Section::Utilities)
+        ),
+        card(
             "Advanced search",
             "Search notes, fields, types, and password age.",
             Event::Section(Section::Search)
@@ -902,6 +917,24 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
 
 pub(super) fn report(payload: &ResponsePayload) -> String {
     match payload {
+        ResponsePayload::Operation(receipt) => format!(
+            "Operation {}\nState: {}{}",
+            receipt.operation_id,
+            match receipt.state {
+                password_manager::protocol::OperationState::Committed => "Committed",
+                password_manager::protocol::OperationState::Failed => "Failed",
+                password_manager::protocol::OperationState::Pending =>
+                    "Pending — check again before making another change",
+                password_manager::protocol::OperationState::Unknown =>
+                    "Unknown — inspect the vault before deciding on a new change",
+                password_manager::protocol::OperationState::CommittedDurabilityUnknown =>
+                    "Committed, durability uncertain — inspect the vault before deciding on a new change",
+            },
+            receipt
+                .revision
+                .map(|revision| format!("\nRevision: {revision}"))
+                .unwrap_or_default()
+        ),
         ResponsePayload::Message(message) => message.clone(),
         ResponsePayload::Secret(secret) => secret.expose().to_owned(),
         ResponsePayload::Authenticator(code) => format!(

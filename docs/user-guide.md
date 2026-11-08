@@ -223,6 +223,7 @@ in **Tools**:
 | Vault security | Create key-file vaults, rekey, or delete a vault. |
 | Advanced search | Combine text/name/username/URL/notes, type, authenticator, weak/stale, and sorting filters; open a matching item in Vault. |
 | Browser integration | Register or update the native browser bridge and install the Linux application-menu shortcut. |
+| CLI utilities | Check any reported operation ID without retrying it; save Bash, Elvish, Fish, PowerShell, or Zsh completions to a new file. |
 
 Choose files using native open/save dialogs or enter their paths. Backup creation
 uses a dedicated password (entered twice) or an existing external key. Restoring
@@ -266,8 +267,17 @@ request; automatic refresh rejects HOTP. Codes and
 individual revealed custom fields disappear after at most 15 seconds and do
 not reappear if an in-flight reply arrives after focus loss.
 
-Shell completion generation, internal native-host/clipboard commands, generated
-developer artifacts, and terminal output flags remain CLI-specific. Settings controls
+Cloud settings include **Download comparison copy**, equivalent to `pm sync pull
+--copy`: it downloads a separate vault with synchronization disabled.
+
+**Tools → CLI utilities → Check operation outcome** accepts IDs from any client.
+It reports committed, failed, pending, or uncertain outcomes without retrying the
+operation or acknowledging a different pending operation in this window.
+Completion export generates the same definitions as `pm completions`; choose a
+new destination file, then configure your shell to load it.
+
+Internal native-host/clipboard commands, generated developer artifacts, and
+terminal output flags remain CLI-specific. See the [CLI/GUI feature map](gui-cli-parity.md). Settings controls
 persistent defaults; generation and authenticator controls provide one-time
 overrides.
 

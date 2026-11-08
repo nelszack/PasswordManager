@@ -3,19 +3,7 @@ name: Security fuzzing
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'fuzz/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/fuzz.yml'
   pull_request:
-    paths:
-      - 'src/**'
-      - 'fuzz/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/fuzz.yml'
   schedule:
     - cron: '43 7 * * 1'
   workflow_dispatch:
@@ -24,11 +12,43 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: fuzz-${{ github.event.pull_request.number || github.run_id }}
+  # Preserve checks for earlier direct pushes; PR updates may cancel old PR runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: Select checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.plan.outputs.rust }}
+      extension: ${{ steps.plan.outputs.extension }}
+      browser: ${{ steps.plan.outputs.browser }}
+      cloud: ${{ steps.plan.outputs.cloud }}
+      fuzz: ${{ steps.plan.outputs.fuzz }}
+      rust_audit: ${{ steps.plan.outputs.rust_audit }}
+      npm_audit: ${{ steps.plan.outputs.npm_audit }}
+      reused: ${{ steps.plan.outputs.reused }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Test CI selection and reuse safeguards
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Select suites or reuse successful PR result
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/plan.py --workflow fuzz
+
   fuzz:
+    needs: plan
+    if: needs.plan.outputs.fuzz == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -87,3 +107,28 @@ jobs:
           name: fuzz-crashes-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  result:
+    name: Fuzz result
+    if: always()
+    needs: [plan, fuzz]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require successful selected checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/plan.py --workflow fuzz --finish
+      - name: Record the tested source tree
+        env:
+          SELECTED: ${{ toJSON(needs.plan.outputs) }}
+        run: python3 scripts/ci/plan.py --workflow fuzz --record
+      - name: Upload successful source-tree proof
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fuzz-tested-tree
+          path: tested-tree.json
+          overwrite: true
+          retention-days: 14
+          if-no-files-found: error

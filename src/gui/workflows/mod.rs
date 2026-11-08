@@ -22,6 +22,7 @@ pub enum Section {
     Security,
     Search,
     Browser,
+    Utilities,
 }
 impl std::fmt::Display for Section {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,6 +35,7 @@ impl std::fmt::Display for Section {
             Self::Security => "Vault security",
             Self::Search => "Advanced search",
             Self::Browser => "Browser integration",
+            Self::Utilities => "CLI utilities",
         })
     }
 }
@@ -187,6 +189,7 @@ pub enum Field {
     Url,
     Notes,
     ExtensionId,
+    OperationId,
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Toggle {
@@ -235,6 +238,8 @@ pub enum Action {
     InstallHost,
     UpdateHost,
     Shortcut,
+    OperationStatus,
+    Completions,
 }
 impl Action {
     pub fn confirm_label(self) -> &'static str {
@@ -284,7 +289,10 @@ impl Action {
         )
     }
     pub fn local(self) -> bool {
-        matches!(self, Self::InstallHost | Self::UpdateHost | Self::Shortcut)
+        matches!(
+            self,
+            Self::InstallHost | Self::UpdateHost | Self::Shortcut | Self::Completions
+        )
     }
 }
 #[derive(Clone, Debug)]
@@ -299,6 +307,7 @@ pub enum Event {
     Policy(Policy),
     Mode(Mode),
     Browser(Browser),
+    Shell(clap_complete::Shell),
     Kind(Option<ItemKind>),
     Sort(SortField),
     HasOtp(Option<bool>),
@@ -345,6 +354,8 @@ pub struct State {
     pub url: String,
     pub notes: SecretString,
     pub extension_id: String,
+    pub operation_id: String,
+    pub shell: clap_complete::Shell,
     pub use_key: bool,
     pub force: bool,
     pub import_new: bool,
@@ -407,6 +418,8 @@ impl Default for State {
             url: String::new(),
             notes: SecretString::default(),
             extension_id: String::new(),
+            operation_id: String::new(),
+            shell: clap_complete::Shell::Bash,
             use_key: false,
             force: false,
             import_new: false,
@@ -510,6 +523,7 @@ impl State {
                     Field::Username => &mut self.username,
                     Field::Url => &mut self.url,
                     Field::ExtensionId => &mut self.extension_id,
+                    Field::OperationId => &mut self.operation_id,
                     _ => unreachable!(),
                 } = value.expose_owned()
             }
@@ -661,7 +675,10 @@ impl State {
         // dispatch a current-vault operation without an expected session: a
         // different client could unlock another vault before it reaches us.
         let needs_session = match action {
-            Action::NewVault | Action::RestoreBackup | Action::DeleteVault => false,
+            Action::NewVault
+            | Action::RestoreBackup
+            | Action::DeleteVault
+            | Action::OperationStatus => false,
             Action::Import | Action::PreviewImport => !self.import_new,
             _ => true,
         };
@@ -715,6 +732,21 @@ impl State {
         let mut confirmation = None;
         let mut revision = needs_item.then(|| item.unwrap().revision);
         let command = match action {
+            Action::OperationStatus => {
+                let id = self.operation_id.trim();
+                if id.is_empty()
+                    || id.len() > 128
+                    || !id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                {
+                    return Err(
+                        "Operation ID must contain 1–128 letters, digits, hyphens or underscores."
+                            .into(),
+                    );
+                }
+                ServerCommand::OperationStatus(id.to_owned())
+            }
             Action::History => ServerCommand::History(target()),
             Action::RestorePassword(index) => {
                 let Some(page) = self.history_for(app) else {
@@ -1030,7 +1062,7 @@ impl State {
                     },
                 })
             }
-            Action::InstallHost | Action::UpdateHost | Action::Shortcut => {
+            Action::InstallHost | Action::UpdateHost | Action::Shortcut | Action::Completions => {
                 return Err("This is a local desktop action.".into());
             }
         };
@@ -1418,6 +1450,7 @@ impl App {
                 self.workspace.prepared = None;
                 self.workspace.clear_inputs();
             }
+            Event::Shell(shell) => self.workspace.shell = shell,
             Event::Field(field, value) => self.workspace.edit(field, value),
             Event::Toggle(toggle, value) => {
                 self.workspace.toggle(toggle, value);
@@ -1533,6 +1566,19 @@ impl App {
                 }
             }
             Event::Run(action) if action.local() => {
+                if action == Action::Completions {
+                    let path = match absolute(&self.workspace.path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            self.report_error(error);
+                            return Task::none();
+                        }
+                    };
+                    let shell = self.workspace.shell;
+                    return self.launch(Job::Local, move || {
+                        backend::save_completions(shell, std::path::Path::new(&path))
+                    });
+                }
                 let extension_id = self.workspace.extension_id.clone();
                 let browser = match self.workspace.browser {
                     Browser::Chrome => NativeBrowser::Chrome,

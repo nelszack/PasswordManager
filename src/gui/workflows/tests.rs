@@ -1383,3 +1383,64 @@ fn empty_health_assessment_has_no_numeric_score() {
     assert!(rendered.contains("50/100"));
     assert!(rendered.contains("1 of 2"));
 }
+
+#[test]
+fn operation_lookup_is_read_only_available_while_locked_and_preserves_pending_review() {
+    let mut app = app();
+    app.session = None;
+    app.pending = Some("desktop-pending".into());
+    app.workspace.operation_id = "cli-operation_123".into();
+    let prepared = app
+        .workspace
+        .prepare(Action::OperationStatus, &app)
+        .unwrap();
+    assert!(
+        matches!(&prepared.command, ServerCommand::OperationStatus(id) if id == "cli-operation_123")
+    );
+    assert!(!prepared.command.is_mutation());
+    assert!(prepared.session.is_none());
+    assert!(prepared.revision.is_none());
+    assert!(prepared.confirmation.is_none());
+    let _ = app.complete(
+        Job::Workflow(Action::OperationStatus),
+        Reply::Server {
+            response: Box::new(RpcResponse::success(ResponsePayload::Operation(
+                password_manager::protocol::OperationReceipt {
+                    operation_id: "cli-operation_123".into(),
+                    state: password_manager::protocol::OperationState::Committed,
+                    revision: Some(42),
+                },
+            ))),
+            vaults: vec![],
+            pending: vec!["desktop-pending".into()],
+        },
+    );
+    assert_eq!(app.pending.as_deref(), Some("desktop-pending"));
+    let output = view::report(app.workspace.result.as_ref().unwrap());
+    assert!(output.contains("cli-operation_123"));
+    assert!(output.contains("Committed"));
+    assert!(output.contains("42"));
+    for invalid in ["", "bad id", "../id", &"a".repeat(129)] {
+        app.workspace.operation_id = invalid.into();
+        assert!(
+            app.workspace
+                .prepare(Action::OperationStatus, &app)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn every_public_cli_command_has_an_entry_in_the_desktop_feature_map() {
+    use clap::CommandFactory;
+    let map = include_str!("../../../docs/gui-cli-parity.md");
+    for command in password_manager::cli::Cli::command().get_subcommands() {
+        if !command.is_hide_set() {
+            assert!(
+                map.contains(&format!("`{}`", command.get_name())),
+                "Document and implement desktop support for {}",
+                command.get_name()
+            );
+        }
+    }
+}

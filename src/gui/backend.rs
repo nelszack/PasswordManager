@@ -519,3 +519,66 @@ mod tests {
         assert!(reopened.pending().unwrap().is_empty());
     }
 }
+
+/// Generate from the same Clap metadata as the CLI; never truncate an existing file.
+pub fn save_completions(
+    shell: clap_complete::Shell,
+    path: &std::path::Path,
+) -> Result<Reply, Failure> {
+    use clap::CommandFactory;
+    use std::io::Write;
+    let mut bytes = Vec::new();
+    clap_complete::generate(
+        shell,
+        &mut password_manager::cli::Cli::command(),
+        "pm",
+        &mut bytes,
+    );
+    let parent = path
+        .parent()
+        .ok_or_else(|| Failure::from("Choose a destination file.".to_owned()))?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(parent).map_err(|e| Failure::from(e.to_string()))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(|e| Failure::from(e.to_string()))?;
+    file.persist_noclobber(path)
+        .map_err(|e| Failure::from(e.to_string()))?;
+    sync_parent(path).map_err(|e| Failure::from(e.to_string()))?;
+    Ok(Reply::Local(format!(
+        "Completions saved to {}",
+        path.display()
+    )))
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn desktop_completion_files_match_cli_and_preserve_existing_destinations() {
+        let directory = tempfile::tempdir().unwrap();
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Elvish,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+            clap_complete::Shell::Zsh,
+        ] {
+            let path = directory.path().join(shell.to_string());
+            let mut expected = Vec::new();
+            clap_complete::generate(
+                shell,
+                &mut password_manager::cli::Cli::command(),
+                "pm",
+                &mut expected,
+            );
+            save_completions(shell, &path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+            std::fs::write(&path, "keep this file").unwrap();
+            assert!(save_completions(shell, &path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"keep this file");
+        }
+    }
+}

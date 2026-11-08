@@ -350,12 +350,18 @@ fn rendered_screens_fit_supported_windows() {
         app.tab = Tab::Generator;
         render(&app, "generator", width, 800, scale);
         app.tab = Tab::Settings;
+        app.cloud_vaults = vec!["a".repeat(32)];
+        app.cloud_vault = app.cloud_vaults.first().cloned();
         for section in presentation::SettingsSection::ALL {
             app.ui.settings_section = section;
             render(&app, &format!("settings-{section}"), width, 800, scale);
         }
         app.tab = Tab::Tools;
         render(&app, "tools", width, 800, scale);
+        app.workspace.section = workflows::Section::Utilities;
+        render(&app, "cli-utilities", width, 800, scale);
+        app.session = None;
+        render(&app, "cli-utilities-locked", width, 800, scale);
     }
 }
 

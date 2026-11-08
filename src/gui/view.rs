@@ -1980,11 +1980,11 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
             .placeholder("Cloud vault"),
         );
         if let Some(id) = &app.cloud_vault {
-            form = form.push(action(
-                "Download selected vault",
-                Message::Cloud(Action::Pull(id.clone())),
-                ready,
-            ));
+            form = form.push(row![
+                action("Download selected vault", Message::Cloud(Action::Pull(id.clone())), ready),
+                action("Download comparison copy", Message::Cloud(Action::PullCopy(id.clone())), ready),
+            ].spacing(8).wrap())
+            .push(text("A comparison copy has synchronization disabled and leaves existing local vaults intact.").size(14));
         }
     }
     form = form.push(

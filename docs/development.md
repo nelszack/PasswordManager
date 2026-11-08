@@ -117,6 +117,51 @@ fast unit-only iteration; `npm run test:extension:coverage` also checks generate
 bundles and coverage gates. Run `npm run validate` once the changes are stable,
 plus the browser/cloud/native checks appropriate to the change.
 
+### CI suite selection and merged PRs
+
+CI runs on pull requests and pushes to `main`; feature-branch pushes do not
+start a second run. A planner selects whole suites from the complete Git diff,
+including deletions and both sides of renames:
+
+- Ordinary Markdown documentation skips application tests. Generated command
+  references still run Rust validation.
+- GUI/assets changes run Rust tests, coverage, and platform checks.
+- Shared Rust, integration-test, and vendor changes also run browser, cloud,
+  and fuzz integration checks.
+- Extension changes run extension validation and browser integration. Generated
+  command-contract changes also run Rust consistency checks.
+- Go server changes run cloud validation and the two-device integration test.
+- Dependency manifests/lockfiles run the affected suites and dependency audits.
+  Root Cargo changes select all suites.
+- Workflow/planner changes and unknown inputs select all suites. A missing Git
+  diff also falls back to all suites.
+
+`npm run validate` still runs the complete local validation. CI splits it into
+`npm run validate -- rust` on each platform and
+`npm run validate -- extension` once on Linux. Browser integration builds the
+CLI/native host with `--no-default-features`, without the desktop renderer.
+
+A successful PR workflow uploads the exact checked-out Git tree as a small
+artifact. A push to `main` reuses that result only for a merged PR from this
+repository, in the same workflow, with a successful run, an identical tree, and proof that all suites needed
+for the main-branch diff actually passed.
+This works across merge and squash commits even though their commit IDs differ.
+Each workflow verifies its own result independently. Missing/expired artifacts,
+API errors, direct pushes, changed merge results, and unfinished/failed PR runs
+run the selected checks normally. Proof artifacts expire after 14 days.
+
+The lightweight planner and final result jobs still run after merging; expensive
+suites are skipped when reuse is verified. The planner's job summary links the
+reused PR run or lists the selected suites. `CI result`, `Security result`, and
+`Fuzz result` reject failures, cancellations, and unexpectedly skipped selected
+jobs; these are the stable checks to require if branch protection is enabled.
+Branch protection itself does not deduplicate tests. Earlier main-branch runs
+are allowed to finish so later pushes cannot cancel validation of direct pushes.
+
+Weekly full runs bypass selection and reuse to catch selection gaps and refresh
+shared caches on `main`. Manual workflow dispatch also runs all suites. PRs
+restore these shared Rust caches without saving PR-specific copies.
+
 The dev/test profiles optimize Argon2, Blake2, and zxcvbn while leaving application
 debug information intact. This adds a one-time dependency compilation cost but
 avoids repeatedly running cryptographic and strength-estimation loops without
