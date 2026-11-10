@@ -227,7 +227,8 @@ module.exports.create = function create() {
         return [
             input.name, input.id, input.className, input.autocomplete,
             input.getAttribute("type"), input.getAttribute("placeholder"),
-            input.getAttribute("aria-label"), input.getAttribute("role")
+            input.getAttribute("aria-label"), input.getAttribute("role"),
+            ...Array.from(input.labels || [], label => label.textContent)
         ].filter(Boolean).map(String);
     }
 
@@ -276,8 +277,13 @@ module.exports.create = function create() {
     }
 
     function usernameCandidates(fields) {
-        return fields.filter(field => isUsableInput(field)
-            && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field));
+        return fields.filter(field => {
+            if (!isUsableInput(field) || !USERNAME_INPUT_TYPES.has(field.type)
+                || hasSearchHint(field) || isTotpInput(field)) return false;
+            const tokens = autocompleteTokens(field).filter(token =>
+                !token.startsWith("section-") && !["shipping", "billing", "on", "off", "webauthn"].includes(token));
+            return !tokens.length || tokens.some(token => ["username", "email", "tel"].includes(token));
+        });
     }
 
     function credentialScope(input) {
@@ -299,25 +305,25 @@ module.exports.create = function create() {
     function chooseUsernameField(fields, anchor) {
         const candidates = usernameCandidates(fields);
         const preceding = anchor ? candidates.filter(field => fields.indexOf(field) < fields.indexOf(anchor)) : candidates;
-        const pool = preceding.length ? preceding : candidates;
+        const pool = preceding.length ? preceding.toReversed() : candidates;
         return pool.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
-            || pool.find(hasUsernameHint) || pool.at(-1) || null;
+            || pool.find(hasUsernameHint) || (preceding.length ? pool[0] : pool.at(-1)) || null;
     }
 
     function choosePasswordField(fields, anchor) {
         const candidates = fields.filter(isLoginPasswordInput);
-        return candidates.find(field => autocompleteTokens(field).includes("current-password"))
-            || (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
+        return (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
+            || candidates.find(field => autocompleteTokens(field).includes("current-password"))
             || candidates[0] || null;
     }
 
-    function credentialFields(input) {
-        const scope = credentialScope(input);
+    function credentialFields(input, scope = credentialScope(input)) {
         const fields = scopeInputs(scope);
         return {
             scope,
-            usernameField: USERNAME_INPUT_TYPES.has(input.type) ? input : chooseUsernameField(fields, input),
-            passwordField: isLoginPasswordInput(input) ? input : choosePasswordField(fields, input)
+            usernameField: usernameCandidates(fields).includes(input)
+                ? input : chooseUsernameField(fields, input),
+            passwordField: fields.includes(input) && isLoginPasswordInput(input) ? input : choosePasswordField(fields, input)
         };
     }
 
@@ -333,9 +339,7 @@ module.exports.create = function create() {
         if (formUsernames?.has(input.form)) return formUsernames.get(input.form) === input;
         const fields = scopeInputs(input.form);
         const passwordIndex = fields.findIndex(isLoginPasswordInput);
-        const username = passwordIndex < 0 ? null : fields.slice(0, passwordIndex)
-            .filter(field => isUsableInput(field) && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))
-            .at(-1);
+        const username = passwordIndex < 0 ? null : usernameCandidates(fields.slice(0, passwordIndex)).at(-1);
         formUsernames?.set(input.form, username);
         return username === input;
     }
@@ -343,7 +347,7 @@ module.exports.create = function create() {
     function isCredentialInput(input, formUsernames) {
         if (!isUsableInput(input)) return false;
         if (input.type === "password") return !isNewPasswordInput(input);
-        if (!USERNAME_INPUT_TYPES.has(input.type) || hasSearchHint(input)) return false;
+        if (!usernameCandidates([input]).length) return false;
         return hasUsernameHint(input) || isUsernameBeforePassword(input, formUsernames);
     }
 
@@ -415,90 +419,86 @@ module.exports.create = function create({} = {}) {
         input.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    const securePickerResolvers = new Map();
-    const credentialPromptResolvers = new Map();
-
-    function openSecurePicker(kind) {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ action: "openSecurePicker", kind }, response => {
-                if (disposed) { resolve(null); return; }
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                if (!response?.success || !response.token) {
-                    reject(new Error(response?.error || "Could not open secure picker"));
-                    return;
-                }
-                const timer = setTimeout(() => {
-                    securePickerResolvers.delete(response.token);
-                    resolve(null);
-                }, 65_000);
-                securePickerResolvers.set(response.token, payload => {
-                    clearTimeout(timer);
-                    resolve(payload);
-                });
+    // Result delivery and the opening callback use separate Chrome message
+    // channels. A fast selection/cancellation can arrive before its callback.
+    function windowRequests(action, resultAction, timeout, cancelled) {
+        const opening = new Set();
+        const active = new Set();
+        const resolvers = new Map();
+        const early = new Map();
+        function open(fields) {
+            if (disposed) return Promise.resolve(cancelled);
+            return new Promise((resolve, reject) => {
+                const request = { token: null, timer: null, finish(value, error) {
+                    if (!active.delete(request)) return;
+                    opening.delete(request);
+                    if (request.token) resolvers.delete(request.token);
+                    clearTimeout(request.timer);
+                    if (!opening.size) early.clear();
+                    if (error) reject(error); else resolve(value);
+                } };
+                opening.add(request); active.add(request);
+                try {
+                    chrome.runtime.sendMessage({ action, ...fields }, response => {
+                        if (!active.has(request)) return;
+                        if (chrome.runtime.lastError) {
+                            request.finish(null, new Error(chrome.runtime.lastError.message));
+                            return;
+                        }
+                        if (response?.skipped) { request.finish({ action: "skipped" }); return; }
+                        if (!response?.success || !response.token) {
+                            request.finish(null, new Error(response?.error || "Could not open secure window"));
+                            return;
+                        }
+                        request.token = response.token;
+                        opening.delete(request);
+                        if (early.has(request.token)) {
+                            const value = early.get(request.token);
+                            early.delete(request.token);
+                            request.finish(value);
+                        } else {
+                            resolvers.set(request.token, value => request.finish(value));
+                            request.timer = setTimeout(() => request.finish(cancelled), timeout);
+                        }
+                        if (!opening.size) early.clear();
+                    });
+                } catch (error) { request.finish(null, error); }
             });
-        });
-    }
-
-    function openCredentialPrompt(username, password) {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ action: "openCredentialPrompt", username, password }, response => {
-                if (disposed) { resolve({ action: "cancel" }); return; }
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                if (response?.skipped) {
-                    resolve({ action: "skipped" });
-                    return;
-                }
-                if (!response?.success || !response.token) {
-                    reject(new Error(response?.error || "Could not open credential prompt"));
-                    return;
-                }
-                const timer = setTimeout(() => {
-                    credentialPromptResolvers.delete(response.token);
-                    resolve({ action: "cancel" });
-                }, 125_000);
-                credentialPromptResolvers.set(response.token, result => {
-                    clearTimeout(timer);
-                    resolve(result);
-                });
-            });
-        });
-    }
-
-    const listener = message => {
-        if (message.action === "securePickerResult") {
-            const resolver = securePickerResolvers.get(message.token);
-            if (!resolver) return;
-            securePickerResolvers.delete(message.token);
-            resolver(message.payload);
-        } else if (message.action === "credentialPromptResult") {
-            const resolver = credentialPromptResolvers.get(message.token);
-            if (!resolver) return;
-            credentialPromptResolvers.delete(message.token);
-            resolver(message.result);
         }
-    };
+        function receive(message) {
+            if (message.action !== resultAction) return;
+            const value = action === "openSecurePicker" ? message.payload : message.result;
+            const resolver = resolvers.get(message.token);
+            if (resolver) resolver(value);
+            else if (typeof message.token === "string" && opening.size && early.size < opening.size) {
+                early.set(message.token, value);
+            }
+        }
+        function dispose() {
+            for (const request of active) request.finish(cancelled);
+            early.clear();
+        }
+        return { open, receive, dispose };
+    }
+
+    const pickers = windowRequests("openSecurePicker", "securePickerResult", 65_000, null);
+    const prompts = windowRequests("openCredentialPrompt", "credentialPromptResult", 125_000, { action: "cancel" });
+    const listener = message => { pickers.receive(message); prompts.receive(message); };
     chrome.runtime.onMessage.addListener(listener);
     function dispose() {
         disposed = true;
         chrome.runtime.onMessage.removeListener(listener);
-        for (const resolve of securePickerResolvers.values()) resolve(null);
-        for (const resolve of credentialPromptResolvers.values()) resolve({ action: "cancel" });
-        securePickerResolvers.clear(); credentialPromptResolvers.clear();
+        pickers.dispose(); prompts.dispose();
     }
 
-    return { fillInput, openSecurePicker, openCredentialPrompt, dispose };
+    return { fillInput, openSecurePicker: kind => pickers.open({ kind }),
+        openCredentialPrompt: (username, password) => prompts.open({ username, password }), dispose };
 };
 
 },
 "content_credentials.js": (module, exports, require) => {
 const { scopeInputs, isUsableInput, isNewPasswordInput, autocompleteTokens, inputDescriptors,
-    usernameCandidates, hasUsernameHint, credentialScope } = require("content_detection.js");
+    usernameCandidates, hasUsernameHint, credentialScope, credentialFields } = require("content_detection.js");
 module.exports.create = function create({ roots = () => [document] } = {}) {
     function getDomainFromUrl(url) { return new URL(url).origin.toLowerCase(); }
     let storedUsername = "";
@@ -512,24 +512,20 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         );
         const newPasswords = filledPasswords.filter(isNewPasswordInput);
         const currentPasswords = filledPasswords.filter(field => !isNewPasswordInput(field));
+        const selectedPassword = fields.includes(lastCredentialInput)
+            ? credentialFields(lastCredentialInput, scope).passwordField : null;
         // Capture a newly chosen password on registration/change-password forms,
         // but never autofill these fields (credentialFields excludes them).
         const passwordField = newPasswords.find(field => autocompleteTokens(field).includes("new-password"))
             || newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value)))
             || newPasswords[0]
+            || (currentPasswords.includes(selectedPassword) ? selectedPassword : null)
             || currentPasswords.find(field => autocompleteTokens(field).includes("current-password"))
             || currentPasswords[0]
             || null;
         if (!passwordField) return { username: "", password: "", scope };
 
-        const candidates = usernameCandidates(fields);
-        const preceding = candidates.filter(field => fields.indexOf(field) < fields.indexOf(passwordField));
-        const pool = preceding.length > 0 ? preceding : candidates;
-        const valued = pool.filter(field => field.value.trim());
-        const usernameField = valued.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
-            || valued.find(hasUsernameHint)
-            || valued.at(-1)
-            || null;
+        const usernameField = credentialFields(passwordField, scope).usernameField;
 
         return {
             username: usernameField ? usernameField.value.trim() : "",
@@ -626,10 +622,9 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
 },
 "content_autofill.js": (module, exports, require) => {
 "use strict";
-const { autocompleteTokens, inputDescriptors, isUsableInput, isElementVisible } = require("content_detection.js");
+const { autocompleteTokens, inputDescriptors, isElementVisible } = require("content_detection.js");
 const PasswordManagerContentFields = require("content_fields.js");
 module.exports.create = function create({ bridge }) {
-    const { fillInput } = bridge;
     const CARD_AUTOCOMPLETE_FIELDS = new Set([
         "cc-name", "cc-given-name", "cc-additional-name", "cc-family-name",
         "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "cc-type"
@@ -663,10 +658,6 @@ module.exports.create = function create({ bridge }) {
         );
     }
 
-    function explicitAutofillField(control, fields) {
-        return autocompleteTokens(control).find(token => fields.has(token)) || null;
-    }
-
     function inferredCardField(control) {
         return PasswordManagerContentFields.inferCard(inputDescriptors(control));
     }
@@ -676,16 +667,28 @@ module.exports.create = function create({ bridge }) {
     }
 
     function autofillField(control, kind) {
-        if (kind === "payment-card") {
-            return explicitAutofillField(control, CARD_AUTOCOMPLETE_FIELDS)
-                || inferredCardField(control);
-        }
-        return explicitAutofillField(control, IDENTITY_AUTOCOMPLETE_FIELDS)
-            || inferredIdentityField(control);
+        if (control instanceof HTMLInputElement
+            && !["text", "email", "tel", "number", "month"].includes(control.type)) return null;
+        const tokens = autocompleteTokens(control);
+        const explicit = tokens.find(token => CARD_AUTOCOMPLETE_FIELDS.has(token)
+            || IDENTITY_AUTOCOMPLETE_FIELDS.has(token)
+            || ["username", "current-password", "new-password", "one-time-code"].includes(token));
+        const fields = kind === "payment-card" ? CARD_AUTOCOMPLETE_FIELDS : IDENTITY_AUTOCOMPLETE_FIELDS;
+        // Explicit field roles override guesses from names, labels and classes.
+        if (explicit) return fields.has(explicit) ? explicit : null;
+        return kind === "payment-card" ? inferredCardField(control) : inferredIdentityField(control);
+    }
+
+    function fieldGroup(control) {
+        const tokens = autocompleteTokens(control);
+        return JSON.stringify([
+            tokens.find(token => token.startsWith("section-")) || "",
+            tokens.find(token => token === "shipping" || token === "billing") || ""
+        ]);
     }
 
     function typedAutofillKind(input) {
-        if (!isUsableInput(input)) return null;
+        if (input.disabled || input.readOnly || !isElementVisible(input)) return null;
         if (autofillField(input, "payment-card")) return "payment-card";
 
         const identityField = autofillField(input, "identity");
@@ -696,13 +699,11 @@ module.exports.create = function create({ bridge }) {
         // an identity picker when another address/name field establishes context.
         const controls = formControls(formScope(input));
         return controls.some(control => {
+            if (control.disabled || control.readOnly || !isElementVisible(control)
+                || fieldGroup(control) !== fieldGroup(input)) return false;
             const field = autofillField(control, "identity");
             return field && IDENTITY_CONTEXT_FIELDS.has(field);
         }) ? "identity" : null;
-    }
-
-    function normalizedFieldName(value) {
-        return PasswordManagerContentFields.normalize(value);
     }
 
     function customAutofillValue(item, aliases) {
@@ -758,7 +759,10 @@ module.exports.create = function create({ bridge }) {
                 candidate.value.trim().toLowerCase() === wanted
                 || candidate.text.trim().toLowerCase() === wanted
             );
-            control.value = option ? option.value : value;
+            if (!option) return;
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+            if (setter) setter.call(control, option.value);
+            else control.value = option.value;
         } else {
             const prototype = control instanceof HTMLTextAreaElement
                 ? HTMLTextAreaElement.prototype
@@ -771,18 +775,37 @@ module.exports.create = function create({ bridge }) {
         control.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    function fillTypedItem(anchor, item) {
+    function typedFillContext(input) {
+        return { scope: formScope(input), group: fieldGroup(input) };
+    }
+
+    function fillTypedItem(anchor, item, context = typedFillContext(anchor)) {
+        const { scope, group } = context;
+        if (!scope.isConnected) return;
         const kind = item.kind;
-        for (const control of formControls(formScope(anchor))) {
-            const field = autofillField(control, kind);
+        const targets = formControls(scope).map((control, index) => ({
+            control, index, id: control.id, name: control.name,
+            field: fieldGroup(control) === group ? autofillField(control, kind) : null
+        }));
+        for (const target of targets) {
+            const { index, field, id, name } = target;
+            if (!scope.isConnected) return;
             if (!field) continue;
+            // Prefer the original control or a unique stable identifier when a
+            // page replaces/reorders fields; use position only for unnamed fields.
+            const current = formControls(scope);
+            const matches = current.filter(control => (id ? control.id === id : name && control.name === name)
+                && fieldGroup(control) === group && autofillField(control, kind) === field);
+            const control = current.includes(target.control) ? target.control
+                : matches.length === 1 ? matches[0] : !id && !name ? current[index] : null;
+            if (!control || fieldGroup(control) !== group || autofillField(control, kind) !== field) continue;
             const value = autofillValue(item, field);
             if (value) fillFormControl(control, value);
         }
-        anchor.focus();
+        if (anchor.isConnected) anchor.focus();
     }
 
-    return { typedAutofillKind, fillTypedItem };
+    return { typedAutofillKind, fillTypedItem, typedFillContext };
 };
 
 },
@@ -802,13 +825,16 @@ var PasswordManagerContentFields = (() => {
     function inferIdentity(descriptors) {
         const description = descriptors.filter(Boolean).join(" ").toLowerCase();
         if (/postal|zip/.test(description)) return "postal-code";
-        if (/address.?line.?3/.test(description)) return "address-line3";
-        if (/address.?line.?2|apartment|suite|unit/.test(description)) return "address-line2";
-        if (/street|address.?line.?1/.test(description)) return "address-line1";
+        if (/address.?line.?3|address.?3/.test(description)) return "address-line3";
+        if (/address.?line.?2|address.?2|apartment|suite|unit/.test(description)) return "address-line2";
+        if (/street|address.?line.?1|address.?1/.test(description)) return "address-line1";
         if (/city|town/.test(description)) return "address-level2";
-        if (/state|province|region|county/.test(description)) return "address-level1";
+        if (/county|district/.test(description)) return "address-level3";
+        if (/state|province|region/.test(description)) return "address-level1";
+        if (/country.?name/.test(description)) return "country-name";
         if (/country/.test(description)) return "country";
         if (/first|given/.test(description) && /name/.test(description)) return "given-name";
+        if (/middle|additional/.test(description) && /name/.test(description)) return "additional-name";
         if (/last|family|surname/.test(description)) return "family-name";
         if (/full.?name|contact.?name/.test(description)) return "name";
         if (/company|organization/.test(description)) return "organization";
@@ -837,11 +863,11 @@ if (typeof module !== "undefined") module.exports = PasswordManagerContentFields
 },
 "content_controls.js": (module, exports, require) => {
 "use strict";
-const { isUsableInput, isElementVisible, credentialFields } = require("content_detection.js");
+const { isUsableInput, isElementVisible, credentialFields, credentialScope } = require("content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
     const { fillInput, openSecurePicker } = bridge;
     const { storeUsernameForLater } = credentials;
-    const { fillTypedItem } = autofill;
+    const { fillTypedItem, typedFillContext } = autofill;
     const lifecycle = new AbortController();
     let layoutObserver;
     // Reposition secure picker and generator buttons as the page layout changes.
@@ -912,7 +938,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         securePickerControls.get(input)?.remove();
     }
 
-    function createSecurePickerButton(input, kind, icon, title, onSelection) {
+    function createSecurePickerButton(input, kind, icon, title, onSelection, selectionScope = () => undefined) {
         const existing = securePickerControls.get(input);
         if (existing?.kind === kind) {
             existing.position();
@@ -957,8 +983,9 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             event.stopPropagation();
             const originalIcon = button.innerText;
             try {
+                const scope = selectionScope();
                 const selection = await openSecurePicker(kind);
-                if (selection) onSelection(selection);
+                if (selection) onSelection(selection, scope);
             } catch (error) {
                 button.innerText = "⚠️";
                 button.title = error?.message || "Could not open secure picker";
@@ -973,13 +1000,18 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function createSecureCredentialButton(input) {
-        createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", account => {
-            const fields = credentialFields(input);
+        createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", (account, scope) => {
+            if (!scope.isConnected) return;
+            let fields = credentialFields(input, scope);
             storeUsernameForLater(accountUsername(account).trim());
             fillInput(fields.usernameField, accountUsername(account));
+            // Site input handlers may replace fields synchronously. Stay within
+            // the original scope and resolve the live password after those run.
+            if (!scope.isConnected) return;
+            fields = credentialFields(input, scope);
             fillInput(fields.passwordField, account.password);
             (fields.passwordField || fields.usernameField)?.focus();
-        });
+        }, () => credentialScope(input));
     }
 
     function createSecureTotpButton(input) {
@@ -995,7 +1027,8 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             kind,
             kind === "payment-card" ? "💳" : "👤",
             kind === "payment-card" ? "Choose payment card" : "Choose identity",
-            item => fillTypedItem(input, item)
+            (item, scope) => fillTypedItem(input, item, scope),
+            () => typedFillContext(input)
         );
     }
 
@@ -1181,9 +1214,13 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     let disposed = false;
     const registeredRoots = new Set();
     function dispose() { disposed = true; observer?.disconnect(); for (const root of registeredRoots) onRemoveRoot(root); registeredRoots.clear(); }
+    function isFormControl(element) {
+        return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
+            || element instanceof HTMLTextAreaElement;
+    }
     function attachInput(input, formUsernames) {
         // Ignore extension UI elements
-        if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
+        if (!isFormControl(input) || input.classList.contains("my-extension-ui")) return;
         const typedKind = typedAutofillKind(input);
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
@@ -1211,10 +1248,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         for (let index = 0; index < roots.length; index++) {
             const openRoot = roots[index];
             observeRoot(openRoot);
-            if (openRoot instanceof HTMLInputElement) attachInput(openRoot, formUsernames);
+            if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
             if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
             for (const candidate of openRoot.querySelectorAll?.("*") || []) {
-                if (candidate instanceof HTMLInputElement) attachInput(candidate, formUsernames);
+                if (isFormControl(candidate)) attachInput(candidate, formUsernames);
                 if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
             }
         }
@@ -1243,7 +1280,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             for (const mutation of mutations) {
                 if (mutation.type === "attributes") {
                     if (mutation.target.classList?.contains("my-extension-ui")) continue;
-                    if (mutation.target instanceof HTMLInputElement
+                    if (isFormControl(mutation.target)
                         || ["class", "style", "hidden", "open"].includes(mutation.attributeName)) {
                         scheduleAttach(mutation.target);
                     }
@@ -1255,7 +1292,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         });
         const observationOptions = {
             childList: true, subtree: true, attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly"]
+            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly", "id", "name", "placeholder", "aria-label", "role"]
         };
         const observeRoot = root => {
             if (disposed || (root !== document && !root.host) || registeredRoots.has(root)) return;

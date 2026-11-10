@@ -13,13 +13,16 @@ var PasswordManagerContentFields = (() => {
     function inferIdentity(descriptors) {
         const description = descriptors.filter(Boolean).join(" ").toLowerCase();
         if (/postal|zip/.test(description)) return "postal-code";
-        if (/address.?line.?3/.test(description)) return "address-line3";
-        if (/address.?line.?2|apartment|suite|unit/.test(description)) return "address-line2";
-        if (/street|address.?line.?1/.test(description)) return "address-line1";
+        if (/address.?line.?3|address.?3/.test(description)) return "address-line3";
+        if (/address.?line.?2|address.?2|apartment|suite|unit/.test(description)) return "address-line2";
+        if (/street|address.?line.?1|address.?1/.test(description)) return "address-line1";
         if (/city|town/.test(description)) return "address-level2";
-        if (/state|province|region|county/.test(description)) return "address-level1";
+        if (/county|district/.test(description)) return "address-level3";
+        if (/state|province|region/.test(description)) return "address-level1";
+        if (/country.?name/.test(description)) return "country-name";
         if (/country/.test(description)) return "country";
         if (/first|given/.test(description) && /name/.test(description)) return "given-name";
+        if (/middle|additional/.test(description) && /name/.test(description)) return "additional-name";
         if (/last|family|surname/.test(description)) return "family-name";
         if (/full.?name|contact.?name/.test(description)) return "name";
         if (/company|organization/.test(description)) return "organization";

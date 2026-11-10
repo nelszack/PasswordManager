@@ -1,5 +1,5 @@
 const { scopeInputs, isUsableInput, isNewPasswordInput, autocompleteTokens, inputDescriptors,
-    usernameCandidates, hasUsernameHint, credentialScope } = require("./content_detection.js");
+    usernameCandidates, hasUsernameHint, credentialScope, credentialFields } = require("./content_detection.js");
 module.exports.create = function create({ roots = () => [document] } = {}) {
     function getDomainFromUrl(url) { return new URL(url).origin.toLowerCase(); }
     let storedUsername = "";
@@ -13,24 +13,20 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         );
         const newPasswords = filledPasswords.filter(isNewPasswordInput);
         const currentPasswords = filledPasswords.filter(field => !isNewPasswordInput(field));
+        const selectedPassword = fields.includes(lastCredentialInput)
+            ? credentialFields(lastCredentialInput, scope).passwordField : null;
         // Capture a newly chosen password on registration/change-password forms,
         // but never autofill these fields (credentialFields excludes them).
         const passwordField = newPasswords.find(field => autocompleteTokens(field).includes("new-password"))
             || newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value)))
             || newPasswords[0]
+            || (currentPasswords.includes(selectedPassword) ? selectedPassword : null)
             || currentPasswords.find(field => autocompleteTokens(field).includes("current-password"))
             || currentPasswords[0]
             || null;
         if (!passwordField) return { username: "", password: "", scope };
 
-        const candidates = usernameCandidates(fields);
-        const preceding = candidates.filter(field => fields.indexOf(field) < fields.indexOf(passwordField));
-        const pool = preceding.length > 0 ? preceding : candidates;
-        const valued = pool.filter(field => field.value.trim());
-        const usernameField = valued.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
-            || valued.find(hasUsernameHint)
-            || valued.at(-1)
-            || null;
+        const usernameField = credentialFields(passwordField, scope).usernameField;
 
         return {
             username: usernameField ? usernameField.value.trim() : "",

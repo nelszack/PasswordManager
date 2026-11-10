@@ -38,6 +38,8 @@ function environment(children = []) {
         module: { exports: {} },
         document,
         HTMLInputElement: Input,
+        HTMLSelectElement: class {},
+        HTMLTextAreaElement: class {},
         MutationObserver: class {
             constructor(callback) { notify = callback; }
             observe(root, options) { observed.push({ root, options }); }

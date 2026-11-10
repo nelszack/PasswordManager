@@ -14,7 +14,8 @@
         return [
             input.name, input.id, input.className, input.autocomplete,
             input.getAttribute("type"), input.getAttribute("placeholder"),
-            input.getAttribute("aria-label"), input.getAttribute("role")
+            input.getAttribute("aria-label"), input.getAttribute("role"),
+            ...Array.from(input.labels || [], label => label.textContent)
         ].filter(Boolean).map(String);
     }
 
@@ -63,8 +64,13 @@
     }
 
     function usernameCandidates(fields) {
-        return fields.filter(field => isUsableInput(field)
-            && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field));
+        return fields.filter(field => {
+            if (!isUsableInput(field) || !USERNAME_INPUT_TYPES.has(field.type)
+                || hasSearchHint(field) || isTotpInput(field)) return false;
+            const tokens = autocompleteTokens(field).filter(token =>
+                !token.startsWith("section-") && !["shipping", "billing", "on", "off", "webauthn"].includes(token));
+            return !tokens.length || tokens.some(token => ["username", "email", "tel"].includes(token));
+        });
     }
 
     function credentialScope(input) {
@@ -86,25 +92,25 @@
     function chooseUsernameField(fields, anchor) {
         const candidates = usernameCandidates(fields);
         const preceding = anchor ? candidates.filter(field => fields.indexOf(field) < fields.indexOf(anchor)) : candidates;
-        const pool = preceding.length ? preceding : candidates;
+        const pool = preceding.length ? preceding.toReversed() : candidates;
         return pool.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
-            || pool.find(hasUsernameHint) || pool.at(-1) || null;
+            || pool.find(hasUsernameHint) || (preceding.length ? pool[0] : pool.at(-1)) || null;
     }
 
     function choosePasswordField(fields, anchor) {
         const candidates = fields.filter(isLoginPasswordInput);
-        return candidates.find(field => autocompleteTokens(field).includes("current-password"))
-            || (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
+        return (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
+            || candidates.find(field => autocompleteTokens(field).includes("current-password"))
             || candidates[0] || null;
     }
 
-    function credentialFields(input) {
-        const scope = credentialScope(input);
+    function credentialFields(input, scope = credentialScope(input)) {
         const fields = scopeInputs(scope);
         return {
             scope,
-            usernameField: USERNAME_INPUT_TYPES.has(input.type) ? input : chooseUsernameField(fields, input),
-            passwordField: isLoginPasswordInput(input) ? input : choosePasswordField(fields, input)
+            usernameField: usernameCandidates(fields).includes(input)
+                ? input : chooseUsernameField(fields, input),
+            passwordField: fields.includes(input) && isLoginPasswordInput(input) ? input : choosePasswordField(fields, input)
         };
     }
 
@@ -120,9 +126,7 @@
         if (formUsernames?.has(input.form)) return formUsernames.get(input.form) === input;
         const fields = scopeInputs(input.form);
         const passwordIndex = fields.findIndex(isLoginPasswordInput);
-        const username = passwordIndex < 0 ? null : fields.slice(0, passwordIndex)
-            .filter(field => isUsableInput(field) && USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))
-            .at(-1);
+        const username = passwordIndex < 0 ? null : usernameCandidates(fields.slice(0, passwordIndex)).at(-1);
         formUsernames?.set(input.form, username);
         return username === input;
     }
@@ -130,7 +134,7 @@
     function isCredentialInput(input, formUsernames) {
         if (!isUsableInput(input)) return false;
         if (input.type === "password") return !isNewPasswordInput(input);
-        if (!USERNAME_INPUT_TYPES.has(input.type) || hasSearchHint(input)) return false;
+        if (!usernameCandidates([input]).length) return false;
         return hasUsernameHint(input) || isUsernameBeforePassword(input, formUsernames);
     }
 
