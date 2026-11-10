@@ -7,6 +7,9 @@ function html(body, script = "") {
 }
 
 function fixture(pathname, port) {
+    if (pathname === "/identity-names") return html(`
+        <form><label>First name <input id="f1"></label>
+        <label>Last name <input id="f2"></label></form>`);
     if (pathname === "/identity") return html(`
         <form><input id="fullName" autocomplete="name">
         <input id="email" autocomplete="email">
@@ -155,6 +158,8 @@ test.describe("extended credential flows", () => {
                 { id: 9, name: "Test Visa", kind: "payment-card", primary_secret: "4111111111111111", custom_fields: [] },
                 { id: 10, name: "Home identity", kind: "identity", username: "alice@example.com", primary_secret: "", custom_fields: [
                     { name: "full name", value: "Alice Example", secret: false },
+                    { name: "first name", value: "Alice", secret: false },
+                    { name: "last name", value: "Example", secret: false },
                     { name: "address line 1", value: "123 Example Street", secret: false }
                 ] }
             ])
@@ -201,6 +206,73 @@ test.describe("extended credential flows", () => {
             globalThis.lastAutomaticPromptResult
         )).toEqual({ success: true, skipped: true });
         expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
+    });
+
+    test("selection fills the current password field after username handlers replace inputs", async () => {
+        await page.goto(`${origin}/login`);
+        await page.evaluate(() => {
+            document.querySelector("#username").addEventListener("input", () => {
+                const oldPassword = document.querySelector("#password");
+                oldPassword.replaceWith(oldPassword.cloneNode());
+            });
+        });
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect(page.locator("#username")).toHaveValue("alice@example.com");
+        await expect(page.locator("#password")).toHaveValue("saved-password");
+    });
+
+    test("selection fills replacement inputs within the original form while the picker is open", async () => {
+        await page.goto(`${origin}/login`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await page.evaluate(() => {
+            for (const input of document.querySelectorAll("#login input")) {
+                input.replaceWith(input.cloneNode());
+            }
+        });
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect(page.locator("#username")).toHaveValue("alice@example.com");
+        await expect(page.locator("#password")).toHaveValue("saved-password");
+    });
+
+    test("selection does not follow a removed form into another login form", async () => {
+        await page.goto(`${origin}/login`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose saved credentials" }).first());
+        await page.evaluate(() => {
+            const form = document.querySelector("#login");
+            form.replaceWith(form.cloneNode(true));
+        });
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect.poll(() => picker.isClosed()).toBe(true);
+        await expect(page.locator("#username")).toHaveValue("");
+        await expect(page.locator("#password")).toHaveValue("");
+    });
+
+    test("login selection pairs the nearest username and password in a shared form", async () => {
+        await page.goto(`${origin}/login`);
+        await page.evaluate(() => {
+            document.querySelector("form").insertAdjacentHTML("beforeend", `
+                <input id="secondUsername" autocomplete="username">
+                <input id="secondPassword" type="password" autocomplete="current-password">`);
+        });
+        const picker = await openPicker(browser.context, page.locator("#secondUsername + button"));
+        await picker.getByRole("button", { name: /Alice/ }).click();
+        await expect(page.locator("#secondUsername")).toHaveValue("alice@example.com");
+        await expect(page.locator("#secondPassword")).toHaveValue("saved-password");
+        await expect(page.locator("#username")).toHaveValue("");
+        await expect(page.locator("#password")).toHaveValue("");
+        const second = await openPicker(browser.context, page.locator("#secondPassword + button"));
+        await second.getByRole("button", { name: /Bob/ }).click();
+        await expect(page.locator("#secondUsername")).toHaveValue("bob@example.com");
+        await expect(page.locator("#secondPassword")).toHaveValue("bob-password");
+        await expect(page.locator("#username")).toHaveValue("");
+        await page.locator("#secondPassword").fill("updated-second-password");
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
+        await expect(prompt.locator("#username")).toHaveValue("bob@example.com");
+        await prompt.locator("#cancel").click();
     });
 
     test("edited autofilled passwords still offer an update", async () => {
@@ -438,6 +510,99 @@ test.describe("extended credential flows", () => {
         });
         await expect(generators).toHaveCount(1);
         await expect(pickers).toHaveCount(3);
+    });
+
+    test("identity selection recognizes first and last name labels", async () => {
+        await page.goto(`${origin}/identity-names`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose identity" }).first());
+        await picker.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#f1")).toHaveValue("Alice");
+        await expect(page.locator("#f2")).toHaveValue("Example");
+    });
+
+    test("identity selection handles inputs replaced before and during filling", async () => {
+        await page.goto(`${origin}/identity`);
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose identity" }).first());
+        await page.evaluate(() => {
+            for (const input of document.querySelectorAll("input")) input.replaceWith(input.cloneNode());
+            document.querySelector("#fullName").addEventListener("input", () => {
+                document.querySelector("#fullName").insertAdjacentHTML("afterend", '<input id="unrelated">');
+                for (const id of ["email", "address"]) {
+                    const input = document.getElementById(id);
+                    input.replaceWith(input.cloneNode());
+                }
+            });
+        });
+        await picker.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#fullName")).toHaveValue("Alice Example");
+        await expect(page.locator("#email")).toHaveValue("alice@example.com");
+        await expect(page.locator("#address")).toHaveValue("123 Example Street");
+    });
+
+    test("identity filling respects sections and leaves credentials, codes and unmatched selects alone", async () => {
+        await page.goto(`${origin}/identity`);
+        await page.evaluate(() => {
+            document.querySelector("form").innerHTML = `
+                <input id="shipName" autocomplete="section-delivery shipping given-name">
+                <input id="shipLast" autocomplete="section-delivery shipping family-name">
+                <input id="billName" autocomplete="section-billing billing given-name" value="Other">
+                <input id="loginEmail" name="email" autocomplete="username" value="login@example.com">
+                <input id="emailPassword" type="password" value="keep-password">
+                <input id="emailCode" autocomplete="one-time-code" value="123456">
+                <select id="address" autocomplete="section-delivery shipping address-line1">
+                    <option value="keep">Keep selection</option><option value="else">Elsewhere</option>
+                </select>`;
+        });
+        const picker = await openPicker(browser.context,
+            page.locator("#shipName + button"));
+        await picker.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#shipName")).toHaveValue("Alice");
+        await expect(page.locator("#shipLast")).toHaveValue("Example");
+        await expect(page.locator("#billName")).toHaveValue("Other");
+        await expect(page.locator("#loginEmail")).toHaveValue("login@example.com");
+        await expect(page.locator("#emailPassword")).toHaveValue("keep-password");
+        await expect(page.locator("#emailCode")).toHaveValue("123456");
+        await expect(page.locator("#address")).toHaveValue("keep");
+    });
+
+    test("profile filling never overwrites credentials or codes in the same unsectioned form", async () => {
+        await page.goto(`${origin}/identity`);
+        await page.evaluate(() => {
+            document.querySelector("form").insertAdjacentHTML("beforeend", `
+                <input id="loginEmail" name="email" autocomplete="username" value="login@example.com">
+                <input id="emailPassword" type="password" value="keep-password">
+                <input id="emailCode" autocomplete="one-time-code" value="123456">
+                <select id="unmatched" autocomplete="country"><option value="keep">Keep selection</option></select>`);
+        });
+        const picker = await openPicker(browser.context,
+            page.getByRole("button", { name: "Choose identity" }).first());
+        await picker.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#loginEmail")).toHaveValue("login@example.com");
+        await expect(page.locator("#emailPassword")).toHaveValue("keep-password");
+        await expect(page.locator("#emailCode")).toHaveValue("123456");
+    });
+
+    test("identity pickers work on textareas and selects and preserve unmatched options", async () => {
+        await page.goto(`${origin}/identity`);
+        await page.evaluate(() => {
+            document.querySelector("form").innerHTML = `
+                <textarea id="address" autocomplete="street-address"></textarea>
+                <input id="firstName" autocomplete="given-name">
+                <select id="nameSelect" autocomplete="family-name">
+                    <option value="keep">Keep</option><option value="example">Example</option>
+                </select>
+                <select id="unmatched" autocomplete="address-line1"><option value="keep">Keep</option></select>`;
+        });
+        const picker = await openPicker(browser.context, page.locator("#address + button"));
+        await picker.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#firstName")).toHaveValue("Alice");
+        await expect(page.locator("#nameSelect")).toHaveValue("example");
+        await expect(page.locator("#unmatched")).toHaveValue("keep");
+        const next = await openPicker(browser.context, page.locator("#nameSelect + button"));
+        await next.getByRole("button", { name: "Home identity" }).click();
+        await expect(page.locator("#nameSelect")).toHaveValue("example");
     });
 
     test("identity fields fill only after selection in the secure picker window", async () => {

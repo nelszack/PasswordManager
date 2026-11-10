@@ -108,3 +108,72 @@ test("scan-local form classification refreshes after fields change", () => {
     assert.equal(detection.isCredentialInput(unrelated, new WeakMap()), false);
     assert.equal(detection.isCredentialInput(unrelated), false);
 });
+
+
+test("credential fields can resolve replaced anchors within their original scope", () => {
+    const oldUsername = new FakeInput("text", { autocomplete: "username" });
+    const oldPassword = new FakeInput("password");
+    const form = new FakeForm([oldUsername, oldPassword]);
+    const username = new FakeInput("text", { autocomplete: "username" });
+    const password = new FakeInput("password");
+    form.elements = [username, password];
+    for (const input of [oldUsername, oldPassword]) {
+        input.isConnected = false;
+        input.form = null;
+    }
+    for (const anchor of [oldUsername, oldPassword]) {
+        assert.deepEqual(detection.credentialFields(anchor, form), {
+            scope: form, usernameField: username, passwordField: password
+        });
+    }
+});
+
+test("associated labels contribute identity field descriptors", () => {
+    const input = new FakeInput("text", { id: "f1" });
+    input.labels = [{ textContent: "First name" }];
+    const fields = require("./content_fields.js");
+    assert.equal(fields.inferIdentity(detection.inputDescriptors(input)), "given-name");
+    input.labels = [{ textContent: "Last name" }];
+    assert.equal(fields.inferIdentity(detection.inputDescriptors(input)), "family-name");
+});
+
+test("login selection and capture exclude identity and one-time-code fields", () => {
+    const first = new FakeInput("text", { autocomplete: "given-name" });
+    const last = new FakeInput("text", { autocomplete: "family-name" });
+    const code = new FakeInput("tel", { autocomplete: "one-time-code" });
+    const username = new FakeInput("email", { autocomplete: "username" });
+    const password = new FakeInput("password");
+    const form = new FakeForm([first, last, username, code, password]);
+    assert.deepEqual(detection.usernameCandidates(form.elements), [username]);
+    assert.equal(detection.credentialFields(password).usernameField, username);
+    assert.equal(detection.isCredentialInput(code), false);
+    assert.equal(detection.isCredentialInput(last), false);
+});
+
+test("multiple login pairs in a shared form use the fields closest to the selected anchor", () => {
+    const firstUser = new FakeInput("text", { autocomplete: "username" });
+    const firstPassword = new FakeInput("password", { autocomplete: "current-password" });
+    const secondUser = new FakeInput("text", { autocomplete: "username" });
+    const secondPassword = new FakeInput("password", { autocomplete: "current-password" });
+    new FakeForm([firstUser, firstPassword, secondUser, secondPassword]);
+    for (const anchor of [secondUser, secondPassword]) {
+        const fields = detection.credentialFields(anchor);
+        assert.equal(fields.usernameField, secondUser);
+        assert.equal(fields.passwordField, secondPassword);
+    }
+});
+
+test("saving a shared form captures the selected login pair rather than another filled account", () => {
+    const firstUser = new FakeInput("text", { autocomplete: "username" });
+    const firstPassword = new FakeInput("password", { autocomplete: "current-password" });
+    const secondUser = new FakeInput("text", { autocomplete: "username" });
+    const secondPassword = new FakeInput("password", { autocomplete: "current-password" });
+    [firstUser.value, firstPassword.value, secondUser.value, secondPassword.value] =
+        ["first", "first-secret", "second", "second-secret"];
+    const form = new FakeForm([firstUser, firstPassword, secondUser, secondPassword]);
+    const credentials = require("./content_credentials.js").create();
+    credentials.lastInput = secondPassword;
+    assert.deepEqual(credentials.findLoginCredentials(form), {
+        username: "second", password: "second-secret", scope: form
+    });
+});

@@ -1,9 +1,9 @@
 "use strict";
-const { isUsableInput, isElementVisible, credentialFields } = require("./content_detection.js");
+const { isUsableInput, isElementVisible, credentialFields, credentialScope } = require("./content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
     const { fillInput, openSecurePicker } = bridge;
     const { storeUsernameForLater } = credentials;
-    const { fillTypedItem } = autofill;
+    const { fillTypedItem, typedFillContext } = autofill;
     const lifecycle = new AbortController();
     let layoutObserver;
     // Reposition secure picker and generator buttons as the page layout changes.
@@ -74,7 +74,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         securePickerControls.get(input)?.remove();
     }
 
-    function createSecurePickerButton(input, kind, icon, title, onSelection) {
+    function createSecurePickerButton(input, kind, icon, title, onSelection, selectionScope = () => undefined) {
         const existing = securePickerControls.get(input);
         if (existing?.kind === kind) {
             existing.position();
@@ -119,8 +119,9 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             event.stopPropagation();
             const originalIcon = button.innerText;
             try {
+                const scope = selectionScope();
                 const selection = await openSecurePicker(kind);
-                if (selection) onSelection(selection);
+                if (selection) onSelection(selection, scope);
             } catch (error) {
                 button.innerText = "⚠️";
                 button.title = error?.message || "Could not open secure picker";
@@ -135,13 +136,18 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function createSecureCredentialButton(input) {
-        createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", account => {
-            const fields = credentialFields(input);
+        createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", (account, scope) => {
+            if (!scope.isConnected) return;
+            let fields = credentialFields(input, scope);
             storeUsernameForLater(accountUsername(account).trim());
             fillInput(fields.usernameField, accountUsername(account));
+            // Site input handlers may replace fields synchronously. Stay within
+            // the original scope and resolve the live password after those run.
+            if (!scope.isConnected) return;
+            fields = credentialFields(input, scope);
             fillInput(fields.passwordField, account.password);
             (fields.passwordField || fields.usernameField)?.focus();
-        });
+        }, () => credentialScope(input));
     }
 
     function createSecureTotpButton(input) {
@@ -157,7 +163,8 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             kind,
             kind === "payment-card" ? "💳" : "👤",
             kind === "payment-card" ? "Choose payment card" : "Choose identity",
-            item => fillTypedItem(input, item)
+            (item, scope) => fillTypedItem(input, item, scope),
+            () => typedFillContext(input)
         );
     }
 

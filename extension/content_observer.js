@@ -9,9 +9,13 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     let disposed = false;
     const registeredRoots = new Set();
     function dispose() { disposed = true; observer?.disconnect(); for (const root of registeredRoots) onRemoveRoot(root); registeredRoots.clear(); }
+    function isFormControl(element) {
+        return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
+            || element instanceof HTMLTextAreaElement;
+    }
     function attachInput(input, formUsernames) {
         // Ignore extension UI elements
-        if (!(input instanceof HTMLInputElement) || input.classList.contains("my-extension-ui")) return;
+        if (!isFormControl(input) || input.classList.contains("my-extension-ui")) return;
         const typedKind = typedAutofillKind(input);
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
@@ -39,10 +43,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         for (let index = 0; index < roots.length; index++) {
             const openRoot = roots[index];
             observeRoot(openRoot);
-            if (openRoot instanceof HTMLInputElement) attachInput(openRoot, formUsernames);
+            if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
             if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
             for (const candidate of openRoot.querySelectorAll?.("*") || []) {
-                if (candidate instanceof HTMLInputElement) attachInput(candidate, formUsernames);
+                if (isFormControl(candidate)) attachInput(candidate, formUsernames);
                 if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
             }
         }
@@ -71,7 +75,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             for (const mutation of mutations) {
                 if (mutation.type === "attributes") {
                     if (mutation.target.classList?.contains("my-extension-ui")) continue;
-                    if (mutation.target instanceof HTMLInputElement
+                    if (isFormControl(mutation.target)
                         || ["class", "style", "hidden", "open"].includes(mutation.attributeName)) {
                         scheduleAttach(mutation.target);
                     }
@@ -83,7 +87,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         });
         const observationOptions = {
             childList: true, subtree: true, attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly"]
+            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly", "id", "name", "placeholder", "aria-label", "role"]
         };
         const observeRoot = root => {
             if (disposed || (root !== document && !root.host) || registeredRoots.has(root)) return;

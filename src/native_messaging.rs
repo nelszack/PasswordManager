@@ -648,6 +648,9 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             copy_timeout: 0,
         }),
         "updateCredentials" => {
+            // The page origin authorizes the browser selection; updating a
+            // password must not replace the item's saved primary URL.
+            required(request.domain.take(), "domain", 2048)?;
             let entry_id = request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?;
@@ -657,7 +660,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                     update: EntryChanges {
                         name: None,
                         username: Some(optional_text(request.username.take(), "username", 4096)?),
-                        url: Some(required(request.domain.take(), "domain", 2048)?),
+                        url: None,
                         notes: None,
                     },
                     password: Some(
