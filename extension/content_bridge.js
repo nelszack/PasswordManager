@@ -13,82 +13,78 @@ module.exports.create = function create({} = {}) {
         input.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    const securePickerResolvers = new Map();
-    const credentialPromptResolvers = new Map();
-
-    function openSecurePicker(kind) {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ action: "openSecurePicker", kind }, response => {
-                if (disposed) { resolve(null); return; }
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                if (!response?.success || !response.token) {
-                    reject(new Error(response?.error || "Could not open secure picker"));
-                    return;
-                }
-                const timer = setTimeout(() => {
-                    securePickerResolvers.delete(response.token);
-                    resolve(null);
-                }, 65_000);
-                securePickerResolvers.set(response.token, payload => {
-                    clearTimeout(timer);
-                    resolve(payload);
-                });
+    // Result delivery and the opening callback use separate Chrome message
+    // channels. A fast selection/cancellation can arrive before its callback.
+    function windowRequests(action, resultAction, timeout, cancelled) {
+        const opening = new Set();
+        const active = new Set();
+        const resolvers = new Map();
+        const early = new Map();
+        function open(fields) {
+            if (disposed) return Promise.resolve(cancelled);
+            return new Promise((resolve, reject) => {
+                const request = { token: null, timer: null, finish(value, error) {
+                    if (!active.delete(request)) return;
+                    opening.delete(request);
+                    if (request.token) resolvers.delete(request.token);
+                    clearTimeout(request.timer);
+                    if (!opening.size) early.clear();
+                    if (error) reject(error); else resolve(value);
+                } };
+                opening.add(request); active.add(request);
+                try {
+                    chrome.runtime.sendMessage({ action, ...fields }, response => {
+                        if (!active.has(request)) return;
+                        if (chrome.runtime.lastError) {
+                            request.finish(null, new Error(chrome.runtime.lastError.message));
+                            return;
+                        }
+                        if (response?.skipped) { request.finish({ action: "skipped" }); return; }
+                        if (!response?.success || !response.token) {
+                            request.finish(null, new Error(response?.error || "Could not open secure window"));
+                            return;
+                        }
+                        request.token = response.token;
+                        opening.delete(request);
+                        if (early.has(request.token)) {
+                            const value = early.get(request.token);
+                            early.delete(request.token);
+                            request.finish(value);
+                        } else {
+                            resolvers.set(request.token, value => request.finish(value));
+                            request.timer = setTimeout(() => request.finish(cancelled), timeout);
+                        }
+                        if (!opening.size) early.clear();
+                    });
+                } catch (error) { request.finish(null, error); }
             });
-        });
-    }
-
-    function openCredentialPrompt(username, password) {
-        return new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({ action: "openCredentialPrompt", username, password }, response => {
-                if (disposed) { resolve({ action: "cancel" }); return; }
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                if (response?.skipped) {
-                    resolve({ action: "skipped" });
-                    return;
-                }
-                if (!response?.success || !response.token) {
-                    reject(new Error(response?.error || "Could not open credential prompt"));
-                    return;
-                }
-                const timer = setTimeout(() => {
-                    credentialPromptResolvers.delete(response.token);
-                    resolve({ action: "cancel" });
-                }, 125_000);
-                credentialPromptResolvers.set(response.token, result => {
-                    clearTimeout(timer);
-                    resolve(result);
-                });
-            });
-        });
-    }
-
-    const listener = message => {
-        if (message.action === "securePickerResult") {
-            const resolver = securePickerResolvers.get(message.token);
-            if (!resolver) return;
-            securePickerResolvers.delete(message.token);
-            resolver(message.payload);
-        } else if (message.action === "credentialPromptResult") {
-            const resolver = credentialPromptResolvers.get(message.token);
-            if (!resolver) return;
-            credentialPromptResolvers.delete(message.token);
-            resolver(message.result);
         }
-    };
+        function receive(message) {
+            if (message.action !== resultAction) return;
+            const value = action === "openSecurePicker" ? message.payload : message.result;
+            const resolver = resolvers.get(message.token);
+            if (resolver) resolver(value);
+            else if (typeof message.token === "string" && opening.size && early.size < opening.size) {
+                early.set(message.token, value);
+            }
+        }
+        function dispose() {
+            for (const request of active) request.finish(cancelled);
+            early.clear();
+        }
+        return { open, receive, dispose };
+    }
+
+    const pickers = windowRequests("openSecurePicker", "securePickerResult", 65_000, null);
+    const prompts = windowRequests("openCredentialPrompt", "credentialPromptResult", 125_000, { action: "cancel" });
+    const listener = message => { pickers.receive(message); prompts.receive(message); };
     chrome.runtime.onMessage.addListener(listener);
     function dispose() {
         disposed = true;
         chrome.runtime.onMessage.removeListener(listener);
-        for (const resolve of securePickerResolvers.values()) resolve(null);
-        for (const resolve of credentialPromptResolvers.values()) resolve({ action: "cancel" });
-        securePickerResolvers.clear(); credentialPromptResolvers.clear();
+        pickers.dispose(); prompts.dispose();
     }
 
-    return { fillInput, openSecurePicker, openCredentialPrompt, dispose };
+    return { fillInput, openSecurePicker: kind => pickers.open({ kind }),
+        openCredentialPrompt: (username, password) => prompts.open({ username, password }), dispose };
 };

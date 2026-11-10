@@ -121,6 +121,26 @@ test("the extension saves through the real native host into a temporary vault", 
     await expect(page.locator("#username")).toHaveValue("real@example.com");
     await expect(page.locator("#password")).toHaveValue("real-native-password");
 
+    // Updating a password through the browser preserves the original URL,
+    // including its path, and all additional URLs saved by the desktop/CLI.
+    const savedUrl = `${origin}/saved-login`;
+    runPm(environment, "update", "--entry-name", "Real Native Entry",
+        "--url", savedUrl, "--add-url", "https://alternate.example");
+    await page.reload();
+    await page.locator("#username").fill("real@example.com");
+    await page.locator("#password").fill("real-updated-password");
+    const updateOpened = browser.context.waitForEvent(
+        "page", popup => popup.url().includes("credential_prompt.html")
+    );
+    await page.getByRole("button", { name: "Sign in" }).click();
+    const update = await updateOpened;
+    await update.locator("#update").click();
+    await expect.poll(() => update.isClosed()).toBe(true);
+    const updated = JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Real Native Entry"));
+    expect(updated.data.urls).toEqual(expect.arrayContaining([savedUrl, "https://alternate.example"]));
+    expect(JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Real Native Entry", "--password-only")))
+        .toMatchObject({ ok: true, data: "real-updated-password" });
+
     const secondPickerOpened = browser.context.waitForEvent(
         "page", popup => popup.url().includes("picker.html")
     );

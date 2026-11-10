@@ -506,3 +506,21 @@ fn browser_native_reads_require_session_revision_and_site_for_otp() {
         }
     }
 }
+
+#[test]
+fn browser_password_updates_preserve_saved_site_information() {
+    let mut request = NativeRequest {
+        action: NativeAction::UpdateCredentials,
+        domain: Some("https://alternate.example.com".into()),
+        entry_id: Some(7),
+        username: Some("alice".into()),
+        password: Some("new-password".into()),
+        ..NativeRequest::default()
+    };
+    let ServerCommand::Update(update) = command_for_request(&mut request).unwrap() else {
+        panic!("expected credential update");
+    };
+    assert_eq!(update.entry.update.username.as_deref(), Some("alice"));
+    assert_eq!(update.entry.update.url, None);
+    assert_eq!(update.entry.password.unwrap().expose(), "new-password");
+}
