@@ -23,7 +23,8 @@ toml = "1.1"
 rpassword = "7.5"
 zeroize = { version = "1.7", features = ["derive"] }
 rmp-serde = "1"
-argon2 = { version = "0.6", features = ["zeroize"] }
+# Derive raw keys directly; PHC password-hash strings are not used.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.11", features = ["alloc"] }
 blake3 = { version = "1.5", features = ["zeroize"] }
 hex = "0.4"
@@ -48,7 +49,8 @@ iced_winit = { version = "0.14", default-features = false, features = ["a11y"], 
 rfd = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
-proptest = "1"
+# Property tests run in-process and do not use bit-set strategies.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Keep production KDF parameters in integration tests without paying the cost of
 # unoptimized cryptographic loops. These also improve local debug CLI latency.
