@@ -13,7 +13,7 @@ pub(crate) enum DuoEnrollmentMaterial {
     Passcodes(Zeroizing<String>),
 }
 impl PreparedDuoEnrollment {
-    pub(crate) fn enroll(&self) -> Result<DuoEnrollmentMaterial, VaultError> {
+    pub(crate) async fn enroll(&self) -> Result<DuoEnrollmentMaterial, VaultError> {
         let DuoCommand::Enroll {
             activation, mode, ..
         } = &*self.command
@@ -21,9 +21,12 @@ impl PreparedDuoEnrollment {
             unreachable!()
         };
         if self.push {
-            crate::duo::enroll_push(activation, *mode).map(DuoEnrollmentMaterial::Push)
+            crate::duo::enroll_push(activation, *mode)
+                .await
+                .map(DuoEnrollmentMaterial::Push)
         } else {
             crate::duo::enroll(activation, mode.unwrap_or(crate::types::OtpMode::Hotp))
+                .await
                 .map(DuoEnrollmentMaterial::Passcodes)
         }
     }

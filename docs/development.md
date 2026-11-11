@@ -14,8 +14,8 @@
 - `src/gui/settings.rs` - Complete configuration form, input validation, and edits relative to its loaded settings
 - `src/desktop.rs` - Linux application-menu launcher installation for the same executable
 - `src/server.rs` and `src/server/` - Authenticated connections, a bounded vault worker, command handling, and external effects
-- `src/client.rs` and `src/client/transport.rs` - Authenticated Result-returning client with explicit connection settings
-- `src/client/presentation.rs` - Human-readable rendering of typed response records
+- `crates/pm-client/src/client.rs` and `crates/pm-client/src/client/transport.rs` - Authenticated Result-returning client with explicit connection settings
+- `crates/pm-client/src/client/presentation.rs` - Human-readable rendering of typed response records
 - `src/native_messaging.rs` - Chrome native host protocol and registration
 - `src/vault.rs` and `src/vault/` - Complete item aggregates, staged mutations, import/export, and versioned document storage
 - `src/secret.rs` - Redacted secret fields that wipe their contents on drop
@@ -29,7 +29,7 @@
 - `sync-server/` - Independent Go snapshot server, device enrollment, quotas, and Linux service unit
 - `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - Application paths, key-path validation, private permissions, and atomic file writes
-- `src/protocol.rs` and `src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
+- `crates/pm-contracts/src/protocol.rs` and `crates/pm-contracts/src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
 - `src/lib.rs` - Shared production library used by the CLI and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
 - `docs/commands.template.html` - Static layout used by the command-reference generator
@@ -59,6 +59,46 @@ for decorated Wayland titlebars, removing the unmaintained ttf-parser dependency
 Linux desktop builds require pkg-config and Fontconfig/FreeType development
 packages (`sudo apt-get install pkg-config libfontconfig1-dev libfreetype6-dev`
 on Debian/Ubuntu). CLI-only builds exclude these desktop dependencies.
+
+The Rust workspace separates reusable contracts and client infrastructure:
+
+- `pm-contracts` owns command/response types, secret wrappers, generated native
+  contracts, and authenticated wire records. It has no storage, HTTP, or GUI
+  implementation. Its optional `cli` feature supplies Clap enum adapters only.
+- `pm-platform` owns filesystem paths/permissions and the clipboard helper.
+  Clipboard integration is an optional feature enabled by the application;
+  client-only builds do not enable it.
+- `pm-client` owns authenticated connections and terminal rendering. It depends
+  on the contracts and filesystem adapters, without loading vault storage,
+  password-strength analysis, HTTP services, the clipboard backend, or Iced.
+- `password_manager` composes the vault owner, persistence, integrations, CLI,
+  native host, and optional desktop. Existing module paths remain available as
+  compatibility exports, and the `pm` executable/launcher behavior is unchanged.
+
+Exercise the extracted components with:
+
+```sh
+cargo test --locked -p pm-contracts -p pm-client -p pm-platform --features pm-platform/clipboard
+```
+
+The main validator runs them separately, and `python3 scripts/check_dependency_boundaries.py`
+guards the lightweight client boundaries. Build packages separately when checking
+these boundaries: Cargo unifies features selected within one invocation. The root
+application's CLI and clipboard features are intentionally absent from standalone
+client builds, even though all packages share the workspace lockfile. The application
+and extracted crates inherit their version from `[workspace.package]`, so status
+responses continue to report the application release version.
+
+AccessKit uses its Tokio backend rather than the separate async-executor stack.
+Duo enrollment uses asynchronous Reqwest, as do push, sync, and breach lookups;
+RSA enrollment-key generation runs on Tokio's blocking pool. Enrollment retains
+its shared deadline, redirect validation, bounded responses, and the unlocked
+session/item revision checks before persisting results.
+
+Iced's editing clipboard and the service's headless clipboard owner remain distinct:
+the latter must work without a window and preserve delayed clearing and process
+lifetime behavior. Extracting it makes this dependency optional for reusable clients
+without replacing platform behavior or adding helper-program requirements.
 
 The Tokio CLI runtime is created only for CLI dispatch, leaving Iced's event
 loop on the main thread. Windows keeps the console subsystem for CLI and native
@@ -389,7 +429,7 @@ Duo finalization rechecks the unlock session and item revision. Connections carr
 an explicit response encryption key, with no plaintext-response fallback.
 
 The protocol uses versioned envelopes, explicit operation tags and named fields.
-Domain reads return records; `src/client/presentation.rs` formats human output,
+Domain reads return records; `crates/pm-client/src/client/presentation.rs` formats human output,
 and the native host only adapts browser framing and validated operations. CLI
 output settings are explicit values in the executable; reusable clients return
 results instead of terminating the process.
@@ -425,7 +465,7 @@ npm run build:extension
 The dependency-free build writes `content_runtime.js`;
 unit tests, browser tests and shared validation check that they are current.
 Browser operation policies, runtime validators and TypeScript declarations come
-from `src/protocol/native_contract.rs` and its template. Regenerate them with:
+from `crates/pm-contracts/src/protocol/native_contract.rs` and its template. Regenerate them with:
 
 ```bash
 cargo run -- generate-command-contract

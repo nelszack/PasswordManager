@@ -24,6 +24,8 @@ def select(paths):
             selected.update(SUITES)
         elif path.startswith(("src/gui/", "assets/")) or path == "src/desktop.rs":
             selected.add("rust")
+        elif path.startswith("crates/"):
+            selected.update(("rust", "browser", "cloud", "fuzz", "rust_audit"))
         elif path.startswith(("src/", "tests/", "vendor/")):
             selected.update(("rust", "browser", "cloud", "fuzz"))
         elif path.startswith("fuzz/"):

@@ -14,6 +14,8 @@ use std::{
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
+pub use pm_contracts::cloud::Action;
+
 pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteVault {
@@ -407,18 +409,4 @@ mod tests {
         assert!(verify_identity(&path, [2; 16]).is_err());
         assert!(!path.exists());
     }
-}
-
-/// Local application commands; never accepted from the browser native host.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    Status,
-    Check,
-    Now,
-    Enable,
-    Disable,
-    List,
-    Pull(String),
-    PullCopy(String),
 }

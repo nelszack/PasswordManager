@@ -148,4 +148,6 @@ optional = true
 
 [dependencies.accesskit_winit]
 version = "0.32"
+default-features = false
+features = ["accesskit_unix", "rwh_06", "tokio"]
 optional = true

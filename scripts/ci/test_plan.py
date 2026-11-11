@@ -30,6 +30,7 @@ class SelectionTests(unittest.TestCase):
             "package-lock.json": {"extension", "browser", "npm_audit"},
             "fuzz/Cargo.lock": {"fuzz", "rust_audit"},
             "Cargo.lock": set(plan.SUITES),
+            "crates/pm-client/src/client.rs": {"rust", "browser", "cloud", "fuzz", "rust_audit"},
             ".github/workflows/ci.yml": set(plan.SUITES),
             "scripts/ci/plan.py": set(plan.SUITES),
             "new-build-input.toml": set(plan.SUITES),

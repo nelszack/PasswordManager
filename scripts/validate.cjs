@@ -49,7 +49,12 @@ if (mode !== "rust") {
 }
 if (mode !== "extension") {
     run("cargo", ["fmt", "--all", "--", "--check"]);
+    run(process.platform === "win32" ? "python" : "python3", ["scripts/check_dependency_boundaries.py"]);
     const artifacts = [];
+    // Exercise the small components independently of the application: their
+    // tests must not accidentally rely on features enabled by the full build.
+    run("cargo", ["test", "--locked", "-p", "pm-contracts", "-p", "pm-client", "-p", "pm-platform",
+        "--features", "pm-platform/clipboard"]);
     // These desktop packages share the same resolved dependency features. Build and
     // run their harnesses together rather than resolving the graph for each one.
     const desktopPackages = ["iced_tiny_skia", "iced_winit"];
@@ -69,5 +74,5 @@ if (mode !== "extension") {
     if (!executable) throw new Error("Cargo did not report the pm integration-test executable");
     run(executable, ["generate-command-reference", "--check"]);
     run(executable, ["generate-command-contract", "--check"]);
-    run("cargo", ["clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"]);
+    run("cargo", ["clippy", "--locked", "-p", "password_manager", "-p", "pm-contracts", "-p", "pm-client", "-p", "pm-platform", "--all-targets", "--all-features", "--", "-D", "warnings"]);
 }
