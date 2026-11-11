@@ -11,10 +11,7 @@ use base64::{
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use serde::Deserialize;
-use std::{
-    io::Read,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use totp_rs::Secret;
 use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -349,12 +346,12 @@ fn configuration_from_response(
 }
 
 trait Transport {
-    fn get(&self, url: Url) -> Result<Zeroizing<Vec<u8>>, VaultError>;
-    fn post(&self, url: Url, public_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError>;
+    async fn get(&self, url: Url) -> Result<Zeroizing<Vec<u8>>, VaultError>;
+    async fn post(&self, url: Url, public_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError>;
 }
 
 struct HttpTransport {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     deadline: Instant,
 }
 
@@ -363,7 +360,7 @@ impl HttpTransport {
         &self,
         url: Url,
         public_key: &str,
-    ) -> Result<reqwest::blocking::RequestBuilder, VaultError> {
+    ) -> Result<reqwest::RequestBuilder, VaultError> {
         validate_https(&url)?;
         // Send mobile fields in an application/x-www-form-urlencoded body.
         // Only customer_protocol belongs in the URL; an empty POST with all
@@ -403,29 +400,28 @@ impl HttpTransport {
             })
     }
 
-    fn body(
+    async fn body(
         &self,
-        response: reqwest::blocking::Response,
+        mut response: reqwest::Response,
         phase: RequestPhase,
     ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let status = response.status();
         let mut body = Zeroizing::new(Vec::new());
-        response
-            .take(MAX_RESPONSE_BYTES + 1)
-            .read_to_end(&mut body)
-            .map_err(|_| {
-                invalid(&format!(
-                    "could not read {} response (HTTP {})",
-                    phase.label(),
-                    status.as_u16()
-                ))
-            })?;
-        if body.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(invalid(&format!(
-                "{} response exceeded the size limit (HTTP {})",
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            invalid(&format!(
+                "could not read {} response (HTTP {})",
                 phase.label(),
                 status.as_u16()
-            )));
+            ))
+        })? {
+            if body.len().saturating_add(chunk.len()) as u64 > MAX_RESPONSE_BYTES {
+                return Err(invalid(&format!(
+                    "{} response exceeded the size limit (HTTP {})",
+                    phase.label(),
+                    status.as_u16()
+                )));
+            }
+            body.extend_from_slice(&chunk);
         }
         if !status.is_success() {
             return Err(rejection_error(phase, Some(status), &body));
@@ -435,7 +431,7 @@ impl HttpTransport {
 }
 
 impl Transport for HttpTransport {
-    fn get(&self, mut url: Url) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    async fn get(&self, mut url: Url) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         for _ in 0..=3 {
             validate_https(&url)?;
             let response = self
@@ -443,6 +439,7 @@ impl Transport for HttpTransport {
                 .get(url.clone())
                 .timeout(self.remaining()?)
                 .send()
+                .await
                 .map_err(|_| {
                     invalid("could not fetch Duo setup page; paste its duo:// link instead")
                 })?;
@@ -457,35 +454,36 @@ impl Transport for HttpTransport {
                     .map_err(|_| invalid("invalid Duo setup redirect"))?;
                 continue;
             }
-            return self.body(response, RequestPhase::SetupPage);
+            return self.body(response, RequestPhase::SetupPage).await;
         }
         Err(invalid(
             "too many Duo setup redirects; paste its duo:// link instead",
         ))
     }
 
-    fn post(&self, url: Url, public_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    async fn post(&self, url: Url, public_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let response = self
             .activation_request(url, public_key)?
             .send()
+            .await
             .map_err(|_| {
                 invalid("Duo activation request failed; check enrollment status before retrying")
             })?;
-        self.body(response, RequestPhase::Activation)
+        self.body(response, RequestPhase::Activation).await
     }
 }
 
-fn enroll_with(
+async fn enroll_with(
     transport: &impl Transport,
     link: &str,
     mode: OtpMode,
     public_key: &str,
 ) -> Result<Zeroizing<String>, VaultError> {
-    let endpoint = enrollment_endpoint(transport, link)?;
-    configuration_from_response(&transport.post(endpoint, public_key)?, mode)
+    let endpoint = enrollment_endpoint(transport, link).await?;
+    configuration_from_response(&transport.post(endpoint, public_key).await?, mode)
 }
 
-fn enrollment_endpoint(transport: &impl Transport, link: &str) -> Result<Url, VaultError> {
+async fn enrollment_endpoint(transport: &impl Transport, link: &str) -> Result<Url, VaultError> {
     let link = link.trim();
     if link.len() > MAX_LINK_BYTES {
         return Err(invalid("Duo activation link is too long"));
@@ -493,7 +491,7 @@ fn enrollment_endpoint(transport: &impl Transport, link: &str) -> Result<Url, Va
     if link.starts_with("duo://") {
         activation_url(link)
     } else {
-        let page = transport.get(page_url(link)?)?;
+        let page = transport.get(page_url(link)?).await?;
         activation_url(&link_from_page(&page)?)
     }
 }
@@ -504,14 +502,19 @@ pub(crate) struct PushEnrollment {
     pub configuration: String,
 }
 
-pub(crate) fn enroll_push(link: &str, mode: Option<OtpMode>) -> Result<PushEnrollment, VaultError> {
+pub(crate) async fn enroll_push(
+    link: &str,
+    mode: Option<OtpMode>,
+) -> Result<PushEnrollment, VaultError> {
     validate_link(link)?;
     let transport = enrollment_transport()?;
-    let endpoint = enrollment_endpoint(&transport, link)?;
+    let endpoint = enrollment_endpoint(&transport, link).await?;
     let host = endpoint.host_str().unwrap().to_owned();
-    let private_key = crypto::new_key()?;
+    let private_key = tokio::task::spawn_blocking(crypto::new_key)
+        .await
+        .map_err(|_| invalid("Duo enrollment key generation failed"))??;
     let public_key = crypto::public_pem(&private_key)?;
-    let body = transport.post(endpoint, &public_key)?;
+    let body = transport.post(endpoint, &public_key).await?;
     let configuration = configuration_from_response(&body, mode.unwrap_or(OtpMode::Hotp))?;
     let response: ActivationResponse = serde_json::from_slice(&body)
         .map_err(|_| invalid("invalid Duo push enrollment response"))?;
@@ -560,7 +563,7 @@ fn validate_link(link: &str) -> Result<(), VaultError> {
 
 fn enrollment_transport() -> Result<HttpTransport, VaultError> {
     Ok(HttpTransport {
-        client: reqwest::blocking::Client::builder()
+        client: reqwest::Client::builder()
             .user_agent(concat!(
                 "password-manager/",
                 env!("CARGO_PKG_VERSION"),
@@ -576,14 +579,15 @@ fn enrollment_transport() -> Result<HttpTransport, VaultError> {
     })
 }
 
-pub(crate) fn enroll(link: &str, mode: OtpMode) -> Result<Zeroizing<String>, VaultError> {
-    // Called only by the server's blocking command worker, with the vault unlocked.
+pub(crate) async fn enroll(link: &str, mode: OtpMode) -> Result<Zeroizing<String>, VaultError> {
     validate_link(link)?;
     let transport = enrollment_transport()?;
-    let private_key = crypto::new_key()?;
+    let private_key = tokio::task::spawn_blocking(crypto::new_key)
+        .await
+        .map_err(|_| invalid("Duo enrollment key generation failed"))??;
     let public_key = crypto::public_pem(&private_key)?;
     drop(private_key);
-    enroll_with(&transport, link, mode, &public_key)
+    enroll_with(&transport, link, mode, &public_key).await
 }
 
 #[cfg(test)]
@@ -606,12 +610,12 @@ mod tests {
     }
 
     impl Transport for MockTransport {
-        fn get(&self, url: Url) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        async fn get(&self, url: Url) -> Result<Zeroizing<Vec<u8>>, VaultError> {
             self.calls.borrow_mut().push(format!("GET {url}"));
             Ok(Zeroizing::new(self.page.clone()))
         }
 
-        fn post(&self, url: Url, public_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        async fn post(&self, url: Url, public_key: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
             assert_eq!(public_key, "synthetic-public-key");
             self.calls.borrow_mut().push(format!("POST {url}"));
             Ok(Zeroizing::new(self.response.clone()))
@@ -629,7 +633,7 @@ mod tests {
     #[test]
     fn activation_request_uses_mobile_field_names_and_preserves_key_encoding() {
         let transport = HttpTransport {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::Client::new(),
             deadline: Instant::now() + ENROLLMENT_TIMEOUT,
         };
         let public_key =
@@ -681,9 +685,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn activation_form_is_transmitted_with_its_content_type_and_encoded_public_key() {
-        use std::io::{BufRead, BufReader, Write};
+    #[tokio::test]
+    async fn activation_form_is_transmitted_with_its_content_type_and_encoded_public_key() {
+        use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -721,10 +725,7 @@ mod tests {
             (headers, body)
         });
         let transport = HttpTransport {
-            client: reqwest::blocking::Client::builder()
-                .no_proxy()
-                .build()
-                .unwrap(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
             deadline: Instant::now() + Duration::from_secs(5),
         };
         let public_key =
@@ -740,7 +741,7 @@ mod tests {
             "http://{address}/push/v2/activation/{CODE}?customer_protocol=1"
         ))
         .unwrap();
-        let response = transport.client.execute(request).unwrap();
+        let response = transport.client.execute(request).await.unwrap();
         assert!(response.status().is_success());
         let (headers, body) = server.join().unwrap();
         assert!(headers.starts_with(&format!(
@@ -763,16 +764,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn both_link_formats_enroll_for_hotp_or_totp_without_retaining_push_secrets() {
+    #[tokio::test]
+    async fn both_link_formats_enroll_for_hotp_or_totp_without_retaining_push_secrets() {
         for input in [
             link(),
             "https://m-test.duosecurity.com/activate/SyntheticToken123".into(),
         ] {
             for mode in [OtpMode::Hotp, OtpMode::Totp] {
                 let transport = mock();
-                let configuration =
-                    enroll_with(&transport, &input, mode, "synthetic-public-key").unwrap();
+                let configuration = enroll_with(&transport, &input, mode, "synthetic-public-key")
+                    .await
+                    .unwrap();
                 let url = Url::parse(&configuration).unwrap();
                 assert_eq!(
                     url.host_str(),
@@ -804,8 +806,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn encoded_host_cannot_redirect_activation_outside_duo() {
+    #[tokio::test]
+    async fn encoded_host_cannot_redirect_activation_outside_duo() {
         for host in [
             "localhost",
             "127.0.0.1",
@@ -819,7 +821,9 @@ mod tests {
             let input = format!("duo://{CODE}-{}", STANDARD_NO_PAD.encode(host));
             let transport = mock();
             assert!(
-                enroll_with(&transport, &input, OtpMode::Hotp, "synthetic-public-key").is_err()
+                enroll_with(&transport, &input, OtpMode::Hotp, "synthetic-public-key")
+                    .await
+                    .is_err()
             );
             assert!(transport.calls.borrow().is_empty());
         }
@@ -833,8 +837,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn setup_urls_are_validated_before_any_request() {
+    #[tokio::test]
+    async fn setup_urls_are_validated_before_any_request() {
         for input in [
             "http://m-test.duosecurity.com/activate/token",
             "https://evil.example/activate/token",
@@ -847,7 +851,11 @@ mod tests {
             "https://m-test.duosecurity.com/other",
         ] {
             let transport = mock();
-            assert!(enroll_with(&transport, input, OtpMode::Hotp, "synthetic-public-key").is_err());
+            assert!(
+                enroll_with(&transport, input, OtpMode::Hotp, "synthetic-public-key")
+                    .await
+                    .is_err()
+            );
             assert!(transport.calls.borrow().is_empty());
         }
         let transport = mock();
@@ -858,6 +866,7 @@ mod tests {
                 OtpMode::Hotp,
                 "synthetic-public-key"
             )
+            .await
             .is_err()
         );
         assert!(transport.calls.borrow().is_empty());
@@ -980,10 +989,10 @@ mod tests {
         assert!(!opaque.contains("Opaque"));
     }
 
-    fn mock_http_response(
+    async fn mock_http_response(
         status: u16,
         body: &[u8],
-    ) -> (reqwest::blocking::Response, std::thread::JoinHandle<()>) {
+    ) -> (reqwest::Response, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1012,29 +1021,32 @@ mod tests {
             // The client may deliberately stop reading an oversized body.
             let _ = stream.write_all(&body);
         });
-        let response = reqwest::blocking::Client::builder()
+        let response = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap()
             .get(format!("http://{address}/synthetic-response"))
             .send()
+            .await
             .unwrap();
         (response, server)
     }
 
-    #[test]
-    fn http_error_responses_are_read_bounded_and_report_the_rejection_details() {
+    #[tokio::test]
+    async fn http_error_responses_are_read_bounded_and_report_the_rejection_details() {
         let transport = HttpTransport {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::Client::new(),
             deadline: Instant::now() + ENROLLMENT_TIMEOUT,
         };
         let (response, server) = mock_http_response(
             400,
             br#"{"stat":"FAIL","code":40002,"message":"Unsupported platform"}"#,
-        );
+        )
+        .await;
         let error = transport
             .body(response, RequestPhase::Activation)
+            .await
             .err()
             .unwrap()
             .to_string();
@@ -1042,17 +1054,21 @@ mod tests {
         assert!(error.contains("HTTP 400; Duo code 40002"));
         assert!(error.contains("unsupported platform"));
         let (response, server) =
-            mock_http_response(403, &vec![b'x'; MAX_RESPONSE_BYTES as usize + 1]);
+            mock_http_response(403, &vec![b'x'; MAX_RESPONSE_BYTES as usize + 1]).await;
         let error = transport
             .body(response, RequestPhase::Activation)
+            .await
             .err()
             .unwrap()
             .to_string();
         server.join().unwrap();
         assert!(error.contains("size limit (HTTP 403)"));
-        let (response, server) = mock_http_response(200, b"synthetic-success");
+        let (response, server) = mock_http_response(200, b"synthetic-success").await;
         assert_eq!(
-            *transport.body(response, RequestPhase::Activation).unwrap(),
+            *transport
+                .body(response, RequestPhase::Activation)
+                .await
+                .unwrap(),
             b"synthetic-success"
         );
         server.join().unwrap();

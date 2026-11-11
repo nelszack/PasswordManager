@@ -24,6 +24,11 @@ builder, and action routing adapted from Daniel Hedlund's Iced fork, commit
 `68c3226f8c13a247a5225aa788e35ccddbeeb5fe` (MIT):
 https://github.com/dhedlund/iced/tree/68c3226f8c13a247a5225aa788e35ccddbeeb5fe
 
+The adapter selects AccessKit's Tokio backend with default features disabled,
+so it uses the same runtime family as Iced and the application instead of pulling
+in a second executor/channel stack. AccessKit still owns its dedicated event
+thread and Tokio runtime; it does not depend on a caller entering a runtime.
+
 The application's desktop feature enables this bridge with the local core and
 widget metadata patches. CLI-only builds exclude it. This port uses the current
 AccessKit 0.24 tree/action API and protected password roles. It omits the fork's

@@ -40,7 +40,7 @@ jobs:
             echo "Release tag must be a semantic version beginning with v: $RELEASE_TAG" >&2
             exit 1
           fi
-          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "password_manager") | .version')"
           if [[ "$RELEASE_TAG" != "v$cargo_version" ]]; then
             echo "Tag $RELEASE_TAG does not match Cargo.toml version $cargo_version" >&2
             exit 1

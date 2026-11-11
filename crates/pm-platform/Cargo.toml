@@ -1,0 +1,15 @@
+[package]
+name = "pm-platform"
+version.workspace = true
+edition = "2024"
+publish = false
+
+[features]
+clipboard = ["dep:arboard"]
+fixtures = []
+
+[dependencies]
+directories = "6"
+tempfile = "3"
+zeroize = "1.7"
+arboard = { version = "3", default-features = false, optional = true }

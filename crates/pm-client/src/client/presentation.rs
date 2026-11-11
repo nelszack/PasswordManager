@@ -138,7 +138,7 @@ pub fn render(payload: &ResponsePayload) -> String {
     }
 }
 
-pub(crate) fn audit(findings: &crate::vault::AuditReport) -> String {
+pub fn audit(findings: &crate::vault::AuditReport) -> String {
     if findings.total == 0 {
         return "No login items to assess. Add or import a login before checking vault health.\n"
             .into();

@@ -391,24 +391,12 @@ async fn finish_duo_enrollment(
     worker: VaultWorker,
     responses: &mut Vec<RpcResponse>,
 ) {
-    let result = tokio::task::spawn_blocking(move || {
-        let material = prepared.enroll();
-        (prepared, material)
-    })
-    .await;
-    let (prepared, material) = match result {
-        Ok((prepared, Ok(material))) => (prepared, material),
-        Ok((_, Err(error))) => {
+    let material = match prepared.enroll().await {
+        Ok(material) => material,
+        Err(error) => {
             outcome::respond_domain_error_with_context(
                 &error,
                 &format!("Duo setup failed: {error}"),
-                responses,
-            );
-            return;
-        }
-        Err(_) => {
-            outcome::respond_failure(
-                "Duo enrollment worker failed; check enrollment before retrying.",
                 responses,
             );
             return;

@@ -1,6 +1,6 @@
 [package]
 name = "password_manager"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [[bin]]
@@ -13,11 +13,13 @@ fuzzing = []
 desktop = ["dep:iced", "dep:iced_winit", "dep:rfd"]
 
 [dependencies]
+pm-contracts = { path = "crates/pm-contracts", features = ["cli"] }
+pm-platform = { path = "crates/pm-platform", features = ["clipboard"] }
+pm-client = { path = "crates/pm-client" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 rand = "0.10"
 zxcvbn = { version = "3", default-features = false }
-arboard = { version = "3", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 rpassword = "7.5"
@@ -39,7 +41,7 @@ directories = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 subtle = "2"
 totp-rs = { version = "6", default-features = false, features = ["otpauth", "zeroize"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 base64 = "0.23"
 aws-lc-rs = "1.18"
 pem-rfc7468 = { version = "1.0", features = ["alloc"] }
@@ -49,6 +51,7 @@ iced_winit = { version = "0.14", default-features = false, features = ["a11y"], 
 rfd = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
+pm-platform = { path = "crates/pm-platform", features = ["fixtures"] }
 # Property tests run in-process and do not use bit-set strategies.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
@@ -90,6 +93,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSDate", "NSNotification", "NSDistributedNotificationCenter", "NSRunLoop", "NSString", "NSOperation"] }
 
 [workspace]
-members = ["vendor/atspi-common", "vendor/zbus-lockstep"]
+members = ["crates/pm-contracts", "crates/pm-platform", "crates/pm-client", "vendor/atspi-common", "vendor/zbus-lockstep"]
 default-members = ["."]
 exclude = ["fuzz", "vendor/iced_core", "vendor/iced_widget", "vendor/iced_winit", "vendor/iced_tiny_skia", "vendor/fontdb-compat", "vendor/accesskit_unix", "vendor/accesskit_atspi_common", "vendor/atspi-proxies", "vendor/zbus-lockstep-macros"]
+
+[workspace.package]
+version = "0.1.0"

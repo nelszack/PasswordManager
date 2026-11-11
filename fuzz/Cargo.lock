@@ -672,7 +672,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
- "futures-sink",
 ]
 
 [[package]]
@@ -701,12 +700,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "futures-sink"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
-
-[[package]]
 name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -719,10 +712,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
- "futures-io",
- "futures-sink",
  "futures-task",
- "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -1444,7 +1434,6 @@ dependencies = [
 name = "password_manager"
 version = "0.1.0"
 dependencies = [
- "arboard",
  "argon2",
  "aws-lc-rs",
  "base64 0.23.1",
@@ -1463,6 +1452,9 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "pem-rfc7468",
+ "pm-client",
+ "pm-contracts",
+ "pm-platform",
  "psl",
  "rand",
  "reqwest",
@@ -1519,6 +1511,44 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "pm-client"
+version = "0.1.0"
+dependencies = [
+ "pm-contracts",
+ "pm-platform",
+ "rmp-serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "pm-contracts"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "clap",
+ "hex",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "pm-platform"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "directories",
+ "tempfile",
+ "zeroize",
+]
 
 [[package]]
 name = "poly1305"
@@ -1734,9 +1764,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
- "futures-channel",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",

@@ -1,23 +1,4 @@
 use super::*;
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserLogin {
-    pub id: usize,
-    pub revision: u64,
-    pub name: String,
-    pub username: Option<String>,
-    pub password: SecretString,
-    pub has_totp: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutofillItem {
-    pub id: usize,
-    pub revision: u64,
-    pub name: String,
-    pub kind: ItemKind,
-    pub username: Option<String>,
-    pub primary_secret: SecretString,
-    pub custom_fields: Vec<CustomField>,
-}
 impl Vault {
     pub fn browser_duo_items(&self, origin: &str) -> Vec<ItemSummary> {
         let Ok(url) = url::Url::parse(origin) else {

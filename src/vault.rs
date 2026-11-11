@@ -35,8 +35,8 @@ pub use totp::AuthenticatorCode;
 
 mod browser;
 mod management;
-pub use browser::{AutofillItem, BrowserLogin};
-pub use management::{
+pub use pm_contracts::vault::{AutofillItem, BrowserLogin};
+pub use pm_contracts::vault::{
     HistoryPage, ItemDetail, ItemField, ItemPage, ItemSummary, TrashPage, TrashSummary,
 };
 mod query;
@@ -78,28 +78,7 @@ pub(crate) struct AuditOutcome {
     pub incomplete: bool,
 }
 
-/// Public audit findings contain labels and counts, never password hashes or secrets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditLabel {
-    pub id: usize,
-    pub name: String,
-    pub username: Option<String>,
-    pub password_changed: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditReport {
-    pub total: usize,
-    pub healthy: usize,
-    pub score: usize,
-    pub weak: Vec<AuditLabel>,
-    pub reused: Vec<Vec<AuditLabel>>,
-    pub duplicates: Vec<Vec<AuditLabel>>,
-    pub stale: Vec<AuditLabel>,
-    pub missing_totp: Vec<AuditLabel>,
-    pub breached: Vec<(AuditLabel, u64)>,
-    pub breach_error: Option<String>,
-    pub unchecked: Vec<AuditLabel>,
-}
+pub use pm_contracts::vault::{AuditLabel, AuditReport, ImportReport};
 impl AuditEntrySnapshot {
     fn label(&self) -> AuditLabel {
         AuditLabel {
@@ -499,19 +478,6 @@ struct MetadataUpdate<'a> {
     set_fields: &'a [CustomField],
     remove_fields: &'a [String],
     clear_fields: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ImportReport {
-    pub total: usize,
-    pub added: usize,
-    pub replaced: usize,
-    pub skipped: usize,
-    pub renamed: usize,
-    pub preview: bool,
-    pub unsupported: usize,
-    pub loss_count: usize,
-    /// Bounded, secret-free descriptions indexed by source row/item.
-    pub losses: Vec<String>,
 }
 
 pub(crate) struct AuditSnapshot {

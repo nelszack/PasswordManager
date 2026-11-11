@@ -228,14 +228,14 @@ mod tests {
     fn checked_in_browser_types_match_rust_policy() {
         assert_eq!(
             super::browser_declarations(),
-            include_str!("../../extension/command_contract.d.ts")
+            include_str!("../../../../extension/command_contract.d.ts")
         );
     }
     #[test]
     fn checked_in_browser_contract_matches_rust_policy() {
         assert_eq!(
             super::browser_contract(),
-            include_str!("../../extension/command_contract.js"),
+            include_str!("../../../../extension/command_contract.js"),
             "Regenerate extension/command_contract.js using generate-command-contract"
         );
     }
