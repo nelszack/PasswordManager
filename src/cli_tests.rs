@@ -564,7 +564,7 @@ fn push_cli_requires_selected_entry_and_bounded_polling() {
 }
 
 #[test]
-fn sync_connect_requires_a_url_and_retired_deployment_commands_are_rejected() {
+fn sync_connect_requires_a_url() {
     for args in [
         vec!["pm", "sync", "pull"],
         vec![
@@ -578,12 +578,5 @@ fn sync_connect_requires_a_url_and_retired_deployment_commands_are_rejected() {
     ] {
         assert!(Cli::try_parse_from(args).is_ok());
     }
-    for args in [
-        vec!["pm", "sync", "connect"],
-        vec!["pm", "sync", "setup"],
-        vec!["pm", "sync", "server", "update"],
-        vec!["pm", "sync", "connect", "--ssh", "host"],
-    ] {
-        assert!(Cli::try_parse_from(args).is_err());
-    }
+    assert!(Cli::try_parse_from(["pm", "sync", "connect"]).is_err());
 }

@@ -170,22 +170,6 @@ proptest! {
 }
 
 #[test]
-fn test_encrypt_decrypt_pass() {
-    for (label, plaintext) in [
-        ("ordinary", b"this is a test".to_vec()),
-        ("empty", Vec::new()),
-        ("large", vec![0u8; 10000]),
-    ] {
-        let mut pass = PasswordType::Password("test123".into());
-        let encrypted = encrypt_file(&mut pass, &plaintext);
-        assert_eq!(
-            decrypt_file(&mut pass, &encrypted).unwrap(),
-            plaintext,
-            "{label}"
-        );
-    }
-}
-#[test]
 fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
     crate::file::init_test_data_dir();
     let directory = tempfile::tempdir().unwrap();
@@ -246,7 +230,7 @@ fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
 }
 #[test]
-fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
+fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonces() {
     let plaintext = b"same plaintext";
     let mut first_session = PasswordType::Password("test123".into());
     let mut second_session = PasswordType::Password("test123".into());
@@ -263,8 +247,27 @@ fn independent_sessions_use_random_salts_and_one_session_reuses_its_key() {
         &e3[SALT_OFFSET..SALT_OFFSET + SALT_LEN]
     );
     assert_ne!(e1, e3, "every write still requires a fresh nonce");
-}
 
+    // Reuse the established session for write boundaries; a fresh credential
+    // must also reopen each result through the uncached derivation path.
+    for (label, plaintext) in [
+        ("ordinary", b"this is a test".to_vec()),
+        ("empty", Vec::new()),
+        ("large", vec![0u8; 10000]),
+    ] {
+        let encrypted = encrypt_file(&mut first_session, &plaintext);
+        for mut credential in [
+            first_session.clone(),
+            PasswordType::Password("test123".into()),
+        ] {
+            assert_eq!(
+                decrypt_file(&mut credential, &encrypted).unwrap(),
+                plaintext,
+                "{label}"
+            );
+        }
+    }
+}
 #[test]
 fn decryption_rejects_wrong_credentials_invalid_headers_and_modified_ciphertext() {
     let mut pass = PasswordType::Password("test123".into());

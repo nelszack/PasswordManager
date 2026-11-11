@@ -125,10 +125,19 @@ fn updates_persist_all_fields_and_boundary_values() {
 }
 
 #[test]
-fn test_update_single_field_preserves_unmodified_fields() {
+fn defaults_and_single_field_updates_preserve_other_settings() {
     for (length, persist_defaults) in [(24, true), (50, false)] {
         let (_directory, config_path) = isolated_config();
         let original = default_test_config(persist_defaults, &config_path);
+        assert_eq!(original.genpass.length, 12);
+        assert!(!original.genpass.stats);
+        assert!(original.genpass.copy);
+        assert_eq!(original.clipboard.timeout, 15);
+        assert_eq!(original.unlock.timeout, 15 * 60);
+        assert!(original.copy.passwords);
+        assert_eq!(original.recovery.password_history_limit, 10);
+        assert_eq!(original.recovery.trash_retention_days, 0);
+        assert_eq!(original.server.port, crate::server::DEFAULT_PORT);
         let mut expected = Config::default();
         expected.genpass.length = length;
         update(
@@ -144,22 +153,11 @@ fn test_update_single_field_preserves_unmodified_fields() {
             expected,
             "length {length}, persisted defaults {persist_defaults}"
         );
+        if !persist_defaults {
+            fs::remove_file(&config_path).unwrap();
+            assert_eq!(read_config(&config_path), Config::default());
+        }
     }
-}
-#[test]
-fn test_default_config_values() {
-    let (_directory, config_path) = isolated_config();
-    let config = default_test_config(false, &config_path);
-    assert_eq!(config.genpass.length, 12);
-    assert!(!config.genpass.stats);
-    assert!(config.genpass.copy);
-    assert_eq!(config.clipboard.timeout, 15);
-    assert_eq!(config.unlock.timeout, 15 * 60);
-    assert!(config.copy.passwords);
-    assert_eq!(config.recovery.password_history_limit, 10);
-    assert_eq!(config.recovery.trash_retention_days, 0);
-    assert_eq!(config.server.port, crate::server::DEFAULT_PORT);
-    assert_eq!(read_config(&config_path), config);
 }
 #[test]
 fn successive_updates_preserve_previous_changes_and_reset_restores_defaults() {
