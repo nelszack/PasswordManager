@@ -331,7 +331,7 @@ For Rust coverage, install the LLVM tools and coverage runner first:
 ```bash
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov --locked
-cargo llvm-cov --locked --all-features --workspace --fail-under-lines 65
+cargo llvm-cov --locked --all-features -p password_manager -p pm-contracts -p pm-client -p pm-platform --fail-under-lines 65
 ```
 
 After changing CLI commands or flags, regenerate and verify the browser command
@@ -386,7 +386,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The CLI/package version in `Cargo.toml` is the release version and must match
+The `[workspace.package]` version in `Cargo.toml` is the release version and must match
 the browser manifest's `version_name` for release packaging. Runtime compatibility
 uses the protocol version. The manifest's numeric `version` remains an independent extension-package
 revision because browser stores require monotonically increasing revisions.
