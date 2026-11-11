@@ -91,8 +91,8 @@ impl App {
         self.serial += 1;
         self.stop_tool_watches();
         self.clear_vault();
-        self.pending = None;
-        self.reviewed = false;
+        self.recovery = Recovery::Clear;
+
         self.warning = None;
         self.running = false;
         self.request_state = RequestState::Idle;
@@ -149,13 +149,31 @@ mod tests {
         let conf = app.conf.clone();
         app.running = true;
         app.session = Some("old-session".into());
-        app.pending = Some("old-operation".into());
-        app.reviewed = true;
+        app.recovery =
+            Recovery::AwaitingAcknowledgement(password_manager::protocol::OperationReceipt {
+                operation_id: "old-operation".into(),
+                state: OperationState::Unknown,
+                revision: None,
+            });
         app.warning = Some("old-warning".into());
         app.master = "secret".into();
         app.generated = "generated".into();
-        app.workspace.watch_otp = true;
-        app.workspace.watch_duo = true;
+        app.workspace.otp.watch = Some(workflows::WatchTarget {
+            choice: workflows::Choice {
+                id: 1,
+                label: "Old item".into(),
+            },
+            session: "old-session".into(),
+            revision: 1,
+        });
+        app.workspace.duo.watch = Some(workflows::WatchTarget {
+            choice: workflows::Choice {
+                id: 1,
+                label: "Old item".into(),
+            },
+            session: "old-session".into(),
+            revision: 1,
+        });
         app.select_created_vault = true;
         app.connect_after_discovery = true;
         app.request_state = RequestState::Polling;
@@ -168,14 +186,14 @@ mod tests {
         assert_eq!(app.settings.server_port, conf.server.port.to_string());
         assert!(app.serial > serial);
         assert!(app.session.is_none());
-        assert!(app.pending.is_none());
-        assert!(!app.reviewed);
+        assert!(app.recovery.id().is_none());
+        assert!(!app.recovery.reviewed());
         assert!(app.warning.is_none());
         assert!(!app.running);
         assert!(app.master.is_empty());
         assert!(app.generated.is_empty());
-        assert!(!app.workspace.watch_otp);
-        assert!(!app.workspace.watch_duo);
+        assert!(app.workspace.otp.watch.is_none());
+        assert!(app.workspace.duo.watch.is_none());
         assert!(!app.select_created_vault);
         assert!(!app.connect_after_discovery);
 
@@ -193,7 +211,7 @@ mod tests {
             })),
         ));
         assert!(app.session.is_none());
-        assert!(app.pending.is_none());
+        assert!(app.recovery.id().is_none());
         assert!(app.vaults.is_empty());
         assert_eq!(app.client.port, 8787);
     }

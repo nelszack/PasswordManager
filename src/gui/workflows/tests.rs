@@ -42,7 +42,7 @@ fn duo_request() -> DuoPushRequest {
 }
 
 fn receive_duo(app: &mut App, requests: Vec<DuoPushRequest>) {
-    app.workspace.duo_inflight_target = Some(WatchTarget::selected(app).unwrap());
+    app.workspace.duo.inflight = Some(WatchTarget::selected(app).unwrap());
     app.workspace
         .receive(ResponsePayload::DuoRequests(requests));
 }
@@ -181,7 +181,8 @@ fn history_does_not_follow_an_account_selected_on_the_vault_tab() {
     assert_eq!(app.workspace.selected.as_ref().unwrap().id, 8);
     assert_eq!(
         app.workspace
-            .history_result_target
+            .history
+            .result_target
             .as_ref()
             .unwrap()
             .choice
@@ -208,7 +209,8 @@ fn history_reply_keeps_its_initiating_account_instead_of_the_current_selection()
     app.workspace.receive(history_page());
     assert_eq!(
         app.workspace
-            .history_result_target
+            .history
+            .result_target
             .as_ref()
             .unwrap()
             .choice
@@ -302,14 +304,9 @@ fn failed_history_reload_cannot_relabel_an_older_page() {
     });
     let _ = app.workflow(Event::Run(Action::History));
     assert!(app.workspace.result.is_none());
-    assert!(app.workspace.history_result_target.is_none());
+    assert!(app.workspace.history.result_target.is_none());
     assert_eq!(
-        app.workspace
-            .history_inflight_target
-            .as_ref()
-            .unwrap()
-            .choice
-            .id,
+        app.workspace.history.inflight.as_ref().unwrap().choice.id,
         8
     );
 
@@ -380,10 +377,10 @@ fn history_without_a_request_context_is_ignored_and_clearing_the_vault_drops_con
     app.workspace.receive(history_page());
     assert!(app.workspace.result.is_none());
     load_history(&mut app);
-    assert!(app.workspace.history_result_target.is_some());
+    assert!(app.workspace.history.result_target.is_some());
     app.workspace.clear_vault();
-    assert!(app.workspace.history_result_target.is_none());
-    assert!(app.workspace.history_inflight_target.is_none());
+    assert!(app.workspace.history.result_target.is_none());
+    assert!(app.workspace.history.inflight.is_none());
     assert!(app.workspace.result.is_none());
 }
 
@@ -459,7 +456,7 @@ fn file_operations_preserve_preview_and_conflict_policy_and_require_password_con
 #[test]
 fn uncertain_operations_block_new_mutations_but_allow_review_reads() {
     let mut app = app();
-    app.pending = Some("f".repeat(32));
+    app.recovery = Recovery::AwaitingOutcome("f".repeat(32));
     assert!(app.workspace.prepare(Action::ShowOtp(false), &app).is_err());
     assert!(app.workspace.prepare(Action::History, &app).is_ok());
     assert!(app.workspace.prepare(Action::Audit, &app).is_ok());
@@ -530,7 +527,7 @@ fn duo_decisions_capture_the_reviewed_fingerprint_and_verified_code() {
     assert_eq!(fingerprint, "reviewed-fingerprint");
     assert_eq!(code.expose(), "123");
     assert!(approve);
-    if let Some(requests) = &mut app.workspace.duo_requests {
+    if let Some(DuoRequests { requests, .. }) = &mut app.workspace.duo.result {
         requests[0].expires_at = 0;
     }
     assert!(
@@ -570,7 +567,7 @@ fn external_lock_clears_tools_credentials_results_and_confirmation() {
     app.workspace.password = "password".into();
     app.workspace.configuration = "otp seed".into();
     app.workspace.code = "123".into();
-    app.workspace.watch_duo = true;
+    app.workspace.duo.watch = Some(WatchTarget::selected(&app).unwrap());
     receive_duo(&mut app, vec![duo_request()]);
     app.workspace.prepared = Some(app.workspace.prepare(Action::SetOtp, &app).unwrap());
     let response = RpcResponse::success(ResponsePayload::Status(
@@ -587,8 +584,8 @@ fn external_lock_clears_tools_credentials_results_and_confirmation() {
     assert!(app.workspace.password.is_empty());
     assert!(app.workspace.configuration.is_empty());
     assert!(app.workspace.code.is_empty());
-    assert!(!app.workspace.watch_duo);
-    assert!(app.workspace.duo_requests.is_none());
+    assert!(app.workspace.duo.watch.is_none());
+    assert!(app.workspace.duo.result.is_none());
     assert!(app.workspace.prepared.is_none());
     assert!(app.workspace.result.is_none());
 }
@@ -625,8 +622,7 @@ fn passive_watch_does_not_extend_unlock_or_starve_status_checks() {
     assert!(!prepared.command.is_mutation());
     let now = Instant::now();
     app.tab = Tab::Tools;
-    app.workspace.watch_otp = true;
-    app.workspace.otp_watch_target = Some(WatchTarget::selected(&app).unwrap());
+    app.workspace.otp.watch = Some(WatchTarget::selected(&app).unwrap());
     app.workspace.last_watch = now - Duration::from_secs(1);
     app.last_status = now - Duration::from_secs(2);
     let _ = app.update(super::super::Message::Tick(now));
@@ -639,8 +635,7 @@ fn passive_watch_preserves_inputs_and_watch_target_when_selection_changes() {
     let mut app = app();
     app.workspace.code = "123".into();
     app.workspace.password = "pending backup password".into();
-    app.workspace.watch_duo = true;
-    app.workspace.duo_watch_target = Some(WatchTarget::selected(&app).unwrap());
+    app.workspace.duo.watch = Some(WatchTarget::selected(&app).unwrap());
     let prepared = app.workspace.prepare(Action::Requests, &app).unwrap();
     let _ = app.execute_workflow(prepared);
     assert!(app.polling());
@@ -654,11 +649,8 @@ fn passive_watch_preserves_inputs_and_watch_target_when_selection_changes() {
     }));
     assert!(app.serial > serial);
     assert!(!app.polling());
-    assert!(app.workspace.watch_duo);
-    assert_eq!(
-        app.workspace.duo_watch_target.as_ref().unwrap().choice.id,
-        7
-    );
+    assert!(app.workspace.duo.watch.is_some());
+    assert_eq!(app.workspace.duo.watch.as_ref().unwrap().choice.id, 7);
     assert!(app.workspace.duo_requests_for(&app).is_none());
 }
 
@@ -693,14 +685,14 @@ fn confirmation_cannot_discard_edits_started_on_another_tab() {
     let mut app = app();
     app.workspace.configuration = "synthetic seed".into();
     let prepared = app.workspace.prepare(Action::SetOtp, &app).unwrap();
-    app.draft = Some(Draft {
+    app.editor = Editor::new(Draft {
         name: "Unsaved item".into(),
         dirty: true,
         ..Default::default()
     });
     let _ = app.execute_workflow(prepared);
     assert!(!app.busy());
-    assert!(app.draft.as_ref().unwrap().dirty);
+    assert!(app.editor.as_ref().unwrap().dirty);
     assert!(app.notice.contains("Save or discard"));
 }
 
@@ -708,8 +700,8 @@ fn confirmation_cannot_discard_edits_started_on_another_tab() {
 fn opening_tools_does_not_enable_duo_watching_or_fetch_requests() {
     let mut app = app();
     let _ = app.update(super::super::Message::OpenItemTools(7));
-    assert!(!app.workspace.watch_duo);
-    assert!(app.workspace.duo_watch_target.is_none());
+    assert!(app.workspace.duo.watch.is_none());
+    assert!(app.workspace.duo.watch.is_none());
     assert!(!app.polling() && !app.busy());
 }
 
@@ -727,14 +719,14 @@ fn duo_requests_and_secret_results_do_not_replace_each_other() {
     ));
     app.workspace
         .receive(ResponsePayload::Message("other operation finished".into()));
-    assert_eq!(app.workspace.duo_requests.as_ref().unwrap().len(), 1);
+    assert_eq!(app.workspace.duo.result.as_ref().unwrap().requests.len(), 1);
     assert!(
         app.workspace
             .prepare(Action::Respond(0, false), &app)
             .is_ok()
     );
     app.workspace.hide_secrets();
-    assert_eq!(app.workspace.duo_requests.as_ref().unwrap().len(), 1);
+    assert_eq!(app.workspace.duo.result.as_ref().unwrap().requests.len(), 1);
 }
 
 #[test]
@@ -742,7 +734,7 @@ fn duo_polling_pauses_during_review_and_refreshes_after_a_decision() {
     let mut app = app();
     app.tab = Tab::Tools;
     app.workspace.section = Section::Security;
-    app.workspace.watch_duo = true;
+    app.workspace.duo.watch = Some(WatchTarget::selected(&app).unwrap());
     receive_duo(&mut app, vec![duo_request()]);
     let _ = app.workflow(Event::Run(Action::Respond(0, false)));
     assert!(app.workspace.prepared.is_some());
@@ -760,7 +752,7 @@ fn duo_polling_pauses_during_review_and_refreshes_after_a_decision() {
         Arc::new(Ok(reply)),
     ));
     assert!(app.polling() && !app.busy());
-    assert!(app.workspace.duo_requests.is_none());
+    assert!(app.workspace.duo.result.is_none());
     assert!(app.workspace.prepared.is_none());
 }
 
@@ -769,18 +761,18 @@ fn duo_selection_and_section_changes_preserve_watch_but_hide_other_items_request
     let mut app = app();
     app.workspace.section = Section::Security;
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-    let bound = app.workspace.duo_watch_target.clone().unwrap();
+    let bound = app.workspace.duo.watch.clone().unwrap();
     app.request_state = RequestState::Idle;
     receive_duo(&mut app, vec![duo_request()]);
     let _ = app.workflow(Event::Section(Section::Recovery));
-    assert!(app.workspace.watch_duo);
-    assert_eq!(app.workspace.duo_watch_target, Some(bound.clone()));
+    assert!(app.workspace.duo.watch.is_some());
+    assert_eq!(app.workspace.duo.watch, Some(bound.clone()));
     let _ = app.workflow(Event::Select(Choice {
         id: 8,
         label: "Other".into(),
     }));
-    assert!(app.workspace.watch_duo);
-    assert_eq!(app.workspace.duo_watch_target, Some(bound));
+    assert!(app.workspace.duo.watch.is_some());
+    assert_eq!(app.workspace.duo.watch, Some(bound));
     assert!(app.workspace.duo_requests_for(&app).is_none());
     assert!(
         app.workspace
@@ -828,7 +820,7 @@ fn otp_timeout_override_is_validated_and_scoped_to_codes() {
 #[test]
 fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
     let mut app = app();
-    app.workspace.copy_watched_otp = true;
+    app.workspace.otp.copy = true;
     app.workspace.otp_copy_timeout = "22".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     assert!(app.polling() && !app.busy());
@@ -872,7 +864,7 @@ fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
 #[test]
 fn otp_copy_refetch_at_a_code_boundary_becomes_the_previous_code() {
     let mut app = app();
-    app.workspace.copy_watched_otp = true;
+    app.workspace.otp.copy = true;
     app.workspace.otp_copy_timeout = "10".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     app.request_state = RequestState::Idle;
@@ -882,16 +874,16 @@ fn otp_copy_refetch_at_a_code_boundary_becomes_the_previous_code() {
     let serial = app.serial;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("654321"));
     assert_eq!(app.serial, serial);
-    assert_eq!(app.workspace.previous_otp.expose(), "654321");
+    assert_eq!(app.workspace.otp.previous.expose(), "654321");
 }
 
 #[test]
 fn watch_copy_cannot_start_with_zero_timeout_or_continue_after_focus_loss() {
     let mut app = app();
-    app.workspace.copy_watched_otp = true;
+    app.workspace.otp.copy = true;
     app.workspace.otp_copy_timeout = "0".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
-    assert!(!app.workspace.watch_otp && !app.busy() && !app.polling());
+    assert!(app.workspace.otp.watch.is_none() && !app.busy() && !app.polling());
     app.workspace.otp_copy_timeout = "10".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     app.request_state = RequestState::Idle;
@@ -900,7 +892,7 @@ fn watch_copy_cannot_start_with_zero_timeout_or_continue_after_focus_loss() {
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
     assert_eq!(app.serial, serial);
     assert!(app.workspace.result.is_none());
-    assert!(app.workspace.previous_otp.is_empty());
+    assert!(app.workspace.otp.previous.is_empty());
 }
 
 #[test]
@@ -935,8 +927,8 @@ fn duo_watch_interval_is_bounded_and_invalid_start_is_rejected() {
     for invalid in ["", "0", "2", "61", "-5", "3.5", "five"] {
         app.workspace.duo_interval = invalid.into();
         let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
-        assert!(!app.workspace.watch_duo);
-        assert!(app.workspace.duo_watch_target.is_none());
+        assert!(app.workspace.duo.watch.is_none());
+        assert!(app.workspace.duo.watch.is_none());
         assert!(!app.polling() && !app.busy());
     }
 }
@@ -961,15 +953,7 @@ fn background_watch_uses_bound_target_and_pauses_for_confirmation() {
     app.workspace.last_watch = now - Duration::from_secs(12);
     let _ = app.poll_tool_watches(now);
     assert!(app.polling() && !app.busy());
-    assert_eq!(
-        app.workspace
-            .duo_inflight_target
-            .as_ref()
-            .unwrap()
-            .choice
-            .id,
-        7
-    );
+    assert_eq!(app.workspace.duo.inflight.as_ref().unwrap().choice.id, 7);
     app.request_state = RequestState::Idle;
     let _ = app.complete_duo_requests(ResponsePayload::DuoRequests(vec![duo_request()]));
     assert!(app.workspace.duo_requests_for(&app).is_none());
@@ -1004,13 +988,13 @@ fn duo_cache_and_polling_reject_item_revision_and_session_changes() {
             .is_err()
     );
     let _ = app.poll_tool_watches(Instant::now());
-    assert!(!app.workspace.watch_duo);
-    assert!(app.workspace.duo_requests.is_none());
+    assert!(app.workspace.duo.watch.is_none());
+    assert!(app.workspace.duo.result.is_none());
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
     app.request_state = RequestState::Idle;
     app.session = Some("b".repeat(64));
     let _ = app.complete_duo_requests(ResponsePayload::DuoRequests(vec![duo_request()]));
-    assert!(app.workspace.duo_requests.is_none());
+    assert!(app.workspace.duo.result.is_none());
 }
 
 #[test]
@@ -1024,7 +1008,7 @@ fn duo_response_cache_binds_to_inflight_item_and_never_current_selection() {
     });
     let _ = app.complete_duo_requests(ResponsePayload::DuoRequests(vec![duo_request()]));
     assert_eq!(
-        app.workspace.duo_request_target.as_ref().unwrap().choice.id,
+        app.workspace.duo.result.as_ref().unwrap().target.choice.id,
         7
     );
     assert!(app.workspace.duo_requests_for(&app).is_none());
@@ -1092,7 +1076,7 @@ fn trash_and_audit_use_readable_labels_and_preserve_finding_details() {
 #[test]
 fn automatic_copy_reloads_defaults_and_honors_external_disable() {
     let mut app = app();
-    app.workspace.copy_watched_otp = true;
+    app.workspace.otp.copy = true;
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
@@ -1110,15 +1094,15 @@ fn automatic_copy_reloads_defaults_and_honors_external_disable() {
         "a disabled copy must never launch a mutation"
     );
     assert!(!app.busy() && !app.polling());
-    assert!(app.workspace.watch_otp);
-    assert!(!app.workspace.copy_watched_otp);
+    assert!(app.workspace.otp.watch.is_some());
+    assert!(!app.workspace.otp.copy);
     assert!(app.notice.contains("timeout is zero"));
 }
 
 #[test]
 fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
     let mut app = app();
-    app.workspace.copy_watched_otp = true;
+    app.workspace.otp.copy = true;
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
@@ -1151,7 +1135,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
         Arc::new(Ok(Reply::Configuration(conf))),
     ));
     assert_eq!(app.serial, serial);
-    assert!(!app.busy() && !app.polling() && !app.workspace.watch_otp);
+    assert!(!app.busy() && !app.polling() && app.workspace.otp.watch.is_none());
     assert!(app.workspace.result.is_none());
 }
 
@@ -1171,10 +1155,9 @@ fn duo_revision_conflict_stops_background_watch_and_discards_requests() {
             pending: vec![],
         })),
     ));
-    assert!(!app.workspace.watch_duo);
-    assert!(app.workspace.duo_watch_target.is_none());
-    assert!(app.workspace.duo_requests.is_none());
-    assert!(app.workspace.duo_request_target.is_none());
+    assert!(app.workspace.duo.watch.is_none());
+    assert!(app.workspace.duo.watch.is_none());
+    assert!(app.workspace.duo.result.is_none());
     assert!(app.workspace.prepared.is_none());
 }
 
@@ -1284,7 +1267,7 @@ fn expired_duo_request_resumes_fetching_without_extending_its_deadline() {
     let _ = app.update(super::super::Message::Tick(now));
     assert!(app.polling() && !app.busy());
     assert_eq!(
-        app.workspace.duo_requests.as_ref().unwrap()[0].expires_at,
+        app.workspace.duo.result.as_ref().unwrap().requests[0].expires_at,
         0
     );
 }
@@ -1304,19 +1287,11 @@ fn otp_watch_results_bind_to_the_prepared_account_even_if_selection_changes() {
     let now = Instant::now();
     app.workspace.last_watch = now - Duration::from_secs(2);
     let _ = app.poll_tool_watches(now);
-    assert_eq!(
-        app.workspace
-            .otp_inflight_target
-            .as_ref()
-            .unwrap()
-            .choice
-            .id,
-        7
-    );
+    assert_eq!(app.workspace.otp.inflight.as_ref().unwrap().choice.id, 7);
     app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
     assert_eq!(
-        app.workspace.otp_result_target.as_ref().unwrap().choice.id,
+        app.workspace.otp.result_target.as_ref().unwrap().choice.id,
         7
     );
     assert!(app.workspace.otp_result_for(&app).is_none());
@@ -1388,7 +1363,7 @@ fn empty_health_assessment_has_no_numeric_score() {
 fn operation_lookup_is_read_only_available_while_locked_and_preserves_pending_review() {
     let mut app = app();
     app.session = None;
-    app.pending = Some("desktop-pending".into());
+    app.recovery = Recovery::AwaitingOutcome("desktop-pending".into());
     app.workspace.operation_id = "cli-operation_123".into();
     let prepared = app
         .workspace
@@ -1415,7 +1390,10 @@ fn operation_lookup_is_read_only_available_while_locked_and_preserves_pending_re
             pending: vec!["desktop-pending".into()],
         },
     );
-    assert_eq!(app.pending.as_deref(), Some("desktop-pending"));
+    assert_eq!(
+        app.recovery.id().map(String::as_str),
+        Some("desktop-pending")
+    );
     let output = view::report(app.workspace.result.as_ref().unwrap());
     assert!(output.contains("cli-operation_123"));
     assert!(output.contains("Committed"));

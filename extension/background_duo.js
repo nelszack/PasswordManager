@@ -51,7 +51,7 @@ const PasswordManagerBackgroundDuo = {
                 .map(({ id, name }) => ({ id, name: String(name || ""), sessionId: protocol.sessionId(response) }));
         }
         async function poll(session) {
-            if (session.failure) throw new Error(session.failure);
+            if (session.decision.phase === "failed") throw new Error(session.decision.error);
             if (session.polling) return session.polling;
             session.polling = (async () => {
                 if (!await current(session)) { discard(session); throw new Error("Duo login page is no longer active"); }
@@ -92,7 +92,7 @@ const PasswordManagerBackgroundDuo = {
                 const topOrigin = security.senderOrigin({ url: tab.url });
                 if (!topOrigin) throw new Error("Invalid top-level login page");
                 session = { key, tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId, origin, topOrigin,
-                    sourceOrigin: topOrigin, items: [], requests: [], dismissed: new Set(), token: null,
+                    sourceOrigin: topOrigin, decision: { phase: "reviewing" }, items: [], requests: [], dismissed: new Set(), token: null,
                     windowId: null, expiresAt: Date.now() + lifetime };
                 sessions.set(key, session);
                 setTimeout(() => { if (sessions.get(key) === session) discard(session); }, lifetime);
@@ -111,7 +111,7 @@ const PasswordManagerBackgroundDuo = {
             }
             try {
                 await session.loading;
-                if (session.failure) return { success: true };
+                if (session.decision.phase === "failed") return { success: true };
                 if (!await current(session)) { discard(session); return { success: true }; }
                 if (!session.items.length) { discard(session); return { success: true }; }
                 const requests = await poll(session);
@@ -149,16 +149,16 @@ const PasswordManagerBackgroundDuo = {
         }
         async function data(request, sender) {
             const session = authorize(request, sender);
-            if (!session.completing) await poll(session);
+            if (session.decision.phase !== "deciding") await poll(session);
             if (tokens.get(request.token) !== session) throw new Error("Duo window expired");
             return { success: true, origin: session.origin, topOrigin: session.topOrigin,
                 sourceOrigin: session.sourceOrigin, requests: session.requests };
         }
         async function complete(request, sender) {
             const session = authorize(request, sender);
-            if (session.completing) throw new Error("Duo decision is already in progress");
+            if (session.decision.phase === "deciding") throw new Error("Duo decision is already in progress");
             if (request.cancel === true) { dismiss(session); return { success: true }; }
-            if (session.failure) throw new Error(session.failure);
+            if (session.decision.phase === "failed") throw new Error(session.decision.error);
             const r = session.requests.find(r => r.entryId === request.entryId && r.id === request.requestId && r.fingerprint === request.fingerprint);
             if (!r || r.expires_at * 1000 <= Date.now()) throw new Error("Duo request changed or expired; review it again");
             if (typeof request.approve !== "boolean") throw new Error("Choose approve or deny");
@@ -166,7 +166,7 @@ const PasswordManagerBackgroundDuo = {
             const code = request.approve ? request.verificationCode || "" : "";
             if (typeof code !== "string" || (request.approve && r.code_digits && !new RegExp(`^[0-9]{${r.code_digits}}$`).test(code))
                 || (!r.code_digits && code !== "")) throw new Error("Enter the verification code shown on the login page");
-            session.completing = true;
+            session.decision = { phase: "deciding" };
             try {
                 if (!await current(session) || tokens.get(request.token) !== session) {
                     discard(session); throw new Error("Duo login page is no longer active");
@@ -182,12 +182,12 @@ const PasswordManagerBackgroundDuo = {
                 // A timeout may have answered the request. Show the error, remove
                 // decision controls, and require a new page/review before retrying.
                 if (tokens.get(request.token) === session) {
-                    session.failure = `${error.message || "Duo decision failed"}. Check the login before retrying.`;
+                    session.decision = { phase: "failed", error: `${error.message || "Duo decision failed"}. Check the login before retrying.` };
                     session.requests = [];
-                    throw new Error(session.failure);
+                    throw new Error(session.decision.error);
                 }
                 throw error;
-            } finally { session.completing = false; }
+            } finally { if (session.decision.phase === "deciding") session.decision = { phase: "reviewing" }; }
         }
         function windowRemoved(windowId) {
             const session = windows.get(windowId);

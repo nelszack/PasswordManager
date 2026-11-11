@@ -6,6 +6,7 @@ mod generator;
 mod model;
 mod presentation;
 mod settings;
+mod state;
 mod vault_names;
 mod view;
 mod website;
@@ -27,6 +28,7 @@ use password_manager::{
     vault::{ItemDetail, ItemSummary},
 };
 use settings::{Field as SettingsField, SettingsDraft, Toggle as SettingsToggle};
+use state::{Editor, GeneratedSecret, Recovery};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -312,8 +314,7 @@ struct App {
     items: Vec<ItemSummary>,
     query: String,
     item: Option<ItemDetail>,
-    draft: Option<Draft>,
-    deferred: Option<Navigate>,
+    editor: Editor,
     delete_confirm: bool,
     reveal_until: Option<Instant>,
     serial: u64,
@@ -321,14 +322,11 @@ struct App {
     last_status: Instant,
     notice: String,
     warning: Option<String>,
-    pending: Option<String>,
-    reviewed: bool,
+    recovery: Recovery,
     generator_length: String,
     passphrase: bool,
     words: String,
-    generated: SecretString,
-    generated_until: Option<Instant>,
-    show_generated: bool,
+    generated: GeneratedSecret,
     generated_stats: String,
     settings: SettingsDraft,
     cloud_token: SecretString,
@@ -370,8 +368,7 @@ impl App {
             items: vec![],
             query: String::new(),
             item: None,
-            draft: None,
-            deferred: None,
+            editor: Editor::Closed,
             delete_confirm: false,
             reveal_until: None,
             serial: 0,
@@ -379,13 +376,10 @@ impl App {
             last_status: Instant::now(),
             notice: "Connecting to the vault server…".into(),
             warning: None,
-            pending: None,
-            reviewed: false,
+            recovery: Recovery::Clear,
             passphrase: false,
             words: "6".into(),
-            generated: SecretString::default(),
-            generated_until: None,
-            show_generated: false,
+            generated: GeneratedSecret::default(),
             generated_stats: String::new(),
             confirm_reset_settings: false,
             workspace: workflows::State::default(),
@@ -590,7 +584,7 @@ impl App {
     fn refresh_editor(&mut self, id: usize) -> Task<Message> {
         self.hide_secrets();
         self.item = None;
-        self.draft = None;
+        self.editor = Editor::Closed;
         self.workspace.prepared = None;
         self.workspace.clear_inputs();
         self.load_items_for(Job::RefreshItem(id, ItemIntent::Edit))
@@ -599,7 +593,7 @@ impl App {
     fn hide_secrets(&mut self) {
         self.ui.editor_show_secret = false;
         self.workspace.hide_secrets();
-        if let Some(draft) = &mut self.draft {
+        if let Some(draft) = self.editor.as_mut() {
             // Multiline input is deliberately visible while editing. Focus
             // loss and Escape must mask it just like a revealed stored secret.
             draft.multiline = false;
@@ -612,7 +606,7 @@ impl App {
             self.request_state = RequestState::Idle;
         }
         self.reveal_until = None;
-        self.show_generated = false;
+        self.generated.set_visible(false);
         if let Some(item) = self.item.as_mut() {
             item.password = None;
             for field in &mut item.fields {
@@ -634,21 +628,18 @@ impl App {
         self.ui.undo_trash = None;
         self.ui.active_vault = None;
         self.ui.saved_item = None;
-        self.ui.draft_conflict = false;
-        self.ui.conflict_latest = None;
+
         self.ui.transfer_generated = false;
         self.ui.confirm_stop = false;
         self.item = None;
-        self.draft = None;
-        self.deferred = None;
+        self.editor = Editor::Closed;
         self.delete_confirm = false;
         self.creation = None;
         self.master.zeroize();
         self.confirmation.zeroize();
         self.key_path.zeroize();
-        self.generated.zeroize();
+        self.generated.clear();
         self.generated_stats.clear();
-        self.generated_until = None;
         self.generator.check.zeroize();
         self.generator.assessment.clear();
     }
@@ -661,8 +652,8 @@ impl App {
     }
 
     fn navigate(&mut self, destination: Navigate) -> Task<Message> {
-        if self.draft.as_ref().is_some_and(|draft| draft.dirty) {
-            self.deferred = Some(destination);
+        if self.editor.as_ref().is_some_and(|draft| draft.dirty) {
+            self.editor.defer(destination);
             return iced::widget::operation::focus("keep-editing");
         }
         self.hide_secrets();
@@ -672,9 +663,8 @@ impl App {
         self.delete_confirm = false;
         self.workspace.prepared = None;
         self.workspace.clear_inputs();
-        self.draft = None;
-        self.ui.draft_conflict = false;
-        self.ui.conflict_latest = None;
+        self.editor = Editor::Closed;
+
         self.item = None;
         match destination {
             Navigate::Select(id) => {
@@ -692,7 +682,7 @@ impl App {
             Navigate::New => {
                 self.ui.editor_advanced = false;
                 self.ui.editor_authenticators = false;
-                self.draft = Some(Draft::default());
+                self.editor = Editor::new(Draft::default());
                 iced::widget::operation::focus("item-name")
             }
             Navigate::Close => Task::none(),
@@ -712,7 +702,7 @@ impl App {
     }
 
     fn writes_allowed(&self) -> bool {
-        !self.busy() && self.pending.is_none()
+        !self.busy() && self.recovery.id().is_none()
     }
 
     fn copying_allowed(&self) -> bool {
@@ -740,7 +730,7 @@ impl App {
                 | Message::RemoveUrl(_)
                 | Message::Notes(_)
                 | Message::Generate
-        ) && self.draft.is_some()
+        ) && self.editor.is_some()
             && !self.busy()
         {
             self.workspace.prepared = None;
@@ -748,7 +738,7 @@ impl App {
         match message {
             Message::CloseRequested(id) => {
                 if self.busy()
-                    || self.draft.as_ref().is_some_and(|draft| draft.dirty)
+                    || self.editor.as_ref().is_some_and(|draft| draft.dirty)
                     || self.settings.is_dirty()
                 {
                     self.ui.confirm_close = Some(id);
@@ -802,10 +792,10 @@ impl App {
                             self.stop_tool_watches();
                         }
                         if let Some(id) = error.uncertain_operation {
-                            self.pending = Some(id);
-                            self.reviewed = false;
+                            self.recovery = Recovery::AwaitingOutcome(id);
+
                             self.notice.push_str(" The change may have completed. Check its outcome before making another change.");
-                            self.draft = None;
+                            self.editor = Editor::Closed;
                             self.hide_secrets();
                         }
                         if matches!(job, Job::Connect | Job::Attach | Job::Status) {
@@ -832,11 +822,8 @@ impl App {
                 if self.reveal_until.is_some_and(|deadline| now >= deadline) {
                     self.hide_secrets();
                 }
-                if self.generated_until.is_some_and(|deadline| now >= deadline) {
-                    self.generated.zeroize();
+                if self.generated.expire(now) {
                     self.generated_stats.clear();
-                    self.generated_until = None;
-                    self.show_generated = false;
                     self.ui.transfer_generated = false;
                     if self.notice.starts_with("New secret ready.") {
                         self.notice = "Generated secret cleared after 60 seconds. Generate another when you need it.".into();
@@ -963,7 +950,7 @@ impl App {
             Message::FocusSearch if self.session.is_some() => {
                 self.tab = Tab::Vault;
                 self.hide_secrets();
-                if self.compact() && (self.draft.is_some() || self.item.is_some()) {
+                if self.compact() && (self.editor.is_some() || self.item.is_some()) {
                     return self
                         .navigate(Navigate::Close)
                         .chain(iced::widget::operation::focus("vault-search"));
@@ -1034,7 +1021,7 @@ impl App {
                 self.cancel_passive_read();
                 self.workspace.prepared = None;
                 self.tab = tab;
-                if tab == Tab::Vault && self.draft.is_none() {
+                if tab == Tab::Vault && self.editor.is_none() {
                     if let Some(item) = &self.item {
                         self.workspace.selected = Some(workflows::Choice {
                             id: item.id,
@@ -1064,12 +1051,15 @@ impl App {
                 return self.navigate(destination);
             }
             Message::Discard => {
-                self.draft = None;
-                if let Some(destination) = self.deferred.take() {
+                let destination = self.editor.take_deferred();
+                self.editor = Editor::Closed;
+                if let Some(destination) = destination {
                     return self.navigate(destination);
                 }
             }
-            Message::KeepEditing => self.deferred = None,
+            Message::KeepEditing => {
+                self.editor.take_deferred();
+            }
             Message::VaultName(value) => self.ui.vault_name = value,
             Message::RenameVault if self.writes_allowed() => {
                 if let Some(id) = self.vault.clone() {
@@ -1079,7 +1069,7 @@ impl App {
                     });
                 }
             }
-            Message::UndoDelete if self.writes_allowed() && self.draft.is_none() => {
+            Message::UndoDelete if self.writes_allowed() && self.editor.is_none() => {
                 if let Some((id, session)) = self.ui.undo_trash.take()
                     && self.session.as_ref() == Some(&session)
                 {
@@ -1091,11 +1081,11 @@ impl App {
                 }
             }
             Message::CopyUsername
-                if self.writes_allowed() && self.session.is_some() && self.draft.is_none() =>
+                if self.writes_allowed() && self.session.is_some() && self.editor.is_none() =>
             {
                 return self.launch(Job::UsernameDefaults, backend::reload_settings);
             }
-            Message::OpenWebsite(index) if self.session.is_some() && self.draft.is_none() => {
+            Message::OpenWebsite(index) if self.session.is_some() && self.editor.is_none() => {
                 if let Some(url) = self
                     .item
                     .as_ref()
@@ -1202,12 +1192,12 @@ impl App {
                 });
                 return self.request(Job::Create, ServerCommand::New(key), None);
             }
-            Message::Stop if self.pending.is_none() => {
+            Message::Stop if self.recovery.id().is_none() => {
                 self.ui.confirm_stop = false;
                 self.clear_vault();
                 return self.request(Job::Stop, ServerCommand::Kill, None);
             }
-            Message::Edit if self.draft.is_none() && self.writes_allowed() => {
+            Message::Edit if self.editor.is_none() && self.writes_allowed() => {
                 self.ui.undo_trash = None;
                 self.notice.clear();
                 if let Some(item) = &self.item {
@@ -1217,7 +1207,7 @@ impl App {
                             .iter()
                             .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
                     });
-                    self.draft = Some(Draft::from_item(item));
+                    self.editor = Editor::new(Draft::from_item(item));
                     self.workspace.prepared = None;
                     self.workspace.clear_inputs();
                     self.hide_secrets();
@@ -1226,13 +1216,13 @@ impl App {
                 }
             }
             Message::Name(value) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.name = value;
                     draft.dirty = true;
                 }
             }
             Message::TemplateValue(name, secret, value) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     if let Some(field) = draft
                         .fields
                         .iter_mut()
@@ -1256,7 +1246,7 @@ impl App {
                 }
             }
             Message::AddField => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.fields.push(model::FieldDraft::default());
                     draft.dirty = true;
                     return iced::widget::operation::focus(format!(
@@ -1266,7 +1256,7 @@ impl App {
                 }
             }
             Message::FieldName(index, value) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && let Some(field) = draft.fields.get_mut(index)
                 {
                     field.name = value;
@@ -1275,7 +1265,7 @@ impl App {
                 }
             }
             Message::FieldValue(index, value) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && let Some(field) = draft.fields.get_mut(index)
                 {
                     field.value = value;
@@ -1285,7 +1275,7 @@ impl App {
                 }
             }
             Message::FieldSecret(index, value) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && let Some(field) = draft.fields.get_mut(index)
                 {
                     field.secret = value;
@@ -1294,7 +1284,7 @@ impl App {
                 }
             }
             Message::RemoveField(index) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && let Some(field) = draft.fields.get_mut(index)
                 {
                     field.removed = true;
@@ -1310,12 +1300,12 @@ impl App {
                     return iced::widget::operation::focus("item-name");
                 }
             }
-            Message::ShowEditorSecret(value) if self.draft.is_some() => {
+            Message::ShowEditorSecret(value) if self.editor.is_some() => {
                 self.ui.editor_show_secret = value;
             }
             Message::MultilineSecret(value) => {
                 self.ui.editor_show_secret = false;
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.multiline = value;
                     draft.secret_editor = if value {
                         text_editor::Content::with_text(draft.password.expose())
@@ -1325,7 +1315,7 @@ impl App {
                 }
             }
             Message::SecretEdit(action) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && draft.multiline
                     && (draft.id.is_none() || draft.replace_password)
                 {
@@ -1338,13 +1328,13 @@ impl App {
                 }
             }
             Message::Username(value) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.username = value;
                     draft.dirty = true;
                 }
             }
             Message::Kind(value) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.kind = value;
                     draft.dirty = true;
                     self.ui.editor_advanced = draft.fields.iter().any(|field| {
@@ -1357,20 +1347,20 @@ impl App {
                 }
             }
             Message::Password(value) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.password = value;
                     draft.replace_password = true;
                     draft.dirty = true;
                 }
             }
             Message::CopyPolicy(policy) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.copy_policy = policy;
                 }
             }
             Message::ReplacePassword(value) => {
                 self.ui.editor_show_secret = false;
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.replace_password = value;
                     if !value {
                         draft.password.zeroize();
@@ -1380,7 +1370,7 @@ impl App {
                 }
             }
             Message::Url(index, value) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && let Some(url) = draft.urls.get_mut(index)
                 {
                     *url = value;
@@ -1388,7 +1378,7 @@ impl App {
                 }
             }
             Message::AddUrl => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     draft.urls.push(String::new());
                     draft.dirty = true;
                     return iced::widget::operation::focus(format!(
@@ -1398,7 +1388,7 @@ impl App {
                 }
             }
             Message::RemoveUrl(index) => {
-                if let Some(draft) = &mut self.draft
+                if let Some(draft) = self.editor.as_mut()
                     && index < draft.urls.len()
                 {
                     draft.urls.remove(index);
@@ -1411,7 +1401,7 @@ impl App {
                 }
             }
             Message::Notes(action) => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(draft) = self.editor.as_mut() {
                     if action.is_edit() {
                         draft.notes_changed = true;
                         draft.dirty = true;
@@ -1421,7 +1411,7 @@ impl App {
             }
             Message::SaveAndEdit
                 if self.writes_allowed()
-                    && self.draft.as_ref().is_some_and(|draft| draft.id.is_some()) =>
+                    && self.editor.as_ref().is_some_and(|draft| draft.id.is_some()) =>
             {
                 self.workspace.prepared = None;
                 return self.launch(Job::SaveEditorDefaults, backend::reload_settings);
@@ -1430,7 +1420,7 @@ impl App {
                 return self.update(Message::SaveSettings);
             }
             Message::Save
-                if self.writes_allowed() && self.tab == Tab::Vault && self.draft.is_some() =>
+                if self.writes_allowed() && self.tab == Tab::Vault && self.editor.is_some() =>
             {
                 self.workspace.prepared = None;
                 return self.launch(Job::SaveDefaults, backend::reload_settings);
@@ -1503,7 +1493,7 @@ impl App {
                 }
             }
             Message::Reconcile => {
-                if let Some(id) = &self.pending {
+                if let Some(id) = self.recovery.id() {
                     return self.request(
                         Job::Reconcile,
                         ServerCommand::OperationStatus(id.clone()),
@@ -1511,8 +1501,8 @@ impl App {
                     );
                 }
             }
-            Message::Acknowledge if self.reviewed => {
-                if let Some(id) = self.pending.clone() {
+            Message::Acknowledge if self.recovery.reviewed() => {
+                if let Some(id) = self.recovery.id().cloned() {
                     let client = self.client.clone();
                     return self
                         .launch(Job::Acknowledge, move || backend::acknowledge(&client, &id));
@@ -1524,7 +1514,7 @@ impl App {
             Message::Generate => {
                 return self.launch(Job::GenerateDefaults, backend::reload_settings);
             }
-            Message::ShowGenerated(value) => self.show_generated = value,
+            Message::ShowGenerated(value) => self.generated.set_visible(value),
             Message::UseGenerated if self.session.is_some() && !self.generated.is_empty() => {
                 self.ui.transfer_generated = true;
             }
@@ -1535,8 +1525,8 @@ impl App {
                     && !self.generated.is_empty() =>
             {
                 self.ui.transfer_generated = false;
-                let draft = self.draft.get_or_insert_with(Draft::default);
-                draft.password = self.generated.clone();
+                let draft = self.editor.get_or_insert_with(Draft::default);
+                draft.password = self.generated.secret();
                 draft.replace_password = true;
                 draft.dirty = true;
                 draft.secret_editor = text_editor::Content::new();
@@ -1547,8 +1537,8 @@ impl App {
                     "Generated secret added to the draft. Save the item to keep it.".into();
                 return iced::widget::operation::focus("item-name");
             }
-            Message::ReviewConflict if self.ui.draft_conflict => {
-                if let Some(id) = self.draft.as_ref().and_then(|draft| draft.id) {
+            Message::ReviewConflict if self.editor.conflicted() => {
+                if let Some(id) = self.editor.as_ref().and_then(|draft| draft.id) {
                     return self.request(
                         Job::ConflictReview,
                         ServerCommand::ManagementItem { id, reveal: false },
@@ -1556,15 +1546,11 @@ impl App {
                     );
                 }
             }
-            Message::ReapplyConflict if self.ui.draft_conflict => {
-                if let (Some(draft), Some(original), Some(latest)) =
-                    (&self.draft, &self.item, &self.ui.conflict_latest)
-                    && draft.id == Some(latest.id)
-                    && original.id == latest.id
+            Message::ReapplyConflict if self.editor.conflicted() => {
+                if let Some(original) = &self.item
+                    && let Some(latest) = self.editor.reapply(original)
                 {
-                    self.draft = Some(draft.rebase(original, latest));
-                    self.item = self.ui.conflict_latest.take();
-                    self.ui.draft_conflict = false;
+                    self.item = Some(latest);
                     self.notice = "Your edits are reapplied to the reviewed version. Review the draft, then Save item.".into();
                     self.ui.notice_error = false;
                 }
@@ -1707,8 +1693,8 @@ impl App {
                     self.notice = "Website opened in your default browser.".into()
                 }
                 Reply::Acknowledged => {
-                    self.pending = None;
-                    self.reviewed = false;
+                    self.recovery = Recovery::Clear;
+
                     self.notice =
                         "Previous outcome acknowledged. You can make a new change.".into();
                     return self.status();
@@ -1726,14 +1712,16 @@ impl App {
             return Task::none();
         };
         let response = *response;
-        if self.pending.is_none() {
-            self.pending = pending.first().cloned();
+        if self.recovery.id().is_none() {
+            self.recovery = pending
+                .first()
+                .cloned()
+                .map_or(Recovery::Clear, Recovery::AwaitingOutcome);
         }
         if let Some(receipt) = &response.operation
             && receipt.state == OperationState::CommittedDurabilityUnknown
         {
-            self.pending = Some(receipt.operation_id.clone());
-            self.reviewed = false;
+            self.recovery = Recovery::AwaitingOutcome(receipt.operation_id.clone());
         }
         let incomplete_audit = job == Job::Workflow(workflows::Action::Audit)
             && response.code == ResponseCode::Failure as i32
@@ -1762,11 +1750,10 @@ impl App {
                 self.workspace.prepared = None;
                 if self.session.is_some()
                     && self.session == response.session_id
-                    && self.draft.is_some()
+                    && self.editor.is_some()
                     && self.item.is_some()
                 {
-                    self.ui.draft_conflict = true;
-                    self.ui.conflict_latest = None;
+                    self.editor.require_review();
                     self.notice.push_str(" Your unsaved edits are kept. Review the latest item before reapplying them.");
                 } else {
                     self.clear_vault();
@@ -1811,7 +1798,7 @@ impl App {
                 }
                 self.session = next_session;
                 if status.locked {
-                    if self.pending.is_some() {
+                    if self.recovery.id().is_some() {
                         self.creation = None;
                     }
                     if self.creation.is_some() && self.select_created_vault {
@@ -1866,7 +1853,7 @@ impl App {
                         return self.load_items();
                     }
                     if revision_changed {
-                        if self.draft.is_some() || self.pending.is_some() {
+                        if self.editor.is_some() || self.recovery.id().is_some() {
                             self.notice="The vault changed on another client or device. Your draft is preserved; reopen the item before saving if it changed.".into();
                         } else {
                             self.notice = "Vault updated from another client or device.".into();
@@ -1939,7 +1926,7 @@ impl App {
                     } else {
                         "Duo response recorded.".into()
                     };
-                    self.workspace.duo_requests = None;
+                    self.workspace.clear_duo_requests();
                     self.workspace.receive(payload);
                     return self.workflow(workflows::Event::Run(workflows::Action::Requests));
                 }
@@ -1983,7 +1970,7 @@ impl App {
                             self.session = response.session_id.clone();
                         }
                         self.item = None;
-                        self.draft = None;
+                        self.editor = Editor::Closed;
                         self.workspace.receive(payload);
                         let refresh = if self.session.is_some() {
                             self.load_items()
@@ -2028,11 +2015,12 @@ impl App {
                 if refresh {
                     if self.tab == Tab::Vault
                         && action.edits_authenticator()
-                        && let Some(id) = self.draft.as_ref().and_then(|draft| draft.id)
+                        && let Some(id) = self.editor.as_ref().and_then(|draft| draft.id)
                     {
                         if self
                             .workspace
-                            .duo_watch_target
+                            .duo
+                            .watch
                             .as_ref()
                             .is_some_and(|target| target.choice.id == id)
                         {
@@ -2042,12 +2030,13 @@ impl App {
                     }
                     if consumed_hotp
                         && self.tab == Tab::Vault
-                        && self.draft.is_none()
+                        && self.editor.is_none()
                         && let Some(id) = self.item.as_ref().map(|item| item.id)
                     {
                         if self
                             .workspace
-                            .duo_watch_target
+                            .duo
+                            .watch
                             .as_ref()
                             .is_some_and(|target| target.choice.id == id)
                         {
@@ -2056,13 +2045,15 @@ impl App {
                         return self.refresh_account(id);
                     }
                     self.item = None;
-                    self.draft = None;
+                    self.editor = Editor::Closed;
                     return Task::batch([self.load_items(), workflows::show_result()]);
                 }
                 if matches!(action, workflows::Action::ShowOtp(_)) && self.tab == Tab::Vault {
                     return Task::none();
                 }
-                if first_result || !(self.workspace.watch_otp || self.workspace.watch_duo) {
+                if first_result
+                    || !(self.workspace.otp.watch.is_some() || self.workspace.duo.watch.is_some())
+                {
                     return workflows::show_result();
                 }
             }
@@ -2081,14 +2072,14 @@ impl App {
                 }
             }
             (Job::ConflictReview, ResponsePayload::Item(mut item)) => {
-                if self.draft.as_ref().and_then(|draft| draft.id) == Some(item.id) {
+                if self.editor.as_ref().and_then(|draft| draft.id) == Some(item.id) {
                     item.password = None;
                     for field in &mut item.fields {
                         if field.secret {
                             field.value = None;
                         }
                     }
-                    self.ui.conflict_latest = Some(item);
+                    self.editor.review(item);
                 }
             }
             (Job::List, ResponsePayload::ItemPage(page)) => self.replace_items(page.items),
@@ -2126,7 +2117,7 @@ impl App {
                 self.notice = "This item is no longer available. Refresh the vault.".into();
             }
             (Job::OpenItem(id, ItemIntent::Edit), ResponsePayload::Item(item)) if item.id == id => {
-                self.draft = Some(Draft::from_item(&item));
+                self.editor = Editor::new(Draft::from_item(&item));
                 self.item = Some(item);
                 return iced::widget::operation::snap_to_end("credential-editor");
             }
@@ -2167,8 +2158,8 @@ impl App {
             (Job::Reconcile, ResponsePayload::Operation(receipt)) => {
                 match receipt.state {
                     OperationState::Committed | OperationState::Failed => {
-                        self.pending = None;
-                        self.reviewed = false;
+                        self.recovery = Recovery::Clear;
+
                         self.notice = if receipt.state == OperationState::Committed {
                             "The previous change completed. Vault contents have been refreshed."
                         } else {
@@ -2181,7 +2172,7 @@ impl App {
                             "The previous operation is still running. Check again shortly.".into()
                     }
                     OperationState::Unknown | OperationState::CommittedDurabilityUnknown => {
-                        self.reviewed = true;
+                        self.recovery = Recovery::AwaitingAcknowledgement(receipt.clone());
                         self.notice = "The previous outcome or storage durability is uncertain. Inspect the vault before acknowledging it; the operation will not be retried.".into();
                     }
                 }
@@ -2201,7 +2192,7 @@ impl App {
                 } else {
                     None
                 };
-                let creation = if job == Job::Create && self.pending.is_none() {
+                let creation = if job == Job::Create && self.recovery.id().is_none() {
                     self.creation.take()
                 } else {
                     None
@@ -2226,15 +2217,15 @@ impl App {
                 return self.status();
             }
             (Job::SaveEditor, _) => {
-                if let Some(id) = self.draft.as_ref().and_then(|draft| draft.id) {
+                if let Some(id) = self.editor.as_ref().and_then(|draft| draft.id) {
                     self.notice = "Item saved. You can configure its authenticators below.".into();
                     return self.refresh_editor(id);
                 }
             }
             (Job::Save, _) => {
                 self.ui.editor_show_secret = false;
-                let id = self.draft.as_ref().and_then(|draft| draft.id);
-                self.ui.saved_item = self.draft.as_ref().filter(|_| id.is_none()).map(|draft| {
+                let id = self.editor.as_ref().and_then(|draft| draft.id);
+                self.ui.saved_item = self.editor.as_ref().filter(|_| id.is_none()).map(|draft| {
                     presentation::SavedItem {
                         name: draft.name.clone(),
                         kind: draft.kind,
@@ -2243,7 +2234,7 @@ impl App {
                 });
                 self.workspace.prepared = None;
                 self.workspace.clear_inputs();
-                self.draft = None;
+                self.editor = Editor::Closed;
                 self.item = None;
                 self.delete_confirm = false;
                 self.notice = "Item saved.".into();
@@ -2258,7 +2249,7 @@ impl App {
                 }
                 self.workspace.prepared = None;
                 self.workspace.clear_inputs();
-                self.draft = None;
+                self.editor = Editor::Closed;
                 self.item = None;
                 self.delete_confirm = false;
                 self.notice =
@@ -2345,11 +2336,11 @@ impl App {
     }
 
     fn save_item(&mut self, job: Job) -> Task<Message> {
-        if self.ui.draft_conflict {
+        if self.editor.conflicted() {
             self.report_error("Review and reapply your edits to the latest item before saving.");
             return Task::none();
         }
-        if let Some(draft) = &self.draft {
+        if let Some(draft) = self.editor.as_ref() {
             match draft.command() {
                 Ok(mut command) => {
                     draft.apply_copy_policy(&mut command, &self.conf);
@@ -2375,7 +2366,7 @@ impl App {
         match generated {
             Ok(value) => {
                 if self.tab == Tab::Vault
-                    && let Some(draft) = &mut self.draft
+                    && let Some(draft) = self.editor.as_mut()
                 {
                     draft.password = value.into();
                     draft.secret_editor = if draft.multiline {
@@ -2397,8 +2388,7 @@ impl App {
                     } else {
                         String::new()
                     };
-                    self.generated_until = Some(Instant::now() + Duration::from_secs(60));
-                    self.show_generated = false;
+                    self.generated.set_visible(false);
                     self.notice = "New secret ready. Copy it or save it in an item; it clears from this screen after 60 seconds.".into();
                     let show = iced::widget::operation::snap_to(
                         "generator-form",
@@ -2416,7 +2406,7 @@ impl App {
     }
 
     fn copy_generated(&mut self) -> Task<Message> {
-        let value = self.generated.clone();
+        let value = self.generated.secret();
         let timeout = match self.generator.copy_timeout(&self.conf) {
             Ok(timeout) => timeout,
             Err(error) => {

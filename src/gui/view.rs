@@ -178,7 +178,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     // Keep dynamic banners inside a stable child so edits do not replace the
     // main content's widget state (focus, cursor, and scroll positions).
     let mut chrome = column![navigation(app)].spacing(12);
-    if app.draft.as_ref().is_some_and(|draft| draft.dirty) {
+    if app.editor.as_ref().is_some_and(|draft| draft.dirty) {
         chrome = chrome.push(text("Unsaved item changes · Locking discards this draft.").size(13));
     }
     if app.ui.confirm_close.is_some() {
@@ -187,7 +187,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
             row![primary("Keep window open", Message::CancelClose, true).id("keep-window-open"), action("Close and discard changes", Message::ConfirmClose, true).style(quiet_danger)].spacing(8).wrap()
         ].spacing(10)));
     }
-    if app.deferred.is_some() {
+    if app.editor.deferred().is_some() {
         chrome = chrome.push(panel(
             column![
                 text("Keep your unsaved changes?").size(18),
@@ -206,14 +206,14 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
             .spacing(10),
         ));
     }
-    if let Some(id) = &app.pending {
+    if let Some(id) = app.recovery.id() {
         let mut recovery = column![
             text("Review the last change before continuing").size(17),
             text("The result of a previous change is uncertain. Inspect the vault before allowing new changes.").size(14),
             text(format!("Operation {id}")).size(14),
             primary("Check last change", Message::Reconcile, !app.busy() && app.running),
         ].spacing(8);
-        if app.reviewed {
+        if app.recovery.reviewed() {
             recovery = recovery.push(action(
                 "I inspected the vault; allow new changes",
                 Message::Acknowledge,
@@ -225,12 +225,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     if let Some(warning) = &app.warning {
         chrome = chrome.push(panel(text(warning).size(14).style(text::danger)));
     }
-    if let Some(target) = app
-        .workspace
-        .duo_watch_target
-        .as_ref()
-        .filter(|_| app.workspace.watch_duo)
-    {
+    if let Some(target) = app.workspace.duo.watch.as_ref() {
         chrome = chrome.push(
             row![
                 text(format!("Watching Duo · {}", target.choice))
@@ -264,7 +259,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
             Tab::Tools => app.workspace.view(app),
         }
     };
-    let short = app.ui.height < 460.0 || (app.pending.is_some() && app.ui.height < 680.0);
+    let short = app.ui.height < 460.0 || (app.recovery.id().is_some() && app.ui.height < 680.0);
     if short {
         // At very small heights, scroll the entire page, including its chrome.
         // Each inner pane retains a useful viewport instead of collapsing.
@@ -272,7 +267,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     } else {
         page = page.push(container(content).width(Fill).height(Fill));
     }
-    if app.draft.is_some() && app.tab != Tab::Vault {
+    if app.editor.is_some() && app.tab != Tab::Vault {
         page = page.push(action(
             "Return to item draft",
             Message::Tab(Tab::Vault),
@@ -390,12 +385,12 @@ fn feedback(app: &App) -> Element<'_, Message> {
         .as_ref()
         .is_some_and(|(_, session)| app.session.as_ref() == Some(session))
         && app.tab == Tab::Vault
-        && app.draft.is_none()
+        && app.editor.is_none()
     {
         line = line.push(action(
             "Undo deletion",
             Message::UndoDelete,
-            !app.busy() && app.pending.is_none(),
+            !app.busy() && app.recovery.id().is_none(),
         ));
     }
     if !app.notice.is_empty() {
@@ -856,7 +851,7 @@ fn vault(app: &App) -> Element<'_, Message> {
             !app.busy(),
         ));
     }
-    let detail = if let Some(draft) = &app.draft {
+    let detail = if let Some(draft) = app.editor.as_ref() {
         editor(app, draft)
     } else if let Some(item) = &app.item {
         details(app, item)
@@ -877,7 +872,7 @@ fn vault(app: &App) -> Element<'_, Message> {
         ].spacing(16).width(Fill).height(Fill).into()
     };
     let panes: Element<'_, Message> = if app.compact() {
-        if app.draft.is_some() {
+        if app.editor.is_some() {
             detail
         } else if app.item.is_some() {
             column![
@@ -1226,9 +1221,9 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
         row![name, kind].spacing(12).into()
     };
     let mut form = column![identity, credentials].spacing(8);
-    if app.ui.draft_conflict {
+    if app.editor.conflicted() {
         let mut conflict = column![text("This item changed in another client").size(19), text("Your unsaved edits are kept and masked. Review the latest version, then reapply only your changes. Nothing is saved automatically.").size(14), action("Review latest version", Message::ReviewConflict, enabled)].spacing(8);
-        if let Some(latest) = &app.ui.conflict_latest {
+        if let Some(latest) = app.editor.latest() {
             conflict = conflict.push(text(format!("Latest: {} · {}\nWebsites: {}\nRevision {} · {} custom fields. Stored secrets stay hidden.", latest.name, latest.username.as_deref().unwrap_or("No username"), latest.urls.join(", "), latest.revision, latest.fields.len())).size(14))
                 .push(text("Reapplying replaces fields you edited, including edits to the same fields in the other client. Untouched fields keep their latest values.").size(14))
                 .push(primary("Reapply my edits to this version", Message::ReapplyConflict, enabled));
@@ -1423,7 +1418,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             primary(
                 "Save item",
                 Message::Save,
-                app.writes_allowed() && !app.ui.draft_conflict && draft.validate().is_ok()
+                app.writes_allowed() && !app.editor.conflicted() && draft.validate().is_ok()
             ),
             action("Cancel", Message::Navigate(Navigate::Close), enabled),
             text(if draft.dirty {
@@ -1633,15 +1628,15 @@ fn generator(app: &App) -> Element<'_, Message> {
     ]
     .spacing(14);
     if app.ui.transfer_generated && !app.generated.is_empty() {
-        body = body.push(panel(column![text(if app.draft.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.session.is_some() && !app.busy()), action("Keep current draft", Message::CancelGenerated, !app.busy())].spacing(8).wrap()].spacing(10)));
+        body = body.push(panel(column![text(if app.editor.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.session.is_some() && !app.busy()), action("Keep current draft", Message::CancelGenerated, !app.busy())].spacing(8).wrap()].spacing(10)));
     }
     if !app.generated.is_empty() {
         body = body.push(panel(column![
             text("Your generated secret").size(18),
-            text_input("Generated value", app.generated.expose()).secure(!app.show_generated).padding(12),
+            text_input("Generated value", app.generated.expose()).secure(!app.generated.visible()).padding(12),
             row![primary("Copy", Message::CopyGenerated, !app.busy() && app.generator.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
-                checkbox(app.show_generated).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
-            action(if app.draft.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy() && app.session.is_some()),
+                checkbox(app.generated.visible()).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
+            action(if app.editor.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy() && app.session.is_some()),
             text(if app.session.is_none() { "Unlock a vault to save this value directly into an item." } else { "Transfer directly to an item without using the clipboard." }).size(14),
             text("Cleared from this screen after 60 seconds. Stored only when you save it in an item.").size(14),
         ].spacing(12)));
@@ -1827,7 +1822,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                     action(
                         "Stop local service…",
                         Message::ConfirmStop(true),
-                        !app.busy() && app.pending.is_none(),
+                        !app.busy() && app.recovery.id().is_none(),
                     )
                     .style(button_style::danger),
                 )
@@ -1842,7 +1837,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                 form = form.push(panel(column![
                     text("Stop the local service?").size(18),
                     text("This locks the vault, discards any open item draft, and disconnects the browser extension and CLI until you start it again.").size(14),
-                    row![primary("Keep running", Message::ConfirmStop(false), !app.busy()), action("Stop service", Message::Stop, !app.busy() && app.pending.is_none()).style(button_style::danger)].spacing(8).wrap(),
+                    row![primary("Keep running", Message::ConfirmStop(false), !app.busy()), action("Stop service", Message::Stop, !app.busy() && app.recovery.id().is_none()).style(button_style::danger)].spacing(8).wrap(),
                 ].spacing(12)));
             }
             form.push(cloud_settings(app))

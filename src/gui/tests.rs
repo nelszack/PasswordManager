@@ -51,7 +51,7 @@ fn unlocked() -> App {
     app.running = true;
     app.session = Some("a".repeat(64));
     app.item = Some(item());
-    app.draft = Some(Draft::from_item(&item()));
+    app.editor = Editor::new(Draft::from_item(&item()));
     app.master = "master-secret".into();
     app.generated = "generated-secret".into();
     app.query = "query".into();
@@ -75,7 +75,7 @@ fn session_changes_clear_displayed_secrets_drafts_and_generator() {
         );
         assert_eq!(app.session.as_deref(), session, "{label}");
         assert!(app.item.is_none(), "{label}");
-        assert!(app.draft.is_none(), "{label}");
+        assert!(app.editor.is_none(), "{label}");
         assert!(app.generated.is_empty(), "{label}");
         if locked {
             assert!(app.master.is_empty(), "{label}");
@@ -120,8 +120,8 @@ fn passive_polling_does_not_disable_inputs_or_swallow_edits() {
     assert!(app.polling());
     assert!(!app.busy());
     let _ = app.update(Message::Name("Typed during a poll".into()));
-    assert_eq!(app.draft.as_ref().unwrap().name, "Typed during a poll");
-    assert!(app.draft.as_ref().unwrap().dirty);
+    assert_eq!(app.editor.as_ref().unwrap().name, "Typed during a poll");
+    assert!(app.editor.as_ref().unwrap().dirty);
 }
 
 #[test]
@@ -143,52 +143,61 @@ fn creating_an_additional_vault_selects_the_new_file() {
 }
 
 #[test]
-fn uncertain_mutations_block_retries_and_keep_the_operation_for_review() {
-    let mut app = unlocked();
-    let id = "f".repeat(32);
-    let _ = app.update(Message::Finished(
-        app.serial,
-        Job::Save,
-        Arc::new(Err(Failure {
-            message: "reply lost".into(),
-            uncertain_operation: Some(id.clone()),
-        })),
-    ));
-    assert_eq!(app.pending.as_deref(), Some(id.as_str()));
-    assert!(!app.writes_allowed());
-    assert!(app.draft.is_none());
-    assert!(app.item.as_ref().unwrap().password.is_none());
-    let _ = app.complete(
-        Job::Reconcile,
-        reply(
-            ResponsePayload::Operation(OperationReceipt {
-                operation_id: id.clone(),
-                state: OperationState::Unknown,
-                revision: None,
-            }),
-            None,
-        ),
-    );
-    assert!(app.reviewed);
-    assert_eq!(app.pending.as_deref(), Some(id.as_str()));
-}
-
-#[test]
-fn recovered_operations_block_writes_after_reopening_the_gui() {
-    let mut app = app();
-    let id = "f".repeat(32);
-    let _ = app.complete(
-        Job::Connect,
-        Reply::Server {
-            response: Box::new(RpcResponse::success(ResponsePayload::Status(
-                ServerStatus::new(true, None),
-            ))),
-            vaults: vec![],
-            pending: vec![id.clone()],
-        },
-    );
-    assert_eq!(app.pending.as_deref(), Some(id.as_str()));
-    assert!(!app.writes_allowed());
+fn uncertain_operations_block_writes_and_remain_reviewable_from_both_origins() {
+    for (label, lost_reply) in [("lost reply", true), ("restored journal", false)] {
+        let mut app = if lost_reply { unlocked() } else { app() };
+        let id = "f".repeat(32);
+        if lost_reply {
+            let _ = app.update(Message::Finished(
+                app.serial,
+                Job::Save,
+                Arc::new(Err(Failure {
+                    message: "reply lost".into(),
+                    uncertain_operation: Some(id.clone()),
+                })),
+            ));
+            assert!(app.editor.is_none());
+            assert!(app.item.as_ref().unwrap().password.is_none());
+        } else {
+            let _ = app.complete(
+                Job::Connect,
+                Reply::Server {
+                    response: Box::new(RpcResponse::success(ResponsePayload::Status(
+                        ServerStatus::new(true, None),
+                    ))),
+                    vaults: vec![],
+                    pending: vec![id.clone()],
+                },
+            );
+        }
+        assert_eq!(
+            app.recovery.id().map(String::as_str),
+            Some(id.as_str()),
+            "{label}"
+        );
+        assert!(!app.writes_allowed(), "{label}");
+        let _ = app.complete(
+            Job::Reconcile,
+            reply(
+                ResponsePayload::Operation(OperationReceipt {
+                    operation_id: id.clone(),
+                    state: OperationState::Unknown,
+                    revision: None,
+                }),
+                None,
+            ),
+        );
+        assert!(app.recovery.reviewed(), "{label}");
+        assert_eq!(
+            app.recovery.id().map(String::as_str),
+            Some(id.as_str()),
+            "{label}"
+        );
+        assert!(
+            !app.writes_allowed(),
+            "review must not authorize replay: {label}"
+        );
+    }
 }
 
 #[test]
@@ -202,24 +211,24 @@ fn revealing_expires_before_watch_refresh_and_focus_loss_hides_it_immediately() 
     app.item.as_mut().unwrap().password = Some("revealed secret".into());
     app.reveal_until = Some(now - Duration::from_secs(1));
     app.generated = "expired generated secret".into();
-    app.generated_until = Some(now - Duration::from_secs(1));
+    app.generated.set_deadline(now - Duration::from_secs(1));
     app.generated_stats = "old assessment".into();
-    app.show_generated = true;
+    app.generated.set_visible(true);
     let _ = app.update(Message::Tick(now));
     assert!(app.item.as_ref().unwrap().password.is_none());
     assert!(app.generated.is_empty());
     assert!(app.generated_stats.is_empty());
-    assert!(app.generated_until.is_none());
-    assert!(!app.show_generated);
+    assert!(app.generated.deadline().is_none());
+    assert!(!app.generated.visible());
     assert!(
         app.polling(),
         "Duo watching should still refresh after expiry"
     );
     app.item = Some(item());
-    app.show_generated = true;
+    app.generated.set_visible(true);
     let _ = app.update(Message::HideSecrets);
     assert!(app.item.as_ref().unwrap().password.is_none());
-    assert!(!app.show_generated);
+    assert!(!app.generated.visible());
 }
 
 #[test]
@@ -251,13 +260,13 @@ fn focus_loss_invalidates_a_reveal_that_has_not_returned_yet() {
 #[test]
 fn navigation_requires_an_explicit_discard_of_unsaved_edits() {
     let mut app = unlocked();
-    app.draft.as_mut().unwrap().dirty = true;
+    app.editor.as_mut().unwrap().dirty = true;
     let _ = app.update(Message::Navigate(Navigate::New));
-    assert!(app.deferred.is_some());
-    assert_eq!(app.draft.as_ref().unwrap().id, Some(1));
+    assert!(app.editor.deferred().is_some());
+    assert_eq!(app.editor.as_ref().unwrap().id, Some(1));
     let _ = app.update(Message::Discard);
-    assert!(app.deferred.is_none());
-    assert!(app.draft.as_ref().unwrap().id.is_none());
+    assert!(app.editor.deferred().is_none());
+    assert!(app.editor.as_ref().unwrap().id.is_none());
 }
 
 #[test]
@@ -356,13 +365,13 @@ fn choosing_a_key_fills_the_path_without_unlocking_and_cancel_preserves_input() 
 #[test]
 fn discarding_multiline_replacement_clears_both_the_display_and_submitted_value() {
     let mut app = unlocked();
-    let draft = app.draft.as_mut().unwrap();
+    let draft = app.editor.as_mut().unwrap();
     draft.multiline = true;
     draft.replace_password = true;
     draft.password = "synthetic replacement\nsecond line".into();
     draft.secret_editor = text_editor::Content::with_text(draft.password.expose());
     let _ = app.update(Message::ReplacePassword(false));
-    let draft = app.draft.as_ref().unwrap();
+    let draft = app.editor.as_ref().unwrap();
     assert!(draft.password.is_empty());
     assert!(draft.secret_editor.text().is_empty());
     let ServerCommand::Update(command) = draft.command().unwrap() else {
@@ -370,7 +379,7 @@ fn discarding_multiline_replacement_clears_both_the_display_and_submitted_value(
     };
     assert!(command.entry.password.is_none());
     let _ = app.update(Message::ReplacePassword(true));
-    let draft = app.draft.as_ref().unwrap();
+    let draft = app.editor.as_ref().unwrap();
     let ServerCommand::Update(command) = draft.command().unwrap() else {
         panic!()
     };
@@ -387,7 +396,7 @@ fn hiding_multiline_input_masks_it_without_discarding_the_replacement() {
     let _ = app.update(Message::Password(replacement.into()));
     let _ = app.update(Message::MultilineSecret(true));
     assert!(
-        app.draft
+        app.editor
             .as_ref()
             .unwrap()
             .secret_editor
@@ -400,7 +409,7 @@ fn hiding_multiline_input_masks_it_without_discarding_the_replacement() {
     let _ = app.update(Message::SecretEdit(text_editor::Action::Edit(
         text_editor::Edit::Insert('x'),
     )));
-    let draft = app.draft.as_ref().unwrap();
+    let draft = app.editor.as_ref().unwrap();
     assert!(!draft.multiline);
     assert!(draft.secret_editor.text().is_empty());
     let ServerCommand::Update(command) = draft.command().unwrap() else {
@@ -410,7 +419,7 @@ fn hiding_multiline_input_masks_it_without_discarding_the_replacement() {
 
     let _ = app.update(Message::MultilineSecret(true));
     assert!(
-        app.draft
+        app.editor
             .as_ref()
             .unwrap()
             .secret_editor
@@ -418,9 +427,9 @@ fn hiding_multiline_input_masks_it_without_discarding_the_replacement() {
             .contains(replacement)
     );
     let _ = app.update(Message::MultilineSecret(false));
-    assert!(app.draft.as_ref().unwrap().secret_editor.text().is_empty());
+    assert!(app.editor.as_ref().unwrap().secret_editor.text().is_empty());
     let _ = app.generate();
-    let draft = app.draft.as_ref().unwrap();
+    let draft = app.editor.as_ref().unwrap();
     assert!(!draft.password.is_empty());
     assert!(draft.secret_editor.text().is_empty());
 }
@@ -605,7 +614,7 @@ fn editor_authenticator_actions_bind_to_the_edited_item_instead_of_tools_selecti
             .is_err(),
         "a refreshed summary must not silently rebase an old editor"
     );
-    app.draft = Some(Draft::default());
+    app.editor = Editor::new(Draft::default());
     assert!(
         app.workspace
             .prepare(workflows::Action::SetOtp, &app)
@@ -634,7 +643,7 @@ fn editing_credential_fields_cancels_authenticator_confirmation_and_blocks_dirty
         app.serial, serial,
         "cancelled confirmation must not dispatch a mutation"
     );
-    assert_eq!(app.draft.as_ref().unwrap().name, "Changed name");
+    assert_eq!(app.editor.as_ref().unwrap().name, "Changed name");
 }
 
 #[test]
@@ -656,7 +665,7 @@ fn authenticator_mutations_keep_the_editor_open_with_fresh_status_and_revision()
         );
         assert!(app.busy());
         assert!(
-            app.draft.is_none(),
+            app.editor.is_none(),
             "never edit using the previous revision during refresh"
         );
         assert!(app.workspace.activation.is_empty());
@@ -667,7 +676,7 @@ fn authenticator_mutations_keep_the_editor_open_with_fresh_status_and_revision()
         updated.has_duo = action == workflows::Action::EnrollDuo;
         finish_editor_refresh(&mut app, updated.clone());
         assert_eq!(app.tab, Tab::Vault);
-        let draft = app.draft.as_ref().unwrap();
+        let draft = app.editor.as_ref().unwrap();
         assert_eq!(draft.id, Some(1));
         assert_eq!(draft.revision, Some(4));
         assert!(!draft.dirty && draft.password.is_empty());
@@ -690,14 +699,14 @@ fn save_and_continue_editing_preserves_edits_until_saved_and_reopens_the_current
     let _ = app.update(Message::Name("Updated credential".into()));
     let _ = app.update(Message::SaveAndEdit);
     assert!(app.busy());
-    assert_eq!(app.draft.as_ref().unwrap().name, "Updated credential");
+    assert_eq!(app.editor.as_ref().unwrap().name, "Updated credential");
     let _ = app.update(Message::Finished(
         app.serial,
         Job::SaveEditorDefaults,
         Arc::new(Ok(Reply::Configuration(Config::default()))),
     ));
     assert!(app.busy());
-    assert!(app.draft.as_ref().unwrap().dirty);
+    assert!(app.editor.as_ref().unwrap().dirty);
     let _ = app.update(Message::Finished(
         app.serial,
         Job::SaveEditor,
@@ -710,7 +719,7 @@ fn save_and_continue_editing_preserves_edits_until_saved_and_reopens_the_current
     updated.name = "Updated credential".into();
     updated.revision = 4;
     finish_editor_refresh(&mut app, updated);
-    let draft = app.draft.as_ref().unwrap();
+    let draft = app.editor.as_ref().unwrap();
     assert_eq!(draft.name, "Updated credential");
     assert_eq!(draft.revision, Some(4));
     assert!(!draft.dirty);
@@ -730,12 +739,12 @@ fn locking_during_editor_refresh_prevents_the_old_editor_from_reappearing() {
             Some(&"a".repeat(64)),
         ))),
     ));
-    assert!(app.draft.is_none() && app.item.is_none() && app.session.is_none());
+    assert!(app.editor.is_none() && app.item.is_none() && app.session.is_none());
 }
 
 fn account_app(duo: bool) -> App {
     let mut app = unlocked();
-    app.draft = None;
+    app.editor = Editor::Closed;
     app.item.as_mut().unwrap().has_totp = true;
     app.item.as_mut().unwrap().has_duo = duo;
     app.items = vec![editor_summary(app.item.as_ref().unwrap())];
@@ -769,8 +778,8 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
         reply(ResponsePayload::Item(selected), Some(&"a".repeat(64))),
     );
     assert!(app.polling() && !app.busy());
-    assert!(!app.workspace.watch_duo);
-    assert!(app.workspace.duo_watch_target.is_none());
+    assert!(app.workspace.duo.watch.is_none());
+    assert!(app.workspace.duo.watch.is_none());
     let _ = app.update(Message::Finished(
         app.serial,
         Job::Workflow(workflows::Action::Requests),
@@ -789,7 +798,7 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
             app.serial, serial,
             "account navigation must not start repeated polling"
         );
-        assert!(!app.workspace.watch_duo && !app.polling());
+        assert!(app.workspace.duo.watch.is_none() && !app.polling());
     }
     app.workspace.code = "123".into();
     let _ = app.update(Message::Workflow(workflows::Event::Run(
@@ -837,7 +846,7 @@ fn switching_accounts_rejects_late_duo_results_and_keeps_watch_off() {
     assert_eq!(app.item.as_ref().unwrap().id, 2);
     assert_eq!(app.workspace.selected.as_ref().unwrap().id, 2);
     assert!(app.workspace.duo_requests_for(&app).is_none());
-    assert!(!app.workspace.watch_duo);
+    assert!(app.workspace.duo.watch.is_none());
 }
 
 #[test]
@@ -850,16 +859,8 @@ fn returning_to_an_account_rebinds_requests_after_a_different_tools_selection() 
     });
     let _ = app.update(Message::Tab(Tab::Vault));
     assert_eq!(app.workspace.selected.as_ref().unwrap().id, 1);
-    assert_eq!(
-        app.workspace
-            .duo_inflight_target
-            .as_ref()
-            .unwrap()
-            .choice
-            .id,
-        1
-    );
-    assert!(app.polling() && !app.workspace.watch_duo);
+    assert_eq!(app.workspace.duo.inflight.as_ref().unwrap().choice.id, 1);
+    assert!(app.polling() && app.workspace.duo.watch.is_none());
 }
 
 fn account_otp(counter: Option<u64>) -> ResponsePayload {
@@ -939,7 +940,7 @@ fn account_hotp_keeps_its_code_and_details_while_refreshing_for_repeated_actions
                 Some(&"a".repeat(64)),
             ))),
         ));
-        assert!(!app.busy() && app.draft.is_none());
+        assert!(!app.busy() && app.editor.is_none());
         assert_eq!(app.item.as_ref().unwrap().id, 1);
         assert_eq!(
             app.workspace.otp_result_for(&app).unwrap().counter,
@@ -1163,8 +1164,8 @@ fn review_hiding_secrets_cancels_otp_preflights_before_dispatch() {
             job,
             Arc::new(Ok(Reply::Configuration(app.conf.clone()))),
         ));
-        assert!(!app.workspace.watch_otp);
-        assert!(app.workspace.otp_watch_target.is_none());
+        assert!(app.workspace.otp.watch.is_none());
+        assert!(app.workspace.otp.watch.is_none());
         assert!(
             !app.busy() && !app.polling(),
             "a hidden preflight must not dispatch OTP work"
@@ -1243,13 +1244,13 @@ fn review_incomplete_audits_from_other_sessions_clear_previous_results() {
 fn compact_search_preserves_a_dirty_draft_until_discard_is_confirmed() {
     let mut app = unlocked();
     app.ui.width = 600.0;
-    app.draft.as_mut().unwrap().dirty = true;
+    app.editor.as_mut().unwrap().dirty = true;
     let _ = app.update(Message::FocusSearch);
-    assert!(app.draft.is_some());
-    assert!(matches!(app.deferred, Some(Navigate::Close)));
+    assert!(app.editor.is_some());
+    assert!(matches!(app.editor.deferred(), Some(Navigate::Close)));
     let _ = app.update(Message::KeepEditing);
-    assert!(app.draft.is_some());
-    assert!(app.deferred.is_none());
+    assert!(app.editor.is_some());
+    assert!(app.editor.deferred().is_none());
 }
 
 #[test]
@@ -1273,7 +1274,7 @@ fn save_shortcut_routes_to_settings_and_preserves_the_item_draft() {
     assert!(!app.busy());
     assert!(app.ui.notice_error);
     assert!(app.notice.contains("length"));
-    assert!(app.draft.is_some());
+    assert!(app.editor.is_some());
 }
 
 #[test]
@@ -1282,7 +1283,7 @@ fn new_item_shortcut_opens_the_editor_from_other_tabs() {
     app.tab = Tab::Generator;
     let _ = app.update(Message::Navigate(Navigate::New));
     assert_eq!(app.tab, Tab::Vault);
-    assert!(app.draft.as_ref().unwrap().id.is_none());
+    assert!(app.editor.as_ref().unwrap().id.is_none());
 }
 
 #[test]
@@ -1384,13 +1385,13 @@ fn edit_shortcut_cannot_replace_an_unsaved_draft() {
     let mut app = unlocked();
     let _ = app.update(Message::Name("Unsaved name".into()));
     let _ = app.update(Message::Edit);
-    assert_eq!(app.draft.as_ref().unwrap().name, "Unsaved name");
+    assert_eq!(app.editor.as_ref().unwrap().name, "Unsaved name");
 }
 
 #[test]
 fn username_copy_checks_timeout_and_the_selected_revision() {
     let mut app = unlocked();
-    app.draft = None;
+    app.editor = Editor::Closed;
     app.conf.clipboard.timeout = 0;
     let serial = app.serial;
     let _ = app.fetch_username();
@@ -1416,7 +1417,7 @@ fn username_copy_checks_timeout_and_the_selected_revision() {
 #[test]
 fn typed_fields_are_added_only_when_edited_and_preserve_other_hidden_fields() {
     let mut app = unlocked();
-    app.draft.as_mut().unwrap().fields.push(model::FieldDraft {
+    app.editor.as_mut().unwrap().fields.push(model::FieldDraft {
         name: "Existing token".into(),
         original_name: Some("Existing token".into()),
         secret: true,
@@ -1424,7 +1425,7 @@ fn typed_fields_are_added_only_when_edited_and_preserve_other_hidden_fields() {
         ..Default::default()
     });
     let _ = app.update(Message::TemplateValue("Security code", true, "123".into()));
-    let ServerCommand::Update(update) = app.draft.as_ref().unwrap().command().unwrap() else {
+    let ServerCommand::Update(update) = app.editor.as_ref().unwrap().command().unwrap() else {
         panic!()
     };
     assert_eq!(update.set_fields.len(), 1);
@@ -1460,7 +1461,7 @@ fn a_pending_change_discovered_after_creation_prevents_automatic_unlock() {
             pending: vec!["f".repeat(32)],
         })),
     ));
-    assert!(app.pending.is_some());
+    assert!(app.recovery.id().is_some());
     assert!(app.creation.is_none());
     assert_eq!(app.serial, serial);
 }
@@ -1507,7 +1508,7 @@ fn saved_edits_reopen_the_current_revision_without_clearing_filters() {
             Some(&"a".repeat(64)),
         ),
     );
-    assert!(app.draft.is_none());
+    assert!(app.editor.is_none());
     assert!(app.ui.saved_item.is_none());
     assert_eq!(app.query, "query");
     assert_eq!(app.ui.kind, Some(ItemKind::Login));
@@ -1532,7 +1533,7 @@ fn saved_edits_reopen_the_current_revision_without_clearing_filters() {
         ),
     );
     assert_eq!(app.item.as_ref().unwrap().revision, updated.revision);
-    assert!(app.draft.is_none());
+    assert!(app.editor.is_none());
 }
 
 #[test]
@@ -1540,7 +1541,7 @@ fn new_save_selects_only_a_unique_new_matching_item() {
     for ambiguous in [false, true] {
         let mut app = unlocked();
         app.items = vec![editor_summary(&item())];
-        app.draft.as_mut().unwrap().id = None;
+        app.editor.as_mut().unwrap().id = None;
         let _ = app.complete(
             Job::Save,
             reply(
@@ -1549,7 +1550,7 @@ fn new_save_selects_only_a_unique_new_matching_item() {
             ),
         );
         assert!(
-            app.draft.is_none(),
+            app.editor.is_none(),
             "saved passwords must be dropped before listing"
         );
         assert!(app.ui.saved_item.is_some());
@@ -1599,7 +1600,7 @@ fn generated_results_have_completion_feedback_and_expire_without_losing_options(
     assert!(!app.generated.is_empty());
     assert!(app.notice.starts_with("New secret ready."));
     let length = app.generator_length.clone();
-    let deadline = app.generated_until.unwrap();
+    let deadline = app.generated.deadline().unwrap();
     let _ = app.update(Message::Tick(deadline + Duration::from_secs(1)));
     assert!(app.generated.is_empty());
     assert_eq!(app.generator_length, length);
@@ -1616,7 +1617,7 @@ fn successful_restore_and_purge_clear_only_the_resolved_undo_action() {
         (Action::Purge(None), true),
     ] {
         let mut app = unlocked();
-        app.draft = None;
+        app.editor = Editor::Closed;
         app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
         let session = app.session.clone();
         let _ = app.complete(
@@ -1633,7 +1634,7 @@ fn successful_restore_and_purge_clear_only_the_resolved_undo_action() {
 #[test]
 fn failed_restore_retains_undo_but_navigation_removes_it() {
     let mut app = unlocked();
-    app.draft = None;
+    app.editor = Editor::Closed;
     app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
     let mut response = reply(
         ResponsePayload::Message("Could not restore".into()),
@@ -1676,14 +1677,14 @@ fn editor_visibility_is_temporary_and_does_not_reveal_a_stored_password() {
     let _ = app.update(Message::HideSecrets);
     assert!(!app.ui.editor_show_secret);
     assert_eq!(
-        app.draft.as_ref().unwrap().password.expose(),
+        app.editor.as_ref().unwrap().password.expose(),
         "new draft secret"
     );
     assert!(app.item.as_ref().unwrap().password.is_none());
     let _ = app.update(Message::ShowEditorSecret(true));
     let _ = app.update(Message::ReplacePassword(false));
     assert!(!app.ui.editor_show_secret);
-    assert!(app.draft.as_ref().unwrap().password.is_empty());
+    assert!(app.editor.as_ref().unwrap().password.is_empty());
     let _ = app.update(Message::ReplacePassword(true));
     let _ = app.update(Message::ShowEditorSecret(true));
     let session = app.session.clone();
@@ -1701,8 +1702,8 @@ fn editor_visibility_is_temporary_and_does_not_reveal_a_stored_password() {
 fn cloud_revision_refresh_preserves_an_open_draft() {
     let mut app = unlocked();
     app.vault_revision = Some(2);
-    app.draft.as_mut().unwrap().dirty = true;
-    app.draft.as_mut().unwrap().name = "Unsaved local draft".into();
+    app.editor.as_mut().unwrap().dirty = true;
+    app.editor.as_mut().unwrap().name = "Unsaved local draft".into();
     let mut status = ServerStatus::new(false, None);
     status.vault_revision = Some(3);
     let session = "a".repeat(64);
@@ -1710,7 +1711,7 @@ fn cloud_revision_refresh_preserves_an_open_draft() {
         Job::Status,
         reply(ResponsePayload::Status(status), Some(&session)),
     );
-    assert_eq!(app.draft.as_ref().unwrap().name, "Unsaved local draft");
+    assert_eq!(app.editor.as_ref().unwrap().name, "Unsaved local draft");
     assert!(app.notice.contains("draft is preserved"));
     assert!(!app.busy());
 }
@@ -1718,7 +1719,7 @@ fn cloud_revision_refresh_preserves_an_open_draft() {
 #[test]
 fn cloud_revision_refresh_reloads_a_vault_without_an_editor() {
     let mut app = unlocked();
-    app.draft = None;
+    app.editor = Editor::Closed;
     app.vault_revision = Some(2);
     let mut status = ServerStatus::new(false, None);
     status.vault_revision = Some(3);
@@ -1734,8 +1735,8 @@ fn cloud_revision_refresh_reloads_a_vault_without_an_editor() {
 #[test]
 fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
     let mut app = unlocked();
-    app.draft.as_mut().unwrap().name = "My unsaved name".into();
-    app.draft.as_mut().unwrap().dirty = true;
+    app.editor.as_mut().unwrap().name = "My unsaved name".into();
+    app.editor.as_mut().unwrap().dirty = true;
     let mut response = RpcResponse::success(ResponsePayload::Message("Item changed".into()));
     response.code = ResponseCode::Conflict as i32;
     response.session_id = app.session.clone();
@@ -1747,12 +1748,12 @@ fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
             pending: vec![],
         },
     );
-    assert!(app.ui.draft_conflict);
-    assert_eq!(app.draft.as_ref().unwrap().name, "My unsaved name");
+    assert!(app.editor.conflicted());
+    assert_eq!(app.editor.as_ref().unwrap().name, "My unsaved name");
     assert!(app.item.as_ref().unwrap().password.is_none());
-    let old_revision = app.draft.as_ref().unwrap().revision;
+    let old_revision = app.editor.as_ref().unwrap().revision;
     let _ = app.save_item(Job::Save);
-    assert_eq!(app.draft.as_ref().unwrap().revision, old_revision);
+    assert_eq!(app.editor.as_ref().unwrap().revision, old_revision);
     let mut latest = item();
     latest.revision = 4;
     latest.username = Some("Other client username".into());
@@ -1762,8 +1763,8 @@ fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
         reply(ResponsePayload::Item(latest), session.as_deref()),
     );
     let _ = app.update(Message::ReapplyConflict);
-    assert!(!app.ui.draft_conflict);
-    let draft = app.draft.as_ref().unwrap();
+    assert!(!app.editor.conflicted());
+    let draft = app.editor.as_ref().unwrap();
     assert_eq!(draft.name, "My unsaved name");
     assert_eq!(draft.username, "Other client username");
     assert_eq!(draft.revision, Some(4));
@@ -1784,9 +1785,9 @@ fn conflict_from_another_session_erases_draft_instead_of_reusing_it() {
             pending: vec![],
         },
     );
-    assert!(app.draft.is_none());
-    assert!(app.ui.conflict_latest.is_none());
-    assert!(!app.ui.draft_conflict);
+    assert!(app.editor.is_none());
+    assert!(app.editor.latest().is_none());
+    assert!(!app.editor.conflicted());
 }
 
 #[test]
@@ -1796,12 +1797,12 @@ fn generator_transfer_preserves_draft_fields_and_works_without_clipboard() {
     app.conf.clipboard.timeout = 0;
     app.tab = Tab::Generator;
     app.generated = "exact-generated-value".into();
-    let name = app.draft.as_ref().unwrap().name.clone();
+    let name = app.editor.as_ref().unwrap().name.clone();
     let _ = app.update(Message::UseGenerated);
     assert!(app.ui.transfer_generated);
     let _ = app.update(Message::ConfirmGenerated);
     assert_eq!(app.tab, Tab::Vault);
-    let draft = app.draft.as_ref().unwrap();
+    let draft = app.editor.as_ref().unwrap();
     assert_eq!(draft.name, name);
     assert_eq!(draft.password.expose(), "exact-generated-value");
     assert!(draft.replace_password && draft.dirty);
@@ -1816,7 +1817,7 @@ fn generated_transfer_never_reuses_expired_or_other_session_values() {
     let _ = app.update(Message::UseGenerated);
     app.clear_vault();
     let _ = app.update(Message::ConfirmGenerated);
-    assert!(app.draft.is_none());
+    assert!(app.editor.is_none());
     assert!(!app.ui.transfer_generated);
 }
 
@@ -1824,15 +1825,15 @@ fn generated_transfer_never_reuses_expired_or_other_session_values() {
 fn window_close_requires_a_discard_decision_for_unsaved_work() {
     let mut app = unlocked();
     app.request_state = RequestState::Idle;
-    app.draft.as_mut().unwrap().dirty = true;
+    app.editor.as_mut().unwrap().dirty = true;
     let id = iced::window::Id::unique();
     let _ = app.update(Message::CloseRequested(id));
     assert_eq!(app.ui.confirm_close, Some(id));
-    assert!(app.draft.is_some());
+    assert!(app.editor.is_some());
     assert!(app.item.as_ref().unwrap().password.is_none());
     let _ = app.update(Message::CancelClose);
     assert!(app.ui.confirm_close.is_none());
-    assert!(app.draft.is_some());
+    assert!(app.editor.is_some());
 }
 
 #[test]
@@ -1858,18 +1859,18 @@ fn saved_default_changes_do_not_retarget_the_active_vault() {
 fn connecting_requires_discard_even_when_reusing_the_same_port() {
     let mut app = unlocked();
     app.request_state = RequestState::Idle;
-    app.draft.as_mut().unwrap().dirty = true;
+    app.editor.as_mut().unwrap().dirty = true;
     let port = app.client.port;
     let _ = app.update(Message::UseConnectionPort);
-    assert!(matches!(app.deferred, Some(Navigate::Connect(value)) if value == port));
-    assert!(app.draft.is_some());
+    assert!(matches!(app.editor.deferred(), Some(Navigate::Connect(value)) if *value == port));
+    assert!(app.editor.is_some());
     assert!(app.session.is_some());
     let _ = app.update(Message::KeepEditing);
-    assert!(app.deferred.is_none());
-    assert!(app.draft.is_some());
+    assert!(app.editor.deferred().is_none());
+    assert!(app.editor.is_some());
     let _ = app.update(Message::UseConnectionPort);
     let _ = app.update(Message::Discard);
-    assert!(app.draft.is_none());
+    assert!(app.editor.is_none());
     assert!(app.session.is_none());
     assert_eq!(app.client.port, port);
 }

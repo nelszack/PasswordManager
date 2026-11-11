@@ -58,26 +58,9 @@ module.exports.create = function create() {
         const submissionCoordinator = PasswordManagerFormSubmission.createSubmissionCoordinator({
             isForm: form => form instanceof HTMLFormElement,
             credentialsFor: form => findLoginCredentials(form),
-            shouldIgnore: () => disposed || credentialAttemptPending || modalOpen || popupResolved,
+            shouldIgnore: () => disposed || !credentialAttempt.idle,
             userActivated: () => navigator.userActivation?.isActive === true,
-            handle: async ({ credentials }) => {
-                credentialAttemptPending = true;
-                const { username: rawUsername, password } = credentials;
-                try {
-                    const username = resolveUsername(rawUsername);
-                    if (rawUsername) rememberUsernameAcrossNavigation(rawUsername);
-
-                    modalOpen = true;
-                    try {
-                        const result = await openCredentialPrompt(username, password);
-                        if (result.action !== "skipped") popupResolved = true;
-                    } finally {
-                        modalOpen = false;
-                    }
-                } finally {
-                    credentialAttemptPending = false;
-                }
-            }
+            handle: ({ credentials }) => attemptCredentials(credentials)
         });
         listen(root, "submit", event => {
             if (event.isTrusted && navigator.userActivation?.isActive === true
@@ -111,14 +94,9 @@ module.exports.create = function create() {
                 password: snapshot.password
             }, {
                 remember: rememberUsernameAcrossNavigation,
-                shouldIgnore: () => disposed || credentialAttemptPending || modalOpen || popupResolved,
+                shouldIgnore: () => disposed || !credentialAttempt.idle,
                 prompt: captured => {
-                    credentialAttemptPending = true;
-                    const resolvedUsername = resolveUsername(captured.username);
-                    openCredentialPrompt(resolvedUsername, captured.password)
-                        .then(result => { if (result.action !== "skipped") popupResolved = true; })
-                        .catch(error => console.log("Password Manager credential prompt error:", error))
-                        .finally(() => { credentialAttemptPending = false; });
+                    attemptCredentials(captured).catch(error => console.log("Password Manager credential prompt error:", error));
                 }
             });
         };
@@ -141,9 +119,13 @@ module.exports.create = function create() {
         });
 
     }
-    let modalOpen = false;
-    let popupResolved = false;
-    let credentialAttemptPending = false;
+    const credentialAttempt = PasswordManagerFormSubmission.createCredentialAttempt(captured => {
+        if (captured.username) rememberUsernameAcrossNavigation(captured.username);
+        return openCredentialPrompt(resolveUsername(captured.username), captured.password);
+    });
+    function attemptCredentials(captured) {
+        return disposed ? Promise.resolve() : credentialAttempt.run(captured);
+    }
     let credentialUserIntent = false;
 
     // ===============================
@@ -162,7 +144,7 @@ module.exports.create = function create() {
         // window and background-owned operation survive the page being destroyed.
         window.addEventListener("pagehide", event => {
             if (!event.isTrusted || !credentialUserIntent) return;
-            if (modalOpen || popupResolved || credentialAttemptPending) return;
+            if (!credentialAttempt.idle) return;
 
             const { username: rawUsername, password } = findLoginCredentials();
             if (!password) {
@@ -175,6 +157,7 @@ module.exports.create = function create() {
             const username = resolveUsername(rawUsername);
             if (rawUsername) storeUsernameForLater(rawUsername);
 
+            if (!credentialAttempt.reserve()) return;
             chrome.runtime.sendMessage(
                 { action: "openCredentialPrompt", username, password },
                 () => void chrome.runtime.lastError
@@ -185,7 +168,7 @@ module.exports.create = function create() {
 
     function dispose() {
         if (disposed) return;
-        disposed = true; lifecycle.abort(); observer.dispose();
+        disposed = true; credentialAttempt.dispose(); lifecycle.abort(); observer.dispose();
         generator.dispose(); controls.dispose(); bridge.dispose(); duo.dispose(); credentials.dispose();
     }
     return { start, dispose, roots: () => [...rootControllers.keys()] };

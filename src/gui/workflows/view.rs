@@ -154,7 +154,8 @@ pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, App
                             button_style::primary
                         })
                         .on_press_maybe(
-                            (enabled && app.pending.is_none()).then_some(event(Event::Confirm))
+                            (enabled && app.recovery.id().is_none())
+                                .then_some(event(Event::Confirm))
                         ),
                 ]
                 .spacing(10)
@@ -166,14 +167,12 @@ pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, App
 
 fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
     let mut form = column![].spacing(12);
-    if !state.watch_duo
-        || !state.duo_watch_target.as_ref().is_some_and(|target| {
-            state
-                .selected
-                .as_ref()
-                .is_some_and(|choice| choice.id == target.choice.id)
-        })
-    {
+    if !state.duo.watch.as_ref().is_some_and(|target| {
+        state
+            .selected
+            .as_ref()
+            .is_some_and(|choice| choice.id == target.choice.id)
+    }) {
         return form;
     }
     form = form
@@ -186,14 +185,14 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
         ))
         .push(toggle(
             "Show private desktop alerts for new Duo requests",
-            state.notify_duo,
+            state.duo.notify,
             Toggle::NotifyDuo,
             !app.busy(),
         ));
     if let Err(error) = state.duo_interval_seconds() {
         form = form.push(text(error).size(14));
     }
-    if let Some(target) = state.duo_watch_target.as_ref().filter(|_| state.watch_duo) {
+    if let Some(target) = state.duo.watch.as_ref() {
         form = form.push(
             text(format!(
                 "Watching {}. Review each request here before responding.",
@@ -212,18 +211,17 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             .any(|item| item.id == choice.id && item.has_duo)
     });
     let unlocked = !app.busy() && app.running && app.session.is_some() && enrolled;
-    let writes = unlocked && app.pending.is_none() && state.prepared.is_none();
+    let writes = unlocked && app.recovery.id().is_none() && state.prepared.is_none();
     let mut form = column![
         text("Duo Push requests").size(19),
         row![
             action("Fetch Push requests", Action::Requests, unlocked),
             toggle(
                 "Watch Duo requests in background",
-                state.watch_duo
-                    && state.duo_watch_target.as_ref().is_some_and(|target| state
-                        .selected
-                        .as_ref()
-                        .is_some_and(|choice| choice.id == target.choice.id)),
+                state.duo.watch.as_ref().is_some_and(|target| state
+                    .selected
+                    .as_ref()
+                    .is_some_and(|choice| choice.id == target.choice.id)),
                 Toggle::WatchDuo,
                 unlocked
             ),
@@ -372,11 +370,11 @@ pub(super) fn account_authenticators<'a>(
         }
         form = form.push(toggle(
             "OTP options",
-            state.otp_options_open,
+            state.otp.options_open,
             Toggle::OtpOptions,
             !app.busy(),
         ));
-        if state.otp_options_open {
+        if state.otp.options_open {
             form = form
                 .push(field(
                     "OTP copy timeout in seconds (0–255; blank uses clipboard setting)",
@@ -396,13 +394,13 @@ pub(super) fn account_authenticators<'a>(
                 )
                 .push(toggle(
                     "Copy each new time-based code once while watching",
-                    state.copy_watched_otp,
+                    state.otp.copy,
                     Toggle::CopyWatchedOtp,
                     writes && copy_enabled,
                 ))
                 .push(toggle(
                     "Watch time-based codes",
-                    state.watch_otp,
+                    state.otp.watch.is_some(),
                     Toggle::WatchOtp,
                     writes,
                 ));
@@ -414,7 +412,7 @@ pub(super) fn account_authenticators<'a>(
 
 pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
     let mut form = column![text("Authenticator & Duo").size(20)].spacing(12);
-    let Some(draft) = &app.draft else {
+    let Some(draft) = app.editor.as_ref() else {
         return form;
     };
     let Some(item) = app.item.as_ref().filter(|item| Some(item.id) == draft.id) else {
@@ -469,8 +467,8 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
 pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
     let enabled = !app.busy();
     let unlocked = enabled && app.running && app.session.is_some();
-    let writes = unlocked && app.pending.is_none();
-    let server_writes = enabled && app.running && app.pending.is_none();
+    let writes = unlocked && app.recovery.id().is_none();
+    let server_writes = enabled && app.running && app.recovery.id().is_none();
     let choices: Vec<Choice> = app
         .items
         .iter()
@@ -659,7 +657,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
 
 fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
     let enabled = !app.busy();
-    let writes = enabled && app.session.is_some() && app.pending.is_none();
+    let writes = enabled && app.session.is_some() && app.recovery.id().is_none();
     let result = state.result.as_ref().unwrap();
     let mut form = column![].spacing(14);
     match result {

@@ -162,6 +162,45 @@ pub(super) async fn command(
         }
     }
 }
+/// A comparison fetch is required before declaring a conflict: independently
+/// uploaded ciphertext may already be byte-for-byte equal to the local vault.
+#[derive(Debug, PartialEq, Eq)]
+enum SyncDecision {
+    UpToDate,
+    Upload,
+    Download,
+    Compare,
+    Conflict,
+    RemoteMissing,
+}
+fn sync_decision(local_changed: bool, base: Option<&str>, remote: Option<&str>) -> SyncDecision {
+    let remote_changed = remote != base;
+    if !local_changed && !remote_changed {
+        return SyncDecision::UpToDate;
+    }
+    if remote.is_some() && (remote_changed || base.is_none()) {
+        return if local_changed {
+            SyncDecision::Compare
+        } else {
+            SyncDecision::Download
+        };
+    }
+    if base.is_some() && remote.is_none() {
+        SyncDecision::RemoteMissing
+    } else {
+        SyncDecision::Upload
+    }
+}
+fn compare_snapshot(local_changed: bool, same_contents: bool) -> SyncDecision {
+    if same_contents {
+        SyncDecision::UpToDate
+    } else if local_changed {
+        SyncDecision::Conflict
+    } else {
+        SyncDecision::Download
+    }
+}
+
 async fn sync(
     worker: &VaultWorker,
     enable: bool,
@@ -212,22 +251,31 @@ async fn sync(
             remote.is_some()
         ));
     }
-    if !local_changed && !remote_changed {
-        return Ok("Vault is up to date".into());
+    let decision = sync_decision(
+        local_changed,
+        state.version.as_deref(),
+        remote_version.as_deref(),
+    );
+    match decision {
+        SyncDecision::UpToDate => return Ok("Vault is up to date".into()),
+        SyncDecision::RemoteMissing => {
+            return Err("Cloud vault is missing; local vault preserved".into());
+        }
+        _ => {}
     }
-    if let Some(remote) = remote
-        && (remote_changed || state.version.is_none())
-    {
+    if matches!(decision, SyncDecision::Download | SyncDecision::Compare) {
+        let remote = remote.expect("download decision requires a remote vault");
         let id = snap.id.clone();
         let c = client.clone();
         let (version, bytes) = c.download(&id).await?;
-        if bytes == snap.bytes {
+        let compared = compare_snapshot(local_changed, bytes == snap.bytes);
+        if compared == SyncDecision::UpToDate {
             state.version = Some(version);
             state.digest = Some(local_digest);
             save_binding(&snap.path, &state)?;
             return Ok("Vault is up to date".into());
         }
-        if local_changed {
+        if compared == SyncDecision::Conflict {
             return Err("Sync conflict: local and cloud vaults both changed. Both copies are preserved; automatic merging is not supported yet.".into());
         }
         if version != remote.version {
@@ -263,9 +311,6 @@ async fn sync(
                 Ok("Downloaded and applied cloud changes".to_owned())
             })
             .await?;
-    }
-    if state.version.is_some() && remote_version.is_none() {
-        return Err("Cloud vault is missing; local vault preserved".into());
     }
     // The server compares the base version atomically before committing.
     let id = snap.id;
@@ -410,5 +455,28 @@ mod tests {
             .await
             .unwrap();
         assert!(probe(&worker, "https://one.example".into()).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::{SyncDecision::*, compare_snapshot, sync_decision};
+    #[test]
+    fn reconciliation_preserves_both_copies_until_a_comparison_is_known() {
+        for (local, base, remote, expected) in [
+            (false, Some("v1"), Some("v1"), UpToDate),
+            (true, Some("v1"), Some("v1"), Upload),
+            (false, Some("v1"), Some("v2"), Download),
+            (true, Some("v1"), Some("v2"), Compare),
+            (true, None, None, Upload),
+            (true, Some("v1"), None, RemoteMissing),
+            (false, Some("v1"), None, RemoteMissing),
+            (true, None, Some("v1"), Compare),
+        ] {
+            assert_eq!(sync_decision(local, base, remote), expected);
+        }
+        assert_eq!(compare_snapshot(true, true), UpToDate);
+        assert_eq!(compare_snapshot(true, false), Conflict);
+        assert_eq!(compare_snapshot(false, false), Download);
     }
 }

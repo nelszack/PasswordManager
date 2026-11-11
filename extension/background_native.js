@@ -44,7 +44,7 @@ const PasswordManagerBackgroundNative = {
         }
         function forget(operationId) { observedUnknown.delete(operationId); if (unresolved.delete(operationId)) persist().catch(() => {}); }
         function failure(pending, message) {
-            const uncertain = pending.sent && pending.policy.mutates;
+            const uncertain = pending.phase === "sent" && pending.policy.mutates;
             if (uncertain) remember(pending);
             else if (pending.operationId) forget(pending.operationId);
             const error = new Error(uncertain ? `${message}. The operation may still complete. Review its outcome before retrying.` : message);
@@ -55,14 +55,20 @@ const PasswordManagerBackgroundNative = {
             clearTimeout(channel.idleTimer); clearTimeout(channel.recoveryTimer);
             channel.idleTimer = channel.recoveryTimer = null;
         }
+        function release(channel, pending) {
+            clearTimeout(pending.timer);
+            if (channel.active === pending) channel.active = null;
+            pending.phase = "settled";
+            pending.fields = null;
+        }
         function disconnected(channel, port, message, intentional = false) {
             if (channel.port !== port) return;
             channel.port = null; clearTimers(channel);
             const requests = [channel.active, ...channel.queue].filter(Boolean);
             channel.active = null; channel.queue = [];
             for (const pending of requests) {
-                clearTimeout(pending.timer);
                 pending.reject(failure(pending, message || "Native messaging host disconnected"));
+                release(channel, pending);
             }
             if (!intentional && channel.name !== "duo") onDisconnect();
         }
@@ -94,6 +100,7 @@ const PasswordManagerBackgroundNative = {
                     else if (pending.operationId) forget(pending.operationId);
                     pending.resolve({ ...response, ...(response.uncertain ? { operationId: pending.operationId, operationAction: pending.action } : {}) });
                 } catch (error) { pending.reject(failure(pending, error.code === "protocol_mismatch" ? error.message : "Invalid native host response")); }
+                release(channel, pending);
                 pump(channel);
             });
             port.onDisconnect.addListener(() => disconnected(channel, port, chrome.runtime.lastError?.message));
@@ -106,28 +113,27 @@ const PasswordManagerBackgroundNative = {
             if (pending.policy.mutates && pending.action !== "lock" && unresolved.size) {
                 clearTimeout(pending.timer);
                 pending.reject(Object.assign(new Error("A previous operation must be reconciled before another change"), { uncertain: true, operationId: unresolved.keys().next().value, operationAction: unresolved.values().next().value.action }));
-                pump(channel); return;
+                release(channel, pending); pump(channel); return;
             }
             channel.active = pending;
             function send() {
-                if (channel.active !== pending || pending.expired) return;
+                if (channel.active !== pending || pending.callerTimedOut) return;
                 try {
                     const port = connect(channel);
                     port.postMessage({ ...pending.fields, id: pending.id, action: pending.action });
-                    pending.sent = true; pending.fields = null;
+                    pending.phase = "sent"; pending.fields = null;
                 } catch (error) {
-                    channel.active = null; clearTimeout(pending.timer);
-                    pending.reject(failure(pending, error.message)); pump(channel);
+                    pending.reject(failure(pending, error.message)); release(channel, pending); pump(channel);
                 }
             }
             if (pending.operationId && session) {
+                pending.phase = "persistingIdentity";
                 // Persist identity before sending; browser crashes must not erase an
                 // accepted mutation's reconciliation obligation. No secrets are stored.
                 unresolved.set(pending.operationId, { operationId: pending.operationId, action: pending.action });
                 persist().then(send, () => {
                     if (channel.active !== pending) return;
-                    channel.active = null; clearTimeout(pending.timer);
-                    pending.reject(failure(pending, "Could not retain operation identity")); pump(channel);
+                    pending.reject(failure(pending, "Could not retain operation identity")); release(channel, pending); pump(channel);
                 });
             } else send();
         }
@@ -142,15 +148,17 @@ const PasswordManagerBackgroundNative = {
             try { contract.validateRequest(action, fields); } catch (error) { return Promise.reject(error); }
             return new Promise((resolve, reject) => {
                 const pending = { id: nextRequestId++, action, policy, operationId,
-                    fields: { ...fields, ...(operationId ? { operationId } : {}) }, sent: false, resolve, reject };
+                    fields: { ...fields, ...(operationId ? { operationId } : {}) }, phase: "queued", resolve, reject };
                 pending.timer = setTimeout(() => {
-                    pending.expired = true;
+                    // Caller lifetime is independent of a sent operation's lifetime.
+                    pending.callerTimedOut = true;
                     const queued = channel.queue.indexOf(pending);
                     if (queued >= 0) channel.queue.splice(queued, 1);
                     pending.fields = null;
-                    reject(failure(pending, pending.sent ? "Native messaging request timed out" : "Native request expired before it was sent"));
-                    if (channel.active === pending && !pending.sent) {
-                        channel.active = null; pump(channel);
+                    reject(failure(pending, pending.phase === "sent" ? "Native messaging request timed out" : "Native request expired before it was sent"));
+                    if (queued >= 0) release(channel, pending);
+                    if (channel.active === pending && pending.phase !== "sent") {
+                        release(channel, pending); pump(channel);
                     } else if (channel.active === pending && !channel.recoveryTimer) {
                         // Bound a silent live port without assuming its mutation failed.
                         channel.recoveryTimer = setTimeout(() => close(channel, "Native connection recovery deadline elapsed"), recoveryGraceMs);

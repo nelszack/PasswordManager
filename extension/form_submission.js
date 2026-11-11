@@ -5,6 +5,26 @@
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
 
+    // All submission sources share one document-wide decision lifecycle.
+    function createCredentialAttempt(open) {
+        let phase = "idle";
+        function reserve() {
+            if (phase !== "idle") return false;
+            phase = "pending";
+            return true;
+        }
+        async function run(credentials) {
+            if (!reserve()) return;
+            try {
+                const result = await open(credentials);
+                if (phase !== "disposed") phase = result.action === "skipped" ? "idle" : "resolved";
+            } finally {
+                if (phase === "pending") phase = "idle";
+            }
+        }
+        return { run, reserve, get idle() { return phase === "idle"; }, dispose() { phase = "disposed"; } };
+    }
+
     function createSubmissionCoordinator(options) {
         const pendingForms = new WeakSet();
 
@@ -36,5 +56,5 @@
         });
     }
 
-    return { createSubmissionCoordinator, scheduleCredentialAdvance };
+    return { createCredentialAttempt, createSubmissionCoordinator, scheduleCredentialAdvance };
 });

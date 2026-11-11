@@ -25,7 +25,7 @@ const PasswordManagerBackgroundPrompts = {
             const pending = pendingCredentialPrompts.get(token);
             if (!pending) return;
             pendingCredentialPrompts.delete(token);
-            pending.password = "";
+            pending.state = { phase: "closed" };
             notifyCredentialPrompt(token, pending, action);
             if (!Number.isInteger(pending.windowId)) return;
             credentialPromptWindows.delete(pending.windowId);
@@ -37,10 +37,9 @@ const PasswordManagerBackgroundPrompts = {
         function invalidateCredentialPrompts() {
             generation++;
             for (const [token, pending] of pendingCredentialPrompts) {
-                pending.password = "";
-                if (pending.operationId) continue;
-                pending.invalidated = true;
-                if (!pending.completing) discardCredentialPrompt(token, "skipped");
+                if (pending.state.phase === "reviewingOutcome") continue;
+                if (pending.state.phase === "saving") pending.state = { phase: "invalidatedSaving" };
+                else if (pending.state.phase !== "invalidatedSaving") discardCredentialPrompt(token, "skipped");
             }
         }
 
@@ -94,13 +93,10 @@ const PasswordManagerBackgroundPrompts = {
                 sessionId,
                 domain,
                 username,
-                password,
+                state: { phase: "ready", password },
                 data: promptState.describe(accounts, username, domain),
-                loading: false,
-                error: null,
                 expiresAt: Date.now() + 2 * 60_000,
-                windowId: null,
-                completing: false
+                windowId: null
             };
             pendingCredentialPrompts.set(token, pending);
 
@@ -117,7 +113,7 @@ const PasswordManagerBackgroundPrompts = {
                     const error = chrome.runtime.lastError?.message;
                     if (error || !window?.id) {
                         pendingCredentialPrompts.delete(token);
-                        pending.password = "";
+                        pending.state = { phase: "closed" };
                         reject(new Error(error || "Could not open credential prompt"));
                         return;
                     }
@@ -142,17 +138,16 @@ const PasswordManagerBackgroundPrompts = {
                 discardCredentialPrompt(request?.token);
                 throw new Error("Credential prompt expired");
             }
-            if (pending.completing) throw new Error("Credential operation is already in progress");
+            if (["saving", "invalidatedSaving"].includes(pending.state.phase)) throw new Error("Credential operation is already in progress");
             if (request.selection?.action === "cancel") {
                 discardCredentialPrompt(request.token, "cancel", false);
                 return { success: true };
             }
-            if (pending.loading) throw new Error("Credential prompt is still loading");
-            if (pending.error) throw new Error(pending.error);
-            const operation = promptState.operation(pending, request.selection);
+            if (pending.state.phase === "reviewingOutcome") throw new Error(pending.state.error);
+            const operation = promptState.operation({ ...pending, password: pending.state.password }, request.selection);
 
             const nativeAction = operation.action === "update" ? "updateCredentials" : "saveCredentials";
-            pending.completing = true;
+            pending.state = { phase: "saving", password: pending.state.password };
             let response;
             try {
                 response = await nativeRequest(nativeAction, operation.fields);
@@ -163,14 +158,15 @@ const PasswordManagerBackgroundPrompts = {
                     throw error;
                 }
             } catch (error) {
-                pending.completing = false;
                 if (error.uncertain && pending.windowId !== null) {
                     // An accepted operation is now an outcome review, not a secret
                     // decision. It can survive transport recovery without its password.
-                    pending.operationId = error.operationId; pending.operationAction = operation.action;
-                    pending.error = error.message; pending.password = ""; pending.invalidated = false;
-                } else if (pending.invalidated || pending.windowId === null) {
+                    pending.state = { phase: "reviewingOutcome", operationId: error.operationId,
+                        operationAction: operation.action, error: error.message };
+                } else if (pending.state.phase !== "saving" || pending.windowId === null) {
                     discardCredentialPrompt(request.token, "skipped");
+                } else {
+                    pending.state = { phase: "ready", password: pending.state.password };
                 }
                 throw error;
             }
@@ -182,12 +178,12 @@ const PasswordManagerBackgroundPrompts = {
         async function review(request, sender) {
             if (!credentialPromptSenderAllowed(sender)) throw new Error("Invalid credential prompt sender");
             const pending = pendingCredentialPrompts.get(request?.token);
-            if (!pending || !pending.operationId) throw new Error("Credential operation is unavailable");
-            const response = await reconcile(pending.operationId);
+            if (!pending || pending.state.phase !== "reviewingOutcome") throw new Error("Credential operation is unavailable");
+            const response = await reconcile(pending.state.operationId);
             if (!response.success) return response;
             const state = response.data.state;
             if (["committed", "committed_durability_unknown", "failed"].includes(state)) {
-                discardCredentialPrompt(request.token, state === "failed" ? "skipped" : pending.operationAction, false);
+                discardCredentialPrompt(request.token, state === "failed" ? "skipped" : pending.state.operationAction, false);
                 refreshStatus();
             }
             return response;
@@ -196,8 +192,8 @@ const PasswordManagerBackgroundPrompts = {
         function data(request, sender) {
             if (!credentialPromptSenderAllowed(sender)) return { success: false, error: "Invalid credential prompt sender" };
             const pending = pendingCredentialPrompts.get(request.token);
-            return pending && !pending.invalidated && pending.expiresAt > Date.now()
-                ? { success: true, data: pending.data, loading: pending.loading, error: pending.error }
+            return pending && !["invalidatedSaving", "closed"].includes(pending.state.phase) && pending.expiresAt > Date.now()
+                ? { success: true, data: pending.data, loading: false, error: pending.state.error || null }
                 : { success: false, error: "Credential prompt expired" };
         }
         function windowRemoved(windowId) {
@@ -205,7 +201,7 @@ const PasswordManagerBackgroundPrompts = {
             if (!token) return false;
             credentialPromptWindows.delete(windowId);
             const pending = pendingCredentialPrompts.get(token);
-            if (pending?.completing) pending.windowId = null;
+            if (pending && ["saving", "invalidatedSaving"].includes(pending.state.phase)) pending.windowId = null;
             else discardCredentialPrompt(token, "cancel", false);
             return true;
         }

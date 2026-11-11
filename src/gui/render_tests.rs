@@ -287,7 +287,7 @@ fn multiline_notes_expose_readable_text_and_selection() {
         position: text_editor::Position { line: 1, column: 6 },
         selection: Some(text_editor::Position { line: 0, column: 1 }),
     });
-    app.draft = Some(Draft {
+    app.editor = Editor::new(Draft {
         notes,
         ..Default::default()
     });
@@ -342,7 +342,7 @@ fn rendered_screens_fit_supported_windows() {
             })
             .collect();
         render(&app, "items", width, 800, scale);
-        app.draft = Some(Draft {
+        app.editor = Editor::new(Draft {
             name: "Example account".into(),
             ..Default::default()
         });
@@ -383,7 +383,7 @@ fn rendered_edge_cases_fit_minimum_windows_and_all_themes() {
         app.settings.appearance = appearance;
         let prefix = format!("edge-{appearance:?}");
         for kind in model::KINDS {
-            app.draft = Some(Draft {
+            app.editor = Editor::new(Draft {
                 name: "Long synthetic item name for review ".repeat(3),
                 kind,
                 dirty: true,
@@ -393,7 +393,7 @@ fn rendered_edge_cases_fit_minimum_windows_and_all_themes() {
             app.ui.editor_advanced = true;
             render(&app, &format!("{prefix}-{kind}"), 480, 480, 1.3);
         }
-        app.pending = Some("synthetic-operation".into());
+        app.recovery = Recovery::AwaitingOutcome("synthetic-operation".into());
         app.warning =
             Some("Storage warning: keep your encrypted backup somewhere safe. ".repeat(3));
         app.notice = "A synthetic error with a clear next step: inspect the last operation.".into();
@@ -446,14 +446,14 @@ fn dynamic_banners_preserve_editor_focus_across_view_updates() {
     app.running = true;
     app.request_state = RequestState::Idle;
     app.session = Some("synthetic-session".into());
-    app.draft = Some(Draft::default());
+    app.editor = Editor::new(Draft::default());
     let size = Size::new(1060.0, 760.0);
     let mut renderer = iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0));
     renderer.reset(Rectangle::with_size(size));
     let mut tree = widget::Tree::empty();
     for pass in 0..3 {
         if pass == 1 {
-            app.draft.as_mut().unwrap().dirty = true;
+            app.editor.as_mut().unwrap().dirty = true;
         } else if pass == 2 {
             app.warning = Some("Synthetic connection warning".into());
         }

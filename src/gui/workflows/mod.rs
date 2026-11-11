@@ -332,7 +332,38 @@ impl Drop for Prepared {
     }
 }
 
+/// Enablement and polling are independent: a one-shot read need not start a watch.
+#[derive(Default)]
+pub struct OtpState {
+    pub watch: Option<WatchTarget>,
+    pub inflight: Option<WatchTarget>,
+    pub result_target: Option<WatchTarget>,
+    pub previous: SecretString,
+    pub copy: bool,
+    pub options_open: bool,
+}
+#[derive(Default)]
+pub struct DuoState {
+    pub watch: Option<WatchTarget>,
+    pub inflight: Option<WatchTarget>,
+    pub result: Option<DuoRequests>,
+    seen: std::collections::HashSet<String>,
+    pub notify: bool,
+}
+pub struct DuoRequests {
+    pub target: WatchTarget,
+    pub requests: Vec<DuoPushRequest>,
+}
+#[derive(Default)]
+pub struct HistoryState {
+    inflight: Option<WatchTarget>,
+    result_target: Option<WatchTarget>,
+}
+
 pub struct State {
+    pub otp: OtpState,
+    pub duo: DuoState,
+    pub history: HistoryState,
     pub section: Section,
     pub show_results: bool,
     pub file_operation: FileOperation,
@@ -365,28 +396,12 @@ pub struct State {
     pub weak: bool,
     pub descending: bool,
     pub replace_duo: bool,
-    pub watch_otp: bool,
-    pub otp_options_open: bool,
-    pub otp_inflight_target: Option<WatchTarget>,
-    pub otp_result_target: Option<WatchTarget>,
-    pub watch_duo: bool,
-    pub copy_watched_otp: bool,
-    pub notify_duo: bool,
-    pub duo_watch_target: Option<WatchTarget>,
-    pub duo_request_target: Option<WatchTarget>,
-    pub duo_inflight_target: Option<WatchTarget>,
-    pub otp_watch_target: Option<WatchTarget>,
-    pub previous_otp: SecretString,
-    duo_seen: std::collections::HashSet<String>,
     pub policy: Policy,
     pub mode: Mode,
     pub browser: Browser,
     pub kind: Option<ItemKind>,
     pub has_otp: Option<bool>,
     pub sort: SortField,
-    pub duo_requests: Option<Vec<DuoPushRequest>>,
-    history_inflight_target: Option<WatchTarget>,
-    history_result_target: Option<WatchTarget>,
     pub result: Option<ResponsePayload>,
     pub result_until: Option<Instant>,
     pub prepared: Option<Prepared>,
@@ -397,6 +412,9 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            otp: OtpState::default(),
+            duo: DuoState::default(),
+            history: HistoryState::default(),
             section: Section::Overview,
             show_results: false,
             file_operation: FileOperation::Backup,
@@ -429,28 +447,12 @@ impl Default for State {
             weak: false,
             descending: false,
             replace_duo: false,
-            watch_otp: false,
-            otp_options_open: false,
-            otp_inflight_target: None,
-            otp_result_target: None,
-            watch_duo: false,
-            copy_watched_otp: false,
-            notify_duo: false,
-            duo_watch_target: None,
-            duo_request_target: None,
-            duo_inflight_target: None,
-            otp_watch_target: None,
-            previous_otp: SecretString::default(),
-            duo_seen: Default::default(),
             policy: Policy::Skip,
             mode: Mode::Automatic,
             browser: Browser::Chrome,
             kind: None,
             has_otp: None,
             sort: SortField::Name,
-            duo_requests: None,
-            history_inflight_target: None,
-            history_result_target: None,
             result: None,
             result_until: None,
             prepared: None,
@@ -470,26 +472,23 @@ impl State {
     }
     pub fn hide_secrets(&mut self) {
         self.secret_epoch += 1;
-        self.otp_inflight_target = None;
-        self.otp_result_target = None;
-        self.watch_otp = false;
-        self.otp_watch_target = None;
-        self.previous_otp.zeroize();
+        self.otp.inflight = None;
+        self.otp.result_target = None;
+        self.otp.watch = None;
+        self.otp.previous.zeroize();
         if self.result.as_ref().is_some_and(secret_result) {
             self.result = None;
         }
         self.result_until = None;
     }
     pub fn reset_duo(&mut self) {
-        self.watch_duo = false;
-        self.duo_watch_target = None;
-        self.duo_inflight_target = None;
-        self.duo_seen.clear();
+        self.duo.watch = None;
+        self.duo.inflight = None;
+        self.duo.seen.clear();
         self.clear_duo_requests();
     }
     pub fn clear_duo_requests(&mut self) {
-        self.duo_request_target = None;
-        self.duo_requests = None;
+        self.duo.result = None;
         self.code.zeroize();
     }
     pub fn clear_vault(&mut self) {
@@ -541,11 +540,10 @@ impl State {
             Toggle::Weak => &mut self.weak,
             Toggle::Descending => &mut self.descending,
             Toggle::ReplaceDuo => &mut self.replace_duo,
-            Toggle::WatchOtp => &mut self.watch_otp,
-            Toggle::OtpOptions => &mut self.otp_options_open,
-            Toggle::WatchDuo => &mut self.watch_duo,
-            Toggle::CopyWatchedOtp => &mut self.copy_watched_otp,
-            Toggle::NotifyDuo => &mut self.notify_duo,
+            Toggle::WatchOtp | Toggle::WatchDuo => return,
+            Toggle::OtpOptions => &mut self.otp.options_open,
+            Toggle::CopyWatchedOtp => &mut self.otp.copy,
+            Toggle::NotifyDuo => &mut self.duo.notify,
         } = value;
     }
     fn credentials(&self, confirm: bool) -> Result<PasswordType, String> {
@@ -585,7 +583,7 @@ impl State {
         &self,
         app: &App,
     ) -> Option<&password_manager::protocol::AuthenticatorResponse> {
-        let target = self.otp_result_target.as_ref()?;
+        let target = self.otp.result_target.as_ref()?;
         if !app.running
             || app.session.as_ref() != Some(&target.session)
             || self
@@ -604,24 +602,24 @@ impl State {
         }
     }
     pub fn duo_requests_for<'a>(&'a self, app: &App) -> Option<&'a [DuoPushRequest]> {
-        let target = self.duo_request_target.as_ref()?;
+        let result = self.duo.result.as_ref()?;
+        let target = &result.target;
         (target.current(app)
             && self
                 .selected
                 .as_ref()
                 .is_some_and(|choice| choice.id == target.choice.id))
-        .then_some(self.duo_requests.as_deref())
-        .flatten()
+        .then_some(result.requests.as_slice())
     }
     fn clear_history(&mut self) {
-        self.history_inflight_target = None;
-        self.history_result_target = None;
+        self.history.inflight = None;
+        self.history.result_target = None;
         if matches!(&self.result, Some(ResponsePayload::History(_))) {
             self.result = None;
         }
     }
     fn history_for(&self, app: &App) -> Option<&password_manager::vault::HistoryPage> {
-        let target = self.history_result_target.as_ref()?;
+        let target = self.history.result_target.as_ref()?;
         if !target.current(app)
             || self
                 .selected
@@ -638,23 +636,23 @@ impl State {
     /// Keep the reviewed snapshot stable, as interactive CLI watch does while
     /// awaiting a decision. Explicit fetches still bypass this automatic pause.
     pub fn duo_review_pending(&self, app: &App) -> bool {
-        let Some(watch) = self.duo_watch_target.as_ref().filter(|_| self.watch_duo) else {
+        let Some(watch) = self.duo.watch.as_ref() else {
             return false;
         };
-        if !self
-            .duo_request_target
-            .as_ref()
-            .is_some_and(|target| target.same_context(watch) && target.current(app))
-        {
+        let Some(result) = &self.duo.result else {
+            return false;
+        };
+        if !result.target.same_context(watch) || !result.target.current(app) {
             return false;
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.duo_requests
-            .as_ref()
-            .is_some_and(|requests| requests.iter().any(|request| request.expires_at > now))
+        result
+            .requests
+            .iter()
+            .any(|request| request.expires_at > now)
     }
     pub fn prepare(&self, action: Action, app: &App) -> Result<Prepared, String> {
         self.prepare_for(action, app, None)
@@ -701,7 +699,7 @@ impl State {
                 | Action::RemoveDuo
         );
         let editor_draft = app
-            .draft
+            .editor
             .as_ref()
             .filter(|_| action.edits_authenticator() && app.tab == super::Tab::Vault);
         let editor_choice = match editor_draft {
@@ -1066,12 +1064,12 @@ impl State {
                 return Err("This is a local desktop action.".into());
             }
         };
-        if command.is_mutation() && app.pending.is_some() {
+        if command.is_mutation() && app.recovery.id().is_some() {
             return Err(
                 "Review the previous uncertain operation before making another change.".into(),
             );
         }
-        if command.is_mutation() && app.draft.as_ref().is_some_and(|draft| draft.dirty) {
+        if command.is_mutation() && app.editor.as_ref().is_some_and(|draft| draft.dirty) {
             return Err(
                 "Save or discard the unsaved item edits before changing authenticators or using Tools.".into(),
             );
@@ -1085,8 +1083,8 @@ impl State {
         })
     }
     fn observe_otp(&mut self, code: &password_manager::protocol::AuthenticatorResponse) -> bool {
-        let changed = self.previous_otp != code.code;
-        self.previous_otp = code.code.clone();
+        let changed = self.otp.previous != code.code;
+        self.otp.previous = code.code.clone();
         changed
     }
     fn observe_duo(&mut self, requests: &[DuoPushRequest]) -> bool {
@@ -1099,11 +1097,12 @@ impl State {
             .filter(|request| request.expires_at > now)
             .map(|request| request.fingerprint.clone())
             .collect();
-        self.duo_seen
+        self.duo
+            .seen
             .retain(|fingerprint| pending.contains(fingerprint));
         let mut fresh = false;
         for fingerprint in pending {
-            fresh |= self.duo_seen.insert(fingerprint);
+            fresh |= self.duo.seen.insert(fingerprint);
         }
         fresh
     }
@@ -1111,9 +1110,8 @@ impl State {
         if let ResponsePayload::DuoRequests(requests) = payload {
             // Only the captured request context can bind a cache. Never infer it
             // from the current selection after the asynchronous read finishes.
-            if let Some(target) = self.duo_inflight_target.take() {
-                self.duo_request_target = Some(target);
-                self.duo_requests = Some(requests);
+            if let Some(target) = self.duo.inflight.take() {
+                self.duo.result = Some(DuoRequests { target, requests });
             }
             return;
         }
@@ -1129,20 +1127,20 @@ impl State {
         } else {
             self.result_until = None;
         }
-        self.otp_result_target = if matches!(payload, ResponsePayload::Authenticator(_)) {
-            self.otp_inflight_target.take()
+        self.otp.result_target = if matches!(payload, ResponsePayload::Authenticator(_)) {
+            self.otp.inflight.take()
         } else {
             None
         };
-        self.history_result_target = if matches!(&payload, ResponsePayload::History(_)) {
+        self.history.result_target = if matches!(&payload, ResponsePayload::History(_)) {
             // History belongs to the initiating request, even if the visible
             // selection changes before the reply is delivered.
-            let Some(target) = self.history_inflight_target.take() else {
+            let Some(target) = self.history.inflight.take() else {
                 return;
             };
             Some(target)
         } else {
-            self.history_inflight_target = None;
+            self.history.inflight = None;
             None
         };
         self.result = Some(payload);
@@ -1194,7 +1192,7 @@ impl App {
         // Opening an account is a one-shot read. Watching requires an explicit
         // toggle and remains bound to its own account across navigation.
         if self.tab != Tab::Vault
-            || self.draft.is_some()
+            || self.editor.is_some()
             || self.session.is_none()
             || !self.item.as_ref().is_some_and(|item| {
                 item.has_duo
@@ -1223,15 +1221,15 @@ impl App {
         if self.busy()
             || self.polling()
             || self.workspace.prepared.is_some()
-            || self.pending.is_some()
+            || self.recovery.id().is_some()
             || self.session.is_none()
             || !self.running
         {
             return Task::none();
         }
-        let (action, target, seconds) = if self.workspace.watch_otp {
-            (Action::WatchOtp, self.workspace.otp_watch_target.clone(), 1)
-        } else if self.workspace.watch_duo {
+        let (action, target, seconds) = if let Some(target) = self.workspace.otp.watch.clone() {
+            (Action::WatchOtp, target, 1)
+        } else if let Some(target) = self.workspace.duo.watch.clone() {
             let seconds = match self.workspace.duo_interval_seconds() {
                 Ok(seconds) => seconds,
                 Err(error) => {
@@ -1240,15 +1238,8 @@ impl App {
                     return Task::none();
                 }
             };
-            (
-                Action::Requests,
-                self.workspace.duo_watch_target.clone(),
-                seconds,
-            )
+            (Action::Requests, target, seconds)
         } else {
-            return Task::none();
-        };
-        let Some(target) = target else {
             return Task::none();
         };
         if !target.current(self)
@@ -1284,13 +1275,10 @@ impl App {
         action: Action,
         payload: ResponsePayload,
     ) -> Task<super::Message> {
-        let Some(target) = self.workspace.otp_watch_target.clone() else {
+        let Some(target) = self.workspace.otp.watch.clone() else {
             return Task::none();
         };
-        if !self.workspace.watch_otp
-            || !target.current(self)
-            || self.workspace.request_epoch != self.workspace.secret_epoch
-        {
+        if !target.current(self) || self.workspace.request_epoch != self.workspace.secret_epoch {
             return Task::none();
         }
         let ResponsePayload::Authenticator(code) = &payload else {
@@ -1316,9 +1304,9 @@ impl App {
         self.workspace.receive(payload);
         if action == Action::WatchOtp
             && changed
-            && self.workspace.copy_watched_otp
+            && self.workspace.otp.copy
             && self.workspace.prepared.is_none()
-            && self.pending.is_none()
+            && self.recovery.id().is_none()
         {
             return Task::batch([
                 self.launch(Job::WatchCopyDefaults, backend::reload_settings),
@@ -1331,15 +1319,14 @@ impl App {
     /// Focus loss, a lock, navigation, or an item edit can invalidate the watch
     /// while that read is pending; never send a copy for that old context.
     pub(super) fn copy_watched_otp(&mut self) -> Task<super::Message> {
-        let Some(target) = self.workspace.otp_watch_target.clone() else {
+        let Some(target) = self.workspace.otp.watch.clone() else {
             return Task::none();
         };
-        if !self.workspace.watch_otp
-            || !self.workspace.copy_watched_otp
+        if !self.workspace.otp.copy
             || !target.current(self)
             || self.workspace.request_epoch != self.workspace.secret_epoch
             || self.workspace.prepared.is_some()
-            || self.pending.is_some()
+            || self.recovery.id().is_some()
         {
             return Task::none();
         }
@@ -1347,7 +1334,7 @@ impl App {
             self.workspace.otp_timeout(self.conf.clipboard.timeout),
             Ok(None)
         ) {
-            self.workspace.copy_watched_otp = false;
+            self.workspace.otp.copy = false;
             self.notice =
                 "Copying watched codes stopped because the current timeout is zero.".into();
             return Task::none();
@@ -1370,21 +1357,21 @@ impl App {
         &mut self,
         payload: ResponsePayload,
     ) -> Task<super::Message> {
-        let Some(target) = self.workspace.duo_inflight_target.as_ref() else {
+        let Some(target) = self.workspace.duo.inflight.as_ref() else {
             return Task::none();
         };
         if !target.current(self) {
-            self.workspace.duo_inflight_target = None;
+            self.workspace.duo.inflight = None;
             return Task::none();
         }
-        let watching = self.workspace.watch_duo
-            && self
-                .workspace
-                .duo_watch_target
-                .as_ref()
-                .is_some_and(|watch| watch.same_context(target));
+        let watching = self
+            .workspace
+            .duo
+            .watch
+            .as_ref()
+            .is_some_and(|watch| watch.same_context(target));
         let notify = if let ResponsePayload::DuoRequests(requests) = &payload {
-            watching && self.workspace.observe_duo(requests) && self.workspace.notify_duo
+            watching && self.workspace.observe_duo(requests) && self.workspace.duo.notify
         } else {
             false
         };
@@ -1470,7 +1457,7 @@ impl App {
                             self.notice = error.clone();
                             return Task::none();
                         }
-                        if self.workspace.copy_watched_otp && timeout.unwrap().is_none() {
+                        if self.workspace.otp.copy && timeout.unwrap().is_none() {
                             self.workspace.hide_secrets();
                             self.notice =
                                 "Set an OTP copy timeout greater than zero to watch and copy."
@@ -1478,8 +1465,8 @@ impl App {
                             return Task::none();
                         }
                         self.workspace.reset_duo();
-                        self.workspace.otp_watch_target = Some(target.clone());
-                        self.workspace.previous_otp.zeroize();
+                        self.workspace.otp.watch = Some(target.clone());
+                        self.workspace.otp.previous.zeroize();
                         Action::WatchOtp
                     } else {
                         if let Err(error) = self.workspace.duo_interval_seconds() {
@@ -1498,8 +1485,8 @@ impl App {
                         }
                         self.workspace.hide_secrets();
                         self.workspace.clear_duo_requests();
-                        self.workspace.duo_seen.clear();
-                        self.workspace.duo_watch_target = Some(target.clone());
+                        self.workspace.duo.seen.clear();
+                        self.workspace.duo.watch = Some(target.clone());
                         Action::Requests
                     };
                     return match self.workspace.prepare_for(action, self, Some(&target)) {
@@ -1633,12 +1620,12 @@ impl App {
             self.notice = "The vault session changed. Review this operation again.".into();
             return Task::none();
         }
-        if prepared.command.is_mutation() && self.pending.is_some() {
+        if prepared.command.is_mutation() && self.recovery.id().is_some() {
             self.notice =
                 "Review the previous uncertain operation before making another change.".into();
             return Task::none();
         }
-        if prepared.command.is_mutation() && self.draft.as_ref().is_some_and(|draft| draft.dirty) {
+        if prepared.command.is_mutation() && self.editor.as_ref().is_some_and(|draft| draft.dirty) {
             self.notice =
                 "Save or discard the unsaved item edits before changing authenticators or using Tools.".into();
             return Task::none();
@@ -1681,7 +1668,8 @@ impl App {
             && (self.workspace.history_for(self).is_none()
                 || !context.as_ref().is_some_and(|target| {
                     self.workspace
-                        .history_result_target
+                        .history
+                        .result_target
                         .as_ref()
                         .is_some_and(|history| history.same_context(target))
                 }))
@@ -1692,16 +1680,16 @@ impl App {
         if prepared.action == Action::History {
             // A failed replacement request must not relabel an older page.
             self.workspace.clear_history();
-            self.workspace.history_inflight_target = context.clone();
+            self.workspace.history.inflight = context.clone();
         }
         if matches!(
             prepared.action,
             Action::ShowOtp(_) | Action::WatchOtp | Action::CopyWatchedOtp
         ) {
-            self.workspace.otp_inflight_target = context.clone();
+            self.workspace.otp.inflight = context.clone();
         }
         if prepared.action == Action::Requests {
-            self.workspace.duo_inflight_target = context;
+            self.workspace.duo.inflight = context;
         }
         self.workspace.request_epoch = self.workspace.secret_epoch;
         self.workspace.last_watch = Instant::now();

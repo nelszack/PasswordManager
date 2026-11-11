@@ -70,7 +70,6 @@ fn test_custom_character_classes_and_ambiguous_filter() {
 
 #[test]
 fn invalid_or_empty_character_sets_are_rejected() {
-    assert!(generate_password_with_options(0, &PasswordOptions::default()).is_err());
     let no_characters = PasswordOptions {
         uppercase: false,
         lowercase: false,
@@ -78,19 +77,31 @@ fn invalid_or_empty_character_sets_are_rejected() {
         symbols: None,
         exclude_ambiguous: false,
     };
-    assert!(generate_password_with_options(16, &no_characters).is_err());
-
-    let empty_symbols = PasswordOptions {
-        symbols: Some(""),
-        ..no_characters
-    };
-    assert!(generate_password_with_options(16, &empty_symbols).is_err());
-
-    let non_ascii_symbols = PasswordOptions {
-        symbols: Some("🔐"),
-        ..no_characters
-    };
-    assert!(generate_password_with_options(16, &non_ascii_symbols).is_err());
+    for (label, length, options) in [
+        ("zero length", 0, PasswordOptions::default()),
+        ("disabled classes", 16, PasswordOptions { ..no_characters }),
+        (
+            "empty symbols",
+            16,
+            PasswordOptions {
+                symbols: Some(""),
+                ..no_characters
+            },
+        ),
+        (
+            "non-ASCII symbols",
+            16,
+            PasswordOptions {
+                symbols: Some("🔐"),
+                ..no_characters
+            },
+        ),
+    ] {
+        assert!(
+            generate_password_with_options(length, &options).is_err(),
+            "{label}"
+        );
+    }
 }
 
 #[test]
