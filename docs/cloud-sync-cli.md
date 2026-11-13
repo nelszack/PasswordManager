@@ -44,3 +44,13 @@ pm sync disable
 
 Disabling sync retains local and remote copies. Server installation, device
 revocation, updates, and recovery are covered in the administration guide.
+
+## Resolve concurrent edits
+
+Run `pm sync conflicts` to obtain a review token and redacted field comparisons.
+Use `pm sync resolve --review TOKEN --choose ID:FIELD:local --choose ID:OTHER:remote`,
+with one choice for every reported field. Both full encrypted versions are saved
+as local recovery vaults with sync disabled before the result is applied and
+uploaded. A changed local or cloud snapshot invalidates the review. See
+[conflict recovery](cloud-sync-admin.md#conflicts-and-password-changes) for grouped
+fields, absent items, password changes, and offline recovery.

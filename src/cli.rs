@@ -956,6 +956,17 @@ pub enum SyncCommands {
     Status,
     /// Check for local and remote changes without applying them.
     Check,
+    /// Compare local and cloud items; protected values are redacted.
+    Conflicts,
+    /// Apply explicit choices to an unchanged conflict review, preserving recovery copies.
+    Resolve {
+        /// Token printed by `pm sync conflicts`.
+        #[arg(long)]
+        review: String,
+        /// One choice per differing field: ITEM_ID:FIELD:local or ITEM_ID:FIELD:remote.
+        #[arg(long = "choose")]
+        choices: Vec<String>,
+    },
     /// Upload or download changes, preserving both copies on conflict.
     Now,
 }

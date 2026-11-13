@@ -23,7 +23,7 @@ process entry points have no separate desktop action.
 | `duo` | Item authenticator controls: enroll/replace/mode, fetch/watch/interval/notifications, review and approve/deny an exact request, Verified Push code, remove enrollment. |
 | `backup`, `import`, `export` | Tools → Import, export & backups: paths, password/key credentials, backup/export replacement, import preview/new vault/conflict policy. `.json` selects portable JSON; other export suffixes select CSV. |
 | `native-host` | Tools → Browser integration: Chrome/Chromium/Helium registration and update. The hidden bridge process is started by the browser. |
-| `sync` | Settings → Connection → Cloud sync: server URL/device credential, list/select/download vault, download comparison copy, enable/disable/status/check/now. Tokens can be pasted from a credential file instead of supplied via a CLI file argument. |
+| `sync` | Settings → Connection → Cloud sync: server URL/device credential, list/select/download vault, download comparison copy, enable/disable/status/check/now, and side-by-side conflict review with per-field resolution. Tokens can be pasted from a credential file instead of supplied via a CLI file argument. |
 | `completions` | Tools → CLI utilities: save definitions for all five shells. Existing destination files are protected. |
 
 CLI aliases select the same operation. `--json`, `--quiet`, stdout-only output,

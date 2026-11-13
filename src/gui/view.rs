@@ -1995,6 +1995,11 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
                 ready && app.session.is_some()
             ),
             action(
+                "Review conflicts",
+                Message::Cloud(Action::Conflicts),
+                ready && app.session.is_some()
+            ),
+            action(
                 "Check changes",
                 Message::Cloud(Action::Check),
                 ready && app.session.is_some()
@@ -2013,6 +2018,111 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .wrap(),
     );
+    if let Some(review) = &app.cloud_review {
+        use password_manager::cloud::Side;
+        form = form.push(text("Resolve item differences").size(20))
+            .push(text("Choose every differing field. Protected values stay hidden. Metadata includes item type, URLs and custom fields; authenticators, history and deletion state are chosen as groups. Both complete vault versions are saved as encrypted recovery copies before applying.").size(14));
+        if !review.items.is_empty() {
+            form = form.push(
+                row![
+                    action(
+                        "Choose all local",
+                        Message::CloudChooseAll(Side::Local),
+                        ready
+                    ),
+                    action(
+                        "Choose all cloud",
+                        Message::CloudChooseAll(Side::Remote),
+                        ready
+                    ),
+                ]
+                .spacing(8)
+                .wrap(),
+            );
+        }
+        for item in &review.items {
+            form = form.push(text(format!("Item {}", item.id)).size(18)).push(
+                row![
+                    text(format!("Local: {}", item.local)).width(Length::FillPortion(1)),
+                    text(format!("Cloud: {}", item.remote)).width(Length::FillPortion(1))
+                ]
+                .spacing(12),
+            );
+            for field in &item.fields {
+                let selected = app
+                    .cloud_choices
+                    .iter()
+                    .find(|c| c.id == item.id && c.field == field.field)
+                    .map(|c| c.side);
+                let id = item.id;
+                let local_field = field.field.clone();
+                let remote_field = field.field.clone();
+                let title = match field.field.as_str() {
+                    "password" => "Primary secret",
+                    "notes" => "Notes",
+                    "metadata" => "Type, URLs and custom fields",
+                    "history" => "Password history",
+                    "authenticator" => "Authenticator",
+                    "duo" => "Duo enrollment",
+                    "lifecycle" => "Active or deleted",
+                    "created" => "Created",
+                    "item" => "Item presence",
+                    "name" => "Name",
+                    "username" => "Username",
+                    "url" => "Website",
+                    other => other,
+                };
+                form = form.push(text(title.to_owned())).push(
+                    row![
+                        column![
+                            text(field.local.clone()),
+                            action(
+                                if selected == Some(Side::Local) {
+                                    "✓ Keep local"
+                                } else {
+                                    "Keep local"
+                                },
+                                Message::CloudChoice(id, local_field, Side::Local),
+                                ready
+                            )
+                        ]
+                        .width(Length::FillPortion(1))
+                        .spacing(6),
+                        column![
+                            text(field.remote.clone()),
+                            action(
+                                if selected == Some(Side::Remote) {
+                                    "✓ Keep cloud"
+                                } else {
+                                    "Keep cloud"
+                                },
+                                Message::CloudChoice(id, remote_field, Side::Remote),
+                                ready
+                            )
+                        ]
+                        .width(Length::FillPortion(1))
+                        .spacing(6),
+                    ]
+                    .spacing(12),
+                );
+            }
+        }
+        let complete = review.items.iter().all(|item| {
+            item.fields.iter().all(|f| {
+                app.cloud_choices
+                    .iter()
+                    .any(|c| c.id == item.id && c.field == f.field)
+            })
+        });
+        form = form.push(action(
+            "Apply selected values and sync",
+            Message::ResolveCloud,
+            ready
+                && complete
+                && app.writes_allowed()
+                && !app.editor.as_ref().is_some_and(|d| d.dirty),
+        ));
+    }
     form = form
         .push(label("Server URL (save settings after editing)"))
         .push(

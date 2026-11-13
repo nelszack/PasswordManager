@@ -171,6 +171,20 @@ Zero disables automatic locking for this unlock session. If omitted, uses the co
       <p>Check for local and remote changes without applying them</p>
       <pre><code>Usage: pm sync check</code></pre>
     </section>
+    <section class="command" id="pm-sync-conflicts">
+      <h2><code>pm sync conflicts</code></h2>
+      <p>Compare local and cloud items; protected values are redacted</p>
+      <pre><code>Usage: pm sync conflicts</code></pre>
+    </section>
+    <section class="command" id="pm-sync-resolve">
+      <h2><code>pm sync resolve</code></h2>
+      <p>Apply explicit choices to an unchanged conflict review, preserving recovery copies</p>
+      <pre><code>Usage: pm sync resolve [OPTIONS] --review &lt;REVIEW&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--review &lt;REVIEW&gt;</code></dt><dd>Token printed by `pm sync conflicts`</dd>
+        <dt><code>--choose &lt;CHOICES&gt;</code></dt><dd>One choice per differing field: ITEM_ID:FIELD:local or ITEM_ID:FIELD:remote</dd>
+      </dl>
+    </section>
     <section class="command" id="pm-sync-now">
       <h2><code>pm sync now</code></h2>
       <p>Upload or download changes, preserving both copies on conflict</p>

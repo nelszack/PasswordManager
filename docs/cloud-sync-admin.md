@@ -106,17 +106,52 @@ or single-use pairing-code exchange.
 
 An upload names the remote version it started from. The server atomically rejects
 stale uploads. If both local and remote contents changed, neither copy is
-replaced. Automatic merging and an interactive conflict-resolution workflow are
-not implemented yet. To inspect the remote version without disturbing the local
-vault:
+replaced. Review differences in **Settings → Connection → Cloud sync → Review
+conflicts**. The desktop shows local and cloud labels side by side. Choose all
+local, all cloud, or select a side for each differing field, then choose **Apply
+selected values and sync**. Save or discard unfinished item edits first.
+
+Names, usernames, URLs, creation times, and deletion states are shown; passwords,
+notes, and protected groups remain redacted. Metadata (item type, additional
+URLs, and custom fields), password history, authenticators,
+and Duo credentials are selected as complete groups. The password-change time
+follows the selected primary secret. No choice is preselected.
+When an item exists on only one side, choosing the absent side removes it from
+the resolved vault. Independently created items can share a numeric ID; review
+creation times and item labels carefully. There is no automatic three-way merge.
+
+The CLI exposes the same review and choices:
+
+```bash
+pm sync conflicts
+pm sync resolve --review REVIEW_TOKEN \
+  --choose 1:name:local --choose 1:password:remote --choose 1:history:remote
+```
+
+Use the exact field names and token printed by `conflicts`, supplying one
+`--choose ITEM_ID:FIELD:local|remote` for every reported difference. The example
+assumes only those three fields differ. If no fields differ but ciphertexts do,
+`pm sync resolve --review REVIEW_TOKEN` reconciles them without field choices.
+
+Resolution rejects stale reviews if either snapshot, the unlock session, or
+connection changed. Refresh the review and choose again. Before applying,
+the client saves both complete encrypted versions as separate local vault files
+with synchronization disabled, and reports their filenames. These recovery copies
+use the corresponding original password or external key and retain history and
+trash. They remain until you explicitly delete them.
+
+The resolved vault is saved locally and uploaded against the reviewed cloud
+version. A later remote edit is preserved as another conflict; an offline upload
+remains pending. Check current state before retrying an uncertain operation.
+If another device changed the password/key so this session cannot decrypt the
+cloud version, download an independent copy and unlock it with its current
+credentials:
 
 ```bash
 pm sync pull CLOUD_VAULT_ID --copy
 ```
 
-That creates a separate comparison copy with sync disabled. Keep encrypted
-backups before manually reconciling conflicting credentials. Do not edit sync
-checkpoint files to bypass conflict checks.
+Do not edit sync checkpoint files to bypass conflict checks.
 
 Changing a master password or external key uploads a new encrypted snapshot. An
 already-unlocked peer cannot decrypt it with its old cached key; it preserves its

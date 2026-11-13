@@ -156,6 +156,61 @@ def main():
             assert sorted(s["enabled"] for s in checkpoints) == [False, True]
             print("PASS: concurrent edits preserve both copies and allow a disabled comparison download")
 
+            review = json.loads(desktop.run("sync", "conflicts").stdout)
+            def resolve(review, ok=True):
+                arguments = ["sync", "resolve", "--review", review["token"]]
+                for item in review["items"]:
+                    for field in item["fields"]:
+                        side = "remote" if field["field"] == "username" else "local"
+                        arguments.extend(["--choose", f"{item['id']}:{field['field']}:{side}"])
+                return desktop.run(*arguments, ok=ok)
+
+            desktop.run("update", "--id", "1", "--username", "desktop-user")
+            stale = resolve(review, ok=False)
+            assert "changed since review" in stale.stderr.lower()
+            review = json.loads(desktop.run("sync", "conflicts").stdout)
+            laptop.run("update", "--id", "1", "--username", "cloud-user")
+            laptop.run("sync", "now")
+            stale = resolve(review, ok=False)
+            assert "changed since review" in stale.stderr.lower()
+            original_files = set((desktop.root / "data").glob("*.enc"))
+            review = json.loads(desktop.run("sync", "conflicts").stdout)
+            result = resolve(review)
+            assert "recovery copies" in result.stdout.lower()
+            recovery = set((desktop.root / "data").glob("*.enc")) - original_files
+            assert len(recovery) == 2
+            laptop.run("sync", "now")
+            for device in devices:
+                items = str(device.names())
+                assert "Desktop conflict" in items and "cloud-user" in items
+            # Old consent cannot be replayed after resolution.
+            resolve(review, ok=False)
+            # Recoveries retain both original versions and can actually unlock.
+            recovered_names = []
+            for path in recovery:
+                checkpoint = json.loads(path.with_suffix(".sync.json").read_text())
+                assert checkpoint["enabled"] is False
+                desktop.run("lock")
+                desktop.run("unlock", "--vault-file", path.name, "--key", str(key))
+                recovered = str(desktop.names())
+                recovered_names.append(recovered)
+                if "desktop-user" in recovered:
+                    assert checkpoint["version"] is None and checkpoint["digest"] is None
+                    # This older local version must not masquerade as current.
+                    enabled = desktop.run("sync", "enable", ok=False)
+                    assert "conflict" in enabled.stderr.lower()
+                    assert str(desktop.names()) == recovered
+                    desktop.run("sync", "disable")
+            assert any("Desktop conflict" in name and "desktop-user" in name for name in recovered_names)
+            assert any("Laptop conflict" in name and "cloud-user" in name for name in recovered_names)
+            desktop.run("lock")
+            # Use the original enabled binding, not one of the comparison copies.
+            active_filename = next(p.name.removesuffix(".sync.json") + ".enc"
+                                   for p in (desktop.root / "data").glob("*.sync.json")
+                                   if json.loads(p.read_text())["enabled"])
+            desktop.run("unlock", "--vault-file", active_filename, "--key", str(key))
+            print("PASS: stale review rejection, mixed-field resolution, convergence and decryptable encrypted recovery copies")
+
             # Server persistence must survive a restart without changing the version.
             before = json.loads(laptop.run("sync", "vaults").stdout)
             cloud.terminate()

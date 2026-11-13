@@ -14,7 +14,9 @@ use std::{
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
-pub use pm_contracts::cloud::Action;
+pub use pm_contracts::cloud::{
+    Action, Choice, ConflictField, ConflictItem, ConflictReview, Resolution, Side,
+};
 
 pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -339,7 +341,7 @@ impl CloudClient {
 pub(crate) fn install_download(
     server_url: &str,
     id: &str,
-    version: String,
+    version: Option<String>,
     bytes: Vec<u8>,
     independent_copy: bool,
 ) -> Result<String, String> {
@@ -362,8 +364,10 @@ pub(crate) fn install_download(
         &Binding {
             server_url: server_url.to_owned(),
             vault_id: id.into(),
-            version: Some(version),
-            digest: Some(digest(&bytes)),
+            // A local recovery snapshot has no shared remote baseline. It
+            // must compare on re-enabling sync rather than claim to be current.
+            digest: version.as_ref().map(|_| digest(&bytes)),
+            version,
             enabled: !independent_copy,
         },
     )?;

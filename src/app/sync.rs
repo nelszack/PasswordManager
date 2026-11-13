@@ -59,6 +59,39 @@ pub(super) async fn run(
                 SyncCommands::Status => Action::Status,
                 SyncCommands::Check => Action::Check,
                 SyncCommands::Now => Action::Now,
+                SyncCommands::Conflicts => Action::Conflicts,
+                SyncCommands::Resolve { review, choices } => {
+                    let choices = choices
+                        .iter()
+                        .map(|value| {
+                            let parts: Vec<_> = value.split(':').collect();
+                            let invalid = || -> ! {
+                                console.exit_error(
+                                    "Use --choose ITEM_ID:FIELD:local or ITEM_ID:FIELD:remote",
+                                    2,
+                                )
+                            };
+                            if parts.len() != 3 {
+                                invalid();
+                            }
+                            let id = parts[0].parse::<u64>().unwrap_or_else(|_| invalid());
+                            let side = match parts[2] {
+                                "local" => cloud::Side::Local,
+                                "remote" => cloud::Side::Remote,
+                                _ => invalid(),
+                            };
+                            cloud::Choice {
+                                id,
+                                field: parts[1].into(),
+                                side,
+                            }
+                        })
+                        .collect();
+                    Action::Resolve(cloud::Resolution {
+                        token: review,
+                        choices,
+                    })
+                }
                 _ => unreachable!("connect handled above"),
             };
             if let Err(code) = console.send_command(client, ServerCommand::Cloud(action)) {

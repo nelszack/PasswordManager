@@ -44,6 +44,8 @@ pm unlock
 
 A single cloud vault is selected automatically; multiple vaults require selection.
 Locked or offline devices catch up after reconnecting and unlocking. Conflicting
-edits preserve both copies; see [conflict recovery](cloud-sync-admin.md#conflicts-and-password-changes).
+edits preserve both copies. Use **Review conflicts** in Cloud sync to choose
+local or cloud values per field, with encrypted recovery copies saved before
+applying. See [conflict recovery](cloud-sync-admin.md#conflicts-and-password-changes).
 
 See the [terminal walkthrough](cloud-sync-cli.md) for status and sync controls.

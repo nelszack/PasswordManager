@@ -352,6 +352,19 @@ fn rendered_screens_fit_supported_windows() {
         app.tab = Tab::Settings;
         app.cloud_vaults = vec!["a".repeat(32)];
         app.cloud_vault = app.cloud_vaults.first().cloned();
+        app.cloud_review = Some(password_manager::cloud::ConflictReview {
+            token: "synthetic-review".into(),
+            items: vec![password_manager::cloud::ConflictItem {
+                id: 1,
+                local: "Personal email · alice@example.test · Active".into(),
+                remote: "Personal email · alice@example.test · Deleted".into(),
+                fields: vec![password_manager::cloud::ConflictField {
+                    field: "password".into(),
+                    local: "Protected value differs".into(),
+                    remote: "Protected value differs".into(),
+                }],
+            }],
+        });
         for section in presentation::SettingsSection::ALL {
             app.ui.settings_section = section;
             render(&app, &format!("settings-{section}"), width, 800, scale);

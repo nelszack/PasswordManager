@@ -139,6 +139,8 @@ enum Job {
     Local,
     Cloud,
     CloudList,
+    CloudConflicts,
+    CloudResolve,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +158,9 @@ enum Message {
     Cloud(password_manager::cloud::Action),
     CloudToken(SecretString),
     CloudVault(String),
+    CloudChoice(u64, String, password_manager::cloud::Side),
+    CloudChooseAll(password_manager::cloud::Side),
+    ResolveCloud,
     SaveCloudToken,
     Finished(u64, Job, Arc<Result<Reply, Failure>>),
     Connect,
@@ -332,6 +337,8 @@ struct App {
     cloud_token: SecretString,
     cloud_vaults: Vec<String>,
     cloud_vault: Option<String>,
+    cloud_review: Option<password_manager::cloud::ConflictReview>,
+    cloud_choices: Vec<password_manager::cloud::Choice>,
     vault_revision: Option<u64>,
     confirm_reset_settings: bool,
     workspace: workflows::State,
@@ -351,6 +358,8 @@ impl App {
             cloud_token: SecretString::default(),
             cloud_vaults: vec![],
             cloud_vault: None,
+            cloud_review: None,
+            cloud_choices: vec![],
             vault_revision: None,
             unlock_timeout: conf.unlock.timeout.to_string(),
             vault: conf.unlock.vault_id.clone(),
@@ -618,6 +627,8 @@ impl App {
     }
 
     fn clear_vault(&mut self) {
+        self.cloud_review = None;
+        self.cloud_choices.clear();
         self.hide_secrets();
         self.session = None;
         self.workspace.clear_vault();
@@ -757,10 +768,64 @@ impl App {
             Message::Cloud(action) => {
                 let job = if matches!(action, password_manager::cloud::Action::List) {
                     Job::CloudList
+                } else if matches!(action, password_manager::cloud::Action::Conflicts) {
+                    self.cloud_review = None;
+                    self.cloud_choices.clear();
+                    Job::CloudConflicts
                 } else {
+                    self.cloud_review = None;
+                    self.cloud_choices.clear();
                     Job::Cloud
                 };
                 return self.request(job, ServerCommand::Cloud(action), None);
+            }
+            Message::CloudChoice(id, field, side) => {
+                if !self.busy() {
+                    self.cloud_choices
+                        .retain(|c| c.id != id || c.field != field);
+                    self.cloud_choices
+                        .push(password_manager::cloud::Choice { id, field, side });
+                }
+            }
+            Message::CloudChooseAll(side) => {
+                if !self.busy()
+                    && let Some(review) = &self.cloud_review
+                {
+                    self.cloud_choices = review
+                        .items
+                        .iter()
+                        .flat_map(|item| {
+                            item.fields
+                                .iter()
+                                .map(move |field| password_manager::cloud::Choice {
+                                    id: item.id,
+                                    field: field.field.clone(),
+                                    side,
+                                })
+                        })
+                        .collect();
+                }
+            }
+            Message::ResolveCloud => {
+                if !self.writes_allowed() || self.editor.as_ref().is_some_and(|d| d.dirty) {
+                    self.notice =
+                        "Save or discard pending item edits before resolving sync conflicts."
+                            .into();
+                    return Task::none();
+                }
+                if let Some(review) = self.cloud_review.take() {
+                    let resolution = password_manager::cloud::Resolution {
+                        token: review.token,
+                        choices: std::mem::take(&mut self.cloud_choices),
+                    };
+                    self.hide_secrets();
+                    self.workspace.clear_vault();
+                    return self.request(
+                        Job::CloudResolve,
+                        ServerCommand::Cloud(password_manager::cloud::Action::Resolve(resolution)),
+                        None,
+                    );
+                }
             }
             Message::CloudToken(token) => self.cloud_token = token,
             Message::CloudVault(id) => self.cloud_vault = Some(id),
@@ -1890,6 +1955,30 @@ impl App {
                     }
                     Err(e) => self.notice = format!("Invalid vault list: {e}"),
                 }
+            }
+            (Job::CloudConflicts, ResponsePayload::Message(message)) => {
+                match serde_json::from_str::<password_manager::cloud::ConflictReview>(&message) {
+                    Ok(review) => {
+                        self.notice = if review.items.is_empty() {
+                            "No item differences. Apply the resolution to reconcile the snapshots."
+                        } else {
+                            "Choose which values to keep, then apply the resolution."
+                        }
+                        .into();
+                        self.cloud_choices.clear();
+                        self.cloud_review = Some(review);
+                    }
+                    Err(e) => self.notice = format!("Invalid conflict review: {e}"),
+                }
+            }
+            (Job::CloudResolve, ResponsePayload::Message(message)) => {
+                self.notice = message;
+                self.workspace.clear_vault();
+                self.item = None;
+                self.editor = Editor::Closed;
+                self.ui.undo_trash = None;
+                self.ui.saved_item = None;
+                return self.load_items();
             }
             (Job::Cloud, ResponsePayload::Message(message)) => {
                 self.notice = message;

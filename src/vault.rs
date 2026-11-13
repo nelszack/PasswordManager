@@ -48,6 +48,7 @@ pub(crate) use backup::restore_encrypted_backup;
 mod entries;
 mod export;
 
+mod conflicts;
 mod persistence;
 mod sync;
 pub use persistence::VaultStore;

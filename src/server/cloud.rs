@@ -116,12 +116,22 @@ pub(super) async fn command(
                     if stopping.load(Ordering::Acquire) {
                         return Err("Server is stopping; download was not installed".into());
                     }
-                    crate::cloud::install_download(&url, &id, version, bytes, independent_copy)
+                    crate::cloud::install_download(
+                        &url,
+                        &id,
+                        Some(version),
+                        bytes,
+                        independent_copy,
+                    )
                 })
                 .await??;
             Ok(format!(
                 "Downloaded encrypted vault as {filename}. Unlock it with its existing password or external key."
             ))
+        }
+        Action::Conflicts => review_or_resolve(worker, None, expected_session, stopping).await,
+        Action::Resolve(resolution) => {
+            review_or_resolve(worker, Some(resolution), expected_session, stopping).await
         }
         Action::Disable => {
             worker
@@ -160,6 +170,93 @@ pub(super) async fn command(
             )
             .await
         }
+    }
+}
+/// Bind consent to the exact two ciphertexts, connection, and unlock session.
+fn review_token(snap: &Snapshot, server: &str, version: &str, bytes: &[u8]) -> String {
+    digest(
+        &serde_json::to_vec(&(
+            &snap.session,
+            &snap.id,
+            server,
+            digest(&snap.bytes),
+            version,
+            digest(bytes),
+        ))
+        .expect("strings serialize"),
+    )
+}
+async fn review_or_resolve(
+    worker: &VaultWorker,
+    resolution: Option<crate::cloud::Resolution>,
+    expected_session: Option<String>,
+    stopping: Arc<AtomicBool>,
+) -> Result<String, String> {
+    let snap = snapshot(worker).await?;
+    if expected_session.as_ref() != Some(&snap.session) {
+        return Err("Unlock session changed before conflict review".into());
+    }
+    let client = client().await?;
+    let state = snap
+        .state
+        .as_ref()
+        .ok_or("This vault is not connected to sync")?;
+    if !state.enabled || state.server_url != client.url || state.vault_id != snap.id {
+        return Err("Sync binding or connection changed; review again".into());
+    }
+    let (version, bytes) = client.download(&snap.id).await?;
+    let token = review_token(&snap, &client.url, &version, &bytes);
+    if resolution.as_ref().is_some_and(|r| r.token != token) {
+        return Err(
+            "Local or cloud vault changed since review; refresh conflicts and choose again".into(),
+        );
+    }
+    let url = client.url.clone();
+    let resolving = resolution.is_some();
+    let result = worker.with_session(move |session| {
+        if stopping.load(Ordering::Acquire) {
+            return Err("Server is stopping; conflict resolution was not applied".into());
+        }
+        if session.session_id().as_ref() != Some(&snap.session) {
+            return Err("Vault locked or switched during conflict review".into());
+        }
+        if binding(&snap.path)? != snap.state || digest(&read_bounded_file(&snap.path, crate::cloud::MAX_BYTES).map_err(|e| e.to_string())?) != digest(&snap.bytes) {
+            return Err("Local vault or sync settings changed; review again".into());
+        }
+        session.with_unlocked(|vault, credentials| {
+            let work = (|| -> Result<String, String> {
+                let Some(resolution) = resolution else {
+                    let items = vault.cloud_conflicts(credentials, &bytes)?;
+                    return serde_json::to_string_pretty(&crate::cloud::ConflictReview { token, items }).map_err(|e| e.to_string());
+                };
+                let merged = vault.merge_cloud(credentials, &bytes, &resolution.choices)?;
+                // Preserve both full encrypted snapshots, including history/trash,
+                // before committing any decision. Recovery copies never auto-sync.
+                let local_copy = crate::cloud::install_download(&url, &snap.id, None, snap.bytes, true)?;
+                let remote_copy = crate::cloud::install_download(&url, &snap.id, Some(version.clone()), bytes.clone(), true)?;
+                vault.apply_cloud(credentials, &merged)?;
+                let mut state = snap.state.ok_or("Sync binding removed")?;
+                // The remote remains the upload's CAS base. A concurrent upload
+                // after review will cause normal sync to preserve both versions.
+                state.version = Some(version);
+                state.digest = Some(digest(&bytes));
+                save_binding(&snap.path, &state)?;
+                Ok(format!("Resolution saved. Encrypted recovery copies: {local_copy} (local), {remote_copy} (cloud)."))
+            })();
+            work.map_err(crate::vault::VaultError::Persistence)
+        }).map_err(|e| e.to_string())
+    }).await??;
+    if !resolving {
+        return Ok(result);
+    }
+    match sync(worker, false, false, expected_session).await {
+        Ok(message) => {
+            worker.set_cloud_warning(None).await;
+            Ok(format!("{result}\n{message}"))
+        }
+        Err(error) => Ok(format!(
+            "{result}\nSync pending: {error}. Review current state before retrying."
+        )),
     }
 }
 /// A comparison fetch is required before declaring a conflict: independently
@@ -276,7 +373,7 @@ async fn sync(
             return Ok("Vault is up to date".into());
         }
         if compared == SyncDecision::Conflict {
-            return Err("Sync conflict: local and cloud vaults both changed. Both copies are preserved; automatic merging is not supported yet.".into());
+            return Err("Sync conflict: local and cloud vaults both changed. Both copies are preserved; review them in Cloud sync or run pm sync conflicts.".into());
         }
         if version != remote.version {
             return Err("Cloud changed during download; retry sync".into());

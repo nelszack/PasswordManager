@@ -1874,3 +1874,81 @@ fn connecting_requires_discard_even_when_reusing_the_same_port() {
     assert!(app.session.is_none());
     assert_eq!(app.client.port, port);
 }
+
+#[test]
+fn cloud_conflict_choices_are_explicit_and_cleared_on_lock() {
+    use password_manager::cloud::{ConflictField, ConflictItem, ConflictReview, Side};
+    let mut app = unlocked();
+    app.cloud_review = Some(ConflictReview {
+        token: "review-token".into(),
+        items: vec![ConflictItem {
+            id: 1,
+            local: "Local item".into(),
+            remote: "Cloud item".into(),
+            fields: vec![
+                ConflictField {
+                    field: "name".into(),
+                    local: "Local".into(),
+                    remote: "Cloud".into(),
+                },
+                ConflictField {
+                    field: "password".into(),
+                    local: "Protected".into(),
+                    remote: "Protected".into(),
+                },
+            ],
+        }],
+    });
+    assert!(app.cloud_choices.is_empty());
+    let _ = app.update(Message::CloudChooseAll(Side::Local));
+    assert_eq!(app.cloud_choices.len(), 2);
+    let _ = app.update(Message::CloudChoice(1, "password".into(), Side::Remote));
+    assert_eq!(app.cloud_choices.len(), 2);
+    assert_eq!(
+        app.cloud_choices
+            .iter()
+            .find(|c| c.field == "password")
+            .unwrap()
+            .side,
+        Side::Remote
+    );
+    let _ = app.view();
+    app.editor = Editor::new(Draft::from_item(&item()));
+    app.editor.as_mut().unwrap().dirty = true;
+    let _ = app.update(Message::ResolveCloud);
+    assert!(
+        app.cloud_review.is_some(),
+        "unsaved edits must survive resolution attempts"
+    );
+    app.clear_vault();
+    assert!(app.cloud_review.is_none() && app.cloud_choices.is_empty());
+}
+
+#[test]
+fn applying_cloud_resolution_discards_old_tool_results_and_confirmations() {
+    let mut app = unlocked();
+    app.items = vec![editor_summary(&item())];
+    app.workspace.selected = Some(workflows::Choice {
+        id: 1,
+        label: "Previous item".into(),
+    });
+    app.workspace.configuration = "previous authenticator input".into();
+    app.workspace.result = Some(ResponsePayload::Message("Previous report".into()));
+    app.workspace.prepared = Some(
+        app.workspace
+            .prepare(workflows::Action::RemoveOtp, &app)
+            .unwrap(),
+    );
+    let _ = app.complete(
+        Job::CloudResolve,
+        reply(
+            ResponsePayload::Message("Resolution saved".into()),
+            Some(&"a".repeat(64)),
+        ),
+    );
+    assert!(app.workspace.prepared.is_none());
+    assert!(app.workspace.selected.is_none());
+    assert!(app.workspace.result.is_none());
+    assert!(app.workspace.configuration.is_empty());
+    assert!(app.item.is_none() && app.editor.is_none());
+}
