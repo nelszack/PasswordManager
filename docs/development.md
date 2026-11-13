@@ -11,6 +11,8 @@
 
 - `src/main.rs` and `src/app/` - CLI initialization, explicit output settings, local commands, and conversion to server requests
 - `src/gui/` - Iced desktop client, asynchronous server adapter, editor state, and native widgets
+- `src/gui/connection.rs`, `editor.rs`, `generator.rs`, and `cloud.rs` - Desktop component state and event handlers; shared request sequencing stays in `App`
+- `src/gui/workflows/forms.rs` - Tool form inputs, separate from results, confirmation, and watch lifetimes
 - `src/gui/settings.rs` - Complete configuration form, input validation, and edits relative to its loaded settings
 - `src/desktop.rs` - Linux application-menu launcher installation for the same executable
 - `src/server.rs` and `src/server/` - Authenticated connections, a bounded vault worker, command handling, and external effects
@@ -28,12 +30,12 @@
 - `src/vault/sync.rs` - Authenticated application of downloaded snapshots on the vault owner
 - `sync-server/` - Independent Go snapshot server, device enrollment, quotas, and Linux service unit
 - `src/clipboard.rs` - Clipboard operations
-- `src/file.rs` - Application paths, key-path validation, private permissions, and atomic file writes
+- `src/file.rs` - Shared platform exports for paths, vault discovery, private permissions, and atomic file writes
 - `crates/pm-contracts/src/protocol.rs` and `crates/pm-contracts/src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
 - `src/lib.rs` - Shared production library used by the CLI and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
 - `docs/commands.template.html` - Static layout used by the command-reference generator
-- `extension/` - Browser extension (Chrome/Chromium)
+- `extension/` - Browser extension (Chrome/Chromium); `ui_transport.js` shares window messaging and reports failures without retrying mutations
 
 See the [architecture review](architecture-review.md) for the reasoning behind
 the domain, protocol, and session refactor.
@@ -421,7 +423,9 @@ Memory-only mutation tests use an explicit memory store; missing credentials
 cannot silently turn a persistent write into a memory-only success.
 
 The daemon's bounded worker owns `VaultSession::Locked` or a complete unlocked
-vault with cached encryption material. It prioritizes lock/shutdown control work,
+vault with cached encryption material. Wire `PasswordType` carries only a password
+or key path; local `VaultCredentials` explicitly represents locked, supplied, or
+cached-key state and wipes its material on drop. It prioritizes lock/shutdown control work,
 uses one inactivity deadline, and publishes nonsecret status independently of
 long operations. A filesystem commit already in progress must finish at its safe
 boundary before locking. Duo and breach network waits run outside the owner;
@@ -493,7 +497,82 @@ Session lifecycle commands run before unlocked dispatch. Other commands borrow a
 complete vault and its cached credentials through `with_unlocked`; ordinary errors
 retain the same session epoch, while a panic leaves the session locked. Desktop
 request activity is one `RequestState`; edit/view refreshes share an `ItemIntent`.
-The persistence encoder uses a reference map and vector with the existing schema.
+The persistence encoder streams ordered item references with the existing schema.
 
 Sync server deployment is an independent administration task. The Rust binary no
 longer embeds Go source, installer scripts, SSH state, or remote-update logic.
+
+### Performance boundaries
+
+Desktop status reads cache vault and pending-operation directory listings by path,
+server port where relevant, and directory metadata. Local mutations invalidate the
+appropriate cache, explicit vault refresh bypasses it, and a short expiry bounds
+staleness on filesystems with coarse directory timestamps. Operation journal writes
+still sync the file and parent before sending a mutation.
+
+Vault persistence streams an ordered merge of live and staged item references into
+the existing named-field document format. Search lazily caches normalized metadata;
+notes and secret custom-field values are excluded from that index. Indexes are wiped
+on invalidation or lock and never enter the encrypted document. Portable imports
+use a lightweight format probe and direct typed decoding, avoiding a generic JSON
+tree for normal portable exports while retaining duplicate-field validation.
+
+The content observer keeps a bounded cache of subtree membership across attribute
+changes. Structural mutations and explicit discovery invalidate it; cached elements
+are still checked for newly attached open shadow roots.
+
+### Performance benchmarks
+
+Run the opt-in suite with `npm run bench`. Rust workloads use optimized release
+builds; the first run compiles the CLI library and desktop test harness and can
+therefore take several minutes. Chromium must already be installed for Playwright
+(the same browser used by the E2E suite). Benchmarks never install dependencies.
+
+```bash
+npm run bench -- --quick
+npm run bench -- --suite core --sizes 100,1000,10000 --samples 15
+npm run bench -- --suite desktop
+npm run bench -- --suite browser
+npm run bench -- --output test-results/benchmarks/before
+# Make a change, then compare matching workload sizes using a fresh directory:
+npm run bench -- --output test-results/benchmarks/after --baseline test-results/benchmarks/before/summary.json
+```
+
+`--quick` reduces sample counts and sizes; it still uses release builds.
+`--profile dev` is useful for checking the harness against existing debug builds,
+but those timings cannot be compared to release reports. All normal tests skip
+the ignored `performance_benchmarks` functions; timing noise never fails CI.
+
+The workloads cover full snapshot serialization and a one-item overlay, cold and
+warm searches, uncached private-note searches, portable JSON import, forced and
+cached directory discovery, and real Chromium DOM discovery with attribute-only
+and structural changes, including open shadow roots. Rust fixture construction,
+source JSON creation, filesystem fixture creation, and warmup are excluded from
+timings. Returning/dropping results is included. Cold-search fixture cloning is
+excluded; it resets the runtime index rather than evicting CPU or OS caches.
+Directory scans use the OS page cache, so they are not cold-disk measurements.
+Snapshot timing excludes encryption, KDFs, fsync, IPC, and cloud traffic.
+
+The browser runs production observer and field-detection code with button
+rendering replaced by classification counters. Its primary timing is processing
+CPU time inside the observer's animation-frame callback; `wall_median_ns` also
+includes frame scheduling. Initial discovery is timed synchronously; browser fixture creation and observer
+disposal are outside timings. Subtree
+query counts and control counts help identify skipped work or lost detection.
+The largest fixture deliberately exceeds the observer snapshot cache capacity;
+attribute-only updates can therefore expose cache churn rather than always giving
+cache hits. These workloads do not measure the entire browser extension or native desktop UI.
+
+Reports go to a new directory under `test-results/benchmarks/` (gitignored), with
+per-suite logs/JSONL, a machine/runtime/build manifest and source fingerprint, and
+`summary.json`. A run fails if relevant source files change while it executes. Each row contains median, p95 and minimum **sample means**, raw
+sample means in execution order, and iteration counts; p95 is not individual-request tail latency.
+The harness calibrates batch lengths, uses `black_box` in Rust, and keeps all data
+synthetic. It neither reads personal vaults nor sends requests to external services.
+
+`--baseline` writes `comparison.json` (negative changes mean faster), rejects
+incompatible workload versions/build profiles, and requires all current cases in
+the baseline. Compare several runs on the same machine, browser/toolchain, power
+settings, and background load. Report differences are descriptive, with no
+statistical-significance claim or automatic timing regression threshold. Bump
+`workload_version` in the runner when changing fixtures or measurement semantics.

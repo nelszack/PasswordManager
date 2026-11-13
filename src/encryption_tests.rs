@@ -103,10 +103,12 @@ fn session_rewrites_preserve_the_parameters_that_derived_the_key() {
         parallelism: 2,
     };
     let password = "parameter-migration-test";
-    let mut session = PasswordType::Password(password.into());
+    let mut session = VaultCredentials::from(PasswordType::Password(password.into()));
     let first = with_test_kdf_parameters(original_parameters, || {
         try_encrypt_file_in_place(&mut session, b"first".to_vec()).unwrap()
     });
+    assert!(matches!(session, VaultCredentials::Session { .. }));
+    assert!(!format!("{session:?}").contains(password));
     assert_eq!(
         u32::from_be_bytes(first[10..14].try_into().unwrap()),
         original_parameters.memory_kib
@@ -128,11 +130,16 @@ fn session_rewrites_preserve_the_parameters_that_derived_the_key() {
         original_parameters.parallelism
     );
 
-    let mut fresh_password = PasswordType::Password(password.into());
+    let mut fresh_password = VaultCredentials::from(PasswordType::Password(password.into()));
     assert_eq!(
         decrypt_file(&mut fresh_password, &rewritten).as_deref(),
         Some(b"rewritten".as_slice())
     );
+    assert!(matches!(fresh_password, VaultCredentials::Session { .. }));
+    fresh_password.zeroize();
+    assert!(fresh_password.is_locked());
+    assert!(decrypt_file(&mut fresh_password, &rewritten).is_none());
+    assert!(try_encrypt_file_in_place(&mut fresh_password, b"locked".to_vec()).is_err());
 }
 
 proptest! {
@@ -140,7 +147,7 @@ proptest! {
     fn arbitrary_encrypted_inputs_never_panic(
         bytes in proptest::collection::vec(any::<u8>(), 0..4096)
     ) {
-        let mut session = PasswordType::Session {
+        let mut session = VaultCredentials::Session {
             encryption_key: [0; 32],
             salt: [0; 16],
             kdf: KDF_ARGON2ID,
@@ -164,7 +171,7 @@ proptest! {
         header[10..14].copy_from_slice(&memory_kib.to_be_bytes());
         header[14..18].copy_from_slice(&iterations.to_be_bytes());
         header[18..22].copy_from_slice(&parallelism.to_be_bytes());
-        let mut password = PasswordType::Password("parser-test".into());
+        let mut password = VaultCredentials::from(PasswordType::Password("parser-test".into()));
         prop_assert!(decrypt_file(&mut password, &header).is_none());
     }
 }
@@ -174,8 +181,8 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
     crate::file::init_test_data_dir();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("vault.key");
-    let key_file = || PasswordType::Key(path.to_str().unwrap().into());
-    gen_master_key(&mut key_file(), true);
+    let key_file = || VaultCredentials::from(PasswordType::Key(path.to_str().unwrap().into()));
+    gen_master_key(key_file().supplied().unwrap(), true);
     for (label, bytes) in [
         ("generated key", fs::read(&path).unwrap()),
         (
@@ -185,7 +192,7 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
     ] {
         fs::write(&path, &bytes).unwrap();
         assert_eq!(
-            try_gen_master_key(&mut key_file(), false).unwrap(),
+            try_gen_master_key(key_file().supplied().unwrap(), false).unwrap(),
             master_key_from_keyfile(&bytes),
             "{label}"
         );
@@ -204,7 +211,7 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
         .set_len(MAX_KEY_FILE_BYTES + 1)
         .unwrap();
     assert!(
-        try_gen_master_key(&mut key_file(), false)
+        try_gen_master_key(key_file().supplied().unwrap(), false)
             .unwrap_err()
             .contains("byte limit")
     );
@@ -224,7 +231,7 @@ fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     let mut plaintext = Vec::with_capacity(expected.len() + HEADER_LEN + 16);
     plaintext.extend_from_slice(expected);
     let allocation = plaintext.as_ptr();
-    let mut pass = PasswordType::Password("test123".into());
+    let mut pass = VaultCredentials::from(PasswordType::Password("test123".into()));
     let encrypted = try_encrypt_file_in_place(&mut pass, plaintext).unwrap();
     assert_eq!(encrypted.as_ptr(), allocation);
     assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
@@ -232,8 +239,8 @@ fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
 #[test]
 fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonces() {
     let plaintext = b"same plaintext";
-    let mut first_session = PasswordType::Password("test123".into());
-    let mut second_session = PasswordType::Password("test123".into());
+    let mut first_session = VaultCredentials::from(PasswordType::Password("test123".into()));
+    let mut second_session = VaultCredentials::from(PasswordType::Password("test123".into()));
     let e1 = encrypt_file(&mut first_session, plaintext);
     let e2 = encrypt_file(&mut second_session, plaintext);
     let e3 = encrypt_file(&mut first_session, plaintext);
@@ -258,7 +265,7 @@ fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonc
         let encrypted = encrypt_file(&mut first_session, &plaintext);
         for mut credential in [
             first_session.clone(),
-            PasswordType::Password("test123".into()),
+            VaultCredentials::from(PasswordType::Password("test123".into())),
         ] {
             assert_eq!(
                 decrypt_file(&mut credential, &encrypted).unwrap(),
@@ -270,11 +277,11 @@ fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonc
 }
 #[test]
 fn decryption_rejects_wrong_credentials_invalid_headers_and_modified_ciphertext() {
-    let mut pass = PasswordType::Password("test123".into());
+    let mut pass = VaultCredentials::from(PasswordType::Password("test123".into()));
     let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
     assert!(
         decrypt_file(
-            &mut PasswordType::Password("wrong-password".into()),
+            &mut VaultCredentials::from(PasswordType::Password("wrong-password".into())),
             &encrypted
         )
         .is_none(),
@@ -284,7 +291,7 @@ fn decryption_rejects_wrong_credentials_invalid_headers_and_modified_ciphertext(
         ("truncated header", b"short".as_slice()),
         ("unversioned data", &[0; HEADER_LEN + 16]),
     ] {
-        let mut uncached = PasswordType::Password("test123".into());
+        let mut uncached = VaultCredentials::from(PasswordType::Password("test123".into()));
         assert!(decrypt_file(&mut uncached, invalid).is_none(), "{label}");
     }
     for offset in [8, 9, 10, 22, HEADER_LEN - 1] {

@@ -124,16 +124,16 @@ fn navigation(app: &App) -> Element<'_, Message> {
 }
 
 pub(super) fn view(app: &App) -> Element<'_, Message> {
-    let status = if !app.running {
+    let status = if !app.connection.running {
         "Offline".to_owned()
-    } else if app.session.is_some() {
+    } else if app.connection.session.is_some() {
         if let Some((id, _)) = app
             .ui
             .active_vault
             .as_ref()
-            .filter(|(_, session)| app.session.as_ref() == Some(session))
+            .filter(|(_, session)| app.connection.session.as_ref() == Some(session))
         {
-            let name = app.names.label(id, &app.vaults);
+            let name = app.names.label(id, &app.connection.vaults);
             let limit = if app.compact() { 12 } else { 32 };
             let name = if name.chars().count() > limit {
                 format!("{}…", name.chars().take(limit - 1).collect::<String>())
@@ -169,7 +169,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
         action(
             if app.compact() { "Lock" } else { "Lock vault" },
             Message::Lock,
-            app.running && app.session.is_some()
+            app.connection.running && app.connection.session.is_some()
         )
         .padding(if app.compact() { [9, 10] } else { [11, 14] }),
     ]
@@ -211,7 +211,7 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
             text("Review the last change before continuing").size(17),
             text("The result of a previous change is uncertain. Inspect the vault before allowing new changes.").size(14),
             text(format!("Operation {id}")).size(14),
-            primary("Check last change", Message::Reconcile, !app.busy() && app.running),
+            primary("Check last change", Message::Reconcile, !app.busy() && app.connection.running),
         ].spacing(8);
         if app.recovery.reviewed() {
             recovery = recovery.push(action(
@@ -251,8 +251,8 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
         shortcuts()
     } else {
         match app.tab {
-            Tab::Vault if !app.running => stopped(app),
-            Tab::Vault if app.session.is_none() => unlock(app),
+            Tab::Vault if !app.connection.running => stopped(app),
+            Tab::Vault if app.connection.session.is_none() => unlock(app),
             Tab::Vault => vault(app),
             Tab::Generator => generator(app),
             Tab::Settings => settings(app),
@@ -383,7 +383,7 @@ fn feedback(app: &App) -> Element<'_, Message> {
         .ui
         .undo_trash
         .as_ref()
-        .is_some_and(|(_, session)| app.session.as_ref() == Some(session))
+        .is_some_and(|(_, session)| app.connection.session.as_ref() == Some(session))
         && app.tab == Tab::Vault
         && app.editor.is_none()
     {
@@ -410,6 +410,7 @@ fn feedback(app: &App) -> Element<'_, Message> {
 
 fn connection_controls(app: &App) -> Column<'_, Message> {
     let valid_port = app
+        .connection
         .connection_port
         .trim()
         .parse::<u16>()
@@ -417,7 +418,7 @@ fn connection_controls(app: &App) -> Column<'_, Message> {
     let mut controls = column![
         label("Temporary connection port (1–65535)"),
         row![
-            text_input("Port", &app.connection_port)
+            text_input("Port", &app.connection.connection_port)
                 .padding(10)
                 .on_input_maybe((!app.busy()).then_some(Message::ConnectionPort))
                 .on_submit_maybe((!app.busy() && valid_port).then_some(Message::UseConnectionPort)),
@@ -458,7 +459,7 @@ fn stopped(app: &App) -> Element<'_, Message> {
 
 fn unlock(app: &App) -> Element<'_, Message> {
     let enabled = !app.busy();
-    if app.vaults.is_empty() && !app.creating {
+    if app.connection.vaults.is_empty() && !app.connection.creating {
         return container(container(scrollable(panel(column![
             text("Your passwords. Your vault.").size(28),
             text("Keep logins, notes, and other secrets together in an encrypted vault on this device.").size(16),
@@ -471,13 +472,13 @@ fn unlock(app: &App) -> Element<'_, Message> {
         ].spacing(18)).max_width(580)).height(Fill)).max_width(620)).center_x(Fill).height(Fill).into();
     }
     let mut form = column![
-        text(if app.creating {
+        text(if app.connection.creating {
             "Create your vault"
         } else {
             "Welcome back"
         })
         .size(28),
-        text(if app.creating {
+        text(if app.connection.creating {
             "One master password protects everything in this vault."
         } else {
             "Unlock your vault to access your items."
@@ -485,11 +486,11 @@ fn unlock(app: &App) -> Element<'_, Message> {
         .size(15),
     ]
     .spacing(14);
-    if !app.creating {
+    if !app.connection.creating {
         let choices = app.vault_choices();
         let selected = choices
             .iter()
-            .find(|choice| Some(&choice.id) == app.vault.as_ref())
+            .find(|choice| Some(&choice.id) == app.connection.vault.as_ref())
             .cloned();
         form = form.push(label("Vault")).push(
             pick_list(choices, selected, |choice: vault_names::Choice| {
@@ -500,8 +501,9 @@ fn unlock(app: &App) -> Element<'_, Message> {
             .padding(12),
         );
     }
-    let using_key = !app.creating && app.ui.unlock_advanced && !app.key_path.is_empty();
-    if app.creating {
+    let using_key =
+        !app.connection.creating && app.ui.unlock_advanced && !app.connection.key_path.is_empty();
+    if app.connection.creating {
         form = form.push(
             column![
                 label("Vault name"),
@@ -520,26 +522,28 @@ fn unlock(app: &App) -> Element<'_, Message> {
         form = form.push(
             column![
                 label("Master password"),
-                text_input("Enter master password", app.master.expose())
+                text_input("Enter master password", app.connection.master.expose())
                     .id("master-password")
                     .secure(true)
                     .padding(12)
                     .on_input_maybe(
                         enabled.then_some(|value: String| Message::Master(value.into()))
                     )
-                    .on_submit_maybe((enabled && !app.creating).then_some(Message::Unlock)),
+                    .on_submit_maybe(
+                        (enabled && !app.connection.creating).then_some(Message::Unlock)
+                    ),
             ]
             .spacing(6),
         );
     }
-    if app.creating {
+    if app.connection.creating {
         form = form
             .push(text("Use 14+ characters, such as several unrelated words.").size(14))
             .push(text("Keep this password somewhere safe. It cannot be reset; a backup still needs its original password or key file.").size(14))
             .push(
                 column![
                     label("Confirm master password"),
-                    text_input("Enter it again", app.confirmation.expose())
+                    text_input("Enter it again", app.connection.confirmation.expose())
                         .accessibility_label("Confirm master password")
                         .secure(true)
                         .padding(12)
@@ -548,8 +552,8 @@ fn unlock(app: &App) -> Element<'_, Message> {
                         )
                         .on_submit_maybe(
                             (app.writes_allowed()
-                                && app.master == app.confirmation
-                                && !app.master.is_empty()
+                                && app.connection.master == app.connection.confirmation
+                                && !app.connection.master.is_empty()
                                 && app.ui.master_error.is_none()
                                 && vault_names::validate_name(&app.ui.vault_name).is_ok())
                             .then_some(Message::Create)
@@ -557,12 +561,14 @@ fn unlock(app: &App) -> Element<'_, Message> {
                 ]
                 .spacing(6),
             );
-        if !app.master.is_empty()
+        if !app.connection.master.is_empty()
             && let Some(message) = app.ui.master_error
         {
             form = form.push(error(message));
         }
-        if !app.confirmation.is_empty() && app.master != app.confirmation {
+        if !app.connection.confirmation.is_empty()
+            && app.connection.master != app.connection.confirmation
+        {
             form = form.push(error("The passwords do not match yet."));
         }
     } else {
@@ -580,15 +586,17 @@ fn unlock(app: &App) -> Element<'_, Message> {
                     "Lock after inactivity (15m, 1h, or seconds; 0 disables)",
                 ))
                 .push(
-                    text_input("15m", &app.unlock_timeout)
+                    text_input("15m", &app.connection.unlock_timeout)
                         .accessibility_label("Lock after inactivity")
                         .padding(12)
                         .on_input(Message::UnlockTimeout),
                 );
-            if let Err(message) = password_manager::config::parse_duration(&app.unlock_timeout) {
+            if let Err(message) =
+                password_manager::config::parse_duration(&app.connection.unlock_timeout)
+            {
                 form = form.push(error(message));
             }
-            if let Some(id) = &app.vault {
+            if let Some(id) = &app.connection.vault {
                 form = form
                     .push(label("Vault file (advanced)"))
                     .push(text(id).size(14));
@@ -597,11 +605,14 @@ fn unlock(app: &App) -> Element<'_, Message> {
                 .push(label("External key file (optional)"))
                 .push(
                     row![
-                        text_input("Absolute path to your key file", app.key_path.expose())
-                            .padding(12)
-                            .on_input_maybe(
-                                enabled.then_some(|value: String| Message::KeyPath(value.into()))
-                            ),
+                        text_input(
+                            "Absolute path to your key file",
+                            app.connection.key_path.expose()
+                        )
+                        .padding(12)
+                        .on_input_maybe(
+                            enabled.then_some(|value: String| Message::KeyPath(value.into()))
+                        ),
                         action("Browse…", Message::BrowseKey, enabled)
                     ]
                     .spacing(8),
@@ -621,14 +632,14 @@ fn unlock(app: &App) -> Element<'_, Message> {
             app.writes_allowed(),
         ));
     }
-    let actions = if app.creating {
+    let actions = if app.connection.creating {
         row![
             primary(
                 "Create vault",
                 Message::Create,
                 app.writes_allowed()
-                    && app.master == app.confirmation
-                    && !app.master.is_empty()
+                    && app.connection.master == app.connection.confirmation
+                    && !app.connection.master.is_empty()
                     && app.ui.master_error.is_none()
                     && vault_names::validate_name(&app.ui.vault_name).is_ok()
             ),
@@ -640,7 +651,7 @@ fn unlock(app: &App) -> Element<'_, Message> {
         row![primary(
             "Unlock vault",
             Message::Unlock,
-            enabled && (!app.master.is_empty() || using_key)
+            enabled && (!app.connection.master.is_empty() || using_key)
         )]
         .spacing(10)
         .wrap()
@@ -1457,29 +1468,29 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
 fn generator(app: &App) -> Element<'_, Message> {
     use super::generator::{Event, Policy, Toggle};
     let mut form = column![
-        checkbox(app.passphrase)
+        checkbox(app.generation.passphrase)
             .label("Generate a memorable passphrase")
             .on_toggle(Message::Passphrase),
-        label(if app.passphrase {
+        label(if app.generation.passphrase {
             "Number of words (1–255)"
         } else {
             "Password length (1–255)"
         }),
         text_input(
-            if app.passphrase { "6" } else { "20" },
-            if app.passphrase {
-                &app.words
+            if app.generation.passphrase { "6" } else { "20" },
+            if app.generation.passphrase {
+                &app.generation.words
             } else {
-                &app.generator_length
+                &app.generation.length
             }
         )
-        .accessibility_label(if app.passphrase {
+        .accessibility_label(if app.generation.passphrase {
             "Number of words (1–255)"
         } else {
             "Password length (1–255)"
         })
         .padding(12)
-        .on_input(if app.passphrase {
+        .on_input(if app.generation.passphrase {
             Message::Words
         } else {
             Message::GeneratorLength
@@ -1487,9 +1498,9 @@ fn generator(app: &App) -> Element<'_, Message> {
         .on_submit(Message::Generate),
     ]
     .spacing(14);
-    if app.passphrase {
+    if app.generation.passphrase {
         form = form.push(label("Word separator")).push(
-            text_input("-", &app.generator.separator)
+            text_input("-", &app.generation.options.separator)
                 .accessibility_label("Word separator")
                 .padding(12)
                 .on_input(|value| Message::Generator(Event::Separator(value))),
@@ -1498,25 +1509,25 @@ fn generator(app: &App) -> Element<'_, Message> {
         form = form
             .push(
                 row![
-                    checkbox(app.generator.uppercase)
+                    checkbox(app.generation.options.uppercase)
                         .label("A–Z")
                         .on_toggle(|value| Message::Generator(Event::Toggle(
                             Toggle::Uppercase,
                             value
                         ))),
-                    checkbox(app.generator.lowercase)
+                    checkbox(app.generation.options.lowercase)
                         .label("a–z")
                         .on_toggle(|value| Message::Generator(Event::Toggle(
                             Toggle::Lowercase,
                             value
                         ))),
-                    checkbox(app.generator.digits)
+                    checkbox(app.generation.options.digits)
                         .label("0–9")
                         .on_toggle(|value| Message::Generator(Event::Toggle(
                             Toggle::Digits,
                             value
                         ))),
-                    checkbox(app.generator.symbols)
+                    checkbox(app.generation.options.symbols)
                         .label("Symbols")
                         .on_toggle(|value| Message::Generator(Event::Toggle(
                             Toggle::Symbols,
@@ -1527,15 +1538,16 @@ fn generator(app: &App) -> Element<'_, Message> {
                 .wrap(),
             )
             .push(
-                checkbox(app.generator.ambiguous)
+                checkbox(app.generation.options.ambiguous)
                     .label("Exclude look-alike characters (0, O, 1, l)")
                     .on_toggle(|value| Message::Generator(Event::Toggle(Toggle::Ambiguous, value))),
             );
     }
-    if let Some(message) =
-        app.generator
-            .input_error(app.passphrase, &app.generator_length, &app.words)
-    {
+    if let Some(message) = app.generation.options.input_error(
+        app.generation.passphrase,
+        &app.generation.length,
+        &app.generation.words,
+    ) {
         form = form.push(error(message));
     }
     form = form.push(disclosure(
@@ -1545,28 +1557,35 @@ fn generator(app: &App) -> Element<'_, Message> {
         !app.busy(),
     ));
     if app.ui.generator_advanced {
-        if !app.passphrase && app.generator.symbols {
+        if !app.generation.passphrase && app.generation.options.symbols {
             form = form.push(label("Allowed symbols")).push(
-                text_input("Allowed symbol characters", &app.generator.symbol_set)
-                    .padding(12)
-                    .on_input(|value| Message::Generator(Event::Symbols(value))),
+                text_input(
+                    "Allowed symbol characters",
+                    &app.generation.options.symbol_set,
+                )
+                .padding(12)
+                .on_input(|value| Message::Generator(Event::Symbols(value))),
             );
         }
         form = form
             .push(label("Show strength and statistics"))
             .push(
-                pick_list(Policy::ALL.as_slice(), Some(app.generator.stats), |value| {
-                    Message::Generator(Event::Stats(value))
-                })
+                pick_list(
+                    Policy::ALL.as_slice(),
+                    Some(app.generation.options.stats),
+                    |value| Message::Generator(Event::Stats(value)),
+                )
                 .placeholder("Show strength and statistics")
                 .padding(12)
                 .width(Fill),
             )
             .push(label("Copy automatically after generation"))
             .push(
-                pick_list(Policy::ALL.as_slice(), Some(app.generator.copy), |value| {
-                    Message::Generator(Event::Copy(value))
-                })
+                pick_list(
+                    Policy::ALL.as_slice(),
+                    Some(app.generation.options.copy),
+                    |value| Message::Generator(Event::Copy(value)),
+                )
                 .placeholder("Copy automatically after generation")
                 .padding(12)
                 .width(Fill),
@@ -1575,7 +1594,7 @@ fn generator(app: &App) -> Element<'_, Message> {
                 "Clipboard timeout override (0–255 seconds; blank uses Settings)",
             ))
             .push(
-                text_input("Use saved setting", &app.generator.copy_timeout)
+                text_input("Use saved setting", &app.generation.options.copy_timeout)
                     .accessibility_label("Clipboard timeout override in seconds")
                     .padding(12)
                     .on_input(|value| Message::Generator(Event::CopyTimeout(value))),
@@ -1583,28 +1602,31 @@ fn generator(app: &App) -> Element<'_, Message> {
             .push(rule::horizontal(1))
             .push(text("Check an existing password").size(20))
             .push(
-                text_input("Password to assess locally", app.generator.check.expose())
-                    .secure(true)
-                    .padding(12)
-                    .on_input(|value: String| Message::Generator(Event::Check(value.into())))
-                    .on_submit(Message::Generator(Event::Evaluate)),
+                text_input(
+                    "Password to assess locally",
+                    app.generation.options.check.expose(),
+                )
+                .secure(true)
+                .padding(12)
+                .on_input(|value: String| Message::Generator(Event::Check(value.into())))
+                .on_submit(Message::Generator(Event::Evaluate)),
             )
             .push(action(
                 "Check strength",
                 Message::Generator(Event::Evaluate),
-                !app.busy() && !app.generator.check.is_empty(),
+                !app.busy() && !app.generation.options.check.is_empty(),
             ));
-        if !app.generator.assessment.is_empty() {
-            form = form.push(text(&app.generator.assessment).size(14));
+        if !app.generation.options.assessment.is_empty() {
+            form = form.push(text(&app.generation.options.assessment).size(14));
         }
     }
-    let policy = app.generator.generation_policy(&app.conf);
+    let policy = app.generation.options.generation_policy(&app.conf);
     if let Err(message) = &policy {
         form = form.push(error(message.clone()));
     }
     let footer = row![
         primary(
-            if app.generated.is_empty() {
+            if app.generation.value.is_empty() {
                 "Generate"
             } else {
                 "Generate another"
@@ -1613,8 +1635,13 @@ fn generator(app: &App) -> Element<'_, Message> {
             !app.busy()
                 && policy.is_ok()
                 && app
-                    .generator
-                    .input_error(app.passphrase, &app.generator_length, &app.words)
+                    .generation
+                    .options
+                    .input_error(
+                        app.generation.passphrase,
+                        &app.generation.length,
+                        &app.generation.words
+                    )
                     .is_none()
         ),
         text("Generated locally on this device").size(14),
@@ -1627,21 +1654,21 @@ fn generator(app: &App) -> Element<'_, Message> {
         text("Create a unique secret for every account.").size(15)
     ]
     .spacing(14);
-    if app.ui.transfer_generated && !app.generated.is_empty() {
-        body = body.push(panel(column![text(if app.editor.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.session.is_some() && !app.busy()), action("Keep current draft", Message::CancelGenerated, !app.busy())].spacing(8).wrap()].spacing(10)));
+    if app.ui.transfer_generated && !app.generation.value.is_empty() {
+        body = body.push(panel(column![text(if app.editor.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.connection.session.is_some() && !app.busy()), action("Keep current draft", Message::CancelGenerated, !app.busy())].spacing(8).wrap()].spacing(10)));
     }
-    if !app.generated.is_empty() {
+    if !app.generation.value.is_empty() {
         body = body.push(panel(column![
             text("Your generated secret").size(18),
-            text_input("Generated value", app.generated.expose()).secure(!app.generated.visible()).padding(12),
-            row![primary("Copy", Message::CopyGenerated, !app.busy() && app.generator.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
-                checkbox(app.generated.visible()).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
-            action(if app.editor.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy() && app.session.is_some()),
-            text(if app.session.is_none() { "Unlock a vault to save this value directly into an item." } else { "Transfer directly to an item without using the clipboard." }).size(14),
+            text_input("Generated value", app.generation.value.expose()).secure(!app.generation.value.visible()).padding(12),
+            row![primary("Copy", Message::CopyGenerated, !app.busy() && app.generation.options.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
+                checkbox(app.generation.value.visible()).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
+            action(if app.editor.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy() && app.connection.session.is_some()),
+            text(if app.connection.session.is_none() { "Unlock a vault to save this value directly into an item." } else { "Transfer directly to an item without using the clipboard." }).size(14),
             text("Cleared from this screen after 60 seconds. Stored only when you save it in an item.").size(14),
         ].spacing(12)));
-        if !app.generated_stats.is_empty() {
-            body = body.push(text(&app.generated_stats).size(14));
+        if !app.generation.stats.is_empty() {
+            body = body.push(text(&app.generation.stats).size(14));
         }
     }
     body = body.push(form);
@@ -1816,8 +1843,8 @@ fn settings(app: &App) -> Element<'_, Message> {
                 !app.busy(),
             )),
         SettingsSection::Connection => {
-            form = form.push(text(if app.running { "The local service is running. It keeps your vault available to the CLI and browser extension when this window closes." } else { "The local service is stopped." }).size(15));
-            form = if app.running {
+            form = form.push(text(if app.connection.running { "The local service is running. It keeps your vault available to the CLI and browser extension when this window closes." } else { "The local service is stopped." }).size(15));
+            form = if app.connection.running {
                 form.push(
                     action(
                         "Stop local service…",
@@ -1856,7 +1883,7 @@ fn settings(app: &App) -> Element<'_, Message> {
                 ))
         }
     };
-    if app.ui.settings_section == SettingsSection::Security && app.vault.is_some() {
+    if app.ui.settings_section == SettingsSection::Security && app.connection.vault.is_some() {
         form = form
             .push(rule::horizontal(1))
             .push(text("Vault name on this device").size(19))
@@ -1947,7 +1974,7 @@ fn settings(app: &App) -> Element<'_, Message> {
 
 fn cloud_settings(app: &App) -> Element<'_, Message> {
     use password_manager::cloud::Action;
-    let ready = !app.busy() && app.running;
+    let ready = !app.busy() && app.connection.running;
     let mut form = column![
         text("Cloud sync").size(22),
         text("Connect to a separately installed sync server, then enable sync for each vault.")
@@ -1965,16 +1992,16 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         Message::Cloud(Action::List),
         ready && !app.conf.sync.server_url.is_empty(),
     ));
-    if !app.cloud_vaults.is_empty() {
+    if !app.cloud.vaults.is_empty() {
         form = form.push(
             pick_list(
-                app.cloud_vaults.as_slice(),
-                app.cloud_vault.as_ref(),
+                app.cloud.vaults.as_slice(),
+                app.cloud.vault.as_ref(),
                 Message::CloudVault,
             )
             .placeholder("Cloud vault"),
         );
-        if let Some(id) = &app.cloud_vault {
+        if let Some(id) = &app.cloud.vault {
             form = form.push(row![
                 action("Download selected vault", Message::Cloud(Action::Pull(id.clone())), ready),
                 action("Download comparison copy", Message::Cloud(Action::PullCopy(id.clone())), ready),
@@ -1987,38 +2014,38 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
             action(
                 "Enable for open vault",
                 Message::Cloud(Action::Enable),
-                ready && app.session.is_some()
+                ready && app.connection.session.is_some()
             ),
             action(
                 "Sync now",
                 Message::Cloud(Action::Now),
-                ready && app.session.is_some()
+                ready && app.connection.session.is_some()
             ),
             action(
                 "Review conflicts",
                 Message::Cloud(Action::Conflicts),
-                ready && app.session.is_some()
+                ready && app.connection.session.is_some()
             ),
             action(
                 "Check changes",
                 Message::Cloud(Action::Check),
-                ready && app.session.is_some()
+                ready && app.connection.session.is_some()
             ),
             action(
                 "Sync status",
                 Message::Cloud(Action::Status),
-                ready && app.session.is_some()
+                ready && app.connection.session.is_some()
             ),
             action(
                 "Disable for open vault",
                 Message::Cloud(Action::Disable),
-                ready && app.session.is_some()
+                ready && app.connection.session.is_some()
             ),
         ]
         .spacing(8)
         .wrap(),
     );
-    if let Some(review) = &app.cloud_review {
+    if let Some(review) = &app.cloud.review {
         use password_manager::cloud::Side;
         form = form.push(text("Resolve item differences").size(20))
             .push(text("Choose every differing field. Protected values stay hidden. Metadata includes item type, URLs and custom fields; authenticators, history and deletion state are chosen as groups. Both complete vault versions are saved as encrypted recovery copies before applying.").size(14));
@@ -2050,7 +2077,8 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
             );
             for field in &item.fields {
                 let selected = app
-                    .cloud_choices
+                    .cloud
+                    .choices
                     .iter()
                     .find(|c| c.id == item.id && c.field == field.field)
                     .map(|c| c.side);
@@ -2109,7 +2137,8 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         }
         let complete = review.items.iter().all(|item| {
             item.fields.iter().all(|f| {
-                app.cloud_choices
+                app.cloud
+                    .choices
                     .iter()
                     .any(|c| c.id == item.id && c.field == f.field)
             })
@@ -2140,7 +2169,7 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         .push(
             text_input(
                 "Paste a server-generated credential",
-                app.cloud_token.expose(),
+                app.cloud.token.expose(),
             )
             .secure(true)
             .padding(12)
@@ -2151,7 +2180,7 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
         .push(action(
             "Save device credential",
             Message::SaveCloudToken,
-            !app.busy() && !app.cloud_token.is_empty(),
+            !app.busy() && !app.cloud.token.is_empty(),
         ));
     panel(form).into()
 }

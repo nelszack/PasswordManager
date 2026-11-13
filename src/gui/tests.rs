@@ -48,12 +48,12 @@ fn reply(payload: ResponsePayload, session: Option<&str>) -> Reply {
 
 fn unlocked() -> App {
     let mut app = app();
-    app.running = true;
-    app.session = Some("a".repeat(64));
+    app.connection.running = true;
+    app.connection.session = Some("a".repeat(64));
     app.item = Some(item());
     app.editor = Editor::new(Draft::from_item(&item()));
-    app.master = "master-secret".into();
-    app.generated = "generated-secret".into();
+    app.connection.master = "master-secret".into();
+    app.generation.value = "generated-secret".into();
     app.query = "query".into();
     app
 }
@@ -73,12 +73,12 @@ fn session_changes_clear_displayed_secrets_drafts_and_generator() {
                 session,
             ),
         );
-        assert_eq!(app.session.as_deref(), session, "{label}");
+        assert_eq!(app.connection.session.as_deref(), session, "{label}");
         assert!(app.item.is_none(), "{label}");
         assert!(app.editor.is_none(), "{label}");
-        assert!(app.generated.is_empty(), "{label}");
+        assert!(app.generation.value.is_empty(), "{label}");
         if locked {
-            assert!(app.master.is_empty(), "{label}");
+            assert!(app.connection.master.is_empty(), "{label}");
             assert!(app.query.is_empty(), "{label}");
         }
     }
@@ -99,18 +99,18 @@ fn locking_invalidates_an_in_flight_reveal_reply() {
         ))),
     ));
     assert!(app.item.is_none());
-    assert!(app.session.is_none());
+    assert!(app.connection.session.is_none());
 }
 
 #[test]
 fn ordinary_status_polling_preserves_an_unlock_form() {
     let mut app = app();
-    app.master = "still-typing".into();
+    app.connection.master = "still-typing".into();
     let _ = app.complete(
         Job::Status,
         reply(ResponsePayload::Status(ServerStatus::new(true, None)), None),
     );
-    assert_eq!(app.master.expose(), "still-typing");
+    assert_eq!(app.connection.master.expose(), "still-typing");
 }
 
 #[test]
@@ -127,8 +127,8 @@ fn passive_polling_does_not_disable_inputs_or_swallow_edits() {
 #[test]
 fn creating_an_additional_vault_selects_the_new_file() {
     let mut app = app();
-    app.vaults = vec!["old.enc".into()];
-    app.select_created_vault = true;
+    app.connection.vaults = vec!["old.enc".into()];
+    app.connection.select_created_vault = true;
     let _ = app.complete(
         Job::Status,
         Reply::Server {
@@ -139,7 +139,7 @@ fn creating_an_additional_vault_selects_the_new_file() {
             pending: vec![],
         },
     );
-    assert_eq!(app.vault.as_deref(), Some("new.enc"));
+    assert_eq!(app.connection.vault.as_deref(), Some("new.enc"));
 }
 
 #[test]
@@ -206,29 +206,31 @@ fn revealing_expires_before_watch_refresh_and_focus_loss_hides_it_immediately() 
     let _ = app.workflow(workflows::Event::Toggle(workflows::Toggle::WatchDuo, true));
     app.request_state = RequestState::Idle;
     let now = Instant::now();
-    app.last_status = now;
+    app.connection.last_status = now;
     app.workspace.last_watch = now - Duration::from_secs(5);
     app.item.as_mut().unwrap().password = Some("revealed secret".into());
     app.reveal_until = Some(now - Duration::from_secs(1));
-    app.generated = "expired generated secret".into();
-    app.generated.set_deadline(now - Duration::from_secs(1));
-    app.generated_stats = "old assessment".into();
-    app.generated.set_visible(true);
+    app.generation.value = "expired generated secret".into();
+    app.generation
+        .value
+        .set_deadline(now - Duration::from_secs(1));
+    app.generation.stats = "old assessment".into();
+    app.generation.value.set_visible(true);
     let _ = app.update(Message::Tick(now));
     assert!(app.item.as_ref().unwrap().password.is_none());
-    assert!(app.generated.is_empty());
-    assert!(app.generated_stats.is_empty());
-    assert!(app.generated.deadline().is_none());
-    assert!(!app.generated.visible());
+    assert!(app.generation.value.is_empty());
+    assert!(app.generation.stats.is_empty());
+    assert!(app.generation.value.deadline().is_none());
+    assert!(!app.generation.value.visible());
     assert!(
         app.polling(),
         "Duo watching should still refresh after expiry"
     );
     app.item = Some(item());
-    app.generated.set_visible(true);
+    app.generation.value.set_visible(true);
     let _ = app.update(Message::HideSecrets);
     assert!(app.item.as_ref().unwrap().password.is_none());
-    assert!(!app.generated.visible());
+    assert!(!app.generation.value.visible());
 }
 
 #[test]
@@ -302,12 +304,12 @@ fn saved_settings_refresh_the_form_and_switch_a_stopped_server_connection() {
         },
     );
     assert_eq!(app.conf, conf);
-    assert_eq!(app.client.port, 8787);
+    assert_eq!(app.connection.client.port, 8787);
     assert_eq!(app.settings.server_port, "8787");
     assert_eq!(app.settings.history_limit, "25");
     assert_eq!(app.settings.trash_retention, "30");
-    assert_eq!(app.vault.as_deref(), Some("selected.enc"));
-    assert_eq!(app.generator_length, "24");
+    assert_eq!(app.connection.vault.as_deref(), Some("selected.enc"));
+    assert_eq!(app.generation.length, "24");
     assert!(!app.settings.generator_copy);
     assert!(!app.settings.password_copy);
     assert!(app.settings.stats);
@@ -317,9 +319,9 @@ fn saved_settings_refresh_the_form_and_switch_a_stopped_server_connection() {
 fn saving_settings_preserves_live_connections_and_explicit_port_overrides() {
     for (running, port) in [(false, 9999), (true, 7878), (true, 9999)] {
         let mut app = app();
-        app.running = running;
-        app.session = running.then(|| "active-session".into());
-        app.client.port = port;
+        app.connection.running = running;
+        app.connection.session = running.then(|| "active-session".into());
+        app.connection.client.port = port;
         let mut conf = Config::default();
         conf.server.port = 8787;
         let _ = app.complete(
@@ -329,9 +331,12 @@ fn saving_settings_preserves_live_connections_and_explicit_port_overrides() {
                 restart_required: false,
             },
         );
-        assert_eq!(app.client.port, port);
-        assert_eq!(app.running, running);
-        assert_eq!(app.session.as_deref(), running.then_some("active-session"));
+        assert_eq!(app.connection.client.port, port);
+        assert_eq!(app.connection.running, running);
+        assert_eq!(
+            app.connection.session.as_deref(),
+            running.then_some("active-session")
+        );
     }
 }
 
@@ -344,21 +349,21 @@ fn generator_preferences_do_not_change_unsaved_settings() {
         Config::default().genpass.length.to_string()
     );
     let _ = app.update(Message::SettingChanged(SettingsField::Length, "32".into()));
-    assert_eq!(app.generator_length, "64");
+    assert_eq!(app.generation.length, "64");
 }
 
 #[test]
 fn choosing_a_key_fills_the_path_without_unlocking_and_cancel_preserves_input() {
     let mut app = app();
-    app.master = "pending-password".into();
-    app.key_path = "original.key".into();
+    app.connection.master = "pending-password".into();
+    app.connection.key_path = "original.key".into();
     let _ = app.complete(Job::PickKey, Reply::KeyFile(None));
-    assert_eq!(app.key_path.expose(), "original.key");
-    assert_eq!(app.master.expose(), "pending-password");
+    assert_eq!(app.connection.key_path.expose(), "original.key");
+    assert_eq!(app.connection.master.expose(), "pending-password");
     let _ = app.complete(Job::PickKey, Reply::KeyFile(Some("selected.key".into())));
-    assert_eq!(app.key_path.expose(), "selected.key");
-    assert!(app.master.is_empty());
-    assert!(app.session.is_none());
+    assert_eq!(app.connection.key_path.expose(), "selected.key");
+    assert!(app.connection.master.is_empty());
+    assert!(app.connection.session.is_none());
     assert!(!app.busy());
 }
 
@@ -442,10 +447,8 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
         vault::{Vault, VaultCredentials},
     };
     let mut vault = Vault::memory();
-    let mut key = VaultCredentials {
-        locked: false,
-        keypass: Some(PasswordType::Password("synthetic fixture password".into())),
-    };
+    let mut key =
+        VaultCredentials::from(PasswordType::Password("synthetic fixture password".into()));
     vault
         .add_entry(
             PasswordEntry {
@@ -467,8 +470,8 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
         )
         .unwrap();
     let mut app = app();
-    app.running = true;
-    app.session = Some("a".repeat(64));
+    app.connection.running = true;
+    app.connection.session = Some("a".repeat(64));
     app.items = vault
         .management_list(SearchFilter::default())
         .unwrap()
@@ -527,8 +530,8 @@ fn generation_uses_reloaded_defaults_without_overwriting_unsaved_settings() {
     conf.genpass.stats = true;
     conf.genpass.length = 24;
     let _ = app.complete(Job::GenerateDefaults, Reply::Configuration(conf));
-    assert_eq!(app.generated.len(), 24);
-    assert!(!app.generated_stats.is_empty());
+    assert_eq!(app.generation.value.len(), 24);
+    assert!(!app.generation.stats.is_empty());
     assert!(
         !app.busy(),
         "external no-copy preference must prevent auto copying"
@@ -552,8 +555,8 @@ fn editor_summary(item: &ItemDetail) -> ItemSummary {
 fn editor_app() -> App {
     let mut app = unlocked();
     app.items.push(editor_summary(app.item.as_ref().unwrap()));
-    app.workspace.configuration = "JBSWY3DPEHPK3PXP".into();
-    app.workspace.activation = "synthetic-unused-activation".into();
+    app.workspace.authenticator.configuration = "JBSWY3DPEHPK3PXP".into();
+    app.workspace.authenticator.activation = "synthetic-unused-activation".into();
     app
 }
 
@@ -604,7 +607,7 @@ fn editor_authenticator_actions_bind_to_the_edited_item_instead_of_tools_selecti
         let prepared = app.workspace.prepare(action, &app).unwrap();
         assert_eq!(prepared.command.revision_target(), Some(&Target::Id(1)));
         assert_eq!(prepared.revision, Some(3));
-        assert_eq!(prepared.session, app.session);
+        assert_eq!(prepared.session, app.connection.session);
         assert!(prepared.confirmation.is_some());
     }
     app.items[0].revision += 1;
@@ -668,8 +671,8 @@ fn authenticator_mutations_keep_the_editor_open_with_fresh_status_and_revision()
             app.editor.is_none(),
             "never edit using the previous revision during refresh"
         );
-        assert!(app.workspace.activation.is_empty());
-        assert!(app.workspace.configuration.is_empty());
+        assert!(app.workspace.authenticator.activation.is_empty());
+        assert!(app.workspace.authenticator.configuration.is_empty());
         let mut updated = item();
         updated.revision = 4;
         updated.has_totp = action != workflows::Action::RemoveOtp;
@@ -682,7 +685,7 @@ fn authenticator_mutations_keep_the_editor_open_with_fresh_status_and_revision()
         assert!(!draft.dirty && draft.password.is_empty());
         assert_eq!(app.item.as_ref().unwrap().has_totp, updated.has_totp);
         assert_eq!(app.item.as_ref().unwrap().has_duo, updated.has_duo);
-        app.workspace.configuration = "JBSWY3DPEHPK3PXP".into();
+        app.workspace.authenticator.configuration = "JBSWY3DPEHPK3PXP".into();
         assert_eq!(
             app.workspace
                 .prepare(workflows::Action::SetOtp, &app)
@@ -739,7 +742,7 @@ fn locking_during_editor_refresh_prevents_the_old_editor_from_reappearing() {
             Some(&"a".repeat(64)),
         ))),
     ));
-    assert!(app.editor.is_none() && app.item.is_none() && app.session.is_none());
+    assert!(app.editor.is_none() && app.item.is_none() && app.connection.session.is_none());
 }
 
 fn account_app(duo: bool) -> App {
@@ -792,15 +795,15 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
     let serial = app.serial;
     let now = Instant::now();
     for seconds in [5, 10, 30, 120] {
-        app.last_status = now + Duration::from_secs(seconds);
-        let _ = app.update(Message::Tick(app.last_status));
+        app.connection.last_status = now + Duration::from_secs(seconds);
+        let _ = app.update(Message::Tick(app.connection.last_status));
         assert_eq!(
             app.serial, serial,
             "account navigation must not start repeated polling"
         );
         assert!(app.workspace.duo.watch.is_none() && !app.polling());
     }
-    app.workspace.code = "123".into();
+    app.workspace.authenticator.code = "123".into();
     let _ = app.update(Message::Workflow(workflows::Event::Run(
         workflows::Action::Respond(0, true),
     )));
@@ -993,7 +996,7 @@ fn custom_field_actions_bind_the_clicked_account_field_and_revision() {
         label: "Other tools selection".into(),
     });
     app.conf.clipboard.timeout = 9;
-    app.workspace.otp_copy_timeout = "60".into();
+    app.workspace.authenticator.otp_copy_timeout = "60".into();
     let (command, revision) = app.custom_field_command(target, true).unwrap();
     assert_eq!(revision, 3);
     assert!(
@@ -1210,7 +1213,7 @@ fn review_incomplete_breach_checks_replace_old_reports_with_partial_findings() {
     app.workspace.result = Some(ResponsePayload::Message("Previous report".into()));
     let _ = app.complete(
         Job::Workflow(workflows::Action::Audit),
-        incomplete_audit_reply(app.session.clone()),
+        incomplete_audit_reply(app.connection.session.clone()),
     );
     let Some(ResponsePayload::Audit(report)) = &app.workspace.result else {
         panic!("the partial audit report must remain available");
@@ -1222,7 +1225,7 @@ fn review_incomplete_breach_checks_replace_old_reports_with_partial_findings() {
     assert!(report.breach_error.is_some());
     assert!(app.notice.contains("incomplete"));
     assert!(app.notice.contains("Synthetic breach service timeout"));
-    assert!(app.session.is_some());
+    assert!(app.connection.session.is_some());
 }
 
 #[test]
@@ -1236,7 +1239,7 @@ fn review_incomplete_audits_from_other_sessions_clear_previous_results() {
         );
         assert!(app.workspace.result.is_none());
         assert!(app.item.is_none() && app.items.is_empty());
-        assert!(app.session.is_none());
+        assert!(app.connection.session.is_none());
     }
 }
 
@@ -1257,12 +1260,15 @@ fn compact_search_preserves_a_dirty_draft_until_discard_is_confirmed() {
 fn closing_advanced_unlock_clears_the_hidden_key_override() {
     let mut app = app();
     app.ui.unlock_advanced = true;
-    app.key_path = "/tmp/demo.key".into();
-    app.master = "password still being entered".into();
+    app.connection.key_path = "/tmp/demo.key".into();
+    app.connection.master = "password still being entered".into();
     let _ = app.update(Message::Disclosure(presentation::Disclosure::Unlock));
     assert!(!app.ui.unlock_advanced);
-    assert!(app.key_path.is_empty());
-    assert_eq!(app.master.expose(), "password still being entered");
+    assert!(app.connection.key_path.is_empty());
+    assert_eq!(
+        app.connection.master.expose(),
+        "password still being entered"
+    );
 }
 
 #[test]
@@ -1289,28 +1295,28 @@ fn new_item_shortcut_opens_the_editor_from_other_tabs() {
 #[test]
 fn weak_master_passwords_are_rejected_locally_without_clearing_the_form() {
     let mut app = app();
-    app.creating = true;
+    app.connection.creating = true;
     let _ = app.update(Message::Master("aaaaaaaaaaaaaa".into()));
-    app.confirmation = app.master.clone();
+    app.connection.confirmation = app.connection.master.clone();
     assert!(app.ui.master_error.is_some());
     let _ = app.update(Message::Create);
     assert!(!app.busy());
     assert!(app.ui.notice_error);
-    assert_eq!(app.master.expose(), "aaaaaaaaaaaaaa");
-    assert_eq!(app.confirmation, app.master);
+    assert_eq!(app.connection.master.expose(), "aaaaaaaaaaaaaa");
+    assert_eq!(app.connection.confirmation, app.connection.master);
 }
 
 fn pending_gui_creation() -> App {
     let mut app = app();
-    app.running = true;
-    app.creating = true;
-    app.vaults = vec!["existing.enc".into()];
+    app.connection.running = true;
+    app.connection.creating = true;
+    app.connection.vaults = vec!["existing.enc".into()];
     app.ui.vault_name = "Work".into();
-    app.master = "cobalt-raindrop-otter-galaxy-742".into();
-    app.confirmation = app.master.clone();
+    app.connection.master = "cobalt-raindrop-otter-galaxy-742".into();
+    app.connection.confirmation = app.connection.master.clone();
     let _ = app.update(Message::Create);
-    assert!(app.creation.is_some());
-    assert!(app.master.is_empty() && app.confirmation.is_empty());
+    assert!(app.connection.creation.is_some());
+    assert!(app.connection.master.is_empty() && app.connection.confirmation.is_empty());
     let _ = app.update(Message::Finished(
         app.serial,
         Job::Create,
@@ -1336,8 +1342,8 @@ fn gui_creation_opens_only_the_unambiguously_new_file() {
             pending: vec![],
         })),
     ));
-    assert_eq!(app.vault.as_deref(), Some("new.enc"));
-    assert!(app.creation.is_none());
+    assert_eq!(app.connection.vault.as_deref(), Some("new.enc"));
+    assert!(app.connection.creation.is_none());
     assert!(app.busy()); // The exact-file unlock is queued; no test task is driven.
 }
 
@@ -1356,7 +1362,7 @@ fn ambiguous_creation_discovery_never_guesses_which_vault_to_open() {
             pending: vec![],
         })),
     ));
-    assert!(app.creation.is_none());
+    assert!(app.connection.creation.is_none());
     assert_eq!(app.serial, serial);
     assert!(!app.busy());
     assert!(app.notice.contains("Select"));
@@ -1367,7 +1373,7 @@ fn explicit_lock_drops_the_creation_credential_before_late_replies() {
     let mut app = pending_gui_creation();
     let serial = app.serial;
     let _ = app.update(Message::Lock);
-    assert!(app.creation.is_none());
+    assert!(app.connection.creation.is_none());
     let _ = app.update(Message::Finished(
         serial,
         Job::Status,
@@ -1376,8 +1382,8 @@ fn explicit_lock_drops_the_creation_credential_before_late_replies() {
             None,
         ))),
     ));
-    assert!(app.creation.is_none());
-    assert!(app.session.is_none());
+    assert!(app.connection.creation.is_none());
+    assert!(app.connection.session.is_none());
 }
 
 #[test]
@@ -1438,7 +1444,7 @@ fn typed_fields_are_added_only_when_edited_and_preserve_other_hidden_fields() {
 #[test]
 fn duplicate_vault_names_remain_distinguishable_without_showing_filenames() {
     let mut app = app();
-    app.vaults = vec!["one.enc".into(), "two.enc".into()];
+    app.connection.vaults = vec!["one.enc".into(), "two.enc".into()];
     app.names.0.insert("one.enc".into(), "Work".into());
     app.names.0.insert("two.enc".into(), "Work".into());
     let choices = app.vault_choices();
@@ -1462,15 +1468,15 @@ fn a_pending_change_discovered_after_creation_prevents_automatic_unlock() {
         })),
     ));
     assert!(app.recovery.id().is_some());
-    assert!(app.creation.is_none());
+    assert!(app.connection.creation.is_none());
     assert_eq!(app.serial, serial);
 }
 
 #[test]
 fn the_header_vault_name_survives_its_unlock_but_never_an_external_session_switch() {
     let mut app = app();
-    app.running = true;
-    app.vault = Some("personal.enc".into());
+    app.connection.running = true;
+    app.connection.vault = Some("personal.enc".into());
     let session = "a".repeat(64);
     let _ = app.complete(
         Job::Unlock,
@@ -1597,13 +1603,13 @@ fn generated_results_have_completion_feedback_and_expire_without_losing_options(
     app.tab = Tab::Generator;
     app.conf.genpass.copy = false;
     let _ = app.generate();
-    assert!(!app.generated.is_empty());
+    assert!(!app.generation.value.is_empty());
     assert!(app.notice.starts_with("New secret ready."));
-    let length = app.generator_length.clone();
-    let deadline = app.generated.deadline().unwrap();
+    let length = app.generation.length.clone();
+    let deadline = app.generation.value.deadline().unwrap();
     let _ = app.update(Message::Tick(deadline + Duration::from_secs(1)));
-    assert!(app.generated.is_empty());
-    assert_eq!(app.generator_length, length);
+    assert!(app.generation.value.is_empty());
+    assert_eq!(app.generation.length, length);
 }
 
 #[test]
@@ -1618,8 +1624,8 @@ fn successful_restore_and_purge_clear_only_the_resolved_undo_action() {
     ] {
         let mut app = unlocked();
         app.editor = Editor::Closed;
-        app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
-        let session = app.session.clone();
+        app.ui.undo_trash = Some((1, app.connection.session.clone().unwrap()));
+        let session = app.connection.session.clone();
         let _ = app.complete(
             Job::Workflow(action),
             reply(
@@ -1635,10 +1641,10 @@ fn successful_restore_and_purge_clear_only_the_resolved_undo_action() {
 fn failed_restore_retains_undo_but_navigation_removes_it() {
     let mut app = unlocked();
     app.editor = Editor::Closed;
-    app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
+    app.ui.undo_trash = Some((1, app.connection.session.clone().unwrap()));
     let mut response = reply(
         ResponsePayload::Message("Could not restore".into()),
-        app.session.as_deref(),
+        app.connection.session.as_deref(),
     );
     if let Reply::Server { response, .. } = &mut response {
         response.code = ResponseCode::Failure as i32;
@@ -1648,7 +1654,7 @@ fn failed_restore_retains_undo_but_navigation_removes_it() {
     app.request_state = RequestState::Idle;
     let _ = app.update(Message::Tab(Tab::Generator));
     assert!(app.ui.undo_trash.is_none());
-    app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
+    app.ui.undo_trash = Some((1, app.connection.session.clone().unwrap()));
     let _ = app.update(Message::OpenTools(workflows::Section::Trash));
     assert!(app.ui.undo_trash.is_none());
 }
@@ -1656,8 +1662,8 @@ fn failed_restore_retains_undo_but_navigation_removes_it() {
 #[test]
 fn loading_trash_invalidates_undo_when_another_client_has_restored_the_item() {
     let mut app = unlocked();
-    app.ui.undo_trash = Some((1, app.session.clone().unwrap()));
-    let session = app.session.clone();
+    app.ui.undo_trash = Some((1, app.connection.session.clone().unwrap()));
+    let session = app.connection.session.clone();
     let _ = app.complete(
         Job::Workflow(workflows::Action::Trash),
         reply(
@@ -1687,7 +1693,7 @@ fn editor_visibility_is_temporary_and_does_not_reveal_a_stored_password() {
     assert!(app.editor.as_ref().unwrap().password.is_empty());
     let _ = app.update(Message::ReplacePassword(true));
     let _ = app.update(Message::ShowEditorSecret(true));
-    let session = app.session.clone();
+    let session = app.connection.session.clone();
     let _ = app.complete(
         Job::Save,
         reply(
@@ -1739,7 +1745,7 @@ fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
     app.editor.as_mut().unwrap().dirty = true;
     let mut response = RpcResponse::success(ResponsePayload::Message("Item changed".into()));
     response.code = ResponseCode::Conflict as i32;
-    response.session_id = app.session.clone();
+    response.session_id = app.connection.session.clone();
     let _ = app.complete(
         Job::Save,
         Reply::Server {
@@ -1757,7 +1763,7 @@ fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
     let mut latest = item();
     latest.revision = 4;
     latest.username = Some("Other client username".into());
-    let session = app.session.clone();
+    let session = app.connection.session.clone();
     let _ = app.complete(
         Job::ConflictReview,
         reply(ResponsePayload::Item(latest), session.as_deref()),
@@ -1796,7 +1802,7 @@ fn generator_transfer_preserves_draft_fields_and_works_without_clipboard() {
     app.request_state = RequestState::Idle;
     app.conf.clipboard.timeout = 0;
     app.tab = Tab::Generator;
-    app.generated = "exact-generated-value".into();
+    app.generation.value = "exact-generated-value".into();
     let name = app.editor.as_ref().unwrap().name.clone();
     let _ = app.update(Message::UseGenerated);
     assert!(app.ui.transfer_generated);
@@ -1839,8 +1845,8 @@ fn window_close_requires_a_discard_decision_for_unsaved_work() {
 #[test]
 fn saved_default_changes_do_not_retarget_the_active_vault() {
     let mut app = unlocked();
-    app.vault = Some("active.enc".into());
-    app.ui.active_vault = Some(("active.enc".into(), app.session.clone().unwrap()));
+    app.connection.vault = Some("active.enc".into());
+    app.ui.active_vault = Some(("active.enc".into(), app.connection.session.clone().unwrap()));
     let mut conf = app.conf.clone();
     conf.unlock.vault_id = Some("next-unlock.enc".into());
     let _ = app.complete(
@@ -1850,7 +1856,7 @@ fn saved_default_changes_do_not_retarget_the_active_vault() {
             restart_required: false,
         },
     );
-    assert_eq!(app.vault.as_deref(), Some("active.enc"));
+    assert_eq!(app.connection.vault.as_deref(), Some("active.enc"));
     assert_eq!(app.ui.active_vault.as_ref().unwrap().0, "active.enc");
     assert_eq!(app.conf.unlock.vault_id.as_deref(), Some("next-unlock.enc"));
 }
@@ -1860,26 +1866,26 @@ fn connecting_requires_discard_even_when_reusing_the_same_port() {
     let mut app = unlocked();
     app.request_state = RequestState::Idle;
     app.editor.as_mut().unwrap().dirty = true;
-    let port = app.client.port;
+    let port = app.connection.client.port;
     let _ = app.update(Message::UseConnectionPort);
     assert!(matches!(app.editor.deferred(), Some(Navigate::Connect(value)) if *value == port));
     assert!(app.editor.is_some());
-    assert!(app.session.is_some());
+    assert!(app.connection.session.is_some());
     let _ = app.update(Message::KeepEditing);
     assert!(app.editor.deferred().is_none());
     assert!(app.editor.is_some());
     let _ = app.update(Message::UseConnectionPort);
     let _ = app.update(Message::Discard);
     assert!(app.editor.is_none());
-    assert!(app.session.is_none());
-    assert_eq!(app.client.port, port);
+    assert!(app.connection.session.is_none());
+    assert_eq!(app.connection.client.port, port);
 }
 
 #[test]
 fn cloud_conflict_choices_are_explicit_and_cleared_on_lock() {
     use password_manager::cloud::{ConflictField, ConflictItem, ConflictReview, Side};
     let mut app = unlocked();
-    app.cloud_review = Some(ConflictReview {
+    app.cloud.review = Some(ConflictReview {
         token: "review-token".into(),
         items: vec![ConflictItem {
             id: 1,
@@ -1899,13 +1905,14 @@ fn cloud_conflict_choices_are_explicit_and_cleared_on_lock() {
             ],
         }],
     });
-    assert!(app.cloud_choices.is_empty());
+    assert!(app.cloud.choices.is_empty());
     let _ = app.update(Message::CloudChooseAll(Side::Local));
-    assert_eq!(app.cloud_choices.len(), 2);
+    assert_eq!(app.cloud.choices.len(), 2);
     let _ = app.update(Message::CloudChoice(1, "password".into(), Side::Remote));
-    assert_eq!(app.cloud_choices.len(), 2);
+    assert_eq!(app.cloud.choices.len(), 2);
     assert_eq!(
-        app.cloud_choices
+        app.cloud
+            .choices
             .iter()
             .find(|c| c.field == "password")
             .unwrap()
@@ -1917,11 +1924,11 @@ fn cloud_conflict_choices_are_explicit_and_cleared_on_lock() {
     app.editor.as_mut().unwrap().dirty = true;
     let _ = app.update(Message::ResolveCloud);
     assert!(
-        app.cloud_review.is_some(),
+        app.cloud.review.is_some(),
         "unsaved edits must survive resolution attempts"
     );
     app.clear_vault();
-    assert!(app.cloud_review.is_none() && app.cloud_choices.is_empty());
+    assert!(app.cloud.review.is_none() && app.cloud.choices.is_empty());
 }
 
 #[test]
@@ -1932,7 +1939,7 @@ fn applying_cloud_resolution_discards_old_tool_results_and_confirmations() {
         id: 1,
         label: "Previous item".into(),
     });
-    app.workspace.configuration = "previous authenticator input".into();
+    app.workspace.authenticator.configuration = "previous authenticator input".into();
     app.workspace.result = Some(ResponsePayload::Message("Previous report".into()));
     app.workspace.prepared = Some(
         app.workspace
@@ -1949,6 +1956,6 @@ fn applying_cloud_resolution_discards_old_tool_results_and_confirmations() {
     assert!(app.workspace.prepared.is_none());
     assert!(app.workspace.selected.is_none());
     assert!(app.workspace.result.is_none());
-    assert!(app.workspace.configuration.is_empty());
+    assert!(app.workspace.authenticator.configuration.is_empty());
     assert!(app.item.is_none() && app.editor.is_none());
 }

@@ -3,8 +3,8 @@ use password_manager::protocol::{AuthenticatorResponse, RpcResponse};
 
 fn app() -> App {
     let mut app = super::super::tests::app();
-    app.running = true;
-    app.session = Some("a".repeat(64));
+    app.connection.running = true;
+    app.connection.session = Some("a".repeat(64));
     app.items.push(ItemSummary {
         id: 7,
         revision: 11,
@@ -49,7 +49,7 @@ fn receive_duo(app: &mut App, requests: Vec<DuoPushRequest>) {
 
 fn workflow_reply(app: &App, payload: ResponsePayload) -> Reply {
     let mut response = RpcResponse::success(payload);
-    response.session_id = app.session.clone();
+    response.session_id = app.connection.session.clone();
     Reply::Server {
         response: Box::new(response),
         vaults: vec![],
@@ -84,11 +84,11 @@ fn add_other_account(app: &mut App) {
 #[test]
 fn queued_current_vault_actions_cannot_dispatch_without_an_unlock_session() {
     let mut app = app();
-    app.session = None;
-    app.vault = Some("selected.enc".into());
-    app.workspace.path = absolute("synthetic-transfer.json").unwrap();
-    app.workspace.password = "synthetic fixture password".into();
-    app.workspace.confirmation = app.workspace.password.clone();
+    app.connection.session = None;
+    app.connection.vault = Some("selected.enc".into());
+    app.workspace.files.path = absolute("synthetic-transfer.json").unwrap();
+    app.workspace.credentials.password = "synthetic fixture password".into();
+    app.workspace.credentials.confirmation = app.workspace.credentials.password.clone();
     for action in [
         Action::History,
         Action::Trash,
@@ -109,7 +109,7 @@ fn queued_current_vault_actions_cannot_dispatch_without_an_unlock_session() {
     for action in [Action::NewVault, Action::RestoreBackup, Action::DeleteVault] {
         assert!(app.workspace.prepare(action, &app).is_ok(), "{action:?}");
     }
-    app.workspace.import_new = true;
+    app.workspace.files.import_new = true;
     for action in [Action::Import, Action::PreviewImport] {
         assert!(app.workspace.prepare(action, &app).is_ok(), "{action:?}");
     }
@@ -118,7 +118,7 @@ fn queued_current_vault_actions_cannot_dispatch_without_an_unlock_session() {
 #[test]
 fn item_actions_bind_to_the_reviewed_item_and_revision() {
     let mut app = app();
-    app.workspace.configuration = "JBSWY3DPEHPK3PXP".into();
+    app.workspace.authenticator.configuration = "JBSWY3DPEHPK3PXP".into();
     load_history(&mut app);
     for action in [
         Action::History,
@@ -132,7 +132,7 @@ fn item_actions_bind_to_the_reviewed_item_and_revision() {
     ] {
         let prepared = app.workspace.prepare(action, &app).unwrap();
         assert_eq!(prepared.revision, Some(11));
-        assert_eq!(prepared.session, app.session);
+        assert_eq!(prepared.session, app.connection.session);
         assert!(matches!(
             prepared.command.revision_target(),
             Some(Target::Id(7))
@@ -241,9 +241,9 @@ fn history_rejects_revision_session_and_availability_changes_before_or_after_rep
             }
             match change {
                 0 => app.items[0].revision += 1,
-                1 => app.session = Some("b".repeat(64)),
+                1 => app.connection.session = Some("b".repeat(64)),
                 2 => app.items.clear(),
-                _ => app.running = false,
+                _ => app.connection.running = false,
             }
             if before_reply {
                 app.workspace.receive(history_page());
@@ -281,7 +281,7 @@ fn history_confirmation_rechecks_the_reviewed_context_before_sending() {
                 load_history(&mut app);
                 assert!(app.workspace.history_for(&app).is_some());
             }
-            _ => app.session = Some("b".repeat(64)),
+            _ => app.connection.session = Some("b".repeat(64)),
         }
         let serial = app.serial;
         let _ = app.execute_workflow(prepared);
@@ -311,7 +311,7 @@ fn failed_history_reload_cannot_relabel_an_older_page() {
     );
 
     let mut response = RpcResponse::message(ResponseCode::Failure, "synthetic history failure");
-    response.session_id = app.session.clone();
+    response.session_id = app.connection.session.clone();
     let _ = app.update(super::super::Message::Finished(
         app.serial,
         Job::Workflow(Action::History),
@@ -339,7 +339,7 @@ fn current_history_preserves_valid_password_restoration() {
         .prepare(Action::RestorePassword(1), &app)
         .unwrap();
     assert_eq!(prepared.revision, Some(11));
-    assert_eq!(prepared.session, app.session);
+    assert_eq!(prepared.session, app.connection.session);
     assert!(prepared.confirmation.as_ref().unwrap().contains("Work"));
     assert!(
         prepared
@@ -387,7 +387,7 @@ fn history_without_a_request_context_is_ignored_and_clearing_the_vault_drops_con
 #[test]
 fn confirmation_holds_the_reviewed_command_and_cannot_cross_sessions() {
     let mut app = app();
-    app.workspace.configuration = "original-secret".into();
+    app.workspace.authenticator.configuration = "original-secret".into();
     let prepared = app.workspace.prepare(Action::SetOtp, &app).unwrap();
     assert!(prepared.confirmation.as_ref().unwrap().contains("Work"));
     assert!(
@@ -397,7 +397,7 @@ fn confirmation_holds_the_reviewed_command_and_cannot_cross_sessions() {
             .unwrap()
             .contains("original-secret")
     );
-    app.session = Some("b".repeat(64));
+    app.connection.session = Some("b".repeat(64));
     let _ = app.execute_workflow(prepared);
     assert!(!app.busy());
     assert!(app.notice.contains("session changed"));
@@ -406,7 +406,7 @@ fn confirmation_holds_the_reviewed_command_and_cannot_cross_sessions() {
 #[test]
 fn editing_inputs_cancels_the_pending_confirmation() {
     let mut app = app();
-    app.workspace.configuration = "first".into();
+    app.workspace.authenticator.configuration = "first".into();
     app.workspace.prepared = Some(app.workspace.prepare(Action::SetOtp, &app).unwrap());
     let _ = app.workflow(Event::Field(Field::Configuration, "second".into()));
     assert!(app.workspace.prepared.is_none());
@@ -417,9 +417,9 @@ fn editing_inputs_cancels_the_pending_confirmation() {
 fn file_operations_preserve_preview_and_conflict_policy_and_require_password_confirmation() {
     let mut app = app();
     let root = tempfile::tempdir().unwrap();
-    app.workspace.path = root.path().join("items.json").to_str().unwrap().into();
-    app.workspace.import_new = true;
-    app.workspace.policy = Policy::KeepBoth;
+    app.workspace.files.path = root.path().join("items.json").to_str().unwrap().into();
+    app.workspace.files.import_new = true;
+    app.workspace.files.policy = Policy::KeepBoth;
     let preview = app.workspace.prepare(Action::PreviewImport, &app).unwrap();
     let ServerCommand::Import(request) = &preview.command else {
         panic!()
@@ -429,9 +429,9 @@ fn file_operations_preserve_preview_and_conflict_policy_and_require_password_con
     assert!(request.key_pass.is_none());
     assert!(preview.confirmation.is_none());
     assert!(app.workspace.prepare(Action::Import, &app).is_err());
-    app.workspace.password = "a sufficiently strong backup password".into();
+    app.workspace.credentials.password = "a sufficiently strong backup password".into();
     assert!(app.workspace.prepare(Action::Backup, &app).is_err());
-    app.workspace.confirmation = app.workspace.password.clone();
+    app.workspace.credentials.confirmation = app.workspace.credentials.password.clone();
     assert!(
         app.workspace
             .prepare(Action::Backup, &app)
@@ -449,7 +449,7 @@ fn file_operations_preserve_preview_and_conflict_policy_and_require_password_con
             .contains("plaintext")
     );
     assert!(app.workspace.prepare(Action::RestoreBackup, &app).is_err());
-    app.session = None;
+    app.connection.session = None;
     assert!(app.workspace.prepare(Action::RestoreBackup, &app).is_ok());
 }
 
@@ -501,7 +501,7 @@ fn duo_decisions_capture_the_reviewed_fingerprint_and_verified_code() {
             .prepare(Action::Respond(0, true), &app)
             .is_err()
     );
-    app.workspace.code = "123".into();
+    app.workspace.authenticator.code = "123".into();
     let prepared = app
         .workspace
         .prepare(Action::Respond(0, true), &app)
@@ -564,9 +564,9 @@ fn focus_loss_discards_late_secret_results_without_losing_mutation_receipts() {
 #[test]
 fn external_lock_clears_tools_credentials_results_and_confirmation() {
     let mut app = app();
-    app.workspace.password = "password".into();
-    app.workspace.configuration = "otp seed".into();
-    app.workspace.code = "123".into();
+    app.workspace.credentials.password = "password".into();
+    app.workspace.authenticator.configuration = "otp seed".into();
+    app.workspace.authenticator.code = "123".into();
     app.workspace.duo.watch = Some(WatchTarget::selected(&app).unwrap());
     receive_duo(&mut app, vec![duo_request()]);
     app.workspace.prepared = Some(app.workspace.prepare(Action::SetOtp, &app).unwrap());
@@ -581,9 +581,9 @@ fn external_lock_clears_tools_credentials_results_and_confirmation() {
             pending: vec![],
         },
     );
-    assert!(app.workspace.password.is_empty());
-    assert!(app.workspace.configuration.is_empty());
-    assert!(app.workspace.code.is_empty());
+    assert!(app.workspace.credentials.password.is_empty());
+    assert!(app.workspace.authenticator.configuration.is_empty());
+    assert!(app.workspace.authenticator.code.is_empty());
     assert!(app.workspace.duo.watch.is_none());
     assert!(app.workspace.duo.result.is_none());
     assert!(app.workspace.prepared.is_none());
@@ -593,14 +593,14 @@ fn external_lock_clears_tools_credentials_results_and_confirmation() {
 #[test]
 fn advanced_search_keeps_all_cli_filters_and_never_requests_secrets() {
     let mut app = app();
-    app.workspace.notes = "note text".into();
-    app.workspace.query = "search text".into();
-    app.workspace.kind = Some(ItemKind::ApiSecret);
-    app.workspace.has_otp = Some(false);
-    app.workspace.weak = true;
-    app.workspace.stale_days = "30".into();
-    app.workspace.sort = SortField::Modified;
-    app.workspace.descending = true;
+    app.workspace.search.notes = "note text".into();
+    app.workspace.search.query = "search text".into();
+    app.workspace.search.kind = Some(ItemKind::ApiSecret);
+    app.workspace.search.has_otp = Some(false);
+    app.workspace.search.weak = true;
+    app.workspace.audit.stale_days = "30".into();
+    app.workspace.search.sort = SortField::Modified;
+    app.workspace.search.descending = true;
     let prepared = app.workspace.prepare(Action::Search, &app).unwrap();
     let ServerCommand::List(filter) = &prepared.command else {
         panic!()
@@ -624,7 +624,7 @@ fn passive_watch_does_not_extend_unlock_or_starve_status_checks() {
     app.tab = Tab::Tools;
     app.workspace.otp.watch = Some(WatchTarget::selected(&app).unwrap());
     app.workspace.last_watch = now - Duration::from_secs(1);
-    app.last_status = now - Duration::from_secs(2);
+    app.connection.last_status = now - Duration::from_secs(2);
     let _ = app.update(super::super::Message::Tick(now));
     assert!(app.polling());
     assert!(!app.busy());
@@ -633,15 +633,18 @@ fn passive_watch_does_not_extend_unlock_or_starve_status_checks() {
 #[test]
 fn passive_watch_preserves_inputs_and_watch_target_when_selection_changes() {
     let mut app = app();
-    app.workspace.code = "123".into();
-    app.workspace.password = "pending backup password".into();
+    app.workspace.authenticator.code = "123".into();
+    app.workspace.credentials.password = "pending backup password".into();
     app.workspace.duo.watch = Some(WatchTarget::selected(&app).unwrap());
     let prepared = app.workspace.prepare(Action::Requests, &app).unwrap();
     let _ = app.execute_workflow(prepared);
     assert!(app.polling());
     assert!(!app.busy());
-    assert_eq!(app.workspace.code.expose(), "123");
-    assert_eq!(app.workspace.password.expose(), "pending backup password");
+    assert_eq!(app.workspace.authenticator.code.expose(), "123");
+    assert_eq!(
+        app.workspace.credentials.password.expose(),
+        "pending backup password"
+    );
     let serial = app.serial;
     let _ = app.workflow(Event::Select(Choice {
         id: 8,
@@ -663,8 +666,8 @@ fn current_vault_import_keeps_its_report_selection_and_unlock_session() {
         ..Default::default()
     };
     let mut response = RpcResponse::success(ResponsePayload::ImportReport(report.clone()));
-    response.session_id = app.session.clone();
-    let session = app.session.clone();
+    response.session_id = app.connection.session.clone();
+    let session = app.connection.session.clone();
     let _ = app.complete(
         Job::Workflow(Action::Import),
         Reply::Server {
@@ -673,7 +676,7 @@ fn current_vault_import_keeps_its_report_selection_and_unlock_session() {
             pending: vec![],
         },
     );
-    assert_eq!(app.session, session);
+    assert_eq!(app.connection.session, session);
     assert!(
         matches!(&app.workspace.result, Some(ResponsePayload::ImportReport(saved)) if saved == &report)
     );
@@ -683,7 +686,7 @@ fn current_vault_import_keeps_its_report_selection_and_unlock_session() {
 #[test]
 fn confirmation_cannot_discard_edits_started_on_another_tab() {
     let mut app = app();
-    app.workspace.configuration = "synthetic seed".into();
+    app.workspace.authenticator.configuration = "synthetic seed".into();
     let prepared = app.workspace.prepare(Action::SetOtp, &app).unwrap();
     app.editor = Editor::new(Draft {
         name: "Unsaved item".into(),
@@ -740,7 +743,7 @@ fn duo_polling_pauses_during_review_and_refreshes_after_a_decision() {
     assert!(app.workspace.prepared.is_some());
     let now = Instant::now();
     app.workspace.last_watch = now - Duration::from_secs(5);
-    app.last_status = now;
+    app.connection.last_status = now;
     let _ = app.update(super::super::Message::Tick(now));
     assert!(!app.polling() && !app.busy());
     let _ = app.workflow(Event::Confirm);
@@ -795,7 +798,7 @@ fn otp_timeout_override_is_validated_and_scoped_to_codes() {
     let mut app = app();
     app.conf.clipboard.timeout = 9;
     for (input, expected) in [("", Some(9)), (" 255 ", Some(255))] {
-        app.workspace.otp_copy_timeout = input.into();
+        app.workspace.authenticator.otp_copy_timeout = input.into();
         let prepared = app.workspace.prepare(Action::ShowOtp(true), &app).unwrap();
         assert!(
             matches!(prepared.command, ServerCommand::Totp(TotpCommand::Show { copy_timeout, .. }) if copy_timeout == expected)
@@ -811,7 +814,7 @@ fn otp_timeout_override_is_validated_and_scoped_to_codes() {
         assert!(!passive.command.extends_unlock());
     }
     for input in ["0", "-1", "256", "1.5", "seconds"] {
-        app.workspace.otp_copy_timeout = input.into();
+        app.workspace.authenticator.otp_copy_timeout = input.into();
         assert!(app.workspace.prepare(Action::ShowOtp(true), &app).is_err());
         assert!(app.workspace.prepare(Action::ShowOtp(false), &app).is_ok());
     }
@@ -821,7 +824,7 @@ fn otp_timeout_override_is_validated_and_scoped_to_codes() {
 fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
     let mut app = app();
     app.workspace.otp.copy = true;
-    app.workspace.otp_copy_timeout = "22".into();
+    app.workspace.authenticator.otp_copy_timeout = "22".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     assert!(app.polling() && !app.busy());
     let passive = app.workspace.prepare(Action::WatchOtp, &app).unwrap();
@@ -865,7 +868,7 @@ fn watch_copies_first_and_each_changed_code_once_without_extending_unlock() {
 fn otp_copy_refetch_at_a_code_boundary_becomes_the_previous_code() {
     let mut app = app();
     app.workspace.otp.copy = true;
-    app.workspace.otp_copy_timeout = "10".into();
+    app.workspace.authenticator.otp_copy_timeout = "10".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     app.request_state = RequestState::Idle;
     let _ = app.complete_otp_watch(Action::WatchOtp, totp("123456"));
@@ -881,10 +884,10 @@ fn otp_copy_refetch_at_a_code_boundary_becomes_the_previous_code() {
 fn watch_copy_cannot_start_with_zero_timeout_or_continue_after_focus_loss() {
     let mut app = app();
     app.workspace.otp.copy = true;
-    app.workspace.otp_copy_timeout = "0".into();
+    app.workspace.authenticator.otp_copy_timeout = "0".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     assert!(app.workspace.otp.watch.is_none() && !app.busy() && !app.polling());
-    app.workspace.otp_copy_timeout = "10".into();
+    app.workspace.authenticator.otp_copy_timeout = "10".into();
     let _ = app.workflow(Event::Toggle(Toggle::WatchOtp, true));
     app.request_state = RequestState::Idle;
     app.workspace.hide_secrets();
@@ -898,8 +901,8 @@ fn watch_copy_cannot_start_with_zero_timeout_or_continue_after_focus_loss() {
 #[test]
 fn duo_replacement_confirmation_applies_only_to_push_enrollment() {
     let mut app = app();
-    app.workspace.activation = "synthetic activation".into();
-    app.workspace.replace_duo = true;
+    app.workspace.authenticator.activation = "synthetic activation".into();
+    app.workspace.authenticator.replace_duo = true;
     let push = app.workspace.prepare(Action::EnrollDuo, &app).unwrap();
     assert!(push.confirmation.as_ref().unwrap().contains("replacing"));
     assert!(matches!(
@@ -921,11 +924,11 @@ fn duo_replacement_confirmation_applies_only_to_push_enrollment() {
 fn duo_watch_interval_is_bounded_and_invalid_start_is_rejected() {
     let mut app = app();
     for valid in ["3", " 5 ", "60"] {
-        app.workspace.duo_interval = valid.into();
-        assert!(app.workspace.duo_interval_seconds().is_ok());
+        app.workspace.authenticator.duo_interval = valid.into();
+        assert!(app.workspace.authenticator.duo_interval_seconds().is_ok());
     }
     for invalid in ["", "0", "2", "61", "-5", "3.5", "five"] {
-        app.workspace.duo_interval = invalid.into();
+        app.workspace.authenticator.duo_interval = invalid.into();
         let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
         assert!(app.workspace.duo.watch.is_none());
         assert!(app.workspace.duo.watch.is_none());
@@ -938,7 +941,7 @@ fn background_watch_uses_bound_target_and_pauses_for_confirmation() {
     let mut app = app();
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
     app.request_state = RequestState::Idle;
-    app.workspace.duo_interval = "12".into();
+    app.workspace.authenticator.duo_interval = "12".into();
     let now = Instant::now();
     app.workspace.selected = Some(Choice {
         id: 8,
@@ -992,7 +995,7 @@ fn duo_cache_and_polling_reject_item_revision_and_session_changes() {
     assert!(app.workspace.duo.result.is_none());
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
     app.request_state = RequestState::Idle;
-    app.session = Some("b".repeat(64));
+    app.connection.session = Some("b".repeat(64));
     let _ = app.complete_duo_requests(ResponsePayload::DuoRequests(vec![duo_request()]));
     assert!(app.workspace.duo.result.is_none());
 }
@@ -1145,7 +1148,7 @@ fn duo_revision_conflict_stops_background_watch_and_discards_requests() {
     let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
     receive_duo(&mut app, vec![duo_request()]);
     let mut response = RpcResponse::message(ResponseCode::Conflict, "item revision changed");
-    response.session_id = app.session.clone();
+    response.session_id = app.connection.session.clone();
     let _ = app.update(super::super::Message::Finished(
         app.serial,
         Job::Workflow(Action::Requests),
@@ -1167,7 +1170,7 @@ fn zero_timeout_copy_actions_cannot_fall_back_to_revealing_or_consuming_codes() 
     app.conf.clipboard.timeout = 0;
     assert!(app.workspace.prepare(Action::ShowOtp(true), &app).is_err());
     assert!(app.workspace.prepare(Action::ShowOtp(false), &app).is_ok());
-    app.workspace.otp_copy_timeout = "20".into();
+    app.workspace.authenticator.otp_copy_timeout = "20".into();
     assert!(app.workspace.prepare(Action::ShowOtp(true), &app).is_ok());
 }
 
@@ -1181,13 +1184,13 @@ fn pending_duo_request_stays_reviewable_across_refresh_ticks_and_status_checks()
         Job::Workflow(Action::Requests),
         Arc::new(Ok(reply)),
     ));
-    app.workspace.code = "123".into();
+    app.workspace.authenticator.code = "123".into();
     let serial = app.serial;
     let now = Instant::now();
     app.workspace.last_watch = now - Duration::from_secs(60);
     for seconds in [5, 10, 20, 60, 120] {
         let tick = now + Duration::from_secs(seconds);
-        app.last_status = tick;
+        app.connection.last_status = tick;
         let _ = app.update(super::super::Message::Tick(tick));
         assert_eq!(
             app.serial, serial,
@@ -1198,10 +1201,10 @@ fn pending_duo_request_stays_reviewable_across_refresh_ticks_and_status_checks()
             app.workspace.duo_requests_for(&app).unwrap()[0].id,
             "request-1"
         );
-        assert_eq!(app.workspace.code.expose(), "123");
+        assert_eq!(app.workspace.authenticator.code.expose(), "123");
     }
     // Pausing Duo refresh must not pause detection of vault locks or switches.
-    app.last_status = now - Duration::from_secs(2);
+    app.connection.last_status = now - Duration::from_secs(2);
     let _ = app.update(super::super::Message::Tick(now));
     assert!(app.polling() && !app.busy());
     let reply = workflow_reply(
@@ -1241,7 +1244,7 @@ fn manual_duo_refresh_still_replaces_a_paused_review_and_resumes_monitoring() {
     assert!(!app.workspace.duo_review_pending(&app));
     assert!(app.workspace.duo_requests_for(&app).unwrap().is_empty());
     let now = Instant::now();
-    app.last_status = now;
+    app.connection.last_status = now;
     app.workspace.last_watch = now - Duration::from_secs(5);
     let _ = app.update(super::super::Message::Tick(now));
     assert!(app.polling() && !app.busy());
@@ -1262,7 +1265,7 @@ fn expired_duo_request_resumes_fetching_without_extending_its_deadline() {
             .is_err()
     );
     let now = Instant::now();
-    app.last_status = now;
+    app.connection.last_status = now;
     app.workspace.last_watch = now - Duration::from_secs(5);
     let _ = app.update(super::super::Message::Tick(now));
     assert!(app.polling() && !app.busy());
@@ -1317,19 +1320,19 @@ fn tools_results_and_options_are_separate_without_discarding_a_reviewed_result()
 #[test]
 fn direct_file_tool_selection_opens_the_requested_task_and_clears_old_credentials() {
     let mut app = app();
-    app.workspace.password = "temporary password".into();
+    app.workspace.credentials.password = "temporary password".into();
     let _ = app.workflow(Event::FileOperation(FileOperation::Import));
     assert_eq!(app.workspace.section, Section::Files);
-    assert_eq!(app.workspace.file_operation, FileOperation::Import);
-    assert!(app.workspace.password.is_empty());
+    assert_eq!(app.workspace.files.file_operation, FileOperation::Import);
+    assert!(app.workspace.credentials.password.is_empty());
 }
 
 #[test]
 fn onboarding_import_targets_a_new_vault_when_no_vault_is_unlocked() {
     let mut app = app();
-    app.session = None;
+    app.connection.session = None;
     let _ = app.workflow(Event::FileOperation(FileOperation::Import));
-    assert!(app.workspace.import_new);
+    assert!(app.workspace.files.import_new);
     assert_eq!(app.workspace.section, Section::Files);
 }
 
@@ -1362,9 +1365,9 @@ fn empty_health_assessment_has_no_numeric_score() {
 #[test]
 fn operation_lookup_is_read_only_available_while_locked_and_preserves_pending_review() {
     let mut app = app();
-    app.session = None;
+    app.connection.session = None;
     app.recovery = Recovery::AwaitingOutcome("desktop-pending".into());
-    app.workspace.operation_id = "cli-operation_123".into();
+    app.workspace.utilities.operation_id = "cli-operation_123".into();
     let prepared = app
         .workspace
         .prepare(Action::OperationStatus, &app)
@@ -1399,7 +1402,7 @@ fn operation_lookup_is_read_only_available_while_locked_and_preserves_pending_re
     assert!(output.contains("Committed"));
     assert!(output.contains("42"));
     for invalid in ["", "bad id", "../id", &"a".repeat(129)] {
-        app.workspace.operation_id = invalid.into();
+        app.workspace.utilities.operation_id = invalid.into();
         assert!(
             app.workspace
                 .prepare(Action::OperationStatus, &app)

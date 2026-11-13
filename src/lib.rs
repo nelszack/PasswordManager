@@ -36,3 +36,6 @@ pub mod fuzz_support {
         }
     }
 }
+
+#[cfg(test)]
+mod benchmarks;

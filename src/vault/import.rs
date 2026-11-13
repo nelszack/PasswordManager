@@ -103,60 +103,83 @@ fn import_json_with_losses(
     contents: &str,
     path: &str,
 ) -> Result<(Vec<ImportedItem>, ImportLosses), String> {
+    #[derive(Deserialize)]
+    struct FormatProbe {
+        format: Option<SecretString>,
+    }
+    // A probe skips item values without constructing a second secret-bearing
+    // tree. Keep direct typed decoding so duplicate fields retain their errors.
+    // The substring gate makes ordinary external imports take their original
+    // single-tree path; escaped format names still work through the fallback.
+    let portable = contents.contains(PORTABLE_FORMAT)
+        && serde_json::from_str::<FormatProbe>(contents)
+            .ok()
+            .and_then(|probe| probe.format)
+            .is_some_and(|format| format.expose() == PORTABLE_FORMAT);
+    if portable {
+        return import_portable(contents, path);
+    }
     let mut root = SensitiveJson(
         serde_json::from_str(contents).map_err(|e| format!("invalid JSON in {path:?}: {e}"))?,
     );
     if root.get("format").and_then(serde_json::Value::as_str) == Some(PORTABLE_FORMAT) {
-        let portable: PortableExport = serde_json::from_str(contents)
-            .map_err(|e| format!("invalid portable JSON in {path:?}: {e}"))?;
-        if portable.version != PORTABLE_VERSION {
-            return Err(format!(
-                "unsupported portable JSON version {} in {path:?}",
-                portable.version
-            ));
-        }
-        let items = portable
-            .items
-            .into_iter()
-            .map(|mut item| {
-                if item.name.trim().is_empty() {
-                    return Err(format!("a portable JSON item in {path:?} has no name"));
-                }
-                if let Some(configuration) = item.totp.as_deref() {
-                    let (normalized, _) =
-                        normalize_totp_configuration(configuration).map_err(|error| {
-                            format!("invalid TOTP configuration for {:?}: {error}", item.name)
-                        })?;
-                    item.totp = Some(normalized.into());
-                }
-                if let Some(credentials) = &item.duo {
-                    crate::duo::validate_credentials(credentials).map_err(|e| e.to_string())?;
-                }
-                Ok(ImportedItem {
-                    portable: true,
-                    entry: VaultEntry {
-                        id: 0,
-                        name: item.name,
-                        username: item.username,
-                        password: item.password,
-                        url: item.url,
-                        notes: item.notes,
-                        created: item.created,
-                        modified: item.modified,
-                    },
-                    kind: item.kind,
-                    additional_urls: item.additional_urls,
-                    custom_fields: item.custom_fields,
-                    password_changed: item.password_changed,
-                    password_history: item.password_history,
-                    totp: item.totp,
-                    duo: item.duo,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        return Ok((items, ImportLosses::default()));
+        drop(root);
+        return import_portable(contents, path);
     }
     formats::external_json(std::mem::take(&mut root.0), path)
+}
+fn import_portable(
+    contents: &str,
+    path: &str,
+) -> Result<(Vec<ImportedItem>, ImportLosses), String> {
+    let portable: PortableExport = serde_json::from_str(contents)
+        .map_err(|e| format!("invalid portable JSON in {path:?}: {e}"))?;
+    if portable.version != PORTABLE_VERSION {
+        return Err(format!(
+            "unsupported portable JSON version {} in {path:?}",
+            portable.version
+        ));
+    }
+    let items = portable
+        .items
+        .into_iter()
+        .map(|mut item| {
+            if item.name.trim().is_empty() {
+                return Err(format!("a portable JSON item in {path:?} has no name"));
+            }
+            if let Some(configuration) = item.totp.as_deref() {
+                let (normalized, _) =
+                    normalize_totp_configuration(configuration).map_err(|error| {
+                        format!("invalid TOTP configuration for {:?}: {error}", item.name)
+                    })?;
+                item.totp = Some(normalized.into());
+            }
+            if let Some(credentials) = &item.duo {
+                crate::duo::validate_credentials(credentials).map_err(|e| e.to_string())?;
+            }
+            Ok(ImportedItem {
+                portable: true,
+                entry: VaultEntry {
+                    id: 0,
+                    name: item.name,
+                    username: item.username,
+                    password: item.password,
+                    url: item.url,
+                    notes: item.notes,
+                    created: item.created,
+                    modified: item.modified,
+                },
+                kind: item.kind,
+                additional_urls: item.additional_urls,
+                custom_fields: item.custom_fields,
+                password_changed: item.password_changed,
+                password_history: item.password_history,
+                totp: item.totp,
+                duo: item.duo,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((items, ImportLosses::default()))
 }
 
 impl Vault {

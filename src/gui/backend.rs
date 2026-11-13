@@ -67,37 +67,28 @@ pub fn attach(client: &AuthenticatedClient) -> Result<Reply, Failure> {
 /// Discovery is local and works independently of the server's status.
 pub fn discover_vaults() -> Result<Reply, Failure> {
     Ok(Reply::Vaults {
-        vaults: discover_vaults_at(&data_dir())?,
+        vaults: cached_vaults_at(&data_dir(), true)?,
         names: super::vault_names::Names::read(&config_dir().join("vault-names.json"))
             .map_err(Failure::from)?,
     })
 }
 
+type ListingCache = std::sync::Mutex<super::discovery::DirectoryCache<Vec<String>>>;
+static VAULTS: std::sync::LazyLock<ListingCache> = std::sync::LazyLock::new(ListingCache::default);
+static PENDING: std::sync::LazyLock<ListingCache> = std::sync::LazyLock::new(ListingCache::default);
+fn cached_vaults_at(directory: &std::path::Path, force: bool) -> Result<Vec<String>, Failure> {
+    VAULTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .read(directory, 0, force, || discover_vaults_at(directory))
+}
+
 fn discover_vaults_at(directory: &std::path::Path) -> Result<Vec<String>, Failure> {
-    // Match native vault discovery: sorted opaque .enc filenames, regular
-    // files only. Never open vault contents or follow directory/symlink entries.
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(error) => return Err(Failure::from(format!("Could not list vaults: {error}"))),
-    };
-    let mut names = vec![];
-    for entry in entries {
-        let entry = entry.map_err(|error| Failure::from(error.to_string()))?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if name.ends_with(".enc")
-            && entry
-                .file_type()
-                .map_err(|error| Failure::from(error.to_string()))?
-                .is_file()
-        {
-            names.push(name);
-        }
+    match password_manager::file::list_vault_files(directory) {
+        Ok(names) => Ok(names),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(error) => Err(Failure::from(format!("Could not list vaults: {error}"))),
     }
-    names.sort();
-    Ok(names)
 }
 
 pub fn reload_settings() -> Result<Reply, Failure> {
@@ -170,6 +161,19 @@ pub fn open_created(
 }
 
 pub fn request(client: &AuthenticatedClient, envelope: RequestEnvelope) -> Result<Reply, Failure> {
+    // Invalidate even after a lost reply: creation/deletion may have committed.
+    struct InvalidateVaults(bool);
+    impl Drop for InvalidateVaults {
+        fn drop(&mut self) {
+            if self.0 {
+                VAULTS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .invalidate();
+            }
+        }
+    }
+    let _invalidate = InvalidateVaults(envelope.command.is_mutation());
     let operation_id = envelope.operation_id.clone();
     let journal = Journal::new(client.port);
     if let Some(id) = &operation_id {
@@ -212,7 +216,7 @@ pub fn request(client: &AuthenticatedClient, envelope: RequestEnvelope) -> Resul
     }
     let vaults = if matches!(&response.payload, ResponsePayload::Status(_)) {
         // Vault discovery is local and never decrypts a vault.
-        discover_vaults_at(&data_dir())?
+        cached_vaults_at(&data_dir(), false)?
     } else {
         vec![]
     };
@@ -261,6 +265,10 @@ impl Journal {
             file.persist(&path).map_err(|error| error.error)?;
             sync_parent(&path)
         })();
+        PENDING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate();
         result.map_err(|error| {
             Failure::from(format!(
                 "Could not record the operation before sending it: {error}"
@@ -269,15 +277,28 @@ impl Journal {
     }
     fn finish(&self, id: &str) -> Result<(), Failure> {
         let path = self.path(id)?;
-        match std::fs::remove_file(&path) {
+        let result = match std::fs::remove_file(&path) {
             Ok(()) => sync_parent(&path).map_err(|error| Failure::from(error.to_string())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(Failure::from(format!(
                 "Could not clear the desktop operation record: {error}"
             ))),
-        }
+        };
+        PENDING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate();
+        result
     }
     fn pending(&self) -> Result<Vec<String>, Failure> {
+        PENDING.lock().unwrap_or_else(|e| e.into_inner()).read(
+            &self.directory,
+            self.port,
+            false,
+            || self.scan_pending(),
+        )
+    }
+    fn scan_pending(&self) -> Result<Vec<String>, Failure> {
         let entries = match std::fs::read_dir(&self.directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),

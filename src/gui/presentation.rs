@@ -52,6 +52,7 @@ impl std::fmt::Display for ScaleChoice {
 
 pub(super) struct State {
     matching: std::cell::RefCell<Option<MatchingItems>>,
+    search_text: std::cell::RefCell<Vec<Vec<zeroize::Zeroizing<String>>>>,
     pub progress: String,
     pub progress_started: Option<Instant>,
     pub page_input: String,
@@ -90,6 +91,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             matching: std::cell::RefCell::default(),
+            search_text: std::cell::RefCell::default(),
             progress: String::new(),
             progress_started: None,
             page_input: String::new(),
@@ -209,11 +211,13 @@ impl App {
 
     pub(super) fn vault_choices(&self) -> Vec<vault_names::Choice> {
         let labels: Vec<_> = self
+            .connection
             .vaults
             .iter()
-            .map(|id| self.names.label(id, &self.vaults))
+            .map(|id| self.names.label(id, &self.connection.vaults))
             .collect();
-        self.vaults
+        self.connection
+            .vaults
             .iter()
             .enumerate()
             .map(|(index, id)| {
@@ -233,6 +237,7 @@ impl App {
 
     pub(super) fn replace_items(&mut self, items: Vec<ItemSummary>) {
         self.ui.matching.get_mut().take();
+        self.ui.search_text.get_mut().clear();
         self.items = items;
     }
 
@@ -243,7 +248,21 @@ impl App {
                 || cached.kind != self.ui.kind
                 || cached.source_len != self.items.len()
         }) {
-            let query = self.query.trim().to_lowercase();
+            let query = zeroize::Zeroizing::new(self.query.trim().to_lowercase());
+            let mut search_text = self.ui.search_text.borrow_mut();
+            if !query.is_empty() && search_text.len() != self.items.len() {
+                *search_text = self
+                    .items
+                    .iter()
+                    .map(|item| {
+                        std::iter::once(item.name.as_str())
+                            .chain(item.username.as_deref())
+                            .chain(item.urls.iter().map(String::as_str))
+                            .map(|value| zeroize::Zeroizing::new(value.to_lowercase()))
+                            .collect()
+                    })
+                    .collect();
+            }
             let indices = self
                 .items
                 .iter()
@@ -251,10 +270,9 @@ impl App {
                 .filter_map(|(index, item)| {
                     (self.ui.kind.is_none_or(|kind| kind == item.kind)
                         && (query.is_empty()
-                            || std::iter::once(item.name.as_str())
-                                .chain(item.username.as_deref())
-                                .chain(item.urls.iter().map(String::as_str))
-                                .any(|value| value.to_lowercase().contains(&query))))
+                            || search_text[index]
+                                .iter()
+                                .any(|value| value.contains(query.as_str()))))
                     .then_some(index)
                 })
                 .collect();

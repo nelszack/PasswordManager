@@ -2,30 +2,77 @@ use super::{Vault, VaultError};
 use crate::types::PasswordType;
 use zeroize::Zeroize;
 
-/// Boundary credentials for persistence and unlock. Live sessions validate that
-/// these contain cached keys; VaultSession owns the lock/unlock lifecycle.
-#[derive(Debug)]
-pub struct VaultCredentials {
-    pub locked: bool,
-    pub keypass: Option<PasswordType>,
+/// Local encryption state. Supplied credentials never contain a cached key and
+/// cannot represent a live session on the wire. Successful encryption/unlock
+/// replaces and wipes the supplied credential.
+#[derive(Clone, Default)]
+pub enum VaultCredentials {
+    #[default]
+    Locked,
+    Unlock(PasswordType),
+    Session {
+        encryption_key: [u8; 32],
+        salt: [u8; 16],
+        kdf: u8,
+        memory_kib: u32,
+        iterations: u32,
+        parallelism: u32,
+    },
 }
-impl Default for VaultCredentials {
-    fn default() -> Self {
-        Self {
-            locked: true,
-            keypass: None,
+impl Drop for VaultCredentials {
+    fn drop(&mut self) {
+        match self {
+            Self::Locked => {}
+            Self::Unlock(credential) => credential.zeroize(),
+            Self::Session {
+                encryption_key,
+                salt,
+                kdf,
+                memory_kib,
+                iterations,
+                parallelism,
+            } => {
+                encryption_key.zeroize();
+                salt.zeroize();
+                kdf.zeroize();
+                memory_kib.zeroize();
+                iterations.zeroize();
+                parallelism.zeroize();
+            }
         }
     }
 }
 impl Zeroize for VaultCredentials {
     fn zeroize(&mut self) {
-        self.keypass.zeroize();
-        self.locked = true;
+        *self = Self::Locked;
     }
 }
-impl Drop for VaultCredentials {
-    fn drop(&mut self) {
-        self.zeroize();
+impl std::fmt::Debug for VaultCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Locked => "Locked",
+            Self::Unlock(_) => "Unlock(<redacted>)",
+            Self::Session { .. } => "Session(<redacted>)",
+        })
+    }
+}
+impl From<PasswordType> for VaultCredentials {
+    fn from(credential: PasswordType) -> Self {
+        Self::Unlock(credential)
+    }
+}
+impl VaultCredentials {
+    pub fn is_locked(&self) -> bool {
+        matches!(self, Self::Locked)
+    }
+    pub(crate) fn supplied(&mut self) -> Result<&mut PasswordType, String> {
+        match self {
+            Self::Unlock(credential) => Ok(credential),
+            _ => Err("an unlock credential is required".into()),
+        }
+    }
+    pub(crate) fn cached(&self) -> bool {
+        matches!(self, Self::Session { .. })
     }
 }
 
@@ -36,11 +83,6 @@ pub struct UnlockedVault {
     credentials: VaultCredentials,
     epoch: [u8; 16],
 }
-impl VaultCredentials {
-    fn cached(&self) -> bool {
-        !self.locked && matches!(self.keypass, Some(PasswordType::Session { .. }))
-    }
-}
 #[derive(Debug, Default)]
 pub enum VaultSession {
     #[default]
@@ -49,16 +91,10 @@ pub enum VaultSession {
 }
 impl VaultSession {
     #[cfg(test)]
-    pub fn unlock(vault: Vault, key: PasswordType) -> Self {
+    pub fn unlock(vault: Vault, key: VaultCredentials) -> Self {
         let mut session = Self::Locked;
         session
-            .install(
-                vault,
-                VaultCredentials {
-                    locked: false,
-                    keypass: Some(key),
-                },
-            )
+            .install(vault, key)
             .expect("cached test credentials");
         session
     }
@@ -127,8 +163,8 @@ impl VaultSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn key() -> PasswordType {
-        PasswordType::Session {
+    fn key() -> VaultCredentials {
+        VaultCredentials::Session {
             encryption_key: [42; 32],
             salt: [42; 16],
             kdf: 1,
@@ -142,10 +178,7 @@ mod tests {
         let mut session = VaultSession::Locked;
         for credentials in [
             VaultCredentials::default(),
-            VaultCredentials {
-                locked: false,
-                keypass: Some(PasswordType::Password("synthetic".into())),
-            },
+            VaultCredentials::from(PasswordType::Password("synthetic".into())),
         ] {
             assert!(session.install(Vault::memory(), credentials).is_err());
             assert!(session.is_locked());
@@ -155,7 +188,7 @@ mod tests {
     fn invalidated_credentials_cannot_escape_an_unlocked_operation() {
         let mut session = VaultSession::unlock(Vault::memory(), key());
         let result = session.with_unlocked(|_, credentials| {
-            credentials.keypass = Some(PasswordType::Password("external credential".into()));
+            *credentials = PasswordType::Password("external credential".into()).into();
             Ok(())
         });
         assert!(result.is_err());

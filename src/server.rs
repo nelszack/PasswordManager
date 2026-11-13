@@ -6,7 +6,9 @@ use crate::{
         SECURE_RECORD_HEADER_LEN, decrypt_record, encrypt_record, server_hello,
     },
     types::*,
-    vault::{Vault, VaultSession, create_vault, delete_vault, restore_encrypted_backup},
+    vault::{
+        Vault, VaultCredentials, VaultSession, create_vault, delete_vault, restore_encrypted_backup,
+    },
 };
 use rand::RngExt;
 use serde::Deserialize;

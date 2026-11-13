@@ -8,7 +8,21 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     let scan = () => {};
     let disposed = false;
     const registeredRoots = new Set();
-    function dispose() { disposed = true; observer?.disconnect(); for (const root of registeredRoots) onRemoveRoot(root); registeredRoots.clear(); }
+    // Attribute churn does not change subtree membership. Keep a small LRU of
+    // static discovery snapshots; child-list mutations invalidate them all.
+    const snapshots = new Map();
+    function snapshot(root) {
+        let result = snapshots.get(root);
+        snapshots.delete(root);
+        if (!result) {
+            const elements = [...(root.querySelectorAll?.("*") || [])];
+            result = { elements, inputs: elements.filter(isFormControl) };
+        }
+        snapshots.set(root, result);
+        if (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value);
+        return result;
+    }
+    function dispose() { disposed = true; observer?.disconnect(); for (const root of registeredRoots) onRemoveRoot(root); registeredRoots.clear(); snapshots.clear(); }
     function isFormControl(element) {
         return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
             || element instanceof HTMLTextAreaElement;
@@ -45,8 +59,14 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             observeRoot(openRoot);
             if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
             if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
-            for (const candidate of openRoot.querySelectorAll?.("*") || []) {
-                if (isFormControl(candidate)) attachInput(candidate, formUsernames);
+            // Ordinary controls are leaves; unusual author-created descendants
+            // still receive full discovery.
+            if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
+            const discovered = snapshot(openRoot);
+            for (const input of discovered.inputs) attachInput(input, formUsernames);
+            // Inspect existing elements even on cache hits: a page may attach an
+            // open shadow root without a child-list mutation on its host.
+            for (const candidate of discovered.elements) {
                 if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
             }
         }
@@ -64,6 +84,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         const pendingRoots = new Set();
         let attachScheduled = false;
         observer = new MutationObserver((mutations) => {
+            if (mutations.some(mutation => mutation.type === "childList")) snapshots.clear();
             let removedRoot = false;
             for (const root of registeredRoots) {
                 if (root.host && !root.host.isConnected) { onRemoveRoot(root); registeredRoots.delete(root); removedRoot = true; }
@@ -110,7 +131,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             });
         };
 
-        scan = root => attachToInputs(root, observeRoot);
+        scan = root => { snapshots.clear(); attachToInputs(root, observeRoot); };
         scan(document);
     }
 

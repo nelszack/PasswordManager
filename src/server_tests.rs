@@ -37,7 +37,7 @@ fn test_worker(session: VaultSession, state: &ConnectionState) -> VaultWorker {
 fn session(vault: Vault) -> VaultSession {
     VaultSession::unlock(
         vault,
-        PasswordType::Session {
+        VaultCredentials::Session {
             encryption_key: [42; 32],
             salt: [42; 16],
             kdf: 1,
@@ -722,19 +722,14 @@ async fn os_lock_discards_session_and_inactivity_does_not_need_a_writable_store(
 #[test]
 fn test_server_info_zeroize_restores_locked_defaults() {
     let defaults = ServerInfo::default();
-    assert!(defaults.locked);
-    assert!(defaults.keypass.is_none());
+    assert!(defaults.is_locked());
     for credential in [
         PasswordType::Password("secret".into()),
         PasswordType::Key("key.pem".into()),
     ] {
-        let mut info = ServerInfo {
-            locked: false,
-            keypass: Some(credential),
-        };
+        let mut info = VaultCredentials::from(credential);
         info.zeroize();
-        assert!(info.locked);
-        assert!(info.keypass.is_none());
+        assert!(info.is_locked());
     }
 }
 
@@ -749,7 +744,6 @@ fn test_password_type_zeroize_password_and_key() {
         assert_eq!(std::mem::discriminant(&credential), original_variant);
         match &credential {
             PasswordType::Password(value) | PasswordType::Key(value) => assert!(value.is_empty()),
-            _ => panic!("credential variant changed during zeroization"),
         }
     }
 }

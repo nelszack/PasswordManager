@@ -291,6 +291,23 @@ pub fn init_test_data_dir() {
     let _ = TEST_DATA_DIR.get_or_init(|| Box::leak(Box::new(tempfile::TempDir::new().unwrap())));
 }
 
+/// Discover opaque vault filenames without opening contents or following symlinks.
+/// Callers decide whether a missing directory means an empty list or an error.
+pub fn list_vault_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.ends_with(".enc") && entry.file_type()?.is_file() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

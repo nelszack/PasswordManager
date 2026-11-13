@@ -1,13 +1,7 @@
 const token = new URLSearchParams(location.search).get("token");
 const requests = document.getElementById("requests"), status = document.getElementById("status");
 let timer, busy = false, rendered = "", stopped = false;
-function send(message) {
-    return new Promise((resolve, reject) => chrome.runtime.sendMessage(message, response => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else if (!response?.success) reject(new Error(response?.error || "Duo window unavailable"));
-        else resolve(response);
-    }));
-}
+const send = message => PasswordManagerUiTransport.request(message, "Duo window unavailable");
 function clearCodes() { for (const input of requests.querySelectorAll("input")) input.value = ""; }
 function stop(error) {
     stopped = true; clearTimeout(timer); clearCodes(); requests.replaceChildren();

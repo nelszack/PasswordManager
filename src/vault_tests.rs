@@ -25,8 +25,8 @@ fn memory() -> Vault {
         None,
     )
 }
-fn key(byte: u8) -> PasswordType {
-    PasswordType::Session {
+fn key(byte: u8) -> VaultCredentials {
+    VaultCredentials::Session {
         encryption_key: [byte; 32],
         salt: [7; 16],
         kdf: 1,
@@ -36,10 +36,7 @@ fn key(byte: u8) -> PasswordType {
     }
 }
 fn credentials() -> VaultCredentials {
-    VaultCredentials {
-        locked: false,
-        keypass: Some(key(42)),
-    }
+    key(42)
 }
 fn persisted() -> (tempfile::TempDir, Vault, VaultCredentials) {
     let dir = tempfile::tempdir().unwrap();
@@ -1246,4 +1243,95 @@ fn cloud_updates_authenticate_identity_before_replacing_disk_or_memory() {
     vault.apply_cloud(&mut credentials, &encrypted).unwrap();
     assert_eq!(vault.data, remote.data);
     assert_eq!(reopen(&vault).data, remote.data);
+}
+
+#[test]
+fn search_indexes_follow_metadata_changes_without_retaining_secret_fields_or_notes() {
+    let mut vault = memory();
+    let item = vault.item_mut(1).unwrap();
+    item.entry.name = "ÉCOLE".into();
+    item.entry.notes = Some("private-note-token".into());
+    item.metadata.custom_fields = vec![
+        CustomField {
+            name: "Public".into(),
+            value: "INDEX-ME".into(),
+            secret: false,
+        },
+        CustomField {
+            name: "Hidden".into(),
+            value: "DO-NOT-INDEX".into(),
+            secret: true,
+        },
+    ];
+    let before = persistence::encode_document(&vault.data, None).unwrap();
+    let find = |vault: &Vault, query: &str| {
+        vault
+            .management_list(SearchFilter {
+                query: Some(query.into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == 1)
+    };
+    assert!(find(&vault, "école"));
+    assert!(find(&vault, "index-me"));
+    assert!(find(&vault, "private-note-token"));
+    assert!(!find(&vault, "do-not-index"));
+    assert_eq!(
+        *before,
+        *persistence::encode_document(&vault.data, None).unwrap()
+    );
+    // A failed transaction leaves the old index and metadata intact.
+    let fail: Result<(), VaultError> = vault.transaction(
+        TransactionScope::Entry(1),
+        &mut VaultCredentials::default(),
+        |staged| {
+            staged.item_mut(1).unwrap().entry.name = "Uncommitted".into();
+            Err(VaultError::Validation("synthetic failure".into()))
+        },
+    );
+    assert!(fail.is_err());
+    assert!(find(&vault, "école"));
+    assert!(!find(&vault, "uncommitted"));
+    vault
+        .transaction(
+            TransactionScope::Entry(1),
+            &mut VaultCredentials::default(),
+            |staged| {
+                let item = staged.item_mut(1).unwrap();
+                item.entry.name = "Committed".into();
+                item.entry.notes = Some("changed-notes".into());
+                item.metadata.custom_fields[0].secret = true;
+                Ok((true, ()))
+            },
+        )
+        .unwrap();
+    assert!(find(&vault, "committed"));
+    assert!(!find(&vault, "école"));
+    assert!(!find(&vault, "index-me"));
+    assert!(!find(&vault, "private-note-token"));
+    assert!(find(&vault, "changed-notes"));
+}
+
+#[test]
+fn portable_import_fast_path_preserves_strict_fields_escaped_tags_and_external_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("portable.json");
+    memory().export(path.display().to_string(), false).unwrap();
+    let source = fs::read_to_string(path).unwrap();
+    assert!(import_json(&source, "portable.json").is_ok());
+    let duplicated = source.replacen("\"version\": 1", "\"version\": 1, \"version\": 1", 1);
+    assert_ne!(duplicated, source);
+    assert!(import_json(&duplicated, "portable.json").is_err());
+    let duplicated = source.replacen("\"name\":", "\"name\": \"duplicate\", \"name\":", 1);
+    assert!(import_json(&duplicated, "portable.json").is_err());
+    let escaped = source.replace(PORTABLE_FORMAT, r"password-manager-portabl\u0065");
+    assert!(import_json(&escaped, "portable.json").is_ok());
+    let external =
+        r#"[{"name":"External","password":"exact password","notes":"password-manager-portable"}]"#;
+    let items = import_json(external, "external.json").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].entry.password.expose(), "exact password");
 }

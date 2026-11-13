@@ -25,7 +25,7 @@ struct VaultDocumentRef<'a> {
     vault_id: [u8; 16],
     next_item_id: u64,
     revision: u64,
-    items: Vec<ItemDocumentRef<'a>>,
+    items: DocumentItems<'a>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,52 +71,102 @@ struct ItemDocumentRef<'a> {
     duo: Option<&'a DuoCredentials>,
     lifecycle: &'a Lifecycle,
 }
+/// Serialize the ordered overlay directly. No full-vault reference map or
+/// document vector is needed; the staged records win duplicate IDs.
+struct DocumentItems<'a> {
+    live: &'a VaultData,
+    overlay: Option<(&'a VaultData, &'a HashSet<ItemId>)>,
+}
+impl Serialize for DocumentItems<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let selected = self.overlay.map(|(_, selected)| selected);
+        let staged = self.overlay.map(|(data, _)| &data.items);
+        let removed = selected.map_or(0, |ids| {
+            ids.iter()
+                .filter(|id| self.live.items.contains_key(id))
+                .count()
+        });
+        let added = staged.map_or(0, |items| {
+            items
+                .keys()
+                .filter(|id| {
+                    selected.is_some_and(|ids| ids.contains(id))
+                        || !self.live.items.contains_key(id)
+                })
+                .count()
+        });
+        let mut sequence =
+            serializer.serialize_seq(Some(self.live.items.len() - removed + added))?;
+        let mut live = self
+            .live
+            .items
+            .iter()
+            .filter(|(id, _)| selected.is_none_or(|ids| !ids.contains(id)))
+            .peekable();
+        let mut staged = staged.into_iter().flat_map(|items| items.iter()).peekable();
+        loop {
+            let next = match (live.peek(), staged.peek()) {
+                (Some((left, _)), Some((right, _))) if left < right => live.next(),
+                (Some((left, _)), Some((right, _))) => {
+                    if left == right {
+                        live.next();
+                    }
+                    staged.next()
+                }
+                (Some(_), None) => live.next(),
+                (None, Some(_)) => staged.next(),
+                (None, None) => break,
+            };
+            if let Some((id, item)) = next {
+                sequence.serialize_element(&ItemDocumentRef::from((*id, item)))?;
+            }
+        }
+        sequence.end()
+    }
+}
+impl<'a> From<(ItemId, &'a Item)> for ItemDocumentRef<'a> {
+    fn from((id, item): (ItemId, &'a Item)) -> Self {
+        let e = &item.entry;
+        Self {
+            id,
+            revision: item.revision,
+            entry: EntryDocumentRef {
+                name: &e.name,
+                username: e.username.as_deref(),
+                password: &e.password,
+                url: e.url.as_deref(),
+                notes: e.notes.as_ref(),
+                created: &e.created,
+                modified: &e.modified,
+            },
+            metadata: &item.metadata,
+            history: &item.history,
+            authenticator: item.authenticator.as_ref().map(|a| &a.configuration),
+            duo: item.duo.as_ref().map(|d| &d.credentials),
+            lifecycle: &item.lifecycle,
+        }
+    }
+}
 pub(super) fn encode_document(
     data: &VaultData,
     overlay: Option<(&VaultData, &HashSet<ItemId>)>,
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-    let mut items: BTreeMap<ItemId, &Item> =
-        data.items.iter().map(|(id, item)| (*id, item)).collect();
-    let (next_item_id, revision) = if let Some((staged, selected)) = overlay {
-        for id in selected {
-            items.remove(id);
-        }
-        items.extend(staged.items.iter().map(|(id, item)| (*id, item)));
-        (staged.next_item_id, staged.revision)
-    } else {
-        (data.next_item_id, data.revision)
-    };
+    let (next_item_id, revision) = overlay
+        .map_or((data.next_item_id, data.revision), |(staged, _)| {
+            (staged.next_item_id, staged.revision)
+        });
     let document = VaultDocumentRef {
         schema_version: DOCUMENT_VERSION,
         vault_id: data.vault_id,
         next_item_id,
         revision,
-        items: items
-            .into_iter()
-            .map(|(id, item)| {
-                let e = &item.entry;
-                ItemDocumentRef {
-                    id,
-                    revision: item.revision,
-                    entry: EntryDocumentRef {
-                        name: &e.name,
-                        username: e.username.as_deref(),
-                        password: &e.password,
-                        url: e.url.as_deref(),
-                        notes: e.notes.as_ref(),
-                        created: &e.created,
-                        modified: &e.modified,
-                    },
-                    metadata: &item.metadata,
-                    history: &item.history,
-                    authenticator: item.authenticator.as_ref().map(|a| &a.configuration),
-                    duo: item.duo.as_ref().map(|d| &d.credentials),
-                    lifecycle: &item.lifecycle,
-                }
-            })
-            .collect(),
+        items: DocumentItems {
+            live: data,
+            overlay,
+        },
     };
-    // Named fields make the durable schema independent of Rust field order.
+    // Named fields preserve the durable schema independently of Rust field order.
     let mut bytes = Zeroizing::new(Vec::new());
     rmp_serde::encode::write_named(&mut *bytes, &document)
         .map_err(|e| VaultError::Persistence(format!("could not encode vault document: {e}")))?;
@@ -182,6 +232,7 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
             }),
             lifecycle: item.lifecycle,
             strength: CachedStrength::default(),
+            search: query::CachedSearch::default(),
         };
         if data.items.insert(item.id, value).is_some() {
             return Err(VaultError::Validation(
@@ -209,10 +260,10 @@ impl VaultStore {
         if matches!(self, Self::Memory) {
             return Ok(());
         }
-        if credentials.locked {
+        if credentials.is_locked() {
             return Err(VaultError::Locked);
         }
-        let key = credentials.keypass.as_mut().ok_or(VaultError::Locked)?;
+        let key = &mut *credentials;
         let Self::File {
             directory,
             filename,
@@ -248,9 +299,7 @@ impl Vault {
         credentials: &mut VaultCredentials,
         mut new_key: PasswordType,
     ) -> Result<(), VaultError> {
-        if !matches!(self.store, VaultStore::Memory)
-            && (credentials.locked || credentials.keypass.is_none())
-        {
+        if !matches!(self.store, VaultStore::Memory) && credentials.is_locked() {
             return Err(VaultError::Locked);
         }
         let next_revision = self
@@ -279,23 +328,20 @@ impl Vault {
             next_item_id: self.data.next_item_id,
             revision: next_revision,
         };
-        let mut replacement = VaultCredentials {
-            locked: false,
-            keypass: Some(new_key),
-        };
+        let mut replacement = VaultCredentials::from(new_key);
         let result =
             self.store
                 .commit_overlay(&self.data, &staged, &HashSet::new(), &mut replacement);
         if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
             self.data.revision = next_revision;
-            credentials.keypass = replacement.keypass.take();
+            *credentials = std::mem::take(&mut replacement);
         } else if let Some(path) = generated {
             let _ = fs::remove_file(path);
         }
         result
     }
     pub fn lock_vault(&self, key: &mut VaultCredentials) -> Result<(), VaultError> {
-        key.zeroize();
+        *key = VaultCredentials::Locked;
         Ok(())
     }
 }
@@ -305,27 +351,9 @@ pub fn list_vaults() -> Result<Vec<String>, VaultError> {
 }
 
 fn list_vaults_in(directory: &Path) -> Result<Vec<String>, VaultError> {
-    let mut names = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|error| {
+    crate::file::list_vault_files(directory).map_err(|error| {
         VaultError::Persistence(format!("could not list vault directory: {error}"))
-    })? {
-        let entry = entry.map_err(|error| VaultError::Persistence(error.to_string()))?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if name.ends_with(".enc")
-            && entry
-                .file_type()
-                .map_err(|error| {
-                    VaultError::Persistence(format!("could not inspect vault {name:?}: {error}"))
-                })?
-                .is_file()
-        {
-            names.push(name);
-        }
-    }
-    names.sort();
-    Ok(names)
+    })
 }
 
 pub fn validate_vault_filename(name: &str) -> Result<(), VaultError> {
@@ -342,7 +370,7 @@ pub fn validate_vault_filename(name: &str) -> Result<(), VaultError> {
 }
 
 pub(super) fn lookup_vault(
-    key_pass: &mut PasswordType,
+    key_pass: &mut VaultCredentials,
     selected: Option<&str>,
 ) -> Result<Option<(String, Vault)>, VaultError> {
     lookup_vault_in(&data_dir(), key_pass, selected)
@@ -350,12 +378,13 @@ pub(super) fn lookup_vault(
 
 pub(super) fn lookup_vault_in(
     directory: &Path,
-    key_pass: &mut PasswordType,
+    key_pass: &mut VaultCredentials,
     selected: Option<&str>,
 ) -> Result<Option<(String, Vault)>, VaultError> {
-    if matches!(key_pass, PasswordType::Key(_)) {
-        let _material =
-            Zeroizing::new(try_gen_master_key(key_pass, false).map_err(VaultError::Persistence)?);
+    if matches!(key_pass, VaultCredentials::Unlock(PasswordType::Key(_))) {
+        let _material = Zeroizing::new(
+            try_gen_master_key(key_pass.supplied()?, false).map_err(VaultError::Persistence)?,
+        );
     }
     let filename = match selected {
         Some(name) => {
@@ -463,16 +492,19 @@ pub(crate) fn create_vault(
     credentials: &mut VaultCredentials,
     lock: bool,
 ) -> Result<(), VaultError> {
-    let key = credentials.keypass.as_mut().ok_or(VaultError::Locked)?;
-    if let PasswordType::Password(password) = key {
+    if credentials.is_locked() {
+        return Err(VaultError::Locked);
+    }
+    let key = &mut *credentials;
+    if let VaultCredentials::Unlock(PasswordType::Password(password)) = key {
         validate_new_password(password).map_err(|e| VaultError::Validation(e.into()))?;
     }
     let generated = match key {
-        PasswordType::Key(path) => Some(new_key_file_path(path)?),
+        VaultCredentials::Unlock(PasswordType::Key(path)) => Some(new_key_file_path(path)?),
         _ => None,
     };
     if generated.is_some() {
-        let mut material = try_gen_master_key(key, true)?;
+        let mut material = try_gen_master_key(key.supplied()?, true)?;
         material.zeroize();
     }
     let mut data = VaultData {
@@ -504,14 +536,13 @@ pub(crate) fn create_vault(
         {
             let _ = fs::remove_file(path);
         }
-        credentials.zeroize();
+        *credentials = VaultCredentials::Locked;
         return Err(error);
     }
     if lock {
-        credentials.zeroize();
+        *credentials = VaultCredentials::Locked;
     } else {
         *vault = Some(created);
-        credentials.locked = false;
     }
     Ok(())
 }
@@ -522,14 +553,14 @@ pub(super) fn write_vault(
     if matches!(vault.store, VaultStore::Memory) {
         return Ok(());
     }
-    write_vault_with_key(
-        vault,
-        credentials.keypass.as_mut().ok_or(VaultError::Locked)?,
-    )
+    if credentials.is_locked() {
+        return Err(VaultError::Locked);
+    }
+    write_vault_with_key(vault, credentials)
 }
 pub(super) fn write_vault_with_key(
     vault: &Vault,
-    key: &mut PasswordType,
+    key: &mut VaultCredentials,
 ) -> Result<(), VaultError> {
     write_vault_with_limit(vault, key, active_vault_limit())
 }
@@ -537,7 +568,7 @@ pub(super) fn write_vault_with_key(
 thread_local! {static TEST_MAX_VAULT_BYTES:std::cell::Cell<u64>=const {std::cell::Cell::new(MAX_VAULT_BYTES)};}
 fn write_vault_with_limit(
     vlt: &Vault,
-    key_pass: &mut PasswordType,
+    key_pass: &mut VaultCredentials,
     max_bytes: u64,
 ) -> Result<(), VaultError> {
     let VaultStore::File {
@@ -675,16 +706,19 @@ pub(crate) fn unlock_selected_vault(
     key_pass: &mut VaultCredentials,
     selected: Option<&str>,
 ) -> Result<Vault, VaultError> {
-    let kp = key_pass.keypass.as_mut().ok_or(VaultError::Locked)?;
+    if key_pass.is_locked() {
+        return Err(VaultError::Locked);
+    }
+    let kp = key_pass;
     let (_, vault) = lookup_vault(kp, selected)?.ok_or_else(|| VaultError::Validation(
         "no matching vault: incorrect password/key, no vault exists, or encrypted contents were modified; use `pm vaults` and `pm unlock --vault-file ID` to inspect a specific vault".into()
     ))?;
-    key_pass.locked = false;
+
     Ok(vault)
 }
 
 pub(crate) fn delete_vault(
-    mut key: PasswordType,
+    key: PasswordType,
     keep_key: bool,
     selected: Option<&str>,
 ) -> Result<(), VaultError> {
@@ -698,7 +732,7 @@ pub(crate) fn delete_vault(
     {
         return Err(("key file does not exist or is not a regular file".to_string()).into());
     }
-    let (filename, mut vault) = lookup_vault(&mut key, selected)?
+    let (filename, mut vault) = lookup_vault(&mut key.into(), selected)?
         .ok_or_else(|| "could not delete vault (is the key correct?)".to_string())?;
     vault.zeroize();
     fs::remove_file(data.join(filename)).map_err(|e| {
@@ -712,7 +746,6 @@ pub(crate) fn delete_vault(
         })?;
         key.zeroize();
     }
-    key.zeroize();
     Ok(())
 }
 
@@ -747,8 +780,59 @@ mod tests {
         let document: VaultDocument = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(*bytes, rmp_serde::to_vec_named(&document).unwrap());
     }
-    fn session(byte: u8) -> PasswordType {
-        PasswordType::Session {
+    #[test]
+    fn streaming_overlays_keep_the_collected_wire_shape_for_every_small_overlay() {
+        let live = Vault::from_entries(
+            (1..=4)
+                .map(|id| VaultEntry {
+                    id,
+                    name: format!("live-{id}"),
+                    ..Default::default()
+                })
+                .collect(),
+            None,
+        );
+        for mask in 0..16 {
+            let selected: HashSet<_> = (1..=4)
+                .filter(|id| mask & (1 << (id - 1)) != 0)
+                .map(|id| ItemId::from_public(id).unwrap())
+                .collect();
+            for staged_mask in 0..16 {
+                let staged = Vault::from_entries(
+                    (2..=5)
+                        .filter(|id| staged_mask & (1 << (id - 2)) != 0)
+                        .map(|id| VaultEntry {
+                            id,
+                            name: format!("staged-{id}"),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    None,
+                );
+                let bytes = encode_document(&live.data, Some((&staged.data, &selected))).unwrap();
+                let document: VaultDocument = rmp_serde::from_slice(&bytes).unwrap();
+                assert_eq!(*bytes, rmp_serde::to_vec_named(&document).unwrap());
+                let mut expected = live.data.items.clone();
+                expected.retain(|id, _| !selected.contains(id));
+                expected.extend(staged.data.items.clone());
+                let ids: Vec<_> = document.items.iter().map(|item| item.id).collect();
+                assert_eq!(ids, expected.keys().copied().collect::<Vec<_>>());
+                assert_eq!(
+                    document
+                        .items
+                        .iter()
+                        .map(|item| item.entry.name.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .values()
+                        .map(|item| item.entry.name.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+    fn session(byte: u8) -> VaultCredentials {
+        VaultCredentials::Session {
             encryption_key: [byte; 32],
             salt: [7; 16],
             kdf: 1,
@@ -773,10 +857,7 @@ mod tests {
             directory: directory.path().to_owned(),
             filename: "vault.enc".into(),
         };
-        let mut credentials = VaultCredentials {
-            locked: false,
-            keypass: Some(session(42)),
-        };
+        let mut credentials = session(42);
         write_vault(&vault, &mut credentials).unwrap();
         (directory, vault, credentials)
     }
@@ -808,15 +889,14 @@ mod tests {
         assert!(matches!(result, Err(VaultError::Validation(_))));
         assert_eq!(vault, before);
         assert_eq!(fs::read(directory.path().join("vault.enc")).unwrap(), bytes);
-        let mut replacement = PasswordType::Password("Cedar-Lantern-Quartz-9274!".into());
+        let mut replacement =
+            VaultCredentials::from(PasswordType::Password("Cedar-Lantern-Quartz-9274!".into()));
         assert!(write_vault_with_limit(&vault, &mut replacement, 1).is_err());
-        assert!(matches!(replacement, PasswordType::Password(_)));
-        write_vault_with_limit(
-            &vault,
-            credentials.keypass.as_mut().unwrap(),
-            bytes.len() as u64,
-        )
-        .unwrap();
+        assert!(matches!(
+            replacement,
+            VaultCredentials::Unlock(PasswordType::Password(_))
+        ));
+        write_vault_with_limit(&vault, &mut credentials, bytes.len() as u64).unwrap();
     }
     #[test]
     fn rekey_adopts_new_key_only_after_atomic_replace_including_uncertain_durability() {
@@ -838,9 +918,10 @@ mod tests {
         assert!(key_path.exists());
         let after = fs::read(directory.path().join("vault.enc")).unwrap();
         assert!(decrypt_file(&mut session(42), &after).is_none());
-        let plaintext = Zeroizing::new(decrypt_file(&mut replacement.clone(), &after).unwrap());
+        let plaintext =
+            Zeroizing::new(decrypt_file(&mut replacement.clone().into(), &after).unwrap());
         assert_eq!(decode_document(&plaintext).unwrap(), vault.data);
-        assert!(decrypt_file(credentials.keypass.as_mut().unwrap(), &after).is_some());
+        assert!(decrypt_file(&mut credentials, &after).is_some());
         write_vault(&vault, &mut credentials).unwrap();
     }
     #[test]
@@ -955,10 +1036,7 @@ mod tests {
             lookup_vault_in(Path::new(&directory), &mut session(42), Some("vault.enc"))
                 .unwrap()
                 .unwrap();
-        let mut credentials = VaultCredentials {
-            locked: false,
-            keypass: Some(session(42)),
-        };
+        let mut credentials = session(42);
         with_write_fault(fault, || {
             vault.rekey(&mut credentials, PasswordType::Key(key_path))
         })
@@ -996,7 +1074,7 @@ mod tests {
                 assert!(
                     lookup_vault_in(
                         directory.path(),
-                        &mut PasswordType::Key(key_path.display().to_string()),
+                        &mut PasswordType::Key(key_path.display().to_string()).into(),
                         Some("vault.enc")
                     )
                     .is_err()
@@ -1008,7 +1086,7 @@ mod tests {
                 );
                 lookup_vault_in(
                     directory.path(),
-                    &mut PasswordType::Key(key_path.display().to_string()),
+                    &mut PasswordType::Key(key_path.display().to_string()).into(),
                     Some("vault.enc"),
                 )
             };

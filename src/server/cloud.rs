@@ -503,7 +503,7 @@ mod tests {
         std::fs::write(&path, b"synthetic ciphertext").unwrap();
         let session = VaultSession::unlock(
             vault,
-            PasswordType::Session {
+            VaultCredentials::Session {
                 encryption_key: [42; 32],
                 salt: [7; 16],
                 kdf: 1,

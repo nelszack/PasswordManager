@@ -38,7 +38,7 @@ impl Vault {
         push: bool,
         key: &mut VaultCredentials,
     ) -> Result<PreparedDuoEnrollment, VaultError> {
-        if key.locked || key.keypass.is_none() {
+        if key.is_locked() {
             return Err(VaultError::Locked);
         }
         let command = Zeroizing::new(command);
@@ -77,7 +77,7 @@ impl Vault {
         material: DuoEnrollmentMaterial,
         key: &mut VaultCredentials,
     ) -> Result<String, VaultError> {
-        if key.locked || key.keypass.is_none() {
+        if key.is_locked() {
             return Err(VaultError::Locked);
         }
         if self
@@ -146,7 +146,7 @@ impl Vault {
         command: &DuoCommand,
         key: &mut VaultCredentials,
     ) -> Result<String, VaultError> {
-        if key.locked || key.keypass.is_none() {
+        if key.is_locked() {
             return Err(VaultError::Locked);
         }
         match command {
@@ -181,7 +181,7 @@ impl Vault {
         command: DuoCommand,
         key: &VaultCredentials,
     ) -> Result<PreparedDuoPoll, VaultError> {
-        if key.locked || key.keypass.is_none() {
+        if key.is_locked() {
             return Err(VaultError::Locked);
         }
         let mut command = Zeroizing::new(command);
@@ -223,7 +223,7 @@ impl Vault {
         body: &[u8],
         key: &VaultCredentials,
     ) -> Result<DuoPollResult, VaultError> {
-        if key.locked || key.keypass.is_none() {
+        if key.is_locked() {
             return Err(VaultError::Locked);
         }
         let target = match &*review.command {
@@ -300,16 +300,13 @@ mod tests {
             None,
         );
         vault.set_test_duo(1, credentials());
-        let key = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [7; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            }),
+        let key = VaultCredentials::Session {
+            encryption_key: [42; 32],
+            salt: [7; 16],
+            kdf: 1,
+            memory_kib: 8192,
+            iterations: 1,
+            parallelism: 1,
         };
         (vault, key)
     }
@@ -362,12 +359,12 @@ mod tests {
             vault.finish_duo_poll(&review.review, &body, &key),
             Ok(DuoPollResult::Decision(_))
         ));
-        key.locked = true;
+        let unlocked = std::mem::take(&mut key);
         assert!(matches!(
             vault.finish_duo_poll(&review.review, &body, &key),
             Err(VaultError::Locked)
         ));
-        key.locked = false;
+        key = unlocked;
         vault.item_mut(1).unwrap().duo.as_mut().unwrap().review_key = None;
         assert!(vault.finish_duo_poll(&review.review, &body, &key).is_err());
         let new_poll = vault
@@ -398,12 +395,12 @@ mod tests {
         let prepared = vault
             .prepare_duo_enrollment(enroll(), false, &mut key)
             .unwrap();
-        key.locked = true;
+        let unlocked = std::mem::take(&mut key);
         assert!(matches!(
             vault.finish_duo_enrollment(&prepared, material(), &mut key),
             Err(VaultError::Locked)
         ));
-        key.locked = false;
+        key = unlocked;
         let session = vault.metadata.duo_session;
         vault.metadata.duo_session = Some(rand::random());
         assert!(
@@ -441,13 +438,13 @@ mod tests {
     #[test]
     fn enrollment_preflight_checks_lock_target_conflicts_and_store_before_network() {
         let (mut vault, mut key) = fixture();
-        key.locked = true;
+        let unlocked = std::mem::take(&mut key);
         assert!(
             vault
                 .prepare_duo_enrollment(enroll(), false, &mut key)
                 .is_err()
         );
-        key.locked = false;
+        key = unlocked;
         let missing = DuoCommand::Enroll {
             target: Target::Id(99),
             activation: "never-consumed".into(),

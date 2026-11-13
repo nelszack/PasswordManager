@@ -125,3 +125,6 @@ fn run(invoked_as_native_host: bool) {
         .unwrap_or_else(|error| output.exit_error(&format!("could not start runtime: {error}"), 1))
         .block_on(app::run(command, conf, config_file, client, output));
 }
+
+#[cfg(all(test, feature = "desktop"))]
+mod benchmarks;

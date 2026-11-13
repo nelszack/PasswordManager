@@ -88,19 +88,19 @@ fn path<'a>(
 fn credentials<'a>(state: &'a State, new: bool, enabled: bool) -> Column<'a, AppMessage> {
     let mut form = column![toggle(
         "Use an external key file",
-        state.use_key,
+        state.credentials.use_key,
         Toggle::UseKey,
         enabled
     )]
     .spacing(12);
-    if state.use_key {
+    if state.credentials.use_key {
         form = form.push(path(
             if new {
                 "New key file (must not already exist)"
             } else {
                 "Existing key file"
             },
-            &state.key_path,
+            &state.credentials.key_path,
             Field::KeyPath,
             new,
             enabled,
@@ -108,7 +108,7 @@ fn credentials<'a>(state: &'a State, new: bool, enabled: bool) -> Column<'a, App
     } else {
         form = form.push(field(
             "Password",
-            state.password.expose(),
+            state.credentials.password.expose(),
             Field::Password,
             true,
             enabled,
@@ -116,7 +116,7 @@ fn credentials<'a>(state: &'a State, new: bool, enabled: bool) -> Column<'a, App
         if new {
             form = form.push(field(
                 "Confirm password",
-                state.confirmation.expose(),
+                state.credentials.confirmation.expose(),
                 Field::Confirmation,
                 true,
                 enabled,
@@ -148,7 +148,7 @@ pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, App
                         .on_press_maybe(enabled.then_some(event(Event::Cancel))),
                     button(prepared.action.confirm_label())
                         .padding([11, 14])
-                        .style(if prepared.action.dangerous(state.force) {
+                        .style(if prepared.action.dangerous(state.files.force) {
                             button_style::danger
                         } else {
                             button_style::primary
@@ -178,7 +178,7 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
     form = form
         .push(field(
             "Duo refresh interval (3–60 seconds)",
-            &state.duo_interval,
+            &state.authenticator.duo_interval,
             Field::DuoInterval,
             false,
             !app.busy(),
@@ -189,7 +189,7 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             Toggle::NotifyDuo,
             !app.busy(),
         ));
-    if let Err(error) = state.duo_interval_seconds() {
+    if let Err(error) = state.authenticator.duo_interval_seconds() {
         form = form.push(text(error).size(14));
     }
     if let Some(target) = state.duo.watch.as_ref() {
@@ -210,7 +210,8 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             .iter()
             .any(|item| item.id == choice.id && item.has_duo)
     });
-    let unlocked = !app.busy() && app.running && app.session.is_some() && enrolled;
+    let unlocked =
+        !app.busy() && app.connection.running && app.connection.session.is_some() && enrolled;
     let writes = unlocked && app.recovery.id().is_none() && state.prepared.is_none();
     let mut form = column![
         text("Duo Push requests").size(19),
@@ -283,7 +284,7 @@ fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
             card = card
                 .push(field(
                     "Verified Push code from the login page",
-                    state.code.expose(),
+                    state.authenticator.code.expose(),
                     Field::Code,
                     true,
                     unlocked,
@@ -334,9 +335,11 @@ pub(super) fn account_authenticators<'a>(
             .push(rule::horizontal(1));
     }
     if item.has_totp {
-        let writes = app.writes_allowed() && app.session.is_some() && state.prepared.is_none();
-        let copy_enabled = state.otp_copy_timeout.trim().is_empty()
+        let writes =
+            app.writes_allowed() && app.connection.session.is_some() && state.prepared.is_none();
+        let copy_enabled = state.authenticator.otp_copy_timeout.trim().is_empty()
             || state
+                .authenticator
                 .otp_timeout(app.conf.clipboard.timeout)
                 .is_ok_and(|timeout| timeout.is_some());
         let code = state.otp_result_for(app);
@@ -378,7 +381,7 @@ pub(super) fn account_authenticators<'a>(
             form = form
                 .push(field(
                     "OTP copy timeout in seconds (0–255; blank uses clipboard setting)",
-                    &state.otp_copy_timeout,
+                    &state.authenticator.otp_copy_timeout,
                     Field::OtpCopyTimeout,
                     false,
                     !app.busy(),
@@ -386,6 +389,7 @@ pub(super) fn account_authenticators<'a>(
                 .push(
                     text(
                         state
+                            .authenticator
                             .otp_timeout(app.conf.clipboard.timeout)
                             .err()
                             .unwrap_or_else(|| "Zero disables OTP copying.".into()),
@@ -436,18 +440,18 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
     }
     form = form
         .push(text(if item.has_totp { "Authenticator configured" } else { "No authenticator configured" }).size(14))
-        .push(field("Base32 secret or otpauth URI", state.configuration.expose(), Field::Configuration, true, enabled))
+        .push(field("Base32 secret or otpauth URI", state.authenticator.configuration.expose(), Field::Configuration, true, enabled))
         .push(row![
             action(if item.has_totp { "Replace authenticator" } else { "Add authenticator" }, Action::SetOtp, writes),
             action("Remove authenticator", Action::RemoveOtp, writes && item.has_totp).style(button_style::danger),
         ].spacing(8).wrap())
         .push(rule::horizontal(1))
         .push(text(if item.has_duo { "Duo Push configured" } else { "No Duo Push enrollment" }).size(14))
-        .push(field("Fresh Duo activation link", state.activation.expose(), Field::Activation, true, enabled))
-        .push(pick_list([Mode::Automatic, Mode::Hotp, Mode::Totp], Some(state.mode), |value| event(Event::Mode(value)))
+        .push(field("Fresh Duo activation link", state.authenticator.activation.expose(), Field::Activation, true, enabled))
+        .push(pick_list([Mode::Automatic, Mode::Hotp, Mode::Totp], Some(state.authenticator.mode), |value| event(Event::Mode(value)))
             .placeholder("Duo passcode mode")
             .padding(10))
-        .push(toggle("Replace existing enrollment when enrolling Push & passcodes", state.replace_duo, Toggle::ReplaceDuo, enabled))
+        .push(toggle("Replace existing enrollment when enrolling Push & passcodes", state.authenticator.replace_duo, Toggle::ReplaceDuo, enabled))
         .push(row![
             action("Enroll Duo Push & passcodes", Action::EnrollDuo, writes),
             action("Enroll Duo passcodes only", Action::EnrollPasscodes, writes),
@@ -466,9 +470,9 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
 
 pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
     let enabled = !app.busy();
-    let unlocked = enabled && app.running && app.session.is_some();
+    let unlocked = enabled && app.connection.running && app.connection.session.is_some();
     let writes = unlocked && app.recovery.id().is_none();
-    let server_writes = enabled && app.running && app.recovery.id().is_none();
+    let server_writes = enabled && app.connection.running && app.recovery.id().is_none();
     let choices: Vec<Choice> = app
         .items
         .iter()
@@ -486,7 +490,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             .style(crate::gui::view::quiet_button)
             .on_press_maybe(enabled.then_some(event(Event::Section(Section::Overview)))),
         text(if state.section == Section::Files {
-            state.file_operation.to_string()
+            state.files.file_operation.to_string()
         } else {
             state.section.to_string()
         })
@@ -537,7 +541,9 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             .width(Fill),
         );
     }
-    if app.session.is_none() && !matches!(state.section, Section::Browser | Section::Utilities) {
+    if app.connection.session.is_none()
+        && !matches!(state.section, Section::Browser | Section::Utilities)
+    {
         form = form.push(text("Unlock a vault to use item tools. Creating a vault, restoring a backup, and importing into a new vault are available while locked.").size(14));
     }
     form = match state.section {
@@ -550,36 +556,36 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             .push(action("Load deleted items", Action::Trash, unlocked)),
         Section::Audit => form
             .push(text("Find weak, reused, or exposed passwords and open an affected item directly from the results.").size(16))
-            .push(field("Passwords at least this many days old (optional)", &state.stale_days, Field::StaleDays, false, enabled))
-            .push(toggle("Report logins missing an authenticator", state.require_otp, Toggle::RequireOtp, enabled))
-            .push(toggle("Check Pwned Passwords using hash prefixes (network request)", state.breaches, Toggle::Breaches, enabled))
+            .push(field("Passwords at least this many days old (optional)", &state.audit.stale_days, Field::StaleDays, false, enabled))
+            .push(toggle("Report logins missing an authenticator", state.audit.require_otp, Toggle::RequireOtp, enabled))
+            .push(toggle("Check Pwned Passwords using hash prefixes (network request)", state.audit.breaches, Toggle::Breaches, enabled))
             .push(action("Check vault health", Action::Audit, unlocked)),
         Section::Files => {
-            let saving = matches!(state.file_operation, FileOperation::Backup | FileOperation::Export);
-            let operation = match state.file_operation { FileOperation::Backup => Action::Backup, FileOperation::Restore => Action::RestoreBackup, FileOperation::Import => Action::Import, FileOperation::Export => Action::Export };
+            let saving = matches!(state.files.file_operation, FileOperation::Backup | FileOperation::Export);
+            let operation = match state.files.file_operation { FileOperation::Backup => Action::Backup, FileOperation::Restore => Action::RestoreBackup, FileOperation::Import => Action::Import, FileOperation::Export => Action::Export };
             let readiness = state.prepare(operation, app);
             let file_ready = readiness.is_ok();
             let preview_ready = state.prepare(Action::PreviewImport, app).is_ok();
-            let mut form = form.push(path("File", &state.path, Field::Path, saving, enabled));
+            let mut form = form.push(path("File", &state.files.path, Field::Path, saving, enabled));
             if let Err(message) = readiness { form = form.push(text(message).size(14).style(text::danger)); }
-            match state.file_operation {
+            match state.files.file_operation {
                 FileOperation::Backup => {
                     // Backups use an existing key; only password backups need confirmation.
                     form = form.push(credentials(state, false, enabled));
-                    if !state.use_key { form = form.push(field("Confirm backup password", state.confirmation.expose(), Field::Confirmation, true, enabled)); }
-                    form.push(toggle("Replace an existing backup file", state.force, Toggle::Force, enabled))
+                    if !state.credentials.use_key { form = form.push(field("Confirm backup password", state.credentials.confirmation.expose(), Field::Confirmation, true, enabled)); }
+                    form.push(toggle("Replace an existing backup file", state.files.force, Toggle::Force, enabled))
                         .push(action("Create encrypted backup", Action::Backup, writes && file_ready))
                 }
                 FileOperation::Restore => form
                     .push(text("Restores a separate locked vault. Lock the current vault first.").size(14))
                     .push(credentials(state, false, enabled))
-                    .push(action("Restore backup", Action::RestoreBackup, server_writes && app.session.is_none() && file_ready)),
+                    .push(action("Restore backup", Action::RestoreBackup, server_writes && app.connection.session.is_none() && file_ready)),
                 FileOperation::Import => {
                     form = form
                         .push(text("Supports CSV, JSON, Bitwarden JSON, and portable JSON. Preview counts, conflicts, and data loss before importing.").size(14))
-                        .push(pick_list([Policy::Skip, Policy::Replace, Policy::KeepBoth], Some(state.policy), |value| event(Event::Policy(value))).placeholder("Import duplicate policy").padding(10))
-                        .push(toggle("Import into a new vault", state.import_new, Toggle::ImportNew, enabled));
-                    if state.import_new { form = form.push(credentials(state, true, enabled)); }
+                        .push(pick_list([Policy::Skip, Policy::Replace, Policy::KeepBoth], Some(state.files.policy), |value| event(Event::Policy(value))).placeholder("Import duplicate policy").padding(10))
+                        .push(toggle("Import into a new vault", state.files.import_new, Toggle::ImportNew, enabled));
+                    if state.files.import_new { form = form.push(credentials(state, true, enabled)); }
                     form.push(row![
                         action("Preview import", Action::PreviewImport, server_writes && preview_ready),
                         action("Import", Action::Import, server_writes && file_ready)
@@ -587,61 +593,61 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
                 }
                 FileOperation::Export => form
                     .push(text("Exports plaintext secrets. Use .json to preserve rich metadata; other extensions produce CSV. Prefer an encrypted backup for safekeeping.").size(14))
-                    .push(toggle("Replace an existing export file", state.force, Toggle::Force, enabled))
+                    .push(toggle("Replace an existing export file", state.files.force, Toggle::Force, enabled))
                     .push(action("Export plaintext", Action::Export, writes && file_ready)),
             }
         }
         Section::Security => {
-            let operation = match state.vault_operation { VaultOperation::Rekey => Action::Rekey, VaultOperation::Create => Action::NewVault, VaultOperation::Delete => Action::DeleteVault };
+            let operation = match state.credentials.vault_operation { VaultOperation::Rekey => Action::Rekey, VaultOperation::Create => Action::NewVault, VaultOperation::Delete => Action::DeleteVault };
             let readiness = state.prepare(operation, app);
             let credentials_ready = readiness.is_ok();
             if let Err(message) = readiness { form = form.push(text(message).size(14).style(text::danger)); }
             form.push(text("Vault credentials").size(19))
                 .push(text("New vaults and rekeying create a new external key when key mode is selected. Deleting a vault authenticates using its existing credentials. Select the vault on the Vault tab.").size(14))
-                .push(pick_list([VaultOperation::Rekey, VaultOperation::Create, VaultOperation::Delete], Some(state.vault_operation), |value| event(Event::VaultOperation(value))).placeholder("Vault operation").padding(10))
-                .push(credentials(state, state.vault_operation != VaultOperation::Delete, enabled))
-                .push(toggle("Keep the external key when deleting a vault", state.keep_key, Toggle::KeepKey, enabled))
-                .push(match state.vault_operation {
+                .push(pick_list([VaultOperation::Rekey, VaultOperation::Create, VaultOperation::Delete], Some(state.credentials.vault_operation), |value| event(Event::VaultOperation(value))).placeholder("Vault operation").padding(10))
+                .push(credentials(state, state.credentials.vault_operation != VaultOperation::Delete, enabled))
+                .push(toggle("Keep the external key when deleting a vault", state.credentials.keep_key, Toggle::KeepKey, enabled))
+                .push(match state.credentials.vault_operation {
                     VaultOperation::Rekey => action("Change vault credentials", Action::Rekey, writes && credentials_ready),
                     VaultOperation::Create => action("Create vault", Action::NewVault, server_writes && credentials_ready),
-                    VaultOperation::Delete => action("Delete selected vault", Action::DeleteVault, server_writes && app.session.is_none() && credentials_ready).style(button_style::danger),
+                    VaultOperation::Delete => action("Delete selected vault", Action::DeleteVault, server_writes && app.connection.session.is_none() && credentials_ready).style(button_style::danger),
                 })
         }
         Section::Search => {
             let mut kinds = vec!["All types".to_owned()];
             kinds.extend(model::KINDS.iter().map(ToString::to_string));
-            let selected = state.kind.map(|kind| kind.to_string()).unwrap_or_else(|| "All types".into());
+            let selected = state.search.kind.map(|kind| kind.to_string()).unwrap_or_else(|| "All types".into());
             let mut form = form.push(text("Search metadata, notes, and non-secret custom fields").size(18));
             for (label, value, key) in [
-                ("Any matching text", state.query.as_str(), Field::Query),
-                ("Name contains", state.name.as_str(), Field::Name),
-                ("Username contains", state.username.as_str(), Field::Username),
-                ("URL contains", state.url.as_str(), Field::Url),
-                ("Notes contain", state.notes.expose(), Field::Notes),
-                ("Passwords at least this many days old (optional)", state.stale_days.as_str(), Field::StaleDays),
+                ("Any matching text", state.search.query.as_str(), Field::Query),
+                ("Name contains", state.search.name.as_str(), Field::Name),
+                ("Username contains", state.search.username.as_str(), Field::Username),
+                ("URL contains", state.search.url.as_str(), Field::Url),
+                ("Notes contain", state.search.notes.expose(), Field::Notes),
+                ("Passwords at least this many days old (optional)", state.audit.stale_days.as_str(), Field::StaleDays),
             ] { form = form.push(field(label, value, key, matches!(key, Field::Notes), enabled)); }
             form.push(pick_list(kinds, Some(selected), |value| event(Event::Kind(model::KINDS.iter().find(|kind| kind.to_string() == value).copied()))).placeholder("Filter item type").padding(10))
-                .push(pick_list(["Any authenticator", "With authenticator", "Without authenticator"], Some(match state.has_otp { None => "Any authenticator", Some(true) => "With authenticator", Some(false) => "Without authenticator" }), |value| event(Event::HasOtp(match value { "With authenticator" => Some(true), "Without authenticator" => Some(false), _ => None }))).placeholder("Filter authenticator").padding(10))
-                .push(pick_list(["ID", "Name", "Created", "Modified", "Password age"], Some(match state.sort { SortField::Id => "ID", SortField::Name => "Name", SortField::Created => "Created", SortField::Modified => "Modified", SortField::PasswordAge => "Password age" }), |value| event(Event::Sort(match value { "Name" => SortField::Name, "Created" => SortField::Created, "Modified" => SortField::Modified, "Password age" => SortField::PasswordAge, _ => SortField::Id }))).placeholder("Sort search results").padding(10))
-                .push(toggle("Only weak primary secrets", state.weak, Toggle::Weak, enabled))
-                .push(toggle("Descending order", state.descending, Toggle::Descending, enabled))
+                .push(pick_list(["Any authenticator", "With authenticator", "Without authenticator"], Some(match state.search.has_otp { None => "Any authenticator", Some(true) => "With authenticator", Some(false) => "Without authenticator" }), |value| event(Event::HasOtp(match value { "With authenticator" => Some(true), "Without authenticator" => Some(false), _ => None }))).placeholder("Filter authenticator").padding(10))
+                .push(pick_list(["ID", "Name", "Created", "Modified", "Password age"], Some(match state.search.sort { SortField::Id => "ID", SortField::Name => "Name", SortField::Created => "Created", SortField::Modified => "Modified", SortField::PasswordAge => "Password age" }), |value| event(Event::Sort(match value { "Name" => SortField::Name, "Created" => SortField::Created, "Modified" => SortField::Modified, "Password age" => SortField::PasswordAge, _ => SortField::Id }))).placeholder("Sort search results").padding(10))
+                .push(toggle("Only weak primary secrets", state.search.weak, Toggle::Weak, enabled))
+                .push(toggle("Descending order", state.search.descending, Toggle::Descending, enabled))
                 .push(action("Search vault", Action::Search, unlocked))
         }
         Section::Utilities => form
             .push(text("Inspect a previous operation").size(19))
             .push(text("Enter an operation ID reported by the CLI or another client. Checking its outcome never retries it or clears this window's pending changes.").size(14))
-            .push(field("Operation ID", &state.operation_id, Field::OperationId, false, enabled))
-            .push(action("Check operation outcome", Action::OperationStatus, enabled && app.running && state.prepare(Action::OperationStatus, app).is_ok()))
+            .push(field("Operation ID", &state.utilities.operation_id, Field::OperationId, false, enabled))
+            .push(action("Check operation outcome", Action::OperationStatus, enabled && app.connection.running && state.prepare(Action::OperationStatus, app).is_ok()))
             .push(rule::horizontal(1))
             .push(text("Save shell completions").size(19))
-            .push(pick_list([clap_complete::Shell::Bash, clap_complete::Shell::Elvish, clap_complete::Shell::Fish, clap_complete::Shell::PowerShell, clap_complete::Shell::Zsh], Some(state.shell), |shell| event(Event::Shell(shell))).padding(10))
-            .push(path("Completion file (must not already exist)", &state.path, Field::Path, true, enabled))
-            .push(action("Save shell completions", Action::Completions, enabled && !state.path.trim().is_empty())),
+            .push(pick_list([clap_complete::Shell::Bash, clap_complete::Shell::Elvish, clap_complete::Shell::Fish, clap_complete::Shell::PowerShell, clap_complete::Shell::Zsh], Some(state.utilities.shell), |shell| event(Event::Shell(shell))).padding(10))
+            .push(path("Completion file (must not already exist)", &state.files.path, Field::Path, true, enabled))
+            .push(action("Save shell completions", Action::Completions, enabled && !state.files.path.trim().is_empty())),
         Section::Browser => form
             .push(text("Register the browser extension").size(19))
             .push(text("Load extension/ as an unpacked extension first, then enter its ID. Reload the extension afterward. On Windows, fully close the browser before installing or updating its native host.").size(14))
-            .push(pick_list([Browser::Chrome, Browser::Chromium, Browser::Helium], Some(state.browser), |value| event(Event::Browser(value))).placeholder("Browser to register").padding(10))
-            .push(field("32-character extension ID", &state.extension_id, Field::ExtensionId, false, enabled))
+            .push(pick_list([Browser::Chrome, Browser::Chromium, Browser::Helium], Some(state.browser.browser), |value| event(Event::Browser(value))).placeholder("Browser to register").padding(10))
+            .push(field("32-character extension ID", &state.browser.extension_id, Field::ExtensionId, false, enabled))
             .push(row![
                 action("Register browser bridge", Action::InstallHost, enabled),
                 action("Update registered bridge", Action::UpdateHost, enabled),
@@ -657,7 +663,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
 
 fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
     let enabled = !app.busy();
-    let writes = enabled && app.session.is_some() && app.recovery.id().is_none();
+    let writes = enabled && app.connection.session.is_some() && app.recovery.id().is_none();
     let result = state.result.as_ref().unwrap();
     let mut form = column![].spacing(14);
     match result {

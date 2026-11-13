@@ -63,6 +63,7 @@ function environment(ids, responses, search = "") {
 
 function execute(name, context) {
     const filename = path.resolve(__dirname, name);
+    if (name !== "ui_transport.js") execute("ui_transport.js", context);
     vm.runInNewContext(fs.readFileSync(filename, "utf8"), context, { filename });
 }
 

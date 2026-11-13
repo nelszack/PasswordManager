@@ -534,7 +534,7 @@ mod tests {
     fn live() -> VaultSession {
         VaultSession::unlock(
             Vault::memory(),
-            PasswordType::Session {
+            VaultCredentials::Session {
                 encryption_key: [42; 32],
                 salt: [42; 16],
                 kdf: 1,

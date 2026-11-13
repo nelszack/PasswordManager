@@ -228,6 +228,7 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
                 .ok_or("Item revision exhausted")?;
             item.entry.modified = Timestamp::now();
             item.strength = CachedStrength::default();
+            item.search = query::CachedSearch::default();
             if let Some(duo) = &mut item.duo {
                 duo.review_key = None;
             }
@@ -241,7 +242,7 @@ impl Vault {
         credentials: &VaultCredentials,
         bytes: &[u8],
     ) -> Result<VaultData, String> {
-        let mut key = credentials.keypass.as_ref().ok_or("Vault locked")?.clone();
+        let mut key = credentials.clone();
         let plaintext = Zeroizing::new(decrypt_file(&mut key, bytes).ok_or(
             "Cannot decrypt cloud copy with this session key. Download a comparison copy and unlock with its current credentials; both copies preserved.")?);
         let data = persistence::decode_document(&plaintext).map_err(|e| e.to_string())?;
@@ -272,7 +273,7 @@ impl Vault {
             choices,
         )?;
         let mut plaintext = persistence::encode_document(&data, None).map_err(|e| e.to_string())?;
-        let mut key = credentials.keypass.as_ref().ok_or("Vault locked")?.clone();
+        let mut key = credentials.clone();
         let encrypted = try_encrypt_file_in_place(&mut key, std::mem::take(&mut *plaintext))
             .map_err(|e| e.to_string())?;
         if encrypted.len() as u64 > crate::cloud::MAX_BYTES {
@@ -448,24 +449,17 @@ mod tests {
     #[test]
     fn encrypted_merge_checks_identity_and_key_and_roundtrips() {
         let (local, remote) = pair();
-        let credentials = VaultCredentials {
-            locked: false,
-            keypass: Some(PasswordType::Session {
-                encryption_key: [42; 32],
-                salt: [7; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            }),
+        let credentials = VaultCredentials::Session {
+            encryption_key: [42; 32],
+            salt: [7; 16],
+            kdf: 1,
+            memory_kib: 8192,
+            iterations: 1,
+            parallelism: 1,
         };
         let encrypt = |data: &VaultData| {
             let plaintext = persistence::encode_document(data, None).unwrap();
-            try_encrypt_file_in_place(
-                &mut credentials.keypass.clone().unwrap(),
-                plaintext.to_vec(),
-            )
-            .unwrap()
+            try_encrypt_file_in_place(&mut credentials.clone(), plaintext.to_vec()).unwrap()
         };
         let bytes = encrypt(&remote.data);
         let selected = choices(&local.data, &remote.data, Side::Remote);

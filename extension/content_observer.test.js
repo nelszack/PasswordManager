@@ -164,3 +164,25 @@ test("disposing a document cancels deferred discovery rather than recreating con
     env.dispose(); env.flush();
     assert.deepEqual(env.controls, []);
 });
+
+
+test("repeated visibility changes reuse discovery but still find late shadow roots", () => {
+    const input = new Input();
+    const host = new Element();
+    const container = new Element([input, host]);
+    const env = environment([container]);
+    const change = () => { env.notify([{ type: "attributes", target: container, attributeName: "class", addedNodes: [] }]); env.flush(); };
+    change();
+    assert.equal(container.scans, 1);
+    change();
+    assert.equal(container.scans, 1, "attribute-only churn avoids another subtree query");
+    const otp = new Input("totp");
+    host.shadowRoot = new Element([otp]); host.shadowRoot.host = host;
+    change();
+    assert.ok(env.controls.some(([input, kind]) => input === otp && kind === "totp"));
+    const addedInput = new Input("card"); addedInput.parentNode = container; container.children.push(addedInput);
+    env.notify([added(addedInput)]); env.flush();
+    change();
+    assert.equal(container.scans, 2, "structural changes invalidate cached membership");
+    assert.ok(env.controls.some(([input, kind]) => input === addedInput && kind === "card"));
+});

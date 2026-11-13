@@ -8,9 +8,7 @@ let savedItems = [];
 const search = document.getElementById("search");
 const recovery = document.getElementById("recovery");
 
-function send(message) {
-    return new Promise(resolve => chrome.runtime.sendMessage(message, resolve));
-}
+const send = PasswordManagerUiTransport.send;
 
 async function complete(id) {
     if (crossOrigin && !confirmation.checked) {

@@ -1,10 +1,6 @@
 let pendingOperations = [];
 let reviewedOperationId = null;
-function sendMessage(message) {
-    return new Promise((resolve) => {
-        chrome.runtime.sendMessage(message, response => resolve(response || null));
-    });
-}
+const sendMessage = PasswordManagerUiTransport.send;
 
 function renderStatus(status) {
     const dot = document.getElementById("statusDot");

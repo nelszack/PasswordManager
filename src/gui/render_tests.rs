@@ -140,12 +140,12 @@ fn accessibility_tree(app: &App, focus: Option<&str>) -> iced_winit::a11y::A11yT
 #[test]
 fn accessibility_tree_keeps_button_labels_focus_and_passwords_protected() {
     let mut app = tests::app();
-    app.running = true;
+    app.connection.running = true;
     app.request_state = RequestState::Idle;
-    app.creating = true;
-    app.master = "synthetic-native-protected-value".into();
+    app.connection.creating = true;
+    app.connection.master = "synthetic-native-protected-value".into();
     let accessible = accessibility_tree(&app, Some("master-password"));
-    assert!(!format!("{:?}", accessible.update).contains(app.master.expose()));
+    assert!(!format!("{:?}", accessible.update).contains(app.connection.master.expose()));
     let protected: Vec<_> = accessible
         .update
         .nodes
@@ -181,7 +181,7 @@ fn accessibility_tree_keeps_button_labels_focus_and_passwords_protected() {
 #[test]
 fn accessible_names_feedback_and_selection_follow_the_visible_form() {
     let mut app = tests::app();
-    app.running = true;
+    app.connection.running = true;
     app.request_state = RequestState::Idle;
     app.tab = Tab::Generator;
     app.notice = "Synthetic item saved".into();
@@ -213,7 +213,7 @@ fn accessible_names_feedback_and_selection_follow_the_visible_form() {
             .any(|(_, node)| node.children().contains(&generator_label)
                 && node.is_selected() == Some(true))
     );
-    app.passphrase = true;
+    app.generation.passphrase = true;
     let tree = accessibility_tree(&app, None);
     for label in ["Number of words (1–255)", "Word separator"] {
         assert!(
@@ -238,9 +238,9 @@ fn accessible_names_feedback_and_selection_follow_the_visible_form() {
 #[test]
 fn ordinary_inputs_expose_text_runs_and_caret_without_exposing_passwords() {
     let mut app = tests::app();
-    app.running = true;
+    app.connection.running = true;
     app.request_state = RequestState::Idle;
-    app.creating = true;
+    app.connection.creating = true;
     app.ui.vault_name = "Café 👩🏽‍💻".into();
     let tree = accessibility_tree(&app, None);
     let input = &tree
@@ -279,9 +279,9 @@ fn ordinary_inputs_expose_text_runs_and_caret_without_exposing_passwords() {
 #[test]
 fn multiline_notes_expose_readable_text_and_selection() {
     let mut app = tests::app();
-    app.running = true;
+    app.connection.running = true;
     app.request_state = RequestState::Idle;
-    app.session = Some("synthetic-session".into());
+    app.connection.session = Some("synthetic-session".into());
     let mut notes = text_editor::Content::with_text("first\ncafé 👩🏽‍💻");
     notes.move_to(text_editor::Cursor {
         position: text_editor::Position { line: 1, column: 6 },
@@ -321,14 +321,14 @@ fn rendered_screens_fit_supported_windows() {
         let mut app = tests::app();
         app.ui.width = width as f32 / scale;
         app.ui.height = 800.0 / scale;
-        app.running = true;
+        app.connection.running = true;
         app.request_state = RequestState::Idle;
         app.notice.clear();
         render(&app, "onboarding", width, 800, scale);
-        app.creating = true;
+        app.connection.creating = true;
         render(&app, "create", width, 800, scale);
-        app.creating = false;
-        app.session = Some("synthetic-session".into());
+        app.connection.creating = false;
+        app.connection.session = Some("synthetic-session".into());
         app.items = (1..=3)
             .map(|id| ItemSummary {
                 id,
@@ -350,9 +350,9 @@ fn rendered_screens_fit_supported_windows() {
         app.tab = Tab::Generator;
         render(&app, "generator", width, 800, scale);
         app.tab = Tab::Settings;
-        app.cloud_vaults = vec!["a".repeat(32)];
-        app.cloud_vault = app.cloud_vaults.first().cloned();
-        app.cloud_review = Some(password_manager::cloud::ConflictReview {
+        app.cloud.vaults = vec!["a".repeat(32)];
+        app.cloud.vault = app.cloud.vaults.first().cloned();
+        app.cloud.review = Some(password_manager::cloud::ConflictReview {
             token: "synthetic-review".into(),
             items: vec![password_manager::cloud::ConflictItem {
                 id: 1,
@@ -373,7 +373,7 @@ fn rendered_screens_fit_supported_windows() {
         render(&app, "tools", width, 800, scale);
         app.workspace.section = workflows::Section::Utilities;
         render(&app, "cli-utilities", width, 800, scale);
-        app.session = None;
+        app.connection.session = None;
         render(&app, "cli-utilities-locked", width, 800, scale);
     }
 }
@@ -389,8 +389,8 @@ fn rendered_edge_cases_fit_minimum_windows_and_all_themes() {
         let mut app = tests::app();
         app.request_state = RequestState::Idle;
         app.notice.clear();
-        app.running = true;
-        app.session = Some("synthetic-session".into());
+        app.connection.running = true;
+        app.connection.session = Some("synthetic-session".into());
         app.ui.width = 480.0 / 1.3;
         app.ui.height = 480.0 / 1.3;
         app.settings.appearance = appearance;
@@ -422,8 +422,8 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
     let mut app = tests::app();
     app.request_state = RequestState::Idle;
     app.notice.clear();
-    app.running = true;
-    app.session = Some("synthetic-session".into());
+    app.connection.running = true;
+    app.connection.session = Some("synthetic-session".into());
     app.items = (0..2000)
         .map(|id| ItemSummary {
             id: id + 1,
@@ -456,9 +456,9 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
 fn dynamic_banners_preserve_editor_focus_across_view_updates() {
     use renderer::Renderer as _;
     let mut app = tests::app();
-    app.running = true;
+    app.connection.running = true;
     app.request_state = RequestState::Idle;
-    app.session = Some("synthetic-session".into());
+    app.connection.session = Some("synthetic-session".into());
     app.editor = Editor::new(Draft::default());
     let size = Size::new(1060.0, 760.0);
     let mut renderer = iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0));

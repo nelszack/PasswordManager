@@ -1,7 +1,10 @@
 //! Desktop workflows use the same typed commands and receipts as the CLI.
+mod completion;
+mod forms;
 #[cfg(test)]
 mod tests;
 mod view;
+use forms::*;
 
 use super::*;
 use password_manager::{
@@ -152,7 +155,11 @@ impl WatchTarget {
             .ok_or("Refresh the vault and select the item again.")?;
         Ok(Self {
             choice,
-            session: app.session.clone().ok_or("Unlock a vault first.")?,
+            session: app
+                .connection
+                .session
+                .clone()
+                .ok_or("Unlock a vault first.")?,
             revision: item.revision,
         })
     }
@@ -162,8 +169,8 @@ impl WatchTarget {
             && self.revision == other.revision
     }
     pub fn current(&self, app: &App) -> bool {
-        app.running
-            && app.session.as_ref() == Some(&self.session)
+        app.connection.running
+            && app.connection.session.as_ref() == Some(&self.session)
             && app
                 .items
                 .iter()
@@ -361,47 +368,20 @@ pub struct HistoryState {
 }
 
 pub struct State {
+    pub files: FilesForm,
+    pub credentials: CredentialsForm,
+    pub audit: AuditForm,
+    pub search: SearchForm,
+    pub authenticator: AuthenticatorForm,
+    pub browser: BrowserForm,
+    pub utilities: UtilitiesForm,
+
     pub otp: OtpState,
     pub duo: DuoState,
     pub history: HistoryState,
     pub section: Section,
     pub show_results: bool,
-    pub file_operation: FileOperation,
-    pub vault_operation: VaultOperation,
     pub selected: Option<Choice>,
-    pub path: String,
-    pub key_path: String,
-    pub password: SecretString,
-    pub confirmation: SecretString,
-    pub configuration: SecretString,
-    pub activation: SecretString,
-    pub code: SecretString,
-    pub stale_days: String,
-    pub otp_copy_timeout: String,
-    pub duo_interval: String,
-    pub query: String,
-    pub name: String,
-    pub username: String,
-    pub url: String,
-    pub notes: SecretString,
-    pub extension_id: String,
-    pub operation_id: String,
-    pub shell: clap_complete::Shell,
-    pub use_key: bool,
-    pub force: bool,
-    pub import_new: bool,
-    pub keep_key: bool,
-    pub breaches: bool,
-    pub require_otp: bool,
-    pub weak: bool,
-    pub descending: bool,
-    pub replace_duo: bool,
-    pub policy: Policy,
-    pub mode: Mode,
-    pub browser: Browser,
-    pub kind: Option<ItemKind>,
-    pub has_otp: Option<bool>,
-    pub sort: SortField,
     pub result: Option<ResponsePayload>,
     pub result_until: Option<Instant>,
     pub prepared: Option<Prepared>,
@@ -412,47 +392,20 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            files: FilesForm::default(),
+            credentials: CredentialsForm::default(),
+            audit: AuditForm::default(),
+            search: SearchForm::default(),
+            authenticator: AuthenticatorForm::default(),
+            browser: BrowserForm::default(),
+            utilities: UtilitiesForm::default(),
+
             otp: OtpState::default(),
             duo: DuoState::default(),
             history: HistoryState::default(),
             section: Section::Overview,
             show_results: false,
-            file_operation: FileOperation::Backup,
-            vault_operation: VaultOperation::Rekey,
             selected: None,
-            path: String::new(),
-            key_path: String::new(),
-            password: SecretString::default(),
-            confirmation: SecretString::default(),
-            configuration: SecretString::default(),
-            activation: SecretString::default(),
-            code: SecretString::default(),
-            stale_days: String::new(),
-            otp_copy_timeout: String::new(),
-            duo_interval: "5".into(),
-            query: String::new(),
-            name: String::new(),
-            username: String::new(),
-            url: String::new(),
-            notes: SecretString::default(),
-            extension_id: String::new(),
-            operation_id: String::new(),
-            shell: clap_complete::Shell::Bash,
-            use_key: false,
-            force: false,
-            import_new: false,
-            keep_key: true,
-            breaches: false,
-            require_otp: false,
-            weak: false,
-            descending: false,
-            replace_duo: false,
-            policy: Policy::Skip,
-            mode: Mode::Automatic,
-            browser: Browser::Chrome,
-            kind: None,
-            has_otp: None,
-            sort: SortField::Name,
             result: None,
             result_until: None,
             prepared: None,
@@ -464,11 +417,11 @@ impl Default for State {
 }
 impl State {
     pub fn clear_inputs(&mut self) {
-        self.password.zeroize();
-        self.confirmation.zeroize();
-        self.configuration.zeroize();
-        self.activation.zeroize();
-        self.code.zeroize();
+        self.credentials.password.zeroize();
+        self.credentials.confirmation.zeroize();
+        self.authenticator.configuration.zeroize();
+        self.authenticator.activation.zeroize();
+        self.authenticator.code.zeroize();
     }
     pub fn hide_secrets(&mut self) {
         self.secret_epoch += 1;
@@ -489,14 +442,14 @@ impl State {
     }
     pub fn clear_duo_requests(&mut self) {
         self.duo.result = None;
-        self.code.zeroize();
+        self.authenticator.code.zeroize();
     }
     pub fn clear_vault(&mut self) {
         self.hide_secrets();
         self.reset_duo();
         self.clear_history();
         self.clear_inputs();
-        self.notes.zeroize();
+        self.search.notes.zeroize();
         self.selected = None;
         self.result = None;
         self.prepared = None;
@@ -504,25 +457,25 @@ impl State {
     pub fn edit(&mut self, field: Field, value: SecretString) {
         self.prepared = None;
         match field {
-            Field::Password => self.password = value,
-            Field::Confirmation => self.confirmation = value,
-            Field::Configuration => self.configuration = value,
-            Field::Activation => self.activation = value,
-            Field::Code => self.code = value,
-            Field::Notes => self.notes = value,
+            Field::Password => self.credentials.password = value,
+            Field::Confirmation => self.credentials.confirmation = value,
+            Field::Configuration => self.authenticator.configuration = value,
+            Field::Activation => self.authenticator.activation = value,
+            Field::Code => self.authenticator.code = value,
+            Field::Notes => self.search.notes = value,
             field => {
                 *match field {
-                    Field::Path => &mut self.path,
-                    Field::KeyPath => &mut self.key_path,
-                    Field::StaleDays => &mut self.stale_days,
-                    Field::OtpCopyTimeout => &mut self.otp_copy_timeout,
-                    Field::DuoInterval => &mut self.duo_interval,
-                    Field::Query => &mut self.query,
-                    Field::Name => &mut self.name,
-                    Field::Username => &mut self.username,
-                    Field::Url => &mut self.url,
-                    Field::ExtensionId => &mut self.extension_id,
-                    Field::OperationId => &mut self.operation_id,
+                    Field::Path => &mut self.files.path,
+                    Field::KeyPath => &mut self.credentials.key_path,
+                    Field::StaleDays => &mut self.audit.stale_days,
+                    Field::OtpCopyTimeout => &mut self.authenticator.otp_copy_timeout,
+                    Field::DuoInterval => &mut self.authenticator.duo_interval,
+                    Field::Query => &mut self.search.query,
+                    Field::Name => &mut self.search.name,
+                    Field::Username => &mut self.search.username,
+                    Field::Url => &mut self.search.url,
+                    Field::ExtensionId => &mut self.browser.extension_id,
+                    Field::OperationId => &mut self.utilities.operation_id,
                     _ => unreachable!(),
                 } = value.expose_owned()
             }
@@ -531,61 +484,28 @@ impl State {
     pub fn toggle(&mut self, toggle: Toggle, value: bool) {
         self.prepared = None;
         *match toggle {
-            Toggle::UseKey => &mut self.use_key,
-            Toggle::Force => &mut self.force,
-            Toggle::ImportNew => &mut self.import_new,
-            Toggle::KeepKey => &mut self.keep_key,
-            Toggle::Breaches => &mut self.breaches,
-            Toggle::RequireOtp => &mut self.require_otp,
-            Toggle::Weak => &mut self.weak,
-            Toggle::Descending => &mut self.descending,
-            Toggle::ReplaceDuo => &mut self.replace_duo,
+            Toggle::UseKey => &mut self.credentials.use_key,
+            Toggle::Force => &mut self.files.force,
+            Toggle::ImportNew => &mut self.files.import_new,
+            Toggle::KeepKey => &mut self.credentials.keep_key,
+            Toggle::Breaches => &mut self.audit.breaches,
+            Toggle::RequireOtp => &mut self.audit.require_otp,
+            Toggle::Weak => &mut self.search.weak,
+            Toggle::Descending => &mut self.search.descending,
+            Toggle::ReplaceDuo => &mut self.authenticator.replace_duo,
             Toggle::WatchOtp | Toggle::WatchDuo => return,
             Toggle::OtpOptions => &mut self.otp.options_open,
             Toggle::CopyWatchedOtp => &mut self.otp.copy,
             Toggle::NotifyDuo => &mut self.duo.notify,
         } = value;
     }
-    fn credentials(&self, confirm: bool) -> Result<PasswordType, String> {
-        if self.use_key {
-            Ok(PasswordType::Key(absolute(&self.key_path)?))
-        } else {
-            if self.password.is_empty() {
-                return Err("Enter a password or choose a key file.".into());
-            }
-            if confirm && self.password != self.confirmation {
-                return Err("The two passwords do not match.".into());
-            }
-            Ok(PasswordType::Password(self.password.clone().expose_owned()))
-        }
-    }
-    pub fn otp_timeout(&self, default: u8) -> Result<Option<u8>, String> {
-        let timeout = if self.otp_copy_timeout.trim().is_empty() {
-            default
-        } else {
-            self.otp_copy_timeout.trim().parse::<u8>().map_err(|_| {
-                "OTP copy timeout must be a whole number from 0 to 255 seconds.".to_owned()
-            })?
-        };
-        Ok((timeout > 0).then_some(timeout))
-    }
-    pub fn duo_interval_seconds(&self) -> Result<u64, String> {
-        self.duo_interval
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|seconds| (3..=60).contains(seconds))
-            .ok_or_else(|| {
-                "Duo refresh interval must be a whole number from 3 to 60 seconds.".into()
-            })
-    }
     pub fn otp_result_for(
         &self,
         app: &App,
     ) -> Option<&password_manager::protocol::AuthenticatorResponse> {
         let target = self.otp.result_target.as_ref()?;
-        if !app.running
-            || app.session.as_ref() != Some(&target.session)
+        if !app.connection.running
+            || app.connection.session.as_ref() != Some(&target.session)
             || self
                 .selected
                 .as_ref()
@@ -666,7 +586,7 @@ impl State {
         if watch.is_some_and(|target| !target.current(app)) {
             return Err("The watched item changed. Select it and start watching again.".into());
         }
-        if !app.running {
+        if !app.connection.running {
             return Err("Start the server first.".into());
         }
         // A queued action can outlive the unlocked UI that offered it. Never
@@ -677,10 +597,10 @@ impl State {
             | Action::RestoreBackup
             | Action::DeleteVault
             | Action::OperationStatus => false,
-            Action::Import | Action::PreviewImport => !self.import_new,
+            Action::Import | Action::PreviewImport => !self.files.import_new,
             _ => true,
         };
-        if needs_session && app.session.is_none() {
+        if needs_session && app.connection.session.is_none() {
             return Err("Unlock a vault first.".into());
         }
         let needs_item = matches!(
@@ -731,7 +651,7 @@ impl State {
         let mut revision = needs_item.then(|| item.unwrap().revision);
         let command = match action {
             Action::OperationStatus => {
-                let id = self.operation_id.trim();
+                let id = self.utilities.operation_id.trim();
                 if id.is_empty()
                     || id.len() > 128
                     || !id
@@ -794,18 +714,18 @@ impl State {
                 ServerCommand::PurgeTrash(None)
             }
             Action::Audit => ServerCommand::Audit(AuditOptions {
-                stale_days: optional_number(&self.stale_days)?,
-                check_breaches: self.breaches,
-                require_totp: self.require_otp,
+                stale_days: optional_number(&self.audit.stale_days)?,
+                check_breaches: self.audit.breaches,
+                require_totp: self.audit.require_otp,
             }),
             Action::Backup | Action::RestoreBackup => {
-                if action == Action::RestoreBackup && app.session.is_some() {
+                if action == Action::RestoreBackup && app.connection.session.is_some() {
                     return Err("Lock the vault before restoring a backup.".into());
                 }
                 let request = BackupRequest {
-                    path: absolute(&self.path)?,
-                    key_pass: self.credentials(action == Action::Backup)?,
-                    force: self.force,
+                    path: absolute(&self.files.path)?,
+                    key_pass: self.credentials.value(action == Action::Backup)?,
+                    force: self.files.force,
                 };
                 confirmation = Some(if action == Action::Backup {
                     format!(
@@ -832,12 +752,12 @@ impl State {
             Action::PreviewImport | Action::Import => {
                 let preview = action == Action::PreviewImport;
                 let request = ImportRequest {
-                    path: absolute(&self.path)?,
-                    new: self.import_new,
+                    path: absolute(&self.files.path)?,
+                    new: self.files.import_new,
                     preview,
-                    conflicts: self.policy.into(),
-                    key_pass: if self.import_new && !preview {
-                        Some(self.credentials(true)?)
+                    conflicts: self.files.policy.into(),
+                    key_pass: if self.files.import_new && !preview {
+                        Some(self.credentials.value(true)?)
                     } else {
                         None
                     },
@@ -852,16 +772,16 @@ impl State {
                         } else {
                             "the unlocked vault"
                         },
-                        self.policy
+                        self.files.policy
                     ));
                 }
                 ServerCommand::Import(request)
             }
             Action::Export => {
-                let path = absolute(&self.path)?;
+                let path = absolute(&self.files.path)?;
                 confirmation = Some(format!(
                     "Export plaintext secrets to {path}{}? Anyone who can read this file can read its passwords. JSON preserves richer data than CSV.",
-                    if self.force {
+                    if self.files.force {
                         ", replacing any existing file"
                     } else {
                         ""
@@ -869,11 +789,11 @@ impl State {
                 ));
                 ServerCommand::Export {
                     path,
-                    force: self.force,
+                    force: self.files.force,
                 }
             }
             Action::SetOtp => {
-                if self.configuration.is_empty() {
+                if self.authenticator.configuration.is_empty() {
                     return Err("Enter a Base32 secret or otpauth URI.".into());
                 }
                 confirmation = Some(format!(
@@ -882,21 +802,23 @@ impl State {
                 ));
                 ServerCommand::Totp(TotpCommand::Set {
                     target: target(),
-                    configuration: self.configuration.clone(),
+                    configuration: self.authenticator.configuration.clone(),
                 })
             }
-            Action::ShowOtp(copy) => {
-                ServerCommand::Totp(TotpCommand::Show {
-                    target: target(),
-                    copy_timeout: if copy {
-                        Some(self.otp_timeout(app.conf.clipboard.timeout)?.ok_or(
-                            "OTP copying is disabled because the current timeout is zero.",
-                        )?)
-                    } else {
-                        None
-                    },
-                })
-            }
+            Action::ShowOtp(copy) => ServerCommand::Totp(TotpCommand::Show {
+                target: target(),
+                copy_timeout: if copy {
+                    Some(
+                        self.authenticator
+                            .otp_timeout(app.conf.clipboard.timeout)?
+                            .ok_or(
+                                "OTP copying is disabled because the current timeout is zero.",
+                            )?,
+                    )
+                } else {
+                    None
+                },
+            }),
             Action::WatchOtp => ServerCommand::Totp(TotpCommand::Watch {
                 target: target(),
                 copy_timeout: None,
@@ -904,6 +826,7 @@ impl State {
             Action::CopyWatchedOtp => ServerCommand::Totp(TotpCommand::Watch {
                 target: target(),
                 copy_timeout: self
+                    .authenticator
                     .otp_timeout(app.conf.clipboard.timeout)?
                     .ok_or("Enable OTP copying with a timeout greater than zero.")
                     .map(Some)?,
@@ -916,19 +839,19 @@ impl State {
                 ServerCommand::Totp(TotpCommand::Remove { target: target() })
             }
             Action::EnrollPasscodes | Action::EnrollDuo => {
-                if self.activation.is_empty() {
+                if self.authenticator.activation.is_empty() {
                     return Err("Enter a fresh Duo activation link.".into());
                 }
                 confirmation = Some(format!(
                     "Consume this Duo activation link and enroll {}{}?",
                     item.unwrap().name,
-                    if action == Action::EnrollDuo && self.replace_duo {
+                    if action == Action::EnrollDuo && self.authenticator.replace_duo {
                         ", replacing its enrollment"
                     } else {
                         ""
                     }
                 ));
-                let mode = match self.mode {
+                let mode = match self.authenticator.mode {
                     Mode::Automatic => None,
                     Mode::Hotp => Some(OtpMode::Hotp),
                     Mode::Totp => Some(OtpMode::Totp),
@@ -936,14 +859,14 @@ impl State {
                 if action == Action::EnrollDuo {
                     ServerCommand::Duo(DuoCommand::Enroll {
                         target: target(),
-                        activation: self.activation.clone(),
+                        activation: self.authenticator.activation.clone(),
                         mode,
-                        replace: self.replace_duo,
+                        replace: self.authenticator.replace_duo,
                     })
                 } else {
                     ServerCommand::Totp(TotpCommand::Duo {
                         target: target(),
-                        activation: self.activation.clone(),
+                        activation: self.authenticator.activation.clone(),
                         mode: mode.unwrap_or(OtpMode::Hotp),
                     })
                 }
@@ -968,8 +891,8 @@ impl State {
                         return Err(format!("This request cannot be approved: {reason}"));
                     }
                     if let Some(digits) = request.code_digits
-                        && (self.code.len() != digits
-                            || !self.code.bytes().all(|b| b.is_ascii_digit()))
+                        && (self.authenticator.code.len() != digits
+                            || !self.authenticator.code.bytes().all(|b| b.is_ascii_digit()))
                     {
                         return Err(format!(
                             "Enter the {digits}-digit Verified Push code shown on the login page."
@@ -991,7 +914,7 @@ impl State {
                     fingerprint: request.fingerprint.clone(),
                     approve,
                     code: if approve {
-                        self.code.clone()
+                        self.authenticator.code.clone()
                     } else {
                         SecretString::default()
                     },
@@ -1010,7 +933,7 @@ impl State {
                 } else {
                     "Create a new vault using these credentials? A new key path must be outside application data and must not already exist.".into()
                 });
-                let credentials = self.credentials(true)?;
+                let credentials = self.credentials.value(true)?;
                 if action == Action::Rekey {
                     ServerCommand::Rekey(credentials)
                 } else {
@@ -1018,26 +941,27 @@ impl State {
                 }
             }
             Action::DeleteVault => {
-                if app.session.is_some() {
+                if app.connection.session.is_some() {
                     return Err(
                         "Lock the vault, then select the vault to delete on the Vault tab.".into(),
                     );
                 }
                 let filename = app
+                    .connection
                     .vault
                     .as_ref()
                     .ok_or("Select the vault to delete on the Vault tab.")?;
                 confirmation = Some(format!(
                     "Permanently delete vault {filename}{}? All its entries and recovery data will be lost.",
-                    if self.use_key && !self.keep_key {
+                    if self.credentials.use_key && !self.credentials.keep_key {
                         " AND its external key file"
                     } else {
                         ""
                     }
                 ));
                 ServerCommand::Delete(Target::Vault {
-                    key: self.credentials(false)?,
-                    keep_key: self.keep_key,
+                    key: self.credentials.value(false)?,
+                    keep_key: self.credentials.keep_key,
                     vault_file: Some(filename.clone()),
                 })
             }
@@ -1045,18 +969,18 @@ impl State {
                 revision = None;
                 let nonempty = |value: &String| (!value.is_empty()).then(|| value.clone());
                 ServerCommand::List(SearchFilter {
-                    query: nonempty(&self.query),
-                    name: nonempty(&self.name),
-                    username: nonempty(&self.username),
-                    url: nonempty(&self.url),
-                    notes: (!self.notes.is_empty()).then(|| self.notes.clone()),
+                    query: nonempty(&self.search.query),
+                    name: nonempty(&self.search.name),
+                    username: nonempty(&self.search.username),
+                    url: nonempty(&self.search.url),
+                    notes: (!self.search.notes.is_empty()).then(|| self.search.notes.clone()),
                     list: ListOptions {
-                        kind: self.kind,
-                        has_totp: self.has_otp,
-                        weak: self.weak,
-                        stale_days: optional_number(&self.stale_days)?,
-                        sort: self.sort,
-                        descending: self.descending,
+                        kind: self.search.kind,
+                        has_totp: self.search.has_otp,
+                        weak: self.search.weak,
+                        stale_days: optional_number(&self.audit.stale_days)?,
+                        sort: self.search.sort,
+                        descending: self.search.descending,
                     },
                 })
             }
@@ -1078,7 +1002,7 @@ impl State {
             action,
             command,
             revision,
-            session: app.session.clone(),
+            session: app.connection.session.clone(),
             confirmation,
         })
     }
@@ -1193,7 +1117,7 @@ impl App {
         // toggle and remains bound to its own account across navigation.
         if self.tab != Tab::Vault
             || self.editor.is_some()
-            || self.session.is_none()
+            || self.connection.session.is_none()
             || !self.item.as_ref().is_some_and(|item| {
                 item.has_duo
                     && self
@@ -1222,15 +1146,15 @@ impl App {
             || self.polling()
             || self.workspace.prepared.is_some()
             || self.recovery.id().is_some()
-            || self.session.is_none()
-            || !self.running
+            || self.connection.session.is_none()
+            || !self.connection.running
         {
             return Task::none();
         }
         let (action, target, seconds) = if let Some(target) = self.workspace.otp.watch.clone() {
             (Action::WatchOtp, target, 1)
         } else if let Some(target) = self.workspace.duo.watch.clone() {
-            let seconds = match self.workspace.duo_interval_seconds() {
+            let seconds = match self.workspace.authenticator.duo_interval_seconds() {
                 Ok(seconds) => seconds,
                 Err(error) => {
                     self.workspace.reset_duo();
@@ -1331,7 +1255,9 @@ impl App {
             return Task::none();
         }
         if matches!(
-            self.workspace.otp_timeout(self.conf.clipboard.timeout),
+            self.workspace
+                .authenticator
+                .otp_timeout(self.conf.clipboard.timeout),
             Ok(None)
         ) {
             self.workspace.otp.copy = false;
@@ -1421,9 +1347,9 @@ impl App {
                 return show_form();
             }
             Event::FileOperation(operation) => {
-                self.workspace.file_operation = operation;
-                if operation == FileOperation::Import && self.session.is_none() {
-                    self.workspace.import_new = true;
+                self.workspace.files.file_operation = operation;
+                if operation == FileOperation::Import && self.connection.session.is_none() {
+                    self.workspace.files.import_new = true;
                 }
                 self.workspace.section = Section::Files;
                 self.workspace.show_results = false;
@@ -1433,11 +1359,11 @@ impl App {
                 return show_form();
             }
             Event::VaultOperation(operation) => {
-                self.workspace.vault_operation = operation;
+                self.workspace.credentials.vault_operation = operation;
                 self.workspace.prepared = None;
                 self.workspace.clear_inputs();
             }
-            Event::Shell(shell) => self.workspace.shell = shell,
+            Event::Shell(shell) => self.workspace.utilities.shell = shell,
             Event::Field(field, value) => self.workspace.edit(field, value),
             Event::Toggle(toggle, value) => {
                 self.workspace.toggle(toggle, value);
@@ -1451,7 +1377,10 @@ impl App {
                         }
                     };
                     let action = if matches!(toggle, Toggle::WatchOtp) {
-                        let timeout = self.workspace.otp_timeout(self.conf.clipboard.timeout);
+                        let timeout = self
+                            .workspace
+                            .authenticator
+                            .otp_timeout(self.conf.clipboard.timeout);
                         if let Err(error) = timeout.as_ref() {
                             self.workspace.hide_secrets();
                             self.notice = error.clone();
@@ -1469,7 +1398,7 @@ impl App {
                         self.workspace.otp.previous.zeroize();
                         Action::WatchOtp
                     } else {
-                        if let Err(error) = self.workspace.duo_interval_seconds() {
+                        if let Err(error) = self.workspace.authenticator.duo_interval_seconds() {
                             self.workspace.reset_duo();
                             self.report_error(error);
                             return Task::none();
@@ -1515,17 +1444,17 @@ impl App {
                 return show_form();
             }
             Event::Policy(policy) => {
-                self.workspace.policy = policy;
+                self.workspace.files.policy = policy;
                 self.workspace.prepared = None;
             }
             Event::Mode(mode) => {
-                self.workspace.mode = mode;
+                self.workspace.authenticator.mode = mode;
                 self.workspace.prepared = None;
             }
-            Event::Browser(browser) => self.workspace.browser = browser,
-            Event::Kind(kind) => self.workspace.kind = kind,
-            Event::Sort(sort) => self.workspace.sort = sort,
-            Event::HasOtp(has_otp) => self.workspace.has_otp = has_otp,
+            Event::Browser(browser) => self.workspace.browser.browser = browser,
+            Event::Kind(kind) => self.workspace.search.kind = kind,
+            Event::Sort(sort) => self.workspace.search.sort = sort,
+            Event::HasOtp(has_otp) => self.workspace.search.has_otp = has_otp,
             Event::Pick(field, save) => {
                 self.workspace.prepared = None;
                 self.serial += 1;
@@ -1554,20 +1483,20 @@ impl App {
             }
             Event::Run(action) if action.local() => {
                 if action == Action::Completions {
-                    let path = match absolute(&self.workspace.path) {
+                    let path = match absolute(&self.workspace.files.path) {
                         Ok(path) => path,
                         Err(error) => {
                             self.report_error(error);
                             return Task::none();
                         }
                     };
-                    let shell = self.workspace.shell;
+                    let shell = self.workspace.utilities.shell;
                     return self.launch(Job::Local, move || {
                         backend::save_completions(shell, std::path::Path::new(&path))
                     });
                 }
-                let extension_id = self.workspace.extension_id.clone();
-                let browser = match self.workspace.browser {
+                let extension_id = self.workspace.browser.extension_id.clone();
+                let browser = match self.workspace.browser.browser {
                     Browser::Chrome => NativeBrowser::Chrome,
                     Browser::Chromium => NativeBrowser::Chromium,
                     Browser::Helium => NativeBrowser::Helium,
@@ -1616,7 +1545,7 @@ impl App {
         Task::none()
     }
     fn execute_workflow(&mut self, mut prepared: Prepared) -> Task<super::Message> {
-        if prepared.session != self.session {
+        if prepared.session != self.connection.session {
             self.notice = "The vault session changed. Review this operation again.".into();
             return Task::none();
         }

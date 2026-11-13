@@ -7,7 +7,8 @@
     "test:extension:coverage": "node scripts/build_extension.cjs --check && node extension/check_unit_coverage.cjs",
     "test:e2e": "node scripts/build_extension.cjs --check && playwright test",
     "test:e2e:coverage": "node scripts/build_extension.cjs --check && node -e \"require('node:fs').rmSync('test-results/e2e-coverage', { recursive: true, force: true })\" && PM_E2E_COVERAGE_DIR=test-results/e2e-coverage playwright test && node extension/e2e/report_coverage.cjs test-results/e2e-coverage",
-    "build:extension": "node scripts/build_extension.cjs"
+    "build:extension": "node scripts/build_extension.cjs",
+    "bench": "node scripts/benchmark.cjs"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0"

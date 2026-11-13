@@ -1,6 +1,9 @@
 //! An Iced client of the existing server, never a second owner of vault state.
 mod backend;
+mod cloud;
 mod connection;
+mod discovery;
+mod editor;
 mod file_picker;
 mod generator;
 mod model;
@@ -18,7 +21,7 @@ use iced::{Element, Subscription, Task, Theme, keyboard, widget::text_editor};
 use model::Draft;
 use password_manager::{
     client::AuthenticatedClient,
-    config::{Config, ConfigChanges},
+    config::Config,
     protocol::{OperationState, RequestEnvelope, ResponseCode, ResponsePayload},
     secret::SecretString,
     types::{
@@ -298,24 +301,13 @@ enum ItemIntent {
 }
 
 struct App {
+    connection: connection::State,
+    generation: generator::State,
+    cloud: cloud::State,
     names: vault_names::Names,
-    creation: Option<Creation>,
     ui: presentation::State,
     conf: Config,
-    client: AuthenticatedClient,
-    connection_port: String,
-    connect_after_discovery: bool,
     tab: Tab,
-    running: bool,
-    session: Option<String>,
-    vaults: Vec<String>,
-    vault: Option<String>,
-    master: SecretString,
-    confirmation: SecretString,
-    key_path: SecretString,
-    unlock_timeout: String,
-    creating: bool,
-    select_created_vault: bool,
     items: Vec<ItemSummary>,
     query: String,
     item: Option<ItemDetail>,
@@ -324,56 +316,56 @@ struct App {
     reveal_until: Option<Instant>,
     serial: u64,
     request_state: RequestState,
-    last_status: Instant,
     notice: String,
     warning: Option<String>,
     recovery: Recovery,
-    generator_length: String,
-    passphrase: bool,
-    words: String,
-    generated: GeneratedSecret,
-    generated_stats: String,
     settings: SettingsDraft,
-    cloud_token: SecretString,
-    cloud_vaults: Vec<String>,
-    cloud_vault: Option<String>,
-    cloud_review: Option<password_manager::cloud::ConflictReview>,
-    cloud_choices: Vec<password_manager::cloud::Choice>,
     vault_revision: Option<u64>,
     confirm_reset_settings: bool,
     workspace: workflows::State,
-    generator: generator::Options,
 }
 
 impl App {
     fn new(conf: Config, client: AuthenticatedClient) -> Self {
         Self {
+            connection: connection::State {
+                connection_port: client.port.to_string(),
+                client,
+                connect_after_discovery: false,
+                running: false,
+                session: None,
+                vaults: vec![],
+                vault: conf.unlock.vault_id.clone(),
+                master: SecretString::default(),
+                confirmation: SecretString::default(),
+                key_path: SecretString::default(),
+                unlock_timeout: conf.unlock.timeout.to_string(),
+                creating: false,
+                select_created_vault: false,
+                creation: None,
+                last_status: Instant::now(),
+            },
+            generation: generator::State {
+                length: conf.genpass.length.to_string(),
+                passphrase: false,
+                words: "6".into(),
+                value: GeneratedSecret::default(),
+                stats: String::new(),
+                options: generator::Options::default(),
+            },
+            cloud: cloud::State {
+                token: SecretString::default(),
+                vaults: vec![],
+                vault: None,
+                review: None,
+                choices: vec![],
+            },
             ui: presentation::State::default(),
             names: vault_names::Names::default(),
-            creation: None,
-            connection_port: client.port.to_string(),
-            connect_after_discovery: false,
-            generator_length: conf.genpass.length.to_string(),
             settings: SettingsDraft::from(&conf),
-            cloud_token: SecretString::default(),
-            cloud_vaults: vec![],
-            cloud_vault: None,
-            cloud_review: None,
-            cloud_choices: vec![],
             vault_revision: None,
-            unlock_timeout: conf.unlock.timeout.to_string(),
-            vault: conf.unlock.vault_id.clone(),
             conf,
-            client,
             tab: Tab::Vault,
-            running: false,
-            session: None,
-            vaults: vec![],
-            master: SecretString::default(),
-            confirmation: SecretString::default(),
-            key_path: SecretString::default(),
-            creating: false,
-            select_created_vault: false,
             items: vec![],
             query: String::new(),
             item: None,
@@ -382,23 +374,17 @@ impl App {
             reveal_until: None,
             serial: 0,
             request_state: RequestState::Idle,
-            last_status: Instant::now(),
             notice: "Connecting to the vault server…".into(),
             warning: None,
             recovery: Recovery::Clear,
-            passphrase: false,
-            words: "6".into(),
-            generated: GeneratedSecret::default(),
-            generated_stats: String::new(),
             confirm_reset_settings: false,
             workspace: workflows::State::default(),
-            generator: generator::Options::default(),
         }
     }
 
     fn boot(conf: Config, client: AuthenticatedClient) -> (Self, Task<Message>) {
         let mut app = Self::new(conf, client);
-        app.connect_after_discovery = true;
+        app.connection.connect_after_discovery = true;
         let task = app.refresh_vaults();
         (app, task)
     }
@@ -532,8 +518,8 @@ impl App {
     }
 
     fn connect(&mut self) -> Task<Message> {
-        let client = self.client.clone();
-        self.last_status = Instant::now();
+        let client = self.connection.client.clone();
+        self.connection.last_status = Instant::now();
         self.launch(Job::Connect, move || backend::connect(&client))
     }
 
@@ -555,15 +541,15 @@ impl App {
                 | Job::Reconcile
                 | Job::Stop
         ) {
-            envelope.expected_session = self.session.clone();
+            envelope.expected_session = self.connection.session.clone();
         }
         envelope.expected_revision = revision;
-        let client = self.client.clone();
+        let client = self.connection.client.clone();
         self.launch(job, move || backend::request(&client, envelope))
     }
 
     fn status(&mut self) -> Task<Message> {
-        self.last_status = Instant::now();
+        self.connection.last_status = Instant::now();
         self.request(Job::Status, ServerCommand::Status, None)
     }
 
@@ -615,7 +601,7 @@ impl App {
             self.request_state = RequestState::Idle;
         }
         self.reveal_until = None;
-        self.generated.set_visible(false);
+        self.generation.value.set_visible(false);
         if let Some(item) = self.item.as_mut() {
             item.password = None;
             for field in &mut item.fields {
@@ -627,10 +613,10 @@ impl App {
     }
 
     fn clear_vault(&mut self) {
-        self.cloud_review = None;
-        self.cloud_choices.clear();
+        self.cloud.review = None;
+        self.cloud.choices.clear();
         self.hide_secrets();
-        self.session = None;
+        self.connection.session = None;
         self.workspace.clear_vault();
         self.replace_items(Vec::new());
         self.query.zeroize();
@@ -645,14 +631,14 @@ impl App {
         self.item = None;
         self.editor = Editor::Closed;
         self.delete_confirm = false;
-        self.creation = None;
-        self.master.zeroize();
-        self.confirmation.zeroize();
-        self.key_path.zeroize();
-        self.generated.clear();
-        self.generated_stats.clear();
-        self.generator.check.zeroize();
-        self.generator.assessment.clear();
+        self.connection.creation = None;
+        self.connection.master.zeroize();
+        self.connection.confirmation.zeroize();
+        self.connection.key_path.zeroize();
+        self.generation.value.clear();
+        self.generation.stats.clear();
+        self.generation.options.check.zeroize();
+        self.generation.options.assessment.clear();
     }
 
     fn cancel_passive_read(&mut self) {
@@ -701,7 +687,7 @@ impl App {
             Navigate::Connect(port) => {
                 self.reset_connection(port);
                 self.notice = format!("Connecting to port {port}…");
-                let client = self.client.clone();
+                let client = self.connection.client.clone();
                 self.launch(Job::Attach, move || backend::attach(&client))
             }
         }
@@ -765,78 +751,13 @@ impl App {
                     return iced::window::close(id);
                 }
             }
-            Message::Cloud(action) => {
-                let job = if matches!(action, password_manager::cloud::Action::List) {
-                    Job::CloudList
-                } else if matches!(action, password_manager::cloud::Action::Conflicts) {
-                    self.cloud_review = None;
-                    self.cloud_choices.clear();
-                    Job::CloudConflicts
-                } else {
-                    self.cloud_review = None;
-                    self.cloud_choices.clear();
-                    Job::Cloud
-                };
-                return self.request(job, ServerCommand::Cloud(action), None);
-            }
-            Message::CloudChoice(id, field, side) => {
-                if !self.busy() {
-                    self.cloud_choices
-                        .retain(|c| c.id != id || c.field != field);
-                    self.cloud_choices
-                        .push(password_manager::cloud::Choice { id, field, side });
-                }
-            }
-            Message::CloudChooseAll(side) => {
-                if !self.busy()
-                    && let Some(review) = &self.cloud_review
-                {
-                    self.cloud_choices = review
-                        .items
-                        .iter()
-                        .flat_map(|item| {
-                            item.fields
-                                .iter()
-                                .map(move |field| password_manager::cloud::Choice {
-                                    id: item.id,
-                                    field: field.field.clone(),
-                                    side,
-                                })
-                        })
-                        .collect();
-                }
-            }
-            Message::ResolveCloud => {
-                if !self.writes_allowed() || self.editor.as_ref().is_some_and(|d| d.dirty) {
-                    self.notice =
-                        "Save or discard pending item edits before resolving sync conflicts."
-                            .into();
-                    return Task::none();
-                }
-                if let Some(review) = self.cloud_review.take() {
-                    let resolution = password_manager::cloud::Resolution {
-                        token: review.token,
-                        choices: std::mem::take(&mut self.cloud_choices),
-                    };
-                    self.hide_secrets();
-                    self.workspace.clear_vault();
-                    return self.request(
-                        Job::CloudResolve,
-                        ServerCommand::Cloud(password_manager::cloud::Action::Resolve(resolution)),
-                        None,
-                    );
-                }
-            }
-            Message::CloudToken(token) => self.cloud_token = token,
-            Message::CloudVault(id) => self.cloud_vault = Some(id),
-            Message::SaveCloudToken => {
-                let token = std::mem::take(&mut self.cloud_token);
-                return self.launch(Job::Local, move || {
-                    password_manager::cloud::install_token(token.expose())
-                        .map_err(Failure::from)?;
-                    Ok(Reply::Local("Device credential saved".into()))
-                });
-            }
+            message @ (Message::Cloud(..)
+            | Message::CloudChoice(..)
+            | Message::CloudChooseAll(..)
+            | Message::ResolveCloud
+            | Message::CloudToken(..)
+            | Message::CloudVault(..)
+            | Message::SaveCloudToken) => return self.update_cloud(message),
             Message::Finished(serial, job, result) => {
                 if serial != self.serial {
                     return Task::none();
@@ -850,7 +771,7 @@ impl App {
                             self.ui.saved_item = None;
                         }
                         if matches!(job, Job::Create | Job::Unlock) {
-                            self.creation = None;
+                            self.connection.creation = None;
                         }
                         self.report_error(error.message);
                         if matches!(job, Job::Workflow(_)) {
@@ -864,11 +785,11 @@ impl App {
                             self.hide_secrets();
                         }
                         if matches!(job, Job::Connect | Job::Attach | Job::Status) {
-                            self.running = false;
+                            self.connection.running = false;
                             self.clear_vault();
                         }
-                        if job == Job::DiscoverVaults && self.connect_after_discovery {
-                            self.connect_after_discovery = false;
+                        if job == Job::DiscoverVaults && self.connection.connect_after_discovery {
+                            self.connection.connect_after_discovery = false;
                             return self.connect();
                         }
                         Task::none()
@@ -887,8 +808,8 @@ impl App {
                 if self.reveal_until.is_some_and(|deadline| now >= deadline) {
                     self.hide_secrets();
                 }
-                if self.generated.expire(now) {
-                    self.generated_stats.clear();
+                if self.generation.value.expire(now) {
+                    self.generation.stats.clear();
                     self.ui.transfer_generated = false;
                     if self.notice.starts_with("New secret ready.") {
                         self.notice = "Generated secret cleared after 60 seconds. Generate another when you need it.".into();
@@ -896,22 +817,23 @@ impl App {
                 }
                 if !self.busy()
                     && !self.polling()
-                    && now.saturating_duration_since(self.last_status) < Duration::from_secs(2)
+                    && now.saturating_duration_since(self.connection.last_status)
+                        < Duration::from_secs(2)
                 {
                     let task = self.poll_tool_watches(now);
                     if self.polling() || self.busy() {
                         return task;
                     }
                 }
-                if self.running
+                if self.connection.running
                     && !self.busy()
                     && !self.polling()
-                    && now.duration_since(self.last_status) >= Duration::from_secs(2)
+                    && now.duration_since(self.connection.last_status) >= Duration::from_secs(2)
                 {
                     return self.status();
                 }
             }
-            Message::Lock if self.running => {
+            Message::Lock if self.connection.running => {
                 // Invalidate older completions immediately, even if a request is in flight.
                 self.clear_vault();
                 self.notice.clear();
@@ -962,7 +884,7 @@ impl App {
                 *expanded = !*expanded;
                 if !*expanded {
                     if matches!(section, Disclosure::Unlock) {
-                        self.key_path.zeroize();
+                        self.connection.key_path.zeroize();
                     }
                     self.hide_secrets();
                 }
@@ -995,24 +917,16 @@ impl App {
             }
 
             Message::ConfirmStop(value) => self.ui.confirm_stop = value,
-            Message::SettingsSection(section) => {
-                self.ui.settings_section = section;
-                if section == presentation::SettingsSection::Security
-                    && let Some(id) = &self.vault
-                {
-                    self.ui.vault_name = self.names.label(id, &self.vaults);
-                }
-                return iced::widget::operation::snap_to(
-                    "page-form",
-                    iced::widget::operation::RelativeOffset::START,
-                );
-            }
-            Message::Appearance(value) => self.settings.appearance = value,
-            Message::InterfaceScale(value) if [100, 115, 130].contains(&value) => {
-                self.settings.scale = value;
-                return widgets::ensure_focus_visible();
-            }
-            Message::FocusSearch if self.session.is_some() => {
+            message @ (Message::SettingsSection(..)
+            | Message::Appearance(..)
+            | Message::InterfaceScale(..)
+            | Message::SettingChanged(..)
+            | Message::SettingToggled(..)
+            | Message::SaveSettings
+            | Message::ResetSettings
+            | Message::CancelResetSettings
+            | Message::ConfirmResetSettings) => return self.update_settings(message),
+            Message::FocusSearch if self.connection.session.is_some() => {
                 self.tab = Tab::Vault;
                 self.hide_secrets();
                 if self.compact() && (self.editor.is_some() || self.item.is_some()) {
@@ -1050,7 +964,16 @@ impl App {
                 return self.launch(Job::WatchOtpDefaults, backend::reload_settings);
             }
             Message::Workflow(event) => return self.workflow(event),
-            Message::Generator(event) => self.generator.update(event),
+            message @ (Message::Generator(..)
+            | Message::GeneratorLength(..)
+            | Message::Passphrase(..)
+            | Message::Words(..)
+            | Message::Generate
+            | Message::ShowGenerated(..)
+            | Message::UseGenerated
+            | Message::CancelGenerated
+            | Message::ConfirmGenerated
+            | Message::CopyGenerated) => return self.update_generator(message),
             Message::OpenToolItem(id) => {
                 self.tab = Tab::Vault;
                 return self.navigate(Navigate::Select(id));
@@ -1073,11 +996,21 @@ impl App {
                 self.workspace.prepared = None;
                 return workflows::show_form();
             }
-            Message::Connect => return self.connect(),
-            Message::RefreshVaults => return self.refresh_vaults(),
-            Message::ReloadSettings => return self.reload_settings(),
-            Message::ConnectionPort(value) => self.connection_port = value,
-            Message::UseConnectionPort => return self.use_connection_port(),
+            message @ (Message::Connect
+            | Message::RefreshVaults
+            | Message::ReloadSettings
+            | Message::ConnectionPort(..)
+            | Message::UseConnectionPort
+            | Message::Vault(..)
+            | Message::Master(..)
+            | Message::ConfirmMaster(..)
+            | Message::KeyPath(..)
+            | Message::UnlockTimeout(..)
+            | Message::BrowseKey
+            | Message::Creating(..)
+            | Message::Unlock
+            | Message::Create
+            | Message::Stop) => return self.update_connection(message),
             Message::Tab(tab) => {
                 if tab != self.tab {
                     self.ui.undo_trash = None;
@@ -1097,9 +1030,9 @@ impl App {
                 }
                 if tab == Tab::Settings {
                     if self.ui.settings_section == presentation::SettingsSection::Security
-                        && let Some(id) = &self.vault
+                        && let Some(id) = &self.connection.vault
                     {
-                        self.ui.vault_name = self.names.label(id, &self.vaults);
+                        self.ui.vault_name = self.names.label(id, &self.connection.vaults);
                     }
                     return self.launch(Job::OpenSettings, backend::reload_settings);
                 }
@@ -1108,7 +1041,7 @@ impl App {
                 self.query = query;
                 self.ui.item_page = 0;
             }
-            Message::Navigate(destination) if self.session.is_some() => {
+            Message::Navigate(destination) if self.connection.session.is_some() => {
                 if matches!(destination, Navigate::New) && !self.writes_allowed() {
                     return Task::none();
                 }
@@ -1127,7 +1060,7 @@ impl App {
             }
             Message::VaultName(value) => self.ui.vault_name = value,
             Message::RenameVault if self.writes_allowed() => {
-                if let Some(id) = self.vault.clone() {
+                if let Some(id) = self.connection.vault.clone() {
                     let label = self.ui.vault_name.clone();
                     return self.launch(Job::VaultName, move || {
                         backend::save_vault_name(&id, &label)
@@ -1136,7 +1069,7 @@ impl App {
             }
             Message::UndoDelete if self.writes_allowed() && self.editor.is_none() => {
                 if let Some((id, session)) = self.ui.undo_trash.take()
-                    && self.session.as_ref() == Some(&session)
+                    && self.connection.session.as_ref() == Some(&session)
                 {
                     return self.request(
                         Job::Workflow(workflows::Action::RestoreTrash(id)),
@@ -1146,11 +1079,15 @@ impl App {
                 }
             }
             Message::CopyUsername
-                if self.writes_allowed() && self.session.is_some() && self.editor.is_none() =>
+                if self.writes_allowed()
+                    && self.connection.session.is_some()
+                    && self.editor.is_none() =>
             {
                 return self.launch(Job::UsernameDefaults, backend::reload_settings);
             }
-            Message::OpenWebsite(index) if self.session.is_some() && self.editor.is_none() => {
+            Message::OpenWebsite(index)
+                if self.connection.session.is_some() && self.editor.is_none() =>
+            {
                 if let Some(url) = self
                     .item
                     .as_ref()
@@ -1163,317 +1100,26 @@ impl App {
                     });
                 }
             }
-            Message::Vault(vault) => {
-                self.ui.vault_name = self.names.label(&vault, &self.vaults);
-                self.master.zeroize();
-                self.key_path.zeroize();
-                self.vault = Some(vault);
-            }
-            Message::Master(password) => {
-                self.ui.master_error = if self.creating {
-                    password_manager::encryption::validate_new_password(password.expose()).err()
-                } else {
-                    None
-                };
-                self.master = password;
-            }
-            Message::ConfirmMaster(password) => self.confirmation = password,
-            Message::KeyPath(path) => self.key_path = path,
-            Message::UnlockTimeout(value) => self.unlock_timeout = value,
-            Message::BrowseKey if !self.creating && self.session.is_none() => {
-                self.serial += 1;
-                self.request_state = RequestState::Busy;
-                return file_picker::pick_key_file(self.serial);
-            }
-            Message::Creating(creating) => {
-                self.creating = creating;
-                self.ui.master_error = None;
-                if creating {
-                    self.ui.vault_name = if self.vaults.is_empty() {
-                        "Personal vault".into()
-                    } else {
-                        format!("Vault {}", self.vaults.len() + 1)
-                    };
-                }
-                self.master.zeroize();
-                self.confirmation.zeroize();
-                self.key_path.zeroize();
-                self.notice.clear();
-                self.ui.notice_error = false;
-                return iced::widget::operation::focus("master-password");
-            }
-            Message::Unlock => {
-                let timeout = match password_manager::config::parse_duration(&self.unlock_timeout) {
-                    Ok(timeout) => timeout,
-                    Err(error) => {
-                        self.report_error(format!("Lock timeout: {error}"));
-                        return Task::none();
-                    }
-                };
-                let key = if !self.key_path.is_empty() {
-                    let path = match workflows::absolute(self.key_path.expose()) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            self.report_error(error);
-                            return Task::none();
-                        }
-                    };
-                    PasswordType::Key(path)
-                } else {
-                    PasswordType::Password(std::mem::take(&mut self.master).expose_owned())
-                };
-                self.master.zeroize();
-                self.key_path.zeroize();
-                return self.request(
-                    Job::Unlock,
-                    ServerCommand::Unlock(UnlockInfo {
-                        key,
-                        timeout,
-                        vault_file: self.vault.clone(),
-                    }),
-                    None,
-                );
-            }
-            Message::Create if self.writes_allowed() => {
-                if let Err(error) = vault_names::validate_name(&self.ui.vault_name) {
-                    self.report_error(error);
-                    return Task::none();
-                }
-                if let Err(error) =
-                    password_manager::encryption::validate_new_password(self.master.expose())
-                {
-                    self.report_error(error);
-                    return Task::none();
-                }
-                if self.master != self.confirmation {
-                    self.report_error("The two master passwords do not match.");
-                    return Task::none();
-                }
-                // The server applies the same password policy as the CLI.
-                let key = PasswordType::Password(std::mem::take(&mut self.master).expose_owned());
-                self.creation = Some(Creation {
-                    password: std::mem::take(&mut self.confirmation),
-                    name: self.ui.vault_name.trim().to_owned(),
-                });
-                return self.request(Job::Create, ServerCommand::New(key), None);
-            }
-            Message::Stop if self.recovery.id().is_none() => {
-                self.ui.confirm_stop = false;
-                self.clear_vault();
-                return self.request(Job::Stop, ServerCommand::Kill, None);
-            }
-            Message::Edit if self.editor.is_none() && self.writes_allowed() => {
-                self.ui.undo_trash = None;
-                self.notice.clear();
-                if let Some(item) = &self.item {
-                    self.ui.editor_advanced = item.fields.iter().any(|field| {
-                        !model::profile(item.kind)
-                            .suggested
-                            .iter()
-                            .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
-                    });
-                    self.editor = Editor::new(Draft::from_item(item));
-                    self.workspace.prepared = None;
-                    self.workspace.clear_inputs();
-                    self.hide_secrets();
-                    self.ui.editor_authenticators = false;
-                    return iced::widget::operation::focus("item-name");
-                }
-            }
-            Message::Name(value) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.name = value;
-                    draft.dirty = true;
-                }
-            }
-            Message::TemplateValue(name, secret, value) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    if let Some(field) = draft
-                        .fields
-                        .iter_mut()
-                        .find(|field| !field.removed && field.name.eq_ignore_ascii_case(name))
-                    {
-                        field.value = value;
-                        field.value_edited = true;
-                        field.changed = true;
-                        field.secret |= secret;
-                    } else if !value.is_empty() {
-                        draft.fields.push(model::FieldDraft {
-                            name: name.into(),
-                            value,
-                            secret,
-                            changed: true,
-                            value_edited: true,
-                            ..Default::default()
-                        });
-                    }
-                    draft.dirty = true;
-                }
-            }
-            Message::AddField => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.fields.push(model::FieldDraft::default());
-                    draft.dirty = true;
-                    return iced::widget::operation::focus(format!(
-                        "custom-field-{}",
-                        draft.fields.len() - 1
-                    ));
-                }
-            }
-            Message::FieldName(index, value) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && let Some(field) = draft.fields.get_mut(index)
-                {
-                    field.name = value;
-                    field.changed = true;
-                    draft.dirty = true;
-                }
-            }
-            Message::FieldValue(index, value) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && let Some(field) = draft.fields.get_mut(index)
-                {
-                    field.value = value;
-                    field.changed = true;
-                    field.value_edited = true;
-                    draft.dirty = true;
-                }
-            }
-            Message::FieldSecret(index, value) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && let Some(field) = draft.fields.get_mut(index)
-                {
-                    field.secret = value;
-                    field.changed = true;
-                    draft.dirty = true;
-                }
-            }
-            Message::RemoveField(index) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && let Some(field) = draft.fields.get_mut(index)
-                {
-                    field.removed = true;
-                    field.value.zeroize();
-                    draft.dirty = true;
-                    if model::profile(draft.kind)
-                        .suggested
-                        .iter()
-                        .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
-                    {
-                        return iced::widget::operation::focus(format!("template-{}", field.name));
-                    }
-                    return iced::widget::operation::focus("item-name");
-                }
-            }
-            Message::ShowEditorSecret(value) if self.editor.is_some() => {
-                self.ui.editor_show_secret = value;
-            }
-            Message::MultilineSecret(value) => {
-                self.ui.editor_show_secret = false;
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.multiline = value;
-                    draft.secret_editor = if value {
-                        text_editor::Content::with_text(draft.password.expose())
-                    } else {
-                        text_editor::Content::new()
-                    };
-                }
-            }
-            Message::SecretEdit(action) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && draft.multiline
-                    && (draft.id.is_none() || draft.replace_password)
-                {
-                    let editing = action.is_edit();
-                    draft.secret_editor.perform(action);
-                    if editing {
-                        draft.password = draft.secret_editor.text().into();
-                        draft.dirty = true;
-                    }
-                }
-            }
-            Message::Username(value) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.username = value;
-                    draft.dirty = true;
-                }
-            }
-            Message::Kind(value) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.kind = value;
-                    draft.dirty = true;
-                    self.ui.editor_advanced = draft.fields.iter().any(|field| {
-                        !field.removed
-                            && !model::profile(value)
-                                .suggested
-                                .iter()
-                                .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
-                    });
-                }
-            }
-            Message::Password(value) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.password = value;
-                    draft.replace_password = true;
-                    draft.dirty = true;
-                }
-            }
-            Message::CopyPolicy(policy) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.copy_policy = policy;
-                }
-            }
-            Message::ReplacePassword(value) => {
-                self.ui.editor_show_secret = false;
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.replace_password = value;
-                    if !value {
-                        draft.password.zeroize();
-                        draft.secret_editor = text_editor::Content::new();
-                    }
-                    draft.dirty = true;
-                }
-            }
-            Message::Url(index, value) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && let Some(url) = draft.urls.get_mut(index)
-                {
-                    *url = value;
-                    draft.dirty = true;
-                }
-            }
-            Message::AddUrl => {
-                if let Some(draft) = self.editor.as_mut() {
-                    draft.urls.push(String::new());
-                    draft.dirty = true;
-                    return iced::widget::operation::focus(format!(
-                        "website-{}",
-                        draft.urls.len() - 1
-                    ));
-                }
-            }
-            Message::RemoveUrl(index) => {
-                if let Some(draft) = self.editor.as_mut()
-                    && index < draft.urls.len()
-                {
-                    draft.urls.remove(index);
-                    draft.dirty = true;
-                    return iced::widget::operation::focus(if draft.urls.is_empty() {
-                        "item-name".into()
-                    } else {
-                        format!("website-{}", index.min(draft.urls.len() - 1))
-                    });
-                }
-            }
-            Message::Notes(action) => {
-                if let Some(draft) = self.editor.as_mut() {
-                    if action.is_edit() {
-                        draft.notes_changed = true;
-                        draft.dirty = true;
-                    }
-                    draft.notes.perform(action);
-                }
-            }
+            message @ (Message::Edit
+            | Message::Name(..)
+            | Message::TemplateValue(..)
+            | Message::AddField
+            | Message::FieldName(..)
+            | Message::FieldValue(..)
+            | Message::FieldSecret(..)
+            | Message::RemoveField(..)
+            | Message::ShowEditorSecret(..)
+            | Message::MultilineSecret(..)
+            | Message::SecretEdit(..)
+            | Message::Username(..)
+            | Message::Kind(..)
+            | Message::Password(..)
+            | Message::CopyPolicy(..)
+            | Message::ReplacePassword(..)
+            | Message::Url(..)
+            | Message::AddUrl
+            | Message::RemoveUrl(..)
+            | Message::Notes(..)) => return self.update_editor(message),
             Message::SaveAndEdit
                 if self.writes_allowed()
                     && self.editor.as_ref().is_some_and(|draft| draft.id.is_some()) =>
@@ -1568,39 +1214,10 @@ impl App {
             }
             Message::Acknowledge if self.recovery.reviewed() => {
                 if let Some(id) = self.recovery.id().cloned() {
-                    let client = self.client.clone();
+                    let client = self.connection.client.clone();
                     return self
                         .launch(Job::Acknowledge, move || backend::acknowledge(&client, &id));
                 }
-            }
-            Message::GeneratorLength(value) => self.generator_length = value,
-            Message::Passphrase(value) => self.passphrase = value,
-            Message::Words(value) => self.words = value,
-            Message::Generate => {
-                return self.launch(Job::GenerateDefaults, backend::reload_settings);
-            }
-            Message::ShowGenerated(value) => self.generated.set_visible(value),
-            Message::UseGenerated if self.session.is_some() && !self.generated.is_empty() => {
-                self.ui.transfer_generated = true;
-            }
-            Message::CancelGenerated => self.ui.transfer_generated = false,
-            Message::ConfirmGenerated
-                if self.ui.transfer_generated
-                    && self.session.is_some()
-                    && !self.generated.is_empty() =>
-            {
-                self.ui.transfer_generated = false;
-                let draft = self.editor.get_or_insert_with(Draft::default);
-                draft.password = self.generated.secret();
-                draft.replace_password = true;
-                draft.dirty = true;
-                draft.secret_editor = text_editor::Content::new();
-                draft.multiline = false;
-                self.tab = Tab::Vault;
-                self.hide_secrets();
-                self.notice =
-                    "Generated secret added to the draft. Save the item to keep it.".into();
-                return iced::widget::operation::focus("item-name");
             }
             Message::ReviewConflict if self.editor.conflicted() => {
                 if let Some(id) = self.editor.as_ref().and_then(|draft| draft.id) {
@@ -1619,34 +1236,6 @@ impl App {
                     self.notice = "Your edits are reapplied to the reviewed version. Review the draft, then Save item.".into();
                     self.ui.notice_error = false;
                 }
-            }
-            Message::CopyGenerated if !self.generated.is_empty() => {
-                return self.launch(Job::CopyDefaults, backend::reload_settings);
-            }
-            Message::SettingChanged(field, value) => {
-                self.settings.edit(field, value);
-                self.confirm_reset_settings = false;
-            }
-            Message::SettingToggled(toggle, value) => {
-                self.settings.toggle(toggle, value);
-                self.confirm_reset_settings = false;
-            }
-            Message::SaveSettings => match self.settings.changes() {
-                Ok(changes) => {
-                    return self.launch(Job::Settings, move || backend::save_settings(changes));
-                }
-                Err(error) => self.report_error(error),
-            },
-            Message::ResetSettings => self.confirm_reset_settings = true,
-            Message::CancelResetSettings => self.confirm_reset_settings = false,
-            Message::ConfirmResetSettings if self.confirm_reset_settings => {
-                self.confirm_reset_settings = false;
-                return self.launch(Job::Settings, || {
-                    backend::save_settings(ConfigChanges {
-                        reset: true,
-                        ..Default::default()
-                    })
-                });
             }
             _ => {}
         }
@@ -1675,28 +1264,31 @@ impl App {
                     conf,
                     restart_required,
                 } => {
-                    let restart_required =
-                        restart_required || self.running && conf.recovery != self.conf.recovery;
-                    if !self.running
+                    let restart_required = restart_required
+                        || self.connection.running && conf.recovery != self.conf.recovery;
+                    if !self.connection.running
                         && conf.server.port != self.conf.server.port
-                        && self.client.port == self.conf.server.port
+                        && self.connection.client.port == self.conf.server.port
                     {
                         self.reset_connection(conf.server.port);
                     }
-                    if self.session.is_none() && conf.unlock.vault_id != self.conf.unlock.vault_id {
-                        self.vault = conf.unlock.vault_id.clone();
+                    if self.connection.session.is_none()
+                        && conf.unlock.vault_id != self.conf.unlock.vault_id
+                    {
+                        self.connection.vault = conf.unlock.vault_id.clone();
                     }
                     self.settings = SettingsDraft::from(&conf);
-                    self.unlock_timeout = conf.unlock.timeout.to_string();
-                    self.generator_length = conf.genpass.length.to_string();
-                    self.generated_stats =
-                        if self.generator.stats_enabled(&conf) && !self.generated.is_empty() {
-                            password_manager::password::password_strength_output(
-                                self.generated.expose(),
-                            )
-                        } else {
-                            String::new()
-                        };
+                    self.connection.unlock_timeout = conf.unlock.timeout.to_string();
+                    self.generation.length = conf.genpass.length.to_string();
+                    self.generation.stats = if self.generation.options.stats_enabled(&conf)
+                        && !self.generation.value.is_empty()
+                    {
+                        password_manager::password::password_strength_output(
+                            self.generation.value.expose(),
+                        )
+                    } else {
+                        String::new()
+                    };
                     self.conf = conf;
                     self.notice = if restart_required {
                         "Settings saved. Restart the server to apply recovery settings. The lock timeout applies on the next unlock."
@@ -1705,8 +1297,8 @@ impl App {
                 Reply::Vaults { vaults, names } => {
                     self.names = names;
                     self.apply_vaults(vaults);
-                    if self.connect_after_discovery {
-                        self.connect_after_discovery = false;
+                    if self.connection.connect_after_discovery {
+                        self.connection.connect_after_discovery = false;
                         return self.connect();
                     }
                 }
@@ -1765,8 +1357,8 @@ impl App {
                     return self.status();
                 }
                 Reply::KeyFile(Some(path)) => {
-                    self.key_path = path;
-                    self.master.zeroize();
+                    self.connection.key_path = path;
+                    self.connection.master.zeroize();
                     self.notice.clear();
                 }
                 Reply::PickedFile(field, Some(path)) => self.workspace.edit(field, path),
@@ -1791,7 +1383,9 @@ impl App {
         let incomplete_audit = job == Job::Workflow(workflows::Action::Audit)
             && response.code == ResponseCode::Failure as i32
             && matches!(response.payload, ResponsePayload::Audit(_));
-        if incomplete_audit && (self.session.is_none() || self.session != response.session_id) {
+        if incomplete_audit
+            && (self.connection.session.is_none() || self.connection.session != response.session_id)
+        {
             self.clear_vault();
             self.notice =
                 "The vault session changed. Unlock or reopen the vault to continue.".into();
@@ -1806,15 +1400,15 @@ impl App {
                 self.ui.saved_item = None;
             }
             if matches!(job, Job::Create | Job::Unlock) {
-                self.creation = None;
+                self.connection.creation = None;
             }
             self.report_error(response.error_message());
             self.hide_secrets();
             if response.code == ResponseCode::Conflict as i32 {
                 self.stop_tool_watches();
                 self.workspace.prepared = None;
-                if self.session.is_some()
-                    && self.session == response.session_id
+                if self.connection.session.is_some()
+                    && self.connection.session == response.session_id
                     && self.editor.is_some()
                     && self.item.is_some()
                 {
@@ -1827,117 +1421,21 @@ impl App {
                 }
             }
             if matches!(job, Job::Connect | Job::Attach | Job::Status) {
-                self.running = false;
+                self.connection.running = false;
                 self.clear_vault();
                 return Task::none();
             }
             return self.status();
         }
         if matches!(job, Job::Connect | Job::Attach | Job::Status) {
-            if let ResponsePayload::Status(status) = response.payload {
-                if matches!(job, Job::Connect | Job::Attach) {
-                    self.notice.clear();
-                }
-                self.running = true;
-                self.warning = match (status.warning, status.cloud_warning) {
-                    (Some(a), Some(b)) => Some(format!("{a}; {b}")),
-                    (a, b) => a.or(b),
-                };
-                let revision_changed =
-                    self.vault_revision.is_some() && self.vault_revision != status.vault_revision;
-                self.vault_revision = status.vault_revision;
-                let next_session = if status.locked {
-                    None
-                } else {
-                    response.session_id
-                };
-                let changed = self.session != next_session;
-                if changed {
-                    let known = self
-                        .ui
-                        .active_vault
-                        .take()
-                        .filter(|(_, session)| next_session.as_ref() == Some(session));
-                    self.clear_vault();
-                    self.ui.active_vault = known;
-                }
-                self.session = next_session;
-                if status.locked {
-                    if self.recovery.id().is_some() {
-                        self.creation = None;
-                    }
-                    if self.creation.is_some() && self.select_created_vault {
-                        let new: Vec<_> = vaults
-                            .iter()
-                            .filter(|id| !self.vaults.contains(id))
-                            .cloned()
-                            .collect();
-                        if new.len() == 1 {
-                            let creation = self.creation.take().unwrap();
-                            let id = new[0].clone();
-                            self.vault = Some(id.clone());
-                            self.vaults = vaults;
-                            self.select_created_vault = false;
-                            let client = self.client.clone();
-                            let timeout = self.conf.unlock.timeout;
-                            return self.launch(Job::Unlock, move || {
-                                backend::open_created(
-                                    &client,
-                                    id,
-                                    creation.name,
-                                    creation.password,
-                                    timeout,
-                                )
-                            });
-                        }
-                        self.creation = None;
-                        self.notice = "Your vault was created. Select the new vault and unlock it to continue.".into();
-                    }
-                    if self.select_created_vault {
-                        self.vault = vaults
-                            .iter()
-                            .find(|vault| !self.vaults.contains(vault))
-                            .cloned();
-                        self.select_created_vault = false;
-                    }
-                    self.vaults = vaults;
-                    if self
-                        .vault
-                        .as_ref()
-                        .is_none_or(|selected| !self.vaults.contains(selected))
-                    {
-                        self.vault = self.vaults.first().cloned();
-                    }
-                    if matches!(job, Job::Connect | Job::Attach) {
-                        self.notice.clear();
-                    }
-                } else {
-                    self.vaults = vaults;
-                    if changed {
-                        self.creating = false;
-                        return self.load_items();
-                    }
-                    if revision_changed {
-                        if self.editor.is_some() || self.recovery.id().is_some() {
-                            self.notice="The vault changed on another client or device. Your draft is preserved; reopen the item before saving if it changed.".into();
-                        } else {
-                            self.notice = "Vault updated from another client or device.".into();
-                            if let Some(id) = self.item.as_ref().map(|item| item.id) {
-                                return self.refresh_account(id);
-                            }
-                            return self.load_items();
-                        }
-                    }
-                }
-            }
-            return Task::none();
+            return self.complete_status(job, response, vaults);
         }
         // A lock or another client switching vaults invalidates every selection.
         if !matches!(
             job,
             Job::Unlock | Job::Lock | Job::Create | Job::Stop | Job::Reconcile
         ) && !matches!(job, Job::Workflow(action) if action.changes_vault())
-            && self.session != response.session_id
+            && self.connection.session != response.session_id
         {
             self.clear_vault();
             self.notice =
@@ -1945,206 +1443,14 @@ impl App {
             return self.status();
         }
         match (job, response.payload) {
-            (Job::CloudList, ResponsePayload::Message(message)) => {
-                match serde_json::from_str::<Vec<password_manager::cloud::RemoteVault>>(&message) {
-                    Ok(vaults) => {
-                        self.cloud_vaults = vaults.into_iter().map(|v| v.id).collect();
-                        self.cloud_vault = self.cloud_vaults.first().cloned();
-                        self.notice =
-                            format!("{} cloud vault(s) available", self.cloud_vaults.len());
-                    }
-                    Err(e) => self.notice = format!("Invalid vault list: {e}"),
-                }
+            (
+                job @ (Job::CloudList | Job::CloudConflicts | Job::CloudResolve | Job::Cloud),
+                payload,
+            ) => {
+                return self.complete_cloud(job, payload);
             }
-            (Job::CloudConflicts, ResponsePayload::Message(message)) => {
-                match serde_json::from_str::<password_manager::cloud::ConflictReview>(&message) {
-                    Ok(review) => {
-                        self.notice = if review.items.is_empty() {
-                            "No item differences. Apply the resolution to reconcile the snapshots."
-                        } else {
-                            "Choose which values to keep, then apply the resolution."
-                        }
-                        .into();
-                        self.cloud_choices.clear();
-                        self.cloud_review = Some(review);
-                    }
-                    Err(e) => self.notice = format!("Invalid conflict review: {e}"),
-                }
-            }
-            (Job::CloudResolve, ResponsePayload::Message(message)) => {
-                self.notice = message;
-                self.workspace.clear_vault();
-                self.item = None;
-                self.editor = Editor::Closed;
-                self.ui.undo_trash = None;
-                self.ui.saved_item = None;
-                return self.load_items();
-            }
-            (Job::Cloud, ResponsePayload::Message(message)) => {
-                self.notice = message;
-                return self.refresh_vaults();
-            }
-
             (Job::Workflow(action), payload) => {
-                if let Some((id, _)) = self.ui.undo_trash.as_ref() {
-                    let resolved = match action {
-                        workflows::Action::RestoreTrash(target)
-                        | workflows::Action::Purge(Some(target)) => target == *id,
-                        workflows::Action::Purge(None) => true,
-                        workflows::Action::Trash => {
-                            matches!(&payload, ResponsePayload::Trash(page) if !page.trash.iter().any(|entry| entry.id == *id))
-                        }
-                        _ => false,
-                    };
-                    if resolved {
-                        self.ui.undo_trash = None;
-                    }
-                }
-                if action == workflows::Action::Requests {
-                    return self.complete_duo_requests(payload);
-                }
-                if matches!(
-                    action,
-                    workflows::Action::WatchOtp | workflows::Action::CopyWatchedOtp
-                ) {
-                    return self.complete_otp_watch(action, payload);
-                }
-                if matches!(action, workflows::Action::Respond(..)) {
-                    self.notice = if let ResponsePayload::Message(message) = &payload {
-                        message.clone()
-                    } else {
-                        "Duo response recorded.".into()
-                    };
-                    self.workspace.clear_duo_requests();
-                    self.workspace.receive(payload);
-                    return self.workflow(workflows::Event::Run(workflows::Action::Requests));
-                }
-                if matches!(
-                    action,
-                    workflows::Action::EnrollDuo | workflows::Action::RemoveDuo
-                ) {
-                    self.workspace.reset_duo();
-                }
-                let first_result = self.workspace.result.is_none();
-                self.notice = if let Some(warning) = audit_warning {
-                    format!("Audit completed with incomplete breach checks: {warning}")
-                } else if let ResponsePayload::Message(message) = &payload {
-                    message.clone()
-                } else {
-                    if self.tab == Tab::Vault {
-                        ""
-                    } else {
-                        match action {
-                            workflows::Action::Audit => "Vault health check complete.",
-                            workflows::Action::History => "Password history loaded.",
-                            workflows::Action::Trash => "Deleted items loaded.",
-                            workflows::Action::Search => "Search complete.",
-                            workflows::Action::PreviewImport => "Import preview ready.",
-                            _ => "Operation complete.",
-                        }
-                    }
-                    .into()
-                };
-                if action.changes_vault() {
-                    let changes_selection = matches!(
-                        action,
-                        workflows::Action::NewVault
-                            | workflows::Action::RestoreBackup
-                            | workflows::Action::DeleteVault
-                    ) || action == workflows::Action::Import
-                        && self.workspace.import_new;
-                    if !changes_selection {
-                        if self.session != response.session_id {
-                            self.clear_vault();
-                            self.session = response.session_id.clone();
-                        }
-                        self.item = None;
-                        self.editor = Editor::Closed;
-                        self.workspace.receive(payload);
-                        let refresh = if self.session.is_some() {
-                            self.load_items()
-                        } else {
-                            self.status()
-                        };
-                        return Task::batch([refresh, workflows::show_result()]);
-                    }
-                    let restored = if let ResponsePayload::Vault(reference) = &payload {
-                        Some(reference.vault_file.clone())
-                    } else {
-                        None
-                    };
-                    self.clear_vault();
-                    if let Some(filename) = restored {
-                        self.vault = Some(filename);
-                    }
-                    if matches!(action, workflows::Action::NewVault)
-                        || action == workflows::Action::Import && self.workspace.import_new
-                    {
-                        self.select_created_vault = true;
-                    }
-                    self.workspace.receive(payload);
-                    return Task::batch([self.status(), workflows::show_result()]);
-                }
-                let consumed_hotp = matches!(
-                    &payload,
-                    ResponsePayload::Authenticator(code) if code.counter.is_some()
-                );
-                let refresh = consumed_hotp
-                    || matches!(
-                        action,
-                        workflows::Action::RestorePassword(_)
-                            | workflows::Action::RestoreTrash(_)
-                            | workflows::Action::SetOtp
-                            | workflows::Action::RemoveOtp
-                            | workflows::Action::EnrollDuo
-                            | workflows::Action::EnrollPasscodes
-                            | workflows::Action::RemoveDuo
-                    );
-                self.workspace.receive(payload);
-                if refresh {
-                    if self.tab == Tab::Vault
-                        && action.edits_authenticator()
-                        && let Some(id) = self.editor.as_ref().and_then(|draft| draft.id)
-                    {
-                        if self
-                            .workspace
-                            .duo
-                            .watch
-                            .as_ref()
-                            .is_some_and(|target| target.choice.id == id)
-                        {
-                            self.workspace.reset_duo();
-                        }
-                        return self.refresh_editor(id);
-                    }
-                    if consumed_hotp
-                        && self.tab == Tab::Vault
-                        && self.editor.is_none()
-                        && let Some(id) = self.item.as_ref().map(|item| item.id)
-                    {
-                        if self
-                            .workspace
-                            .duo
-                            .watch
-                            .as_ref()
-                            .is_some_and(|target| target.choice.id == id)
-                        {
-                            self.workspace.reset_duo();
-                        }
-                        return self.refresh_account(id);
-                    }
-                    self.item = None;
-                    self.editor = Editor::Closed;
-                    return Task::batch([self.load_items(), workflows::show_result()]);
-                }
-                if matches!(action, workflows::Action::ShowOtp(_)) && self.tab == Tab::Vault {
-                    return Task::none();
-                }
-                if first_result
-                    || !(self.workspace.otp.watch.is_some() || self.workspace.duo.watch.is_some())
-                {
-                    return workflows::show_result();
-                }
+                return self.complete_workflow(action, payload, response.session_id, audit_warning);
             }
             (Job::UsernameValue, ResponsePayload::Item(item)) => {
                 if self.item.as_ref().is_some_and(|current| {
@@ -2265,37 +1571,40 @@ impl App {
                         self.notice = "The previous outcome or storage durability is uncertain. Inspect the vault before acknowledging it; the operation will not be retried.".into();
                     }
                 }
-                if self.session.is_some() {
+                if self.connection.session.is_some() {
                     return self.navigate(Navigate::Refresh);
                 }
                 return self.status();
             }
             (Job::Stop, _) => {
                 self.clear_vault();
-                self.running = false;
+                self.connection.running = false;
                 self.notice = "Server stopped.".into();
             }
             (Job::Create | Job::Unlock | Job::Lock, _) => {
                 let known = if job == Job::Unlock {
-                    self.vault.clone().zip(response.session_id.clone())
+                    self.connection
+                        .vault
+                        .clone()
+                        .zip(response.session_id.clone())
                 } else {
                     None
                 };
                 let creation = if job == Job::Create && self.recovery.id().is_none() {
-                    self.creation.take()
+                    self.connection.creation.take()
                 } else {
                     None
                 };
                 self.clear_vault();
-                self.creation = creation;
+                self.connection.creation = creation;
                 self.ui.active_vault = known;
-                self.creating = false;
+                self.connection.creating = false;
                 if job == Job::Create {
-                    self.vault = None;
-                    self.select_created_vault = true;
+                    self.connection.vault = None;
+                    self.connection.select_created_vault = true;
                 }
                 self.notice = if job == Job::Create {
-                    if self.creation.is_some() {
+                    if self.connection.creation.is_some() {
                         "Opening your new vault…".into()
                     } else {
                         "Vault created. Select it and unlock to continue.".into()
@@ -2333,7 +1642,7 @@ impl App {
                 return self.load_items_for(Job::SavedList);
             }
             (Job::Delete, _) => {
-                if let (Some(item), Some(session)) = (&self.item, &self.session) {
+                if let (Some(item), Some(session)) = (&self.item, &self.connection.session) {
                     self.ui.undo_trash = Some((item.id, session.clone()));
                 }
                 self.workspace.prepared = None;
@@ -2357,163 +1666,6 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         view::view(self)
-    }
-
-    fn custom_field_command(
-        &self,
-        target: FieldTarget,
-        copy: bool,
-    ) -> Result<(ServerCommand, u64), String> {
-        let item = self
-            .item
-            .as_ref()
-            .filter(|item| item.id == target.id && item.revision == target.revision)
-            .ok_or("The selected account changed. Select the field again.")?;
-        let field = item
-            .fields
-            .get(target.index)
-            .ok_or("This field is no longer available. Refresh the account.")?;
-        if copy && self.conf.clipboard.timeout == 0 {
-            return Err("Copying is disabled because the clipboard timeout is zero.".into());
-        }
-        Ok((
-            ServerCommand::GetField {
-                target: Target::Id(item.id),
-                name: field.name.clone(),
-                copy_timeout: copy.then_some(self.conf.clipboard.timeout),
-            },
-            item.revision,
-        ))
-    }
-
-    fn fetch_username(&mut self) -> Task<Message> {
-        if self.conf.clipboard.timeout == 0 {
-            self.report_error(
-                "Copying is disabled. Set a clipboard timeout in Settings → Security.",
-            );
-            return Task::none();
-        }
-        if let Some(item) = &self.item {
-            return self.request(
-                Job::UsernameValue,
-                ServerCommand::ManagementItem {
-                    id: item.id,
-                    reveal: false,
-                },
-                Some(item.revision),
-            );
-        }
-        Task::none()
-    }
-
-    fn copy_item(&mut self) -> Task<Message> {
-        if self.conf.clipboard.timeout == 0 {
-            self.notice = "Copying is disabled because the clipboard timeout is zero.".into();
-            return Task::none();
-        }
-        if let Some(item) = &self.item {
-            return self.request(
-                Job::Copy,
-                ServerCommand::ManagementCopy {
-                    id: item.id,
-                    timeout: self.conf.clipboard.timeout,
-                },
-                Some(item.revision),
-            );
-        }
-        Task::none()
-    }
-
-    fn save_item(&mut self, job: Job) -> Task<Message> {
-        if self.editor.conflicted() {
-            self.report_error("Review and reapply your edits to the latest item before saving.");
-            return Task::none();
-        }
-        if let Some(draft) = self.editor.as_ref() {
-            match draft.command() {
-                Ok(mut command) => {
-                    draft.apply_copy_policy(&mut command, &self.conf);
-                    return self.request(job, command, draft.revision);
-                }
-                Err(error) => self.report_error(error),
-            }
-        }
-        Task::none()
-    }
-
-    fn generate(&mut self) -> Task<Message> {
-        let policy = match self.generator.generation_policy(&self.conf) {
-            Ok(policy) => policy,
-            Err(error) => {
-                self.report_error(error);
-                return Task::none();
-            }
-        };
-        let generated =
-            self.generator
-                .generate(self.passphrase, &self.generator_length, &self.words);
-        match generated {
-            Ok(value) => {
-                if self.tab == Tab::Vault
-                    && let Some(draft) = self.editor.as_mut()
-                {
-                    draft.password = value.into();
-                    draft.secret_editor = if draft.multiline {
-                        text_editor::Content::with_text(draft.password.expose())
-                    } else {
-                        text_editor::Content::new()
-                    };
-                    draft.replace_password = true;
-                    draft.dirty = true;
-                    self.notice =
-                        "Generated a replacement password. Save the item to keep it.".into();
-                } else {
-                    self.ui.transfer_generated = false;
-                    self.generated = value.into();
-                    self.generated_stats = if policy.stats {
-                        password_manager::password::password_strength_output(
-                            self.generated.expose(),
-                        )
-                    } else {
-                        String::new()
-                    };
-                    self.generated.set_visible(false);
-                    self.notice = "New secret ready. Copy it or save it in an item; it clears from this screen after 60 seconds.".into();
-                    let show = iced::widget::operation::snap_to(
-                        "generator-form",
-                        iced::widget::operation::RelativeOffset::START,
-                    );
-                    if policy.copy {
-                        return Task::batch([show, self.copy_generated()]);
-                    }
-                    return show;
-                }
-            }
-            Err(error) => self.report_error(error),
-        }
-        Task::none()
-    }
-
-    fn copy_generated(&mut self) -> Task<Message> {
-        let value = self.generated.secret();
-        let timeout = match self.generator.copy_timeout(&self.conf) {
-            Ok(timeout) => timeout,
-            Err(error) => {
-                self.report_error(error);
-                return Task::none();
-            }
-        };
-        if value.is_empty() {
-            return Task::none();
-        }
-        if timeout == 0 {
-            self.notice = "Copying is disabled because the clipboard timeout is zero.".into();
-            return Task::none();
-        }
-        self.launch(Job::CopyGenerated, move || {
-            password_manager::clipboard::copy_with_timeout(value.expose(), timeout)?;
-            Ok(Reply::Copied)
-        })
     }
 }
 

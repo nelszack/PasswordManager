@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) struct State {
+    pub(super) length: String,
+    pub(super) passphrase: bool,
+    pub(super) words: String,
+    pub(super) value: GeneratedSecret,
+    pub(super) stats: String,
+    pub(super) options: Options,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Policy {
     #[default]
@@ -198,6 +207,129 @@ impl Options {
                 self.check.zeroize();
             }
         }
+    }
+}
+
+impl App {
+    pub(super) fn update_generator(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Generator(event) => self.generation.options.update(event),
+            Message::GeneratorLength(value) => self.generation.length = value,
+            Message::Passphrase(value) => self.generation.passphrase = value,
+            Message::Words(value) => self.generation.words = value,
+            Message::Generate => {
+                return self.launch(Job::GenerateDefaults, backend::reload_settings);
+            }
+            Message::ShowGenerated(value) => self.generation.value.set_visible(value),
+            Message::UseGenerated
+                if self.connection.session.is_some() && !self.generation.value.is_empty() =>
+            {
+                self.ui.transfer_generated = true;
+            }
+            Message::CancelGenerated => self.ui.transfer_generated = false,
+            Message::ConfirmGenerated
+                if self.ui.transfer_generated
+                    && self.connection.session.is_some()
+                    && !self.generation.value.is_empty() =>
+            {
+                self.ui.transfer_generated = false;
+                let draft = self.editor.get_or_insert_with(Draft::default);
+                draft.password = self.generation.value.secret();
+                draft.replace_password = true;
+                draft.dirty = true;
+                draft.secret_editor = text_editor::Content::new();
+                draft.multiline = false;
+                self.tab = Tab::Vault;
+                self.hide_secrets();
+                self.notice =
+                    "Generated secret added to the draft. Save the item to keep it.".into();
+                return iced::widget::operation::focus("item-name");
+            }
+            Message::CopyGenerated if !self.generation.value.is_empty() => {
+                return self.launch(Job::CopyDefaults, backend::reload_settings);
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+}
+
+impl App {
+    pub(super) fn generate(&mut self) -> Task<Message> {
+        let policy = match self.generation.options.generation_policy(&self.conf) {
+            Ok(policy) => policy,
+            Err(error) => {
+                self.report_error(error);
+                return Task::none();
+            }
+        };
+        let generated = self.generation.options.generate(
+            self.generation.passphrase,
+            &self.generation.length,
+            &self.generation.words,
+        );
+        match generated {
+            Ok(value) => {
+                if self.tab == Tab::Vault
+                    && let Some(draft) = self.editor.as_mut()
+                {
+                    draft.password = value.into();
+                    draft.secret_editor = if draft.multiline {
+                        text_editor::Content::with_text(draft.password.expose())
+                    } else {
+                        text_editor::Content::new()
+                    };
+                    draft.replace_password = true;
+                    draft.dirty = true;
+                    self.notice =
+                        "Generated a replacement password. Save the item to keep it.".into();
+                } else {
+                    self.ui.transfer_generated = false;
+                    self.generation.value = value.into();
+                    self.generation.stats = if policy.stats {
+                        password_manager::password::password_strength_output(
+                            self.generation.value.expose(),
+                        )
+                    } else {
+                        String::new()
+                    };
+                    self.generation.value.set_visible(false);
+                    self.notice = "New secret ready. Copy it or save it in an item; it clears from this screen after 60 seconds.".into();
+                    let show = iced::widget::operation::snap_to(
+                        "generator-form",
+                        iced::widget::operation::RelativeOffset::START,
+                    );
+                    if policy.copy {
+                        return Task::batch([show, self.copy_generated()]);
+                    }
+                    return show;
+                }
+            }
+            Err(error) => self.report_error(error),
+        }
+        Task::none()
+    }
+
+    pub(super) fn copy_generated(&mut self) -> Task<Message> {
+        let value = self.generation.value.secret();
+        let timeout = match self.generation.options.copy_timeout(&self.conf) {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                self.report_error(error);
+                return Task::none();
+            }
+        };
+        if value.is_empty() {
+            return Task::none();
+        }
+        if timeout == 0 {
+            self.notice = "Copying is disabled because the clipboard timeout is zero.".into();
+            return Task::none();
+        }
+        self.launch(Job::CopyGenerated, move || {
+            password_manager::clipboard::copy_with_timeout(value.expose(), timeout)?;
+            Ok(Reply::Copied)
+        })
     }
 }
 

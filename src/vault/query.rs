@@ -51,42 +51,50 @@ impl Vault {
         entries
     }
     pub(super) fn search_entries(&self, filter: &SearchFilter) -> Vec<&VaultEntry> {
-        fn contains(value: Option<&str>, needle: Option<&String>) -> bool {
-            needle.is_none_or(|n| value.is_some_and(|v| v.to_lowercase().contains(n)))
-        }
-        let query = filter.query.as_ref().map(|q| q.to_lowercase());
-        let name = filter.name.as_ref().map(|q| q.to_lowercase());
-        let username = filter.username.as_ref().map(|q| q.to_lowercase());
-        let url = filter.url.as_ref().map(|q| q.to_lowercase());
+        let lower =
+            |value: &Option<String>| value.as_ref().map(|v| Zeroizing::new(v.to_lowercase()));
+        let query = lower(&filter.query);
+        let name = lower(&filter.name);
+        let username = lower(&filter.username);
+        let url = lower(&filter.url);
         let notes = filter
             .notes
             .as_ref()
-            .map(|q| Zeroizing::new(q.to_lowercase()));
+            .map(|v| Zeroizing::new(v.to_lowercase()));
+        // An unfiltered list needs neither an index nor copies of metadata.
+        let metadata_needed =
+            query.is_some() || name.is_some() || username.is_some() || url.is_some();
         self.active_items()
             .filter(|item| {
-                let e = &item.entry;
-                let m = &item.metadata;
-                let urls = || {
-                    e.url
-                        .as_deref()
-                        .into_iter()
-                        .chain(m.additional_urls.iter().map(String::as_str))
-                };
-                query.as_ref().is_none_or(|q| {
-                    e.name.to_lowercase().contains(q)
-                        || contains(e.username.as_deref(), Some(q))
-                        || urls().any(|u| u.to_lowercase().contains(q))
-                        || contains(e.notes.as_ref().map(|s| s.as_str()), Some(q))
-                        || m.custom_fields.iter().any(|f| {
-                            f.name.to_lowercase().contains(q)
-                                || (!f.secret && f.value.to_lowercase().contains(q))
-                        })
-                }) && contains(Some(&e.name), name.as_ref())
-                    && contains(e.username.as_deref(), username.as_ref())
-                    && url
+                let metadata = metadata_needed
+                    .then(|| item.search.0.get_or_init(|| SearchMetadata::new(item)));
+                let contains = |value: Option<&str>, needle: &Option<Zeroizing<String>>| {
+                    needle
                         .as_ref()
-                        .is_none_or(|q| urls().any(|u| u.to_lowercase().contains(q)))
-                    && contains(e.notes.as_ref().map(|s| s.as_str()), notes.as_deref())
+                        .is_none_or(|n| value.is_some_and(|v| v.contains(n.as_str())))
+                };
+                let notes_match = |needle: &str| {
+                    item.entry
+                        .notes
+                        .as_ref()
+                        .is_some_and(|value| Zeroizing::new(value.to_lowercase()).contains(needle))
+                };
+                metadata.is_none_or(|m| {
+                    query.as_ref().is_none_or(|q| {
+                        m.name.contains(q.as_str())
+                            || m.username.as_ref().is_some_and(|v| v.contains(q.as_str()))
+                            || m.urls.iter().any(|v| v.contains(q.as_str()))
+                            || notes_match(q)
+                            || m.fields.iter().any(|(name, value)| {
+                                name.contains(q.as_str())
+                                    || value.as_ref().is_some_and(|v| v.contains(q.as_str()))
+                            })
+                    }) && contains(Some(&m.name), &name)
+                        && contains(m.username.as_deref().map(String::as_str), &username)
+                        && url
+                            .as_ref()
+                            .is_none_or(|q| m.urls.iter().any(|v| v.contains(q.as_str())))
+                }) && notes.as_ref().is_none_or(|q| notes_match(q))
             })
             .map(|item| &item.entry)
             .collect()
@@ -115,5 +123,56 @@ impl Vault {
     }
     pub fn target_revision(&self, target: &Target) -> Option<u64> {
         self.entry_id(target).and_then(|id| self.revision(id))
+    }
+}
+
+// Only normalized metadata is retained. Notes and secret field values are never
+// indexed; even the metadata index is wiped when an item changes or locks.
+#[derive(Default)]
+pub(super) struct CachedSearch(pub std::sync::OnceLock<SearchMetadata>);
+// Staged mutations don't need copies of the normalized index they invalidate.
+impl Clone for CachedSearch {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+impl std::fmt::Debug for CachedSearch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CachedSearch(<redacted>)")
+    }
+}
+impl PartialEq for CachedSearch {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+#[derive(Clone)]
+pub(super) struct SearchMetadata {
+    name: Zeroizing<String>,
+    username: Option<Zeroizing<String>>,
+    urls: Vec<Zeroizing<String>>,
+    fields: Vec<(Zeroizing<String>, Option<Zeroizing<String>>)>,
+}
+impl SearchMetadata {
+    fn new(item: &Item) -> Self {
+        let lower = |v: &str| Zeroizing::new(v.to_lowercase());
+        Self {
+            name: lower(&item.entry.name),
+            username: item.entry.username.as_deref().map(lower),
+            urls: item
+                .entry
+                .url
+                .as_deref()
+                .into_iter()
+                .chain(item.metadata.additional_urls.iter().map(String::as_str))
+                .map(lower)
+                .collect(),
+            fields: item
+                .metadata
+                .custom_fields
+                .iter()
+                .map(|f| (lower(&f.name), (!f.secret).then(|| lower(&f.value))))
+                .collect(),
+        }
     }
 }

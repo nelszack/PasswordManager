@@ -33,7 +33,9 @@ impl Vault {
         }
         let mut bytes = persistence::encode_document(&self.data, None)?;
         persistence::validate_encrypted_size(bytes.len(), 9, max, "backup")?;
-        let ciphertext = try_encrypt_file_in_place(key, std::mem::take(&mut *bytes))?;
+        let ciphertext =
+            try_encrypt_file_in_place(&mut key.clone().into(), std::mem::take(&mut *bytes))?;
+        key.zeroize();
         let mut out = Vec::with_capacity(ciphertext.len() + 9);
         out.extend_from_slice(BACKUP_MAGIC);
         out.push(BACKUP_DOCUMENT_VERSION);
@@ -52,7 +54,7 @@ pub(crate) fn restore_encrypted_backup(
             "unsupported encrypted backup format".into(),
         ));
     }
-    let mut candidate = key.clone();
+    let mut candidate = VaultCredentials::from(key.clone());
     let plaintext = Zeroizing::new(decrypt_file(&mut candidate, &bytes[9..]).ok_or_else(|| {
         VaultError::Validation("wrong backup password/key or modified backup".into())
     })?);
@@ -73,7 +75,7 @@ pub(crate) fn restore_encrypted_backup(
         },
     };
     write_vault_with_key(&vault, &mut candidate)?;
-    *key = candidate;
+    key.zeroize();
     Ok(filename)
 }
 
@@ -120,9 +122,10 @@ mod tests {
         assert!(!String::from_utf8_lossy(&ciphertext).contains("backup-secret"));
         let filename =
             restore_encrypted_backup(path.to_str().unwrap(), &mut strong_password()).unwrap();
-        let (_, restored) = persistence::lookup_vault(&mut strong_password(), Some(&filename))
-            .unwrap()
-            .unwrap();
+        let (_, restored) =
+            persistence::lookup_vault(&mut strong_password().into(), Some(&filename))
+                .unwrap()
+                .unwrap();
         assert_eq!(restored.data.items, vault.data.items);
         assert_ne!(restored.data.vault_id, vault.data.vault_id);
         assert_eq!(restored.data.next_item_id, vault.data.next_item_id);
@@ -192,10 +195,7 @@ mod tests {
                 directory: directory.path().to_owned(),
                 filename: "production.enc".into(),
             };
-            let mut key = VaultCredentials {
-                locked: false,
-                keypass: Some(strong_password()),
-            };
+            let mut key = VaultCredentials::from(strong_password());
             write_vault(&vault, &mut key).unwrap();
             let old = fs::read(directory.path().join("production.enc")).unwrap();
             assert_eq!(
@@ -205,7 +205,7 @@ mod tests {
             assert_eq!(
                 persistence::lookup_vault_in(
                     directory.path(),
-                    &mut strong_password(),
+                    &mut strong_password().into(),
                     Some("production.enc")
                 )
                 .unwrap()
@@ -221,11 +221,11 @@ mod tests {
                 )
                 .unwrap();
             let bytes = fs::read(directory.path().join("production.enc")).unwrap();
-            assert!(decrypt_file(&mut strong_password(), &bytes).is_none());
+            assert!(decrypt_file(&mut strong_password().into(), &bytes).is_none());
             assert_eq!(
                 persistence::lookup_vault_in(
                     directory.path(),
-                    &mut PasswordType::Password("Maple-Compass-Granite-5842!".into()),
+                    &mut PasswordType::Password("Maple-Compass-Granite-5842!".into()).into(),
                     Some("production.enc")
                 )
                 .unwrap()
@@ -240,9 +240,10 @@ mod tests {
                 .unwrap();
             let filename =
                 restore_encrypted_backup(path.to_str().unwrap(), &mut strong_password()).unwrap();
-            let (_, restored) = persistence::lookup_vault(&mut strong_password(), Some(&filename))
-                .unwrap()
-                .unwrap();
+            let (_, restored) =
+                persistence::lookup_vault(&mut strong_password().into(), Some(&filename))
+                    .unwrap()
+                    .unwrap();
             assert_eq!(restored.data.items, vault.data.items);
             fs::remove_file(data_dir().join(filename)).unwrap();
             let mut tampered = bytes;
@@ -250,7 +251,7 @@ mod tests {
             tampered[last] ^= 1;
             assert!(
                 decrypt_file(
-                    &mut PasswordType::Password("Maple-Compass-Granite-5842!".into()),
+                    &mut PasswordType::Password("Maple-Compass-Granite-5842!".into()).into(),
                     &tampered
                 )
                 .is_none()

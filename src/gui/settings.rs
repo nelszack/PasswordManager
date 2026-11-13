@@ -1,3 +1,4 @@
+use super::{App, Job, Message, Task, backend, presentation, widgets};
 use password_manager::config::{Appearance, Config, ConfigChanges, parse_duration};
 
 #[derive(Clone, Copy, Debug)]
@@ -10,6 +11,257 @@ pub enum Field {
     ServerPort,
     DefaultVault,
     SyncServer,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Toggle {
+    GeneratorStats,
+    GeneratorCopy,
+    PasswordCopy,
+    SyncAutomatic,
+}
+
+pub struct SettingsDraft {
+    baseline: Config,
+    pub length: String,
+    pub stats: bool,
+    pub generator_copy: bool,
+    pub password_copy: bool,
+    pub clipboard_timeout: String,
+    pub unlock_timeout: String,
+    pub history_limit: String,
+    pub trash_retention: String,
+    pub server_port: String,
+    pub default_vault: String,
+    pub appearance: Appearance,
+    pub scale: u16,
+    pub sync_server: String,
+    pub sync_automatic: bool,
+}
+
+impl From<&Config> for SettingsDraft {
+    fn from(conf: &Config) -> Self {
+        Self {
+            baseline: conf.clone(),
+            length: conf.genpass.length.to_string(),
+            stats: conf.genpass.stats,
+            generator_copy: conf.genpass.copy,
+            password_copy: conf.copy.passwords,
+            clipboard_timeout: conf.clipboard.timeout.to_string(),
+            unlock_timeout: conf.unlock.timeout.to_string(),
+            history_limit: conf.recovery.password_history_limit.to_string(),
+            trash_retention: conf.recovery.trash_retention_days.to_string(),
+            server_port: conf.server.port.to_string(),
+            default_vault: conf.unlock.vault_id.clone().unwrap_or_default(),
+            appearance: conf.desktop.appearance,
+            scale: conf.desktop.scale,
+            sync_server: conf.sync.server_url.clone(),
+            sync_automatic: conf.sync.automatic,
+        }
+    }
+}
+
+impl SettingsDraft {
+    /// Rebase the form onto the latest disk configuration. Only fields that
+    /// still match the old baseline follow disk changes; even invalid local
+    /// input is retained so a refresh cannot discard work in progress.
+    pub fn reload(&mut self, conf: &Config) {
+        let previous = Self::from(&self.baseline);
+        let next = Self::from(conf);
+        macro_rules! merge {
+            ($($field:ident),+ $(,)?) => {
+                $(if self.$field == previous.$field {
+                    self.$field = next.$field;
+                })+
+            };
+        }
+        merge!(
+            length,
+            stats,
+            generator_copy,
+            password_copy,
+            clipboard_timeout,
+            unlock_timeout,
+            history_limit,
+            trash_retention,
+            server_port,
+            default_vault,
+            appearance,
+            scale,
+            sync_server,
+            sync_automatic,
+        );
+        self.baseline = conf.clone();
+    }
+
+    pub fn edit(&mut self, field: Field, value: String) {
+        *match field {
+            Field::Length => &mut self.length,
+            Field::ClipboardTimeout => &mut self.clipboard_timeout,
+            Field::UnlockTimeout => &mut self.unlock_timeout,
+            Field::HistoryLimit => &mut self.history_limit,
+            Field::TrashRetention => &mut self.trash_retention,
+            Field::ServerPort => &mut self.server_port,
+            Field::DefaultVault => &mut self.default_vault,
+            Field::SyncServer => &mut self.sync_server,
+        } = value;
+    }
+
+    pub fn toggle(&mut self, toggle: Toggle, value: bool) {
+        *match toggle {
+            Toggle::GeneratorStats => &mut self.stats,
+            Toggle::GeneratorCopy => &mut self.generator_copy,
+            Toggle::PasswordCopy => &mut self.password_copy,
+            Toggle::SyncAutomatic => &mut self.sync_automatic,
+        } = value;
+    }
+
+    pub fn changes(&self) -> Result<ConfigChanges, String> {
+        let length = self
+            .length
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|length| *length > 0)
+            .ok_or("Password length must be between 1 and 255.")?;
+        let clipboard = self
+            .clipboard_timeout
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| "Clipboard timeout must be between 0 and 255 seconds.")?;
+        let timeout = parse_duration(&self.unlock_timeout)
+            .map_err(|error| format!("Lock timeout: {error}."))?;
+        let history = self
+            .history_limit
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| "Password history limit must be a nonnegative whole number.")?;
+        let retention = self
+            .trash_retention
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Trash retention must be a nonnegative number of days.")?;
+        let port = self
+            .server_port
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or("Server port must be between 1 and 65535.")?;
+        let vault = self.default_vault.trim();
+        if !vault.is_empty() {
+            password_manager::vault::validate_vault_filename(vault)
+                .map_err(|error| error.to_string())?;
+        }
+        if !self.sync_server.is_empty() {
+            password_manager::cloud::validate_server_url(&self.sync_server)?;
+        }
+        let base = &self.baseline;
+        // Only send edited settings. Other fields may have been changed by the
+        // CLI since this form was opened; the backend rereads them before saving.
+        Ok(ConfigChanges {
+            reset: false,
+            genpass_length: (length != base.genpass.length).then_some(length),
+            genpass_stats: (self.stats != base.genpass.stats).then_some(self.stats),
+            genpass_copy: (self.generator_copy != base.genpass.copy).then_some(self.generator_copy),
+            password_copy: (self.password_copy != base.copy.passwords)
+                .then_some(self.password_copy),
+            clipboard_timeout: (clipboard != base.clipboard.timeout).then_some(clipboard),
+            unlock_timeout: (timeout != base.unlock.timeout).then_some(timeout),
+            password_history_limit: (history != base.recovery.password_history_limit)
+                .then_some(history),
+            trash_retention_days: (retention != base.recovery.trash_retention_days)
+                .then_some(retention),
+            server_port: (port != base.server.port).then_some(port),
+            default_vault: (!vault.is_empty() && base.unlock.vault_id.as_deref() != Some(vault))
+                .then(|| vault.to_owned()),
+            clear_default_vault: vault.is_empty() && base.unlock.vault_id.is_some(),
+            desktop_appearance: (self.appearance != base.desktop.appearance)
+                .then_some(self.appearance),
+            desktop_scale: (self.scale != base.desktop.scale).then_some(self.scale),
+            sync_server_url: (self.sync_server != base.sync.server_url)
+                .then(|| self.sync_server.clone()),
+            sync_automatic: (self.sync_automatic != base.sync.automatic)
+                .then_some(self.sync_automatic),
+        })
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        let previous = Self::from(&self.baseline);
+        self.length != previous.length
+            || self.stats != previous.stats
+            || self.generator_copy != previous.generator_copy
+            || self.password_copy != previous.password_copy
+            || self.clipboard_timeout != previous.clipboard_timeout
+            || self.unlock_timeout != previous.unlock_timeout
+            || self.history_limit != previous.history_limit
+            || self.trash_retention != previous.trash_retention
+            || self.server_port != previous.server_port
+            || self.default_vault != previous.default_vault
+            || self.appearance != previous.appearance
+            || self.scale != previous.scale
+            || self.sync_server != previous.sync_server
+            || self.sync_automatic != previous.sync_automatic
+    }
+
+    /// Validate one edited field against valid defaults so the inline error
+    /// uses exactly the same rules and wording as saving the complete form.
+    pub fn field_error(&self, field: Field, value: &str) -> Option<String> {
+        let mut isolated = Self::from(&Config::default());
+        isolated.edit(field, value.into());
+        isolated.changes().err()
+    }
+}
+
+impl App {
+    pub(super) fn update_settings(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::SettingsSection(section) => {
+                self.ui.settings_section = section;
+                if section == presentation::SettingsSection::Security
+                    && let Some(id) = &self.connection.vault
+                {
+                    self.ui.vault_name = self.names.label(id, &self.connection.vaults);
+                }
+                return iced::widget::operation::snap_to(
+                    "page-form",
+                    iced::widget::operation::RelativeOffset::START,
+                );
+            }
+            Message::Appearance(value) => self.settings.appearance = value,
+            Message::InterfaceScale(value) if [100, 115, 130].contains(&value) => {
+                self.settings.scale = value;
+                return widgets::ensure_focus_visible();
+            }
+            Message::SettingChanged(field, value) => {
+                self.settings.edit(field, value);
+                self.confirm_reset_settings = false;
+            }
+            Message::SettingToggled(toggle, value) => {
+                self.settings.toggle(toggle, value);
+                self.confirm_reset_settings = false;
+            }
+            Message::SaveSettings => match self.settings.changes() {
+                Ok(changes) => {
+                    return self.launch(Job::Settings, move || backend::save_settings(changes));
+                }
+                Err(error) => self.report_error(error),
+            },
+            Message::ResetSettings => self.confirm_reset_settings = true,
+            Message::CancelResetSettings => self.confirm_reset_settings = false,
+            Message::ConfirmResetSettings if self.confirm_reset_settings => {
+                self.confirm_reset_settings = false;
+                return self.launch(Job::Settings, || {
+                    backend::save_settings(ConfigChanges {
+                        reset: true,
+                        ..Default::default()
+                    })
+                });
+            }
+            _ => {}
+        }
+        Task::none()
+    }
 }
 
 #[cfg(test)]
@@ -212,205 +464,5 @@ mod tests {
         assert!(changes.clear_default_vault);
         assert_eq!(changes.unlock_timeout, Some(7200));
         assert_eq!(changes.server_port, None);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Toggle {
-    GeneratorStats,
-    GeneratorCopy,
-    PasswordCopy,
-    SyncAutomatic,
-}
-
-pub struct SettingsDraft {
-    baseline: Config,
-    pub length: String,
-    pub stats: bool,
-    pub generator_copy: bool,
-    pub password_copy: bool,
-    pub clipboard_timeout: String,
-    pub unlock_timeout: String,
-    pub history_limit: String,
-    pub trash_retention: String,
-    pub server_port: String,
-    pub default_vault: String,
-    pub appearance: Appearance,
-    pub scale: u16,
-    pub sync_server: String,
-    pub sync_automatic: bool,
-}
-
-impl From<&Config> for SettingsDraft {
-    fn from(conf: &Config) -> Self {
-        Self {
-            baseline: conf.clone(),
-            length: conf.genpass.length.to_string(),
-            stats: conf.genpass.stats,
-            generator_copy: conf.genpass.copy,
-            password_copy: conf.copy.passwords,
-            clipboard_timeout: conf.clipboard.timeout.to_string(),
-            unlock_timeout: conf.unlock.timeout.to_string(),
-            history_limit: conf.recovery.password_history_limit.to_string(),
-            trash_retention: conf.recovery.trash_retention_days.to_string(),
-            server_port: conf.server.port.to_string(),
-            default_vault: conf.unlock.vault_id.clone().unwrap_or_default(),
-            appearance: conf.desktop.appearance,
-            scale: conf.desktop.scale,
-            sync_server: conf.sync.server_url.clone(),
-            sync_automatic: conf.sync.automatic,
-        }
-    }
-}
-
-impl SettingsDraft {
-    /// Rebase the form onto the latest disk configuration. Only fields that
-    /// still match the old baseline follow disk changes; even invalid local
-    /// input is retained so a refresh cannot discard work in progress.
-    pub fn reload(&mut self, conf: &Config) {
-        let previous = Self::from(&self.baseline);
-        let next = Self::from(conf);
-        macro_rules! merge {
-            ($($field:ident),+ $(,)?) => {
-                $(if self.$field == previous.$field {
-                    self.$field = next.$field;
-                })+
-            };
-        }
-        merge!(
-            length,
-            stats,
-            generator_copy,
-            password_copy,
-            clipboard_timeout,
-            unlock_timeout,
-            history_limit,
-            trash_retention,
-            server_port,
-            default_vault,
-            appearance,
-            scale,
-            sync_server,
-            sync_automatic,
-        );
-        self.baseline = conf.clone();
-    }
-
-    pub fn edit(&mut self, field: Field, value: String) {
-        *match field {
-            Field::Length => &mut self.length,
-            Field::ClipboardTimeout => &mut self.clipboard_timeout,
-            Field::UnlockTimeout => &mut self.unlock_timeout,
-            Field::HistoryLimit => &mut self.history_limit,
-            Field::TrashRetention => &mut self.trash_retention,
-            Field::ServerPort => &mut self.server_port,
-            Field::DefaultVault => &mut self.default_vault,
-            Field::SyncServer => &mut self.sync_server,
-        } = value;
-    }
-
-    pub fn toggle(&mut self, toggle: Toggle, value: bool) {
-        *match toggle {
-            Toggle::GeneratorStats => &mut self.stats,
-            Toggle::GeneratorCopy => &mut self.generator_copy,
-            Toggle::PasswordCopy => &mut self.password_copy,
-            Toggle::SyncAutomatic => &mut self.sync_automatic,
-        } = value;
-    }
-
-    pub fn changes(&self) -> Result<ConfigChanges, String> {
-        let length = self
-            .length
-            .trim()
-            .parse::<u8>()
-            .ok()
-            .filter(|length| *length > 0)
-            .ok_or("Password length must be between 1 and 255.")?;
-        let clipboard = self
-            .clipboard_timeout
-            .trim()
-            .parse::<u8>()
-            .map_err(|_| "Clipboard timeout must be between 0 and 255 seconds.")?;
-        let timeout = parse_duration(&self.unlock_timeout)
-            .map_err(|error| format!("Lock timeout: {error}."))?;
-        let history = self
-            .history_limit
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| "Password history limit must be a nonnegative whole number.")?;
-        let retention = self
-            .trash_retention
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| "Trash retention must be a nonnegative number of days.")?;
-        let port = self
-            .server_port
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port > 0)
-            .ok_or("Server port must be between 1 and 65535.")?;
-        let vault = self.default_vault.trim();
-        if !vault.is_empty() {
-            password_manager::vault::validate_vault_filename(vault)
-                .map_err(|error| error.to_string())?;
-        }
-        if !self.sync_server.is_empty() {
-            password_manager::cloud::validate_server_url(&self.sync_server)?;
-        }
-        let base = &self.baseline;
-        // Only send edited settings. Other fields may have been changed by the
-        // CLI since this form was opened; the backend rereads them before saving.
-        Ok(ConfigChanges {
-            reset: false,
-            genpass_length: (length != base.genpass.length).then_some(length),
-            genpass_stats: (self.stats != base.genpass.stats).then_some(self.stats),
-            genpass_copy: (self.generator_copy != base.genpass.copy).then_some(self.generator_copy),
-            password_copy: (self.password_copy != base.copy.passwords)
-                .then_some(self.password_copy),
-            clipboard_timeout: (clipboard != base.clipboard.timeout).then_some(clipboard),
-            unlock_timeout: (timeout != base.unlock.timeout).then_some(timeout),
-            password_history_limit: (history != base.recovery.password_history_limit)
-                .then_some(history),
-            trash_retention_days: (retention != base.recovery.trash_retention_days)
-                .then_some(retention),
-            server_port: (port != base.server.port).then_some(port),
-            default_vault: (!vault.is_empty() && base.unlock.vault_id.as_deref() != Some(vault))
-                .then(|| vault.to_owned()),
-            clear_default_vault: vault.is_empty() && base.unlock.vault_id.is_some(),
-            desktop_appearance: (self.appearance != base.desktop.appearance)
-                .then_some(self.appearance),
-            desktop_scale: (self.scale != base.desktop.scale).then_some(self.scale),
-            sync_server_url: (self.sync_server != base.sync.server_url)
-                .then(|| self.sync_server.clone()),
-            sync_automatic: (self.sync_automatic != base.sync.automatic)
-                .then_some(self.sync_automatic),
-        })
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        let previous = Self::from(&self.baseline);
-        self.length != previous.length
-            || self.stats != previous.stats
-            || self.generator_copy != previous.generator_copy
-            || self.password_copy != previous.password_copy
-            || self.clipboard_timeout != previous.clipboard_timeout
-            || self.unlock_timeout != previous.unlock_timeout
-            || self.history_limit != previous.history_limit
-            || self.trash_retention != previous.trash_retention
-            || self.server_port != previous.server_port
-            || self.default_vault != previous.default_vault
-            || self.appearance != previous.appearance
-            || self.scale != previous.scale
-            || self.sync_server != previous.sync_server
-            || self.sync_automatic != previous.sync_automatic
-    }
-
-    /// Validate one edited field against valid defaults so the inline error
-    /// uses exactly the same rules and wording as saving the complete form.
-    pub fn field_error(&self, field: Field, value: &str) -> Option<String> {
-        let mut isolated = Self::from(&Config::default());
-        isolated.edit(field, value.into());
-        isolated.changes().err()
     }
 }

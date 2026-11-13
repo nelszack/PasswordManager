@@ -287,6 +287,7 @@ struct Item {
     duo: Option<DuoRecord>,
     lifecycle: Lifecycle,
     strength: CachedStrength,
+    search: query::CachedSearch,
 }
 // Derived runtime data never affects item equality, revisions, or persistence.
 #[derive(Debug, Default, Clone)]
@@ -316,6 +317,7 @@ impl Item {
             duo: None,
             lifecycle: Lifecycle::Active,
             strength: CachedStrength::default(),
+            search: query::CachedSearch::default(),
         }
     }
 }
@@ -397,6 +399,7 @@ impl Vault {
     fn item_mut(&mut self, id: usize) -> Option<&mut Item> {
         let item = self.data.items.get_mut(&ItemId::from_public(id).ok()?)?;
         item.strength.0.take();
+        item.search.0.take();
         Some(item)
     }
     fn active_items(&self) -> impl Iterator<Item = &Item> {
@@ -751,3 +754,6 @@ impl Vault {
         });
     }
 }
+
+#[cfg(test)]
+mod benchmarks;

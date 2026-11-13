@@ -82,10 +82,7 @@ fn handle_command(
                 );
                 return;
             }
-            let mut credentials = ServerInfo {
-                locked: true,
-                keypass: Some(info.key),
-            };
+            let mut credentials = VaultCredentials::from(info.key);
             let result = unlock_selected_vault(&mut credentials, info.vault_file.as_deref())
                 .and_then(|mut vault| {
                     vault
@@ -137,10 +134,7 @@ fn handle_command(
                 respond_domain_error(&error, responses);
                 return;
             }
-            let mut credentials = ServerInfo {
-                locked: true,
-                keypass: Some(key),
-            };
+            let mut credentials = VaultCredentials::from(key);
             match create_vault(&mut None, &mut credentials, true) {
                 Ok(()) => respond("Vault created.", responses),
                 Err(error) => respond_domain_error(&error, responses),
@@ -207,10 +201,7 @@ fn handle_command(
                     );
                     return;
                 };
-                let mut credentials = ServerInfo {
-                    locked: true,
-                    keypass: Some(key),
-                };
+                let mut credentials = VaultCredentials::from(key);
                 let mut vault = None;
                 create_vault(&mut vault, &mut credentials, false).and_then(|()| {
                     vault

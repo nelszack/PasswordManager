@@ -1,5 +1,6 @@
 use crate::file::{key_file_path, new_key_file_path, read_bounded_file, sync_parent};
 use crate::types::PasswordType;
+use crate::vault::VaultCredentials;
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -259,9 +260,6 @@ pub fn try_gen_master_key(key_pass: &mut PasswordType, new: bool) -> Result<[u8;
             pass,
             &blake3::derive_key(SALT_CONTEXT, pass.as_bytes())[..SALT_LEN],
         ),
-        PasswordType::Session { .. } => {
-            return Err("an unlocked session key cannot derive another master key".to_string());
-        }
     };
     Ok(key)
 }
@@ -279,24 +277,24 @@ fn encryption_master(key_pass: &mut PasswordType, salt: &[u8]) -> Result<[u8; 32
     match key_pass {
         PasswordType::Password(pass) => Ok(master_key_from_password(pass, salt)),
         PasswordType::Key(_) => try_gen_master_key(key_pass, false),
-        PasswordType::Session { .. } => {
-            Err("an unlocked session key cannot be used with a different salt".to_string())
-        }
     }
 }
 
 #[cfg(test)]
-pub fn try_encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+pub fn try_encrypt_file(
+    key_pass: &mut VaultCredentials,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
     try_encrypt_file_in_place(key_pass, plaintext.to_vec())
 }
 
 pub fn try_encrypt_file_in_place(
-    key_pass: &mut PasswordType,
+    key_pass: &mut VaultCredentials,
     plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let mut plaintext = Zeroizing::new(plaintext);
     let cached = match key_pass {
-        PasswordType::Session {
+        VaultCredentials::Session {
             encryption_key,
             salt,
             kdf,
@@ -324,16 +322,15 @@ pub fn try_encrypt_file_in_place(
         .map_or_else(<[u8; SALT_LEN]>::generate, |(_, salt, _, _)| *salt);
     let kdf = match cached.as_ref() {
         Some((_, _, kdf, _)) => *kdf,
-        None => match key_pass {
+        None => match key_pass.supplied()? {
             PasswordType::Password(_) => KDF_ARGON2ID,
             PasswordType::Key(_) => KDF_KEYFILE,
-            PasswordType::Session { .. } => unreachable!(),
         },
     };
     let mut enc_key = if let Some((key, _, _, _)) = cached.as_ref() {
         **key
     } else {
-        let mut master_key = encryption_master(key_pass, &salt)?;
+        let mut master_key = encryption_master(key_pass.supplied()?, &salt)?;
         let key = encryption_key_from_master(&master_key);
         master_key.zeroize();
         key
@@ -364,10 +361,8 @@ pub fn try_encrypt_file_in_place(
     plaintext.resize(ciphertext_len + HEADER_LEN, 0);
     plaintext.copy_within(..ciphertext_len, HEADER_LEN);
     plaintext[..HEADER_LEN].copy_from_slice(&header);
-    if !matches!(key_pass, PasswordType::Session { .. }) {
-        let mut original = std::mem::replace(key_pass, PasswordType::Password(String::new()));
-        original.zeroize();
-        *key_pass = PasswordType::Session {
+    if !matches!(key_pass, VaultCredentials::Session { .. }) {
+        *key_pass = VaultCredentials::Session {
             encryption_key: *session_key,
             salt,
             kdf,
@@ -381,7 +376,7 @@ pub fn try_encrypt_file_in_place(
 }
 
 #[cfg(test)]
-pub fn encrypt_file(key_pass: &mut PasswordType, plaintext: &[u8]) -> Vec<u8> {
+pub fn encrypt_file(key_pass: &mut VaultCredentials, plaintext: &[u8]) -> Vec<u8> {
     try_encrypt_file(key_pass, plaintext).expect("could not encrypt vault")
 }
 
@@ -406,7 +401,7 @@ pub fn validate_vault_header(encrypted: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec<u8>> {
+pub fn decrypt_file(key_pass: &mut VaultCredentials, encrypted: &[u8]) -> Option<Vec<u8>> {
     if validate_vault_header(encrypted).is_err() {
         return None;
     }
@@ -427,7 +422,7 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
     let nonce_end = nonce_start + NONCE_LEN;
     let nonce = XNonce::try_from(&encrypted[nonce_start..nonce_end]).ok()?;
     let cached_key = match &*key_pass {
-        PasswordType::Session {
+        VaultCredentials::Session {
             encryption_key,
             salt: cached_salt,
             kdf: cached_kdf,
@@ -448,7 +443,7 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
         **key
     } else {
         let mut master = match (&*key_pass, kdf) {
-            (PasswordType::Password(password), KDF_ARGON2ID) => {
+            (VaultCredentials::Unlock(PasswordType::Password(password)), KDF_ARGON2ID) => {
                 master_key_from_password_with_params(
                     password,
                     salt,
@@ -457,7 +452,9 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
                     parallelism,
                 )?
             }
-            (PasswordType::Key(_), KDF_KEYFILE) => try_gen_master_key(key_pass, false).ok()?,
+            (VaultCredentials::Unlock(PasswordType::Key(_)), KDF_KEYFILE) => {
+                try_gen_master_key(key_pass.supplied().ok()?, false).ok()?
+            }
             _ => return None,
         };
         let key = encryption_key_from_master(&master);
@@ -476,10 +473,8 @@ pub fn decrypt_file(key_pass: &mut PasswordType, encrypted: &[u8]) -> Option<Vec
             },
         )
         .ok()?;
-    if !matches!(key_pass, PasswordType::Session { .. }) {
-        let mut original = std::mem::replace(key_pass, PasswordType::Password(String::new()));
-        original.zeroize();
-        *key_pass = PasswordType::Session {
+    if !matches!(key_pass, VaultCredentials::Session { .. }) {
+        *key_pass = VaultCredentials::Session {
             encryption_key: *session_key,
             salt: salt.try_into().ok()?,
             kdf,

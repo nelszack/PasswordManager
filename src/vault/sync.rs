@@ -16,7 +16,7 @@ impl Vault {
         credentials: &mut VaultCredentials,
         bytes: &[u8],
     ) -> Result<(), String> {
-        let mut key = credentials.keypass.as_ref().ok_or("Vault locked")?.clone();
+        let mut key = credentials.clone();
         let plaintext = Zeroizing::new(decrypt_file(&mut key, bytes).ok_or(
             "Cannot decrypt cloud update with this session key; the password/key may have changed on another device. Download a comparison copy with the new credentials; local vault preserved.",
         )?);
@@ -35,7 +35,7 @@ impl Vault {
         if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
             self.data = data;
             self.metadata.duo_session.zeroize();
-            credentials.keypass = Some(key);
+            *credentials = key;
         }
         result.map_err(|e| e.to_string())
     }

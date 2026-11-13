@@ -9,9 +9,7 @@ const updateButton = document.getElementById("update");
 let completing = false;
 let uncertain = false;
 
-function send(message) {
-    return new Promise(resolve => chrome.runtime.sendMessage(message, resolve));
-}
+const send = PasswordManagerUiTransport.send;
 
 function showError(error) {
     completing = false;

@@ -1,12 +1,12 @@
 #![no_main]
 use password_manager::{
     encryption::{decrypt_file, try_encrypt_file_in_place, validate_vault_header},
-    types::PasswordType,
+    vault::VaultCredentials,
 };
 use zeroize::Zeroizing;
 
-fn session() -> PasswordType {
-    PasswordType::Session {
+fn session() -> VaultCredentials {
+    VaultCredentials::Session {
         encryption_key: [42; 32],
         salt: [7; 16],
         kdf: 1,
