@@ -1,4 +1,5 @@
 use super::*;
+use crate::gui::tests::server_reply;
 use password_manager::protocol::{AuthenticatorResponse, RpcResponse};
 
 fn app() -> App {
@@ -48,13 +49,7 @@ fn receive_duo(app: &mut App, requests: Vec<DuoPushRequest>) {
 }
 
 fn workflow_reply(app: &App, payload: ResponsePayload) -> Reply {
-    let mut response = RpcResponse::success(payload);
-    response.session_id = app.connection.session.clone();
-    Reply::Server {
-        response: Box::new(response),
-        vaults: vec![],
-        pending: vec![],
-    }
+    crate::gui::tests::reply(payload, app.connection.session.as_deref())
 }
 
 fn history_page() -> ResponsePayload {
@@ -315,11 +310,7 @@ fn failed_history_reload_cannot_relabel_an_older_page() {
     let _ = app.update(super::super::Message::Finished(
         app.serial,
         Job::Workflow(Action::History),
-        Arc::new(Ok(Reply::Server {
-            response: Box::new(response),
-            vaults: vec![],
-            pending: vec![],
-        })),
+        Arc::new(Ok(server_reply(response))),
     ));
     assert!(app.workspace.result.is_none());
     assert!(app.workspace.history_for(&app).is_none());
@@ -573,14 +564,7 @@ fn external_lock_clears_tools_credentials_results_and_confirmation() {
     let response = RpcResponse::success(ResponsePayload::Status(
         password_manager::protocol::ServerStatus::new(true, None),
     ));
-    let _ = app.complete(
-        Job::Status,
-        Reply::Server {
-            response: Box::new(response),
-            vaults: vec![],
-            pending: vec![],
-        },
-    );
+    let _ = app.complete(Job::Status, server_reply(response));
     assert!(app.workspace.credentials.password.is_empty());
     assert!(app.workspace.authenticator.configuration.is_empty());
     assert!(app.workspace.authenticator.code.is_empty());
@@ -668,14 +652,7 @@ fn current_vault_import_keeps_its_report_selection_and_unlock_session() {
     let mut response = RpcResponse::success(ResponsePayload::ImportReport(report.clone()));
     response.session_id = app.connection.session.clone();
     let session = app.connection.session.clone();
-    let _ = app.complete(
-        Job::Workflow(Action::Import),
-        Reply::Server {
-            response: Box::new(response),
-            vaults: vec![],
-            pending: vec![],
-        },
-    );
+    let _ = app.complete(Job::Workflow(Action::Import), server_reply(response));
     assert_eq!(app.connection.session, session);
     assert!(
         matches!(&app.workspace.result, Some(ResponsePayload::ImportReport(saved)) if saved == &report)
@@ -703,7 +680,6 @@ fn confirmation_cannot_discard_edits_started_on_another_tab() {
 fn opening_tools_does_not_enable_duo_watching_or_fetch_requests() {
     let mut app = app();
     let _ = app.update(super::super::Message::OpenItemTools(7));
-    assert!(app.workspace.duo.watch.is_none());
     assert!(app.workspace.duo.watch.is_none());
     assert!(!app.polling() && !app.busy());
 }
@@ -931,7 +907,6 @@ fn duo_watch_interval_is_bounded_and_invalid_start_is_rejected() {
         app.workspace.authenticator.duo_interval = invalid.into();
         let _ = app.workflow(Event::Toggle(Toggle::WatchDuo, true));
         assert!(app.workspace.duo.watch.is_none());
-        assert!(app.workspace.duo.watch.is_none());
         assert!(!app.polling() && !app.busy());
     }
 }
@@ -1152,13 +1127,8 @@ fn duo_revision_conflict_stops_background_watch_and_discards_requests() {
     let _ = app.update(super::super::Message::Finished(
         app.serial,
         Job::Workflow(Action::Requests),
-        Arc::new(Ok(Reply::Server {
-            response: Box::new(response),
-            vaults: vec![],
-            pending: vec![],
-        })),
+        Arc::new(Ok(server_reply(response))),
     ));
-    assert!(app.workspace.duo.watch.is_none());
     assert!(app.workspace.duo.watch.is_none());
     assert!(app.workspace.duo.result.is_none());
     assert!(app.workspace.prepared.is_none());

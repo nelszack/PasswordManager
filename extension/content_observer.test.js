@@ -1,7 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const vm = require("node:vm");
+const { loadScript } = require("./test_harness.cjs");
 
 class Element {
     constructor(children = []) {
@@ -59,9 +58,7 @@ function environment(children = []) {
         removeGeneratorButton: () => {}
     };
     context.require = () => context;
-    vm.createContext(context);
-    const filename = require.resolve("./content_observer.js");
-    vm.runInContext(fs.readFileSync(filename, "utf8"), context, { filename });
+    loadScript("content_observer.js", context);
     Object.assign(context, context.module.exports.create({ controls: context, generator: context, autofill: context, onRoot: root => registered.push(root), onRemoveRoot: root => removed.push(root) }));
     context.observeInputs();
     return {

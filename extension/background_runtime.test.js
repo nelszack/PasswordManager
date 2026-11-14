@@ -1,15 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
+const { loadScript } = require("./test_harness.cjs");
 const vm = require("node:vm");
 const { summary, nativeFields, nativeData } = require("./test_fixtures.cjs");
 
 function loadWorker(context) {
-    const execute = name => {
-        const filename = path.join(__dirname, name);
-        vm.runInContext(fs.readFileSync(filename, "utf8"), context, { filename });
-    };
+    const execute = name => loadScript(name, context);
     context.importScripts = (...names) => names.forEach(execute);
     execute("background.js");
 }

@@ -36,14 +36,18 @@ fn item() -> ItemDetail {
     }
 }
 
-fn reply(payload: ResponsePayload, session: Option<&str>) -> Reply {
-    let mut response = RpcResponse::success(payload);
-    response.session_id = session.map(str::to_owned);
+pub(super) fn server_reply(response: RpcResponse) -> Reply {
     Reply::Server {
         response: Box::new(response),
         vaults: vec![],
         pending: vec![],
     }
+}
+
+pub(super) fn reply(payload: ResponsePayload, session: Option<&str>) -> Reply {
+    let mut response = RpcResponse::success(payload);
+    response.session_id = session.map(str::to_owned);
+    server_reply(response)
 }
 
 fn unlocked() -> App {
@@ -782,7 +786,6 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
     );
     assert!(app.polling() && !app.busy());
     assert!(app.workspace.duo.watch.is_none());
-    assert!(app.workspace.duo.watch.is_none());
     let _ = app.update(Message::Finished(
         app.serial,
         Job::Workflow(workflows::Action::Requests),
@@ -1168,7 +1171,6 @@ fn review_hiding_secrets_cancels_otp_preflights_before_dispatch() {
             Arc::new(Ok(Reply::Configuration(app.conf.clone()))),
         ));
         assert!(app.workspace.otp.watch.is_none());
-        assert!(app.workspace.otp.watch.is_none());
         assert!(
             !app.busy() && !app.polling(),
             "a hidden preflight must not dispatch OTP work"
@@ -1200,11 +1202,7 @@ fn incomplete_audit_reply(session: Option<String>) -> Reply {
     };
     let mut response = RpcResponse::new(ResponseCode::Failure, ResponsePayload::Audit(report));
     response.session_id = session;
-    Reply::Server {
-        response: Box::new(response),
-        vaults: vec![],
-        pending: vec![],
-    }
+    server_reply(response)
 }
 
 #[test]
@@ -1705,37 +1703,37 @@ fn editor_visibility_is_temporary_and_does_not_reveal_a_stored_password() {
 }
 
 #[test]
-fn cloud_revision_refresh_preserves_an_open_draft() {
-    let mut app = unlocked();
-    app.vault_revision = Some(2);
-    app.editor.as_mut().unwrap().dirty = true;
-    app.editor.as_mut().unwrap().name = "Unsaved local draft".into();
-    let mut status = ServerStatus::new(false, None);
-    status.vault_revision = Some(3);
-    let session = "a".repeat(64);
-    let _ = app.complete(
-        Job::Status,
-        reply(ResponsePayload::Status(status), Some(&session)),
-    );
-    assert_eq!(app.editor.as_ref().unwrap().name, "Unsaved local draft");
-    assert!(app.notice.contains("draft is preserved"));
-    assert!(!app.busy());
-}
-
-#[test]
-fn cloud_revision_refresh_reloads_a_vault_without_an_editor() {
-    let mut app = unlocked();
-    app.editor = Editor::Closed;
-    app.vault_revision = Some(2);
-    let mut status = ServerStatus::new(false, None);
-    status.vault_revision = Some(3);
-    let session = "a".repeat(64);
-    let _ = app.complete(
-        Job::Status,
-        reply(ResponsePayload::Status(status), Some(&session)),
-    );
-    assert!(app.busy());
-    assert!(app.item.is_none());
+fn cloud_revision_refresh_preserves_drafts_and_reloads_closed_editors() {
+    for (label, editing) in [("open draft", true), ("no editor", false)] {
+        let mut app = unlocked();
+        app.vault_revision = Some(2);
+        if editing {
+            let draft = app.editor.as_mut().unwrap();
+            draft.dirty = true;
+            draft.name = "Unsaved local draft".into();
+        } else {
+            app.editor = Editor::Closed;
+        }
+        let mut status = ServerStatus::new(false, None);
+        status.vault_revision = Some(3);
+        let session = "a".repeat(64);
+        let _ = app.complete(
+            Job::Status,
+            reply(ResponsePayload::Status(status), Some(&session)),
+        );
+        if editing {
+            assert_eq!(
+                app.editor.as_ref().unwrap().name,
+                "Unsaved local draft",
+                "{label}"
+            );
+            assert!(app.notice.contains("draft is preserved"), "{label}");
+            assert!(!app.busy(), "{label}");
+        } else {
+            assert!(app.busy(), "{label}");
+            assert!(app.item.is_none(), "{label}");
+        }
+    }
 }
 
 #[test]
@@ -1746,14 +1744,7 @@ fn revision_conflicts_keep_masked_drafts_and_require_review_before_reapply() {
     let mut response = RpcResponse::success(ResponsePayload::Message("Item changed".into()));
     response.code = ResponseCode::Conflict as i32;
     response.session_id = app.connection.session.clone();
-    let _ = app.complete(
-        Job::Save,
-        Reply::Server {
-            response: Box::new(response),
-            vaults: vec![],
-            pending: vec![],
-        },
-    );
+    let _ = app.complete(Job::Save, server_reply(response));
     assert!(app.editor.conflicted());
     assert_eq!(app.editor.as_ref().unwrap().name, "My unsaved name");
     assert!(app.item.as_ref().unwrap().password.is_none());
@@ -1783,14 +1774,7 @@ fn conflict_from_another_session_erases_draft_instead_of_reusing_it() {
     let mut response = RpcResponse::success(ResponsePayload::Message("Changed".into()));
     response.code = ResponseCode::Conflict as i32;
     response.session_id = Some("other-session".into());
-    let _ = app.complete(
-        Job::Save,
-        Reply::Server {
-            response: Box::new(response),
-            vaults: vec![],
-            pending: vec![],
-        },
-    );
+    let _ = app.complete(Job::Save, server_reply(response));
     assert!(app.editor.is_none());
     assert!(app.editor.latest().is_none());
     assert!(!app.editor.conflicted());

@@ -1,8 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const vm = require("node:vm");
+const { loadScript } = require("./test_harness.cjs");
 
 class FakeElement {
     constructor(id = "") {
@@ -62,9 +60,8 @@ function environment(ids, responses, search = "") {
 }
 
 function execute(name, context) {
-    const filename = path.resolve(__dirname, name);
-    if (name !== "ui_transport.js") execute("ui_transport.js", context);
-    vm.runInNewContext(fs.readFileSync(filename, "utf8"), context, { filename });
+    loadScript("ui_transport.js", context);
+    loadScript(name, context);
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
