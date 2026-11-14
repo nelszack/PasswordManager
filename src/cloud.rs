@@ -2,16 +2,14 @@
 //! No password or decrypted entry is sent to the server.
 use crate::{
     config::SyncConfig,
-    file::{config_dir, data_dir, read_bounded_file, set_private_perms, sync_parent},
+    file::{AtomicWriteMode, atomic_write_private, config_dir, data_dir, read_bounded_file},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
-use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
 pub use pm_contracts::cloud::{
@@ -62,17 +60,16 @@ pub fn validate_server_url(value: &str) -> Result<(), String> {
 pub fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<(), String> {
     let parent = path.parent().ok_or("Missing parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let mut temp = NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    set_private_perms(temp.path()).map_err(|e| e.to_string())?;
-    temp.write_all(bytes)
-        .and_then(|_| temp.as_file().sync_all())
-        .map_err(|e| e.to_string())?;
-    if replace {
-        temp.persist(path).map_err(|e| e.to_string())?;
-    } else {
-        temp.persist_noclobber(path).map_err(|e| e.to_string())?;
-    }
-    sync_parent(path).map_err(|e| format!("File saved but durability uncertain: {e}"))
+    atomic_write_private(
+        path,
+        bytes,
+        if replace {
+            AtomicWriteMode::Replace
+        } else {
+            AtomicWriteMode::CreateNew
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 fn binding_path(vault: &Path) -> PathBuf {
     vault.with_extension("sync.json")
@@ -262,6 +259,44 @@ impl CloudClient {
         }
         Ok(vaults)
     }
+    fn response_version(response: &reqwest::Response) -> Result<String, String> {
+        response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix('"'))
+            .and_then(|v| v.strip_suffix('"'))
+            .filter(|v| valid_id(v))
+            .map(str::to_owned)
+            .ok_or_else(|| "Missing or invalid cloud version".into())
+    }
+    pub async fn head(&self, id: &str) -> Result<Option<RemoteVault>, String> {
+        if !valid_id(id) {
+            return Err("Invalid cloud vault ID".into());
+        }
+        let response = self
+            .request(reqwest::Method::HEAD, &format!("/v1/vaults/{id}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = Self::checked(response)?;
+        let version = Self::response_version(&response)?;
+        let size = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|size| *size > 0 && *size <= MAX_BYTES)
+            .ok_or("Missing or invalid cloud size")?;
+        Ok(Some(RemoteVault {
+            id: id.to_owned(),
+            version,
+            size,
+        }))
+    }
     pub async fn download(&self, id: &str) -> Result<(String, Vec<u8>), String> {
         if !valid_id(id) {
             return Err("Invalid cloud vault ID".into());
@@ -272,13 +307,7 @@ impl CloudClient {
                 .await
                 .map_err(|e| e.to_string())?,
         )?;
-        let version = response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.trim_matches('"').to_owned())
-            .filter(|v| valid_id(v))
-            .ok_or("Missing or invalid cloud version")?;
+        let version = Self::response_version(&response)?;
         let bytes = Self::read(response, MAX_BYTES).await?;
         crate::encryption::validate_vault_header(&bytes).map_err(str::to_owned)?;
         Ok((version, bytes))
@@ -412,5 +441,105 @@ mod tests {
         assert!(verify_identity(&path, [1; 16]).is_ok());
         assert!(verify_identity(&path, [2; 16]).is_err());
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response_client(
+        method: &str,
+        status: &str,
+        headers: String,
+    ) -> (CloudClient, tokio::task::JoinHandle<()>) {
+        let status = status.to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_path = format!("{method} /v1/vaults/{} HTTP/1.1", "a".repeat(32));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .starts_with(&expected_path)
+            );
+            socket
+                .write_all(
+                    format!("HTTP/1.1 {status}\r\n{headers}Connection: close\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let client =
+            CloudClient::with_token(&format!("http://{address}"), Zeroizing::new("c".repeat(64)))
+                .unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn single_vault_head_validates_metadata_and_handles_missing_vaults() {
+        let id = "a".repeat(32);
+        for (status, headers, expected) in [
+            (
+                "200 OK",
+                format!("ETag: \"{}\"\r\nContent-Length: 42\r\n", "b".repeat(32)),
+                1,
+            ),
+            ("404 Not Found", "Content-Length: 0\r\n".into(), 0),
+            (
+                "200 OK",
+                "ETag: invalid\r\nContent-Length: 42\r\n".into(),
+                -1,
+            ),
+            (
+                "200 OK",
+                format!("ETag: \"{}\"\r\nContent-Length: 0\r\n", "b".repeat(32)),
+                -1,
+            ),
+        ] {
+            let (client, server) = response_client("HEAD", status, headers).await;
+            match (expected, client.head(&id).await) {
+                (1, Ok(Some(value))) => {
+                    assert_eq!(value.id, id);
+                    assert_eq!(value.size, 42);
+                }
+                (0, Ok(None)) | (-1, Err(_)) => {}
+                (_, result) => panic!("unexpected metadata result: {result:?}"),
+            }
+            server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn downloads_reject_unquoted_weak_and_repeatedly_quoted_versions() {
+        let hash = "b".repeat(32);
+        for etag in [
+            hash.clone(),
+            format!("W/\"{hash}\""),
+            format!("\"\"{hash}\"\""),
+        ] {
+            let (client, server) = response_client(
+                "GET",
+                "200 OK",
+                format!("ETag: {etag}\r\nContent-Length: 0\r\n"),
+            )
+            .await;
+            assert_eq!(
+                client.download(&"a".repeat(32)).await.unwrap_err(),
+                "Missing or invalid cloud version"
+            );
+            server.await.unwrap();
+        }
     }
 }

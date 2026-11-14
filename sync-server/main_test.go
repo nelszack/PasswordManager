@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,7 +180,7 @@ func TestDownloadSurvivesPruningWithoutBlockingAnotherCommit(t *testing.T) {
 	}
 }
 
-func fixture(t *testing.T) (*server, *httptest.Server, string) {
+func fixture(t testing.TB) (*server, *httptest.Server, string) {
 	t.Helper()
 	root := t.TempDir()
 	for _, d := range []string{"devices", "vaults"} {
@@ -377,4 +378,165 @@ func TestHealthReportsProtocolAndBuildWithoutExposingVaults(t *testing.T) {
 	if res.StatusCode != 401 {
 		t.Fatal("health endpoint bypassed vault authorization")
 	}
+}
+
+func TestVaultLocksDoNotSerializeUnrelatedVaults(t *testing.T) {
+	s, h, token := fixture(t)
+	blockedID := strings.Repeat("a", 32)
+	other := "/v1/vaults/" + strings.Repeat("b", 32)
+	if w := request(t, h, token, "PUT", other, "*", "other"); w.StatusCode != 200 {
+		t.Fatal(w.StatusCode)
+	}
+	release := sync.OnceFunc(s.lockVault(blockedID))
+	defer release()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r := httptest.NewRequest("HEAD", other, nil)
+		requestHeaders(r, token, "")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Errorf("unrelated HEAD: %d", w.Code)
+		}
+	}()
+	await(t, done)
+	release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.vaultLocks) != 0 {
+		t.Fatal("idle lock entries retained")
+	}
+}
+
+func TestStorageAccountingMatchesRetentionAndRestart(t *testing.T) {
+	s, h, token := fixture(t)
+	path := "/v1/vaults/" + strings.Repeat("c", 32)
+	version := "*"
+	for i := 0; i < 7; i++ {
+		w := request(t, h, token, "PUT", path, version, strings.Repeat("ciphertext", i+1))
+		if w.StatusCode != 200 {
+			t.Fatal(w.StatusCode)
+		}
+		version = w.Header.Get("ETag")
+		actual, err := directoryUsage(filepath.Join(s.root, "vaults"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		used, reserved := s.used, s.reserved
+		s.mu.Unlock()
+		if used != actual || reserved != 0 {
+			t.Fatalf("accounted %d, actual %d, reserved %d", used, actual, reserved)
+		}
+	}
+	restarted := &server{root: s.root}
+	if err := restarted.initializeUsage(); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.used != s.used {
+		t.Fatal("restart did not reconstruct usage")
+	}
+}
+
+func TestQuotaCountsOrphanSnapshotsOnStartup(t *testing.T) {
+	s, _, token := fixture(t)
+	dir := filepath.Join(s.root, "vaults", strings.Repeat("d", 32))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orphan.vault"), []byte(strings.Repeat("x", 128)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.budget = 128 + maxHeadBytes
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/v1/vaults/"+strings.Repeat("e", 32), strings.NewReader("new"))
+	requestHeaders(r, token, "*")
+	s.ServeHTTP(w, r)
+	if w.Code != 507 {
+		t.Fatalf("orphan not counted: %d", w.Code)
+	}
+}
+
+// Every parallel worker edits a different vault through the real HTTP handler.
+func BenchmarkConcurrentSync(b *testing.B) {
+	for _, vaults := range []int{1, 100, 1000} {
+		b.Run(fmt.Sprintf("stored-%d", vaults), func(b *testing.B) {
+			s, _, token := fixture(b)
+			s.budget = 1 << 40
+			s.slots = make(chan struct{}, 4096)
+			for i := 0; i < vaults; i++ {
+				dir := filepath.Join(s.root, "vaults", fmt.Sprintf("%032x", i+1))
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					b.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "retained.vault"), []byte("synthetic ciphertext"), 0600); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := s.initializeUsage(); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				path := "/v1/vaults/" + randomID()
+				base := "*"
+				for pb.Next() {
+					r := httptest.NewRequest("PUT", path, strings.NewReader(strings.Repeat("x", 1024)))
+					requestHeaders(r, token, base)
+					w := httptest.NewRecorder()
+					s.ServeHTTP(w, r)
+					if w.Code != 200 {
+						b.Errorf("upload: %d", w.Code)
+						return
+					}
+					base = w.Header().Get("ETag")
+				}
+			})
+		})
+	}
+}
+
+type gatedResponse struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *gatedResponse) Write(p []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return w.ResponseRecorder.Write(p)
+}
+func TestSlowCommitResponseDoesNotHoldVaultOrQuota(t *testing.T) {
+	s, _, token := fixture(t)
+	path := "/v1/vaults/" + strings.Repeat("f", 32)
+	w := &gatedResponse{httptest.NewRecorder(), make(chan struct{}), make(chan struct{})}
+	defer close(w.release)
+	r := httptest.NewRequest("PUT", path, strings.NewReader("synthetic ciphertext"))
+	requestHeaders(r, token, "*")
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(w, r); close(done) }()
+	await(t, w.entered)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		head := httptest.NewRequest("HEAD", path, nil)
+		requestHeaders(head, token, "")
+		response := httptest.NewRecorder()
+		s.ServeHTTP(response, head)
+		if response.Code != 200 {
+			t.Errorf("HEAD: %d", response.Code)
+		}
+	}()
+	await(t, readDone)
+	s.mu.Lock()
+	reserved := s.reserved
+	s.mu.Unlock()
+	if reserved != 0 {
+		t.Fatalf("response retains quota: %d", reserved)
+	}
+	w.release <- struct{}{}
+	await(t, done)
 }

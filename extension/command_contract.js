@@ -5,7 +5,7 @@
     if (typeof module === "object" && module.exports) module.exports = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
-    const protocolVersion = 3;
+    const protocolVersion = 4;
     const operations = Object.freeze({
   "duoRequests": {
     "mutates": false,

@@ -23,15 +23,28 @@
         return (input.autocomplete || "").toLowerCase().split(/\s+/).filter(Boolean);
     }
 
+    let scanVisibility = null;
+    // Cache only within one synchronous read phase; page changes never reuse it.
+    function withVisibilityCache(action) {
+        const previous = scanVisibility;
+        scanVisibility = new WeakMap();
+        try { return action(); } finally { scanVisibility = previous; }
+    }
     function isElementVisible(element) {
         if (!element || !element.isConnected) return false;
-        let node = element;
-        while (node && node.nodeType === 1) {
+        const visited = [];
+        let visible = true;
+        for (let node = element; node && node.nodeType === 1;
+            node = node.parentElement || node.getRootNode?.().host) {
+            if (scanVisibility?.has(node)) { visible = scanVisibility.get(node); break; }
+            visited.push(node);
             const style = getComputedStyle(node);
-            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
-            node = node.parentElement || node.getRootNode?.().host;
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                visible = false; break;
+            }
         }
-        return true;
+        for (const node of visited) scanVisibility?.set(node, visible);
+        return visible;
     }
 
     function isUsableInput(input) {
@@ -142,6 +155,6 @@
         USERNAME_INPUT_TYPES, autocompleteTokens, credentialFields, credentialScope,
         hasSearchHint, hasUsernameHint, inputDescriptors, isCredentialInput,
         isElementVisible, isLoginPasswordInput, isNewPasswordInput, isTotpInput,
-        isUsableInput, scopeInputs, usernameCandidates
+        isUsableInput, scopeInputs, usernameCandidates, withVisibilityCache
     };
 });

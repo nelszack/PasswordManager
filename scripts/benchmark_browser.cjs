@@ -1,6 +1,6 @@
 "use strict";
 // Actual Chromium DOM + production observer/detection, with button rendering
-// replaced by counters. Reports observer CPU time separately from frame waits.
+// replaced by counters for discovery; controls_position measures real button geometry.
 const fs = require("node:fs");
 const path = require("node:path");
 const { chromium } = require("@playwright/test");
@@ -27,6 +27,16 @@ async function main() {
         });
         await page.addScriptTag({ path: path.join(root, "extension/content_observer.js") });
         await page.evaluate(() => { window.createObserver = window.module.exports.create; delete window.module; delete window.require; });
+        await page.evaluate(() => {
+            window.module = { exports:{} };
+            window.require = name => {
+                if (name !== "./content_detection.js") throw new Error(`Unexpected module ${name}`);
+                return window.PasswordManagerContentDetection;
+            };
+        });
+        // CommonJS modules need their own lexical scope when injected as classic scripts.
+        await page.addScriptTag({ content: `(function () {\n${fs.readFileSync(path.join(root, "extension/content_controls.js"), "utf8")}\n})();` });
+        await page.evaluate(() => { window.createControls = window.module.exports.create; delete window.module; });
         for (const size of sizes) {
             const records = await page.evaluate(async ({ size, samples, sampleMs }) => {
                 const mount = document.createElement("main");
@@ -118,6 +128,35 @@ async function main() {
                             controls: fields, shadow_roots: Math.max(1, Math.floor(size / 500)), optimized: null });
                         observer?.dispose(); observer = null;
                     }
+                    // Real production controls and their animation-frame read/write batch.
+                    const controls = window.createControls({ bridge:{}, credentials:{}, autofill:{} });
+                    const inputs = [mount, ...mount.querySelectorAll("*")].flatMap(root =>
+                        root.shadowRoot ? [...root.shadowRoot.querySelectorAll("input")] : root instanceof HTMLInputElement ? [root] : []);
+                    try {
+                        for (const input of inputs) controls.createSecureCredentialButton(input);
+                        await new Promise(resolve => originalFrame.call(window, resolve));
+                        const means=[], wall=[];
+                        for (let sample=0;sample<samples;sample++) {
+                            let timeout;
+                            const start=performance.now();
+                            const duration=await new Promise((resolve,reject)=> {
+                                timeout=setTimeout(()=>{pending=null;reject(new Error("Position frame missing"));},5000);
+                                pending={resolve,reject};
+                                mount.style.paddingLeft=(sample%2)+"px";
+                                window.dispatchEvent(new Event("resize"));
+                            }).finally(()=>clearTimeout(timeout));
+                            means.push(duration);wall.push((performance.now()-start)*1e6);
+                        }
+                        const ordered=[...means].sort((a,b)=>a-b);
+                        wall.sort((a,b)=>a-b);
+                        // Document queries do not cross the open shadow roots in this fixture.
+                        if (inputs.some(input => !input.nextElementSibling?.classList.contains("my-extension-ui")
+                            || !input.nextElementSibling.style.left)) throw new Error("Missing rendered controls");
+                        results.push({schema_version:1,suite:"browser",name:"controls_position",size,unit:"ns/op",samples,
+                            iterations_per_sample:1,median_ns:(ordered[Math.floor((samples-1)/2)]+ordered[Math.floor(samples/2)])/2,
+                            min_ns:ordered[0],p95_ns:ordered[Math.ceil(samples*.95)-1],sample_means_ns:means,
+                            wall_median_ns:wall[Math.floor(samples/2)],controls:inputs.length,optimized:null});
+                    } finally { controls.dispose(); }
                     return results;
                 } finally {
                     observer?.dispose(); pending = null;

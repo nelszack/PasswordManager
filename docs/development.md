@@ -551,10 +551,19 @@ source JSON creation, filesystem fixture creation, and warmup are excluded from
 timings. Returning/dropping results is included. Cold-search fixture cloning is
 excluded; it resets the runtime index rather than evicting CPU or OS caches.
 Directory scans use the OS page cache, so they are not cold-disk measurements.
-Snapshot timing excludes encryption, KDFs, fsync, IPC, and cloud traffic.
+Serialization timing excludes encryption, KDFs, fsync, IPC, and cloud traffic.
+`mutation_durable` and `batch_mutation_durable` include encryption and atomic
+replacement/fsync using synthetic cached session keys; initial files are created
+outside timings. The batch API applies related typed edits with one durable commit.
+`browser_matching_warm` exercises saved-site matching, `audit_cold` includes
+uncached strength evaluation, and `export_json_streamed` writes private temporary
+exports. Cold audits can make the larger benchmark sizes take substantially longer.
+These cases use workload version 2; version 1 baselines cannot be compared.
 
-The browser runs production observer and field-detection code with button
-rendering replaced by classification counters. Its primary timing is processing
+The browser discovery cases run production observer and field-detection code
+with button rendering replaced by classification counters. `controls_position`
+uses real production picker buttons and measures the animation-frame geometry
+reads and position writes after layout changes. Its primary timing is processing
 CPU time inside the observer's animation-frame callback; `wall_median_ns` also
 includes frame scheduling. Initial discovery is timed synchronously; browser fixture creation and observer
 disposal are outside timings. Subtree
@@ -562,6 +571,20 @@ query counts and control counts help identify skipped work or lost detection.
 The largest fixture deliberately exceeds the observer snapshot cache capacity;
 attribute-only updates can therefore expose cache churn rather than always giving
 cache hits. These workloads do not measure the entire browser extension or native desktop UI.
+
+Concurrent sync commits have a separate opt-in Go benchmark:
+
+```bash
+cd sync-server
+go test -run '^$' -bench BenchmarkConcurrentSync -benchmem -benchtime=1s -count=3
+```
+
+It exercises the real handler, quota reservations, encryption-opaque snapshot
+writes, retention, and fsync with concurrent writers editing distinct vaults.
+Stored-vault counts vary independently from upload concurrency. No external
+service is contacted. Runtime quota accounting assumes this process exclusively
+owns its storage directory (enforced by the server lock); startup reconstructs
+usage, and each commit reconciles its own vault even after a partial failure.
 
 Reports go to a new directory under `test-results/benchmarks/` (gitignored), with
 per-suite logs/JSONL, a machine/runtime/build manifest and source fingerprint, and

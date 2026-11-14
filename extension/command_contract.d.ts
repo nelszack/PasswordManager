@@ -43,7 +43,7 @@ export interface NativeResults {
 }
 export type NativeAction = keyof NativeRequests;
 export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
-export const protocolVersion: 3;
+export const protocolVersion: 4;
 export const operations: Readonly<Record<NativeAction, NativePolicy>>;
 export function validateRequest<K extends NativeAction>(action: K, fields: NativeRequests[K]): NativeRequests[K];
 export function validateResult<K extends NativeAction>(action: K, data: unknown): NativeResults[K];

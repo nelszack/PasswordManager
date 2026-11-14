@@ -6,7 +6,7 @@ struct PortableExportRef<'a> {
     format: &'static str,
     version: u8,
     exported_at: String,
-    items: Vec<PortableItemRef<'a>>,
+    items: ExportItems<'a>,
 }
 
 #[derive(Serialize)]
@@ -24,7 +24,7 @@ struct PortableItemRef<'a> {
     additional_urls: &'a [String],
     custom_fields: &'a [CustomField],
     password_changed: Option<&'a str>,
-    password_history: Vec<PortableRevisionRef<'a>>,
+    password_history: ExportHistory<'a>,
     totp: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duo: Option<&'a DuoCredentials>,
@@ -42,50 +42,16 @@ impl Vault {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("json"))
         {
-            let items = self
-                .active_items()
-                .map(|item| {
-                    let e = &item.entry;
-                    let m = &item.metadata;
-                    PortableItemRef {
-                        id: e.id,
-                        name: &e.name,
-                        username: e.username.as_deref(),
-                        password: e.password.as_str(),
-                        url: e.url.as_deref(),
-                        notes: e.notes.as_ref().map(|s| s.as_str()),
-                        created: &e.created,
-                        modified: &e.modified,
-                        kind: m.kind,
-                        additional_urls: &m.additional_urls,
-                        custom_fields: &m.custom_fields,
-                        password_changed: m.password_changed.as_ref().map(Timestamp::as_str),
-                        password_history: item
-                            .history
-                            .iter()
-                            .map(|r| PortableRevisionRef {
-                                password: r.password.as_str(),
-                                changed: &r.changed,
-                            })
-                            .collect(),
-                        totp: item
-                            .authenticator
-                            .as_ref()
-                            .map(|a| a.configuration.as_str()),
-                        duo: item.duo.as_ref().map(|d| &d.credentials),
-                    }
-                })
-                .collect();
             let export = PortableExportRef {
                 format: PORTABLE_FORMAT,
                 version: PORTABLE_VERSION,
                 exported_at: chrono::Utc::now().to_rfc3339(),
-                items,
+                items: ExportItems(self),
             };
-            let mut encoded = Zeroizing::new(Vec::new());
-            serde_json::to_writer_pretty(&mut *encoded, &export)
-                .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")))?;
-            return persist_private_file(Path::new(&path), &encoded, force);
+            return persistence::persist_private_stream(Path::new(&path), force, |file| {
+                serde_json::to_writer_pretty(file, &export)
+                    .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")))
+            });
         }
         // CSV quoting does not prevent spreadsheet formula evaluation. Refuse
         // unsafe cells without altering credential bytes; JSON remains lossless.
@@ -115,17 +81,63 @@ impl Vault {
                 }
             }
         }
-        let mut writer = csv::Writer::from_writer(Vec::new());
-        for entry in self.active_entries() {
+        persistence::persist_private_stream(Path::new(&path), force, |file| {
+            let mut writer = csv::Writer::from_writer(file);
+            for entry in self.active_entries() {
+                writer
+                    .serialize(entry)
+                    .map_err(|e| VaultError::Persistence(e.to_string()))?;
+            }
             writer
-                .serialize(entry)
-                .map_err(|e| VaultError::Persistence(e.to_string()))?;
+                .flush()
+                .map_err(|e| VaultError::Persistence(e.to_string()))
+        })
+    }
+}
+
+struct ExportItems<'a>(&'a Vault);
+impl Serialize for ExportItems<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(None)?;
+        for item in self.0.active_items() {
+            let e = &item.entry;
+            let m = &item.metadata;
+            sequence.serialize_element(&PortableItemRef {
+                id: e.id,
+                name: &e.name,
+                username: e.username.as_deref(),
+                password: e.password.as_str(),
+                url: e.url.as_deref(),
+                notes: e.notes.as_ref().map(|s| s.as_str()),
+                created: &e.created,
+                modified: &e.modified,
+                kind: m.kind,
+                additional_urls: &m.additional_urls,
+                custom_fields: &m.custom_fields,
+                password_changed: m.password_changed.as_ref().map(Timestamp::as_str),
+                password_history: ExportHistory(&item.history),
+                totp: item
+                    .authenticator
+                    .as_ref()
+                    .map(|a| a.configuration.as_str()),
+                duo: item.duo.as_ref().map(|d| &d.credentials),
+            })?;
         }
-        let encoded = Zeroizing::new(
-            writer
-                .into_inner()
-                .map_err(|e| VaultError::Persistence(e.to_string()))?,
-        );
-        persist_private_file(Path::new(&path), &encoded, force)
+        sequence.end()
+    }
+}
+struct ExportHistory<'a>(&'a [PasswordRevision]);
+impl Serialize for ExportHistory<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for revision in self.0 {
+            sequence.serialize_element(&PortableRevisionRef {
+                password: revision.password.as_str(),
+                changed: &revision.changed,
+            })?;
+        }
+        sequence.end()
     }
 }

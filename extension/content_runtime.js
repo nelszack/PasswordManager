@@ -219,15 +219,28 @@ module.exports.create = function create() {
         return (input.autocomplete || "").toLowerCase().split(/\s+/).filter(Boolean);
     }
 
+    let scanVisibility = null;
+    // Cache only within one synchronous read phase; page changes never reuse it.
+    function withVisibilityCache(action) {
+        const previous = scanVisibility;
+        scanVisibility = new WeakMap();
+        try { return action(); } finally { scanVisibility = previous; }
+    }
     function isElementVisible(element) {
         if (!element || !element.isConnected) return false;
-        let node = element;
-        while (node && node.nodeType === 1) {
+        const visited = [];
+        let visible = true;
+        for (let node = element; node && node.nodeType === 1;
+            node = node.parentElement || node.getRootNode?.().host) {
+            if (scanVisibility?.has(node)) { visible = scanVisibility.get(node); break; }
+            visited.push(node);
             const style = getComputedStyle(node);
-            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
-            node = node.parentElement || node.getRootNode?.().host;
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                visible = false; break;
+            }
         }
-        return true;
+        for (const node of visited) scanVisibility?.set(node, visible);
+        return visible;
     }
 
     function isUsableInput(input) {
@@ -338,7 +351,7 @@ module.exports.create = function create() {
         USERNAME_INPUT_TYPES, autocompleteTokens, credentialFields, credentialScope,
         hasSearchHint, hasUsernameHint, inputDescriptors, isCredentialInput,
         isElementVisible, isLoginPasswordInput, isNewPasswordInput, isTotpInput,
-        isUsableInput, scopeInputs, usernameCandidates
+        isUsableInput, scopeInputs, usernameCandidates, withVisibilityCache
     };
 });
 
@@ -866,7 +879,7 @@ if (typeof module !== "undefined") module.exports = PasswordManagerContentFields
 },
 "content_controls.js": (module, exports, require) => {
 "use strict";
-const { isUsableInput, isElementVisible, credentialFields, credentialScope } = require("content_detection.js");
+const { isUsableInput, credentialFields, credentialScope, withVisibilityCache = action => action() } = require("content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
     const { fillInput, openSecurePicker } = bridge;
     const { storeUsernameForLater } = credentials;
@@ -903,13 +916,18 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             repositionScheduled = true;
             requestAnimationFrame(() => {
                 repositionScheduled = false;
-                for (const control of positionedControls) {
-                    if (!control.input.isConnected) {
-                        control.remove();
-                        continue;
+                const writes = [];
+                withVisibilityCache(() => {
+                    for (const control of positionedControls) {
+                        if (!control.input.isConnected) {
+                            control.remove();
+                            continue;
+                        }
+                        if (control.position.measure) writes.push(control.position.measure());
+                        else writes.push(control.position);
                     }
-                    control.position();
-                }
+                });
+                for (const write of writes) write();
             });
         };
 
@@ -962,16 +980,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         });
         // Keep keyboard traversal beside the field the control belongs to.
         if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
-        const positionButton = () => {
-            if (!isElementVisible(input)) {
-                button.style.display = "none";
-                return;
-            }
-            const rect = input.getBoundingClientRect();
-            button.style.display = rect.width && rect.height ? "" : "none";
-            button.style.left = rect.right - 30 + "px";
-            button.style.top = rect.top + rect.height / 2 - 14 + "px";
-        };
+        const positionButton = positionedButton(input, button, 30);
         positionButton();
         const control = { kind, position: positionButton, remove: null };
         control.remove = registerPositionedControl(input, button, positionButton, () => {
@@ -1047,11 +1056,32 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, accountUsername, dispose };
 };
 
+// Return deferred writes so callers can finish all style/geometry reads first.
+function positionedButton(input, button, offset) {
+    const { isElementVisible } = require("content_detection.js");
+    const measure = () => {
+        const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
+        const values = rect?.width && rect?.height
+            ? { display: "", left: rect.right - offset + "px", top: rect.top + rect.height / 2 - 14 + "px" }
+            : { display: "none" };
+        return () => {
+            for (const [key, value] of Object.entries(values)) {
+                if (button.style[key] !== value) button.style[key] = value;
+            }
+        };
+    };
+    const position = () => measure()();
+    position.measure = measure;
+    return position;
+}
+module.exports.positionedButton = positionedButton;
+
 },
 "content_generator.js": (module, exports, require) => {
 "use strict";
+const { positionedButton } = require("content_controls.js");
 const PasswordManagerGenerator = require("password_generator.js");
-const { isElementVisible, scopeInputs, credentialScope, isNewPasswordInput } = require("content_detection.js");
+const { scopeInputs, credentialScope, isNewPasswordInput } = require("content_detection.js");
 module.exports.create = function create({ controls, bridge, credentials }) {
     const { registerPositionedControl } = controls;
     const { fillInput } = bridge;
@@ -1103,20 +1133,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
         });
         document.body.appendChild(button);
 
-        function positionButton() {
-            if (!isElementVisible(input)) {
-                button.style.display = "none";
-                return;
-            }
-            const rect = input.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) {
-                button.style.display = "none";
-                return;
-            }
-            button.style.display = "";
-            button.style.left = rect.right - 24 + "px";
-            button.style.top = rect.top + rect.height / 2 - 14 + "px";
-        }
+        const positionButton = positionedButton(input, button, 24);
 
         button.addEventListener("click", event => {
             if (!event.isTrusted) return;
@@ -1207,7 +1224,7 @@ if (typeof module !== "undefined") module.exports = PasswordManagerGenerator;
 },
 "content_observer.js": (module, exports, require) => {
 "use strict";
-const { isTotpInput, isCredentialInput, isUsableInput, isNewPasswordInput } = require("content_detection.js");
+const { isTotpInput, isCredentialInput, isUsableInput, isNewPasswordInput, withVisibilityCache = action => action() } = require("content_detection.js");
 module.exports.create = function create({ controls, generator, autofill, onRoot = () => {}, onRemoveRoot = () => {} }) {
     const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } = controls;
     const { createGeneratorButton, removeGeneratorButton } = generator;
@@ -1217,7 +1234,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     let disposed = false;
     const registeredRoots = new Set();
     // Attribute churn does not change subtree membership. Keep a small LRU of
-    // static discovery snapshots; child-list mutations invalidate them all.
+    // static discovery snapshots; child-list mutations invalidate affected trees.
     const snapshots = new Map();
     function snapshot(root) {
         let result = snapshots.get(root);
@@ -1258,26 +1275,28 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     // Visit each light DOM / open shadow DOM subtree once for both discovery and
     // observation. No credentials are fetched during this scan.
     function attachToInputs(root = document, observeRoot = () => {}) {
-        const roots = [root];
-        // Form classification is shared within this scan, then discarded so later
-        // DOM changes and user interactions always inspect the current fields.
-        const formUsernames = new WeakMap();
-        for (let index = 0; index < roots.length; index++) {
-            const openRoot = roots[index];
-            observeRoot(openRoot);
-            if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
-            if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
-            // Ordinary controls are leaves; unusual author-created descendants
-            // still receive full discovery.
-            if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
-            const discovered = snapshot(openRoot);
-            for (const input of discovered.inputs) attachInput(input, formUsernames);
-            // Inspect existing elements even on cache hits: a page may attach an
-            // open shadow root without a child-list mutation on its host.
-            for (const candidate of discovered.elements) {
-                if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+        return withVisibilityCache(() => {
+            const roots = [root];
+            // Form classification is shared within this scan, then discarded so later
+            // DOM changes and user interactions always inspect the current fields.
+            const formUsernames = new WeakMap();
+            for (let index = 0; index < roots.length; index++) {
+                const openRoot = roots[index];
+                observeRoot(openRoot);
+                if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
+                if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
+                // Ordinary controls are leaves; unusual author-created descendants
+                // still receive full discovery.
+                if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
+                const discovered = snapshot(openRoot);
+                for (const input of discovered.inputs) attachInput(input, formUsernames);
+                // Inspect existing elements even on cache hits: a page may attach an
+                // open shadow root without a child-list mutation on its host.
+                for (const candidate of discovered.elements) {
+                    if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+                }
             }
-        }
+        });
     }
 
     // Follow shadow hosts too: Node.contains does not cross shadow boundaries.
@@ -1292,7 +1311,24 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         const pendingRoots = new Set();
         let attachScheduled = false;
         observer = new MutationObserver((mutations) => {
-            if (mutations.some(mutation => mutation.type === "childList")) snapshots.clear();
+            const ownUI = node => node?.nodeType === 1 && node.classList?.contains("my-extension-ui");
+            mutations = mutations.filter(mutation => {
+                if (mutation.type !== "childList") return true;
+                const changed = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
+                return !changed.length || !changed.every(ownUI);
+            });
+            for (const mutation of mutations) {
+                if (mutation.type !== "childList") continue;
+                // Mutation targets invalidate ancestor snapshots, including across shadow hosts.
+                if (!mutation.target) { snapshots.clear(); continue; }
+                for (let node = mutation.target; node; node = node.parentNode || node.host) snapshots.delete(node);
+                // Detached trees may change outside observation. Invalidate cached
+                // descendants too when they leave or reenter an observed tree.
+                const changedRoots = new Set([...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]);
+                for (const root of snapshots.keys()) {
+                    if (changedRoots.has(root) || coveredByPendingRoot(root, changedRoots)) snapshots.delete(root);
+                }
+            }
             let removedRoot = false;
             for (const root of registeredRoots) {
                 if (root.host && !root.host.isConnected) { onRemoveRoot(root); registeredRoots.delete(root); removedRoot = true; }

@@ -7,23 +7,12 @@ pub(super) fn random_token() -> Zeroizing<String> {
 }
 
 pub(super) fn write_token_file(token: &str, path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "session token path has no parent directory".to_string())?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|error| format!("could not create session token: {error}"))?;
-    set_private_perms(temporary.path())
-        .map_err(|error| format!("could not protect session token: {error}"))?;
-    temporary
-        .write_all(token.as_bytes())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| format!("could not write session token: {error}"))?;
-    temporary
-        .persist(path)
-        .map_err(|error| format!("could not replace session token: {}", error.error))?;
-    sync_parent(path)
-        .map_err(|error| format!("could not sync session token directory: {error}"))?;
-    Ok(())
+    crate::file::atomic_write_private(
+        path,
+        token.as_bytes(),
+        crate::file::AtomicWriteMode::Replace,
+    )
+    .map_err(|error| format!("could not save session token: {error}"))
 }
 
 pub(super) fn rotate_token_file(path: &Path) -> Result<Zeroizing<String>, String> {

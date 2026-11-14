@@ -43,6 +43,16 @@ impl Vault {
             .ok_or_else(|| VaultError::Conflict("vault revision exhausted".into()))?;
         for (id, item) in &mut staged.data.items {
             let old = self.data.items.get(id);
+            if let Some(old) = old {
+                if old.entry.password == item.entry.password {
+                    item.strength = old.strength.clone();
+                }
+                if old.entry.url == item.entry.url
+                    && old.metadata.additional_urls == item.metadata.additional_urls
+                {
+                    item.sites = old.sites.clone();
+                }
+            }
             if old != Some(item) {
                 item.revision = old.map_or(Ok(1), |i| {
                     i.revision
@@ -59,6 +69,22 @@ impl Vault {
             .as_ref()
             .map_or_else(|error| error.committed(), |_| true)
         {
+            let mut ids = std::collections::BTreeSet::new();
+            for id in selected.iter().chain(staged.data.items.keys()) {
+                ids.insert(*id);
+                if ids.len() > 256 {
+                    break;
+                }
+            }
+            self.metadata.changes = (ids.len() <= 256).then(|| {
+                (
+                    self.data.revision,
+                    staged.data.revision,
+                    ids.into_iter()
+                        .map(|id| id.public().expect("validated item ID"))
+                        .collect(),
+                )
+            });
             for id in selected {
                 self.data.items.remove(&id);
             }
@@ -68,6 +94,31 @@ impl Vault {
         }
         write?;
         Ok(result)
+    }
+    /// Apply related edits atomically with one encryption and durable replacement.
+    /// Every target is resolved against the initial snapshot; errors commit nothing.
+    pub fn update_many(
+        &mut self,
+        changes: Vec<TypedUpdate>,
+        key: &mut VaultCredentials,
+        history_limit: usize,
+    ) -> Result<bool, VaultError> {
+        let mut selected = HashSet::new();
+        let mut resolved = Vec::with_capacity(changes.len());
+        for change in changes {
+            let id = self
+                .entry_id(&change.entry.target)
+                .ok_or_else(|| VaultError::NotFound("batch target not found".into()))?;
+            selected.insert(ItemId::from_public(id)?);
+            resolved.push((id, change));
+        }
+        self.transaction(TransactionScope::Items(selected), key, |staged| {
+            let mut changed = false;
+            for (id, change) in resolved {
+                changed |= staged.apply_typed_update(id, change, history_limit);
+            }
+            Ok((changed, changed))
+        })
     }
     pub(super) fn next_entry_id(&self) -> Result<usize, VaultError> {
         ItemId::try_from(self.data.next_item_id)

@@ -133,7 +133,7 @@ pub fn decrypt_record_stream(
     Ok(plaintext)
 }
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const DEFAULT_PORT: u16 = 7878;
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()
@@ -359,6 +359,10 @@ pub struct RpcResponse {
     pub code: i32,
     pub payload: ResponsePayload,
     pub operation: Option<OperationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<crate::vault::ItemChanges>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_revision: Option<u64>,
 }
 impl RpcResponse {
     pub fn new(code: ResponseCode, payload: ResponsePayload) -> Self {
@@ -369,6 +373,8 @@ impl RpcResponse {
             code: code as i32,
             payload,
             operation: None,
+            changes: None,
+            vault_revision: None,
         }
     }
     pub fn success(payload: ResponsePayload) -> Self {
@@ -398,6 +404,7 @@ impl Zeroize for RpcResponse {
             _ => {}
         }
         self.payload = ResponsePayload::Message(String::new());
+        self.changes = None;
     }
 }
 // Responses are often moved into adapters; secret fields have their own Drop.

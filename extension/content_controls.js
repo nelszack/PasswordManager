@@ -1,5 +1,5 @@
 "use strict";
-const { isUsableInput, isElementVisible, credentialFields, credentialScope } = require("./content_detection.js");
+const { isUsableInput, credentialFields, credentialScope, withVisibilityCache = action => action() } = require("./content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
     const { fillInput, openSecurePicker } = bridge;
     const { storeUsernameForLater } = credentials;
@@ -36,13 +36,18 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             repositionScheduled = true;
             requestAnimationFrame(() => {
                 repositionScheduled = false;
-                for (const control of positionedControls) {
-                    if (!control.input.isConnected) {
-                        control.remove();
-                        continue;
+                const writes = [];
+                withVisibilityCache(() => {
+                    for (const control of positionedControls) {
+                        if (!control.input.isConnected) {
+                            control.remove();
+                            continue;
+                        }
+                        if (control.position.measure) writes.push(control.position.measure());
+                        else writes.push(control.position);
                     }
-                    control.position();
-                }
+                });
+                for (const write of writes) write();
             });
         };
 
@@ -95,16 +100,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         });
         // Keep keyboard traversal beside the field the control belongs to.
         if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
-        const positionButton = () => {
-            if (!isElementVisible(input)) {
-                button.style.display = "none";
-                return;
-            }
-            const rect = input.getBoundingClientRect();
-            button.style.display = rect.width && rect.height ? "" : "none";
-            button.style.left = rect.right - 30 + "px";
-            button.style.top = rect.top + rect.height / 2 - 14 + "px";
-        };
+        const positionButton = positionedButton(input, button, 30);
         positionButton();
         const control = { kind, position: positionButton, remove: null };
         control.remove = registerPositionedControl(input, button, positionButton, () => {
@@ -179,3 +175,23 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
 
     return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, accountUsername, dispose };
 };
+
+// Return deferred writes so callers can finish all style/geometry reads first.
+function positionedButton(input, button, offset) {
+    const { isElementVisible } = require("./content_detection.js");
+    const measure = () => {
+        const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
+        const values = rect?.width && rect?.height
+            ? { display: "", left: rect.right - offset + "px", top: rect.top + rect.height / 2 - 14 + "px" }
+            : { display: "none" };
+        return () => {
+            for (const [key, value] of Object.entries(values)) {
+                if (button.style[key] !== value) button.style[key] = value;
+            }
+        };
+    };
+    const position = () => measure()();
+    position.measure = measure;
+    return position;
+}
+module.exports.positionedButton = positionedButton;

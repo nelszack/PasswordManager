@@ -117,6 +117,23 @@ impl Vault {
         key: &mut VaultCredentials,
         limit: usize,
     ) -> Result<bool, VaultError> {
+        let Some(id) = self.entry_id(&change.entry.target) else {
+            let mut change = change;
+            change.entry.zeroize();
+            return Ok(false);
+        };
+        self.transaction(TransactionScope::Entry(id), key, |vault| {
+            let changed = vault.apply_typed_update(id, change, limit);
+            Ok((changed, changed))
+        })
+    }
+    /// Apply to already-staged data. The caller owns identity resolution and commit.
+    pub(super) fn apply_typed_update(
+        &mut self,
+        id: usize,
+        change: TypedUpdate,
+        limit: usize,
+    ) -> bool {
         let TypedUpdate {
             entry: change,
             kind,
@@ -128,50 +145,44 @@ impl Vault {
             clear_fields,
         } = change;
         let mut change = Zeroizing::new(change);
-        let Some(id) = self.entry_id(&change.target) else {
-            return Ok(false);
-        };
-        self.transaction(TransactionScope::Entry(id), key, |vault| {
-            let changed_password = change
-                .password
-                .as_ref()
-                .is_some_and(|p| p.as_str() != vault.item(id).unwrap().entry.password.as_str());
-            if changed_password {
-                let old = vault.item(id).unwrap().entry.password.clone();
-                vault.push_password_history_with_limit(id, old, limit);
-            }
-            let entry = &mut vault.item_mut(id).unwrap().entry;
-            // Keep the existing primary while applying a replacement so an
-            // identical URL list remains a no-op. Clear it only when the
-            // request supplies no replacement primary.
-            let mut changed =
-                clear_urls && change.update.url.is_none() && entry.url.take().is_some();
-            let update = std::mem::take(&mut change.update);
-            changed |= apply_update(entry, update, change.password.take());
-            if !clear_urls && entry.url.as_ref().is_some_and(|u| remove_url.contains(u)) {
-                entry.url = None;
-                changed = true;
-            }
-            let primary_url = entry.url.clone();
-            let metadata_changed = vault.apply_metadata_update(
-                id,
-                MetadataUpdate {
-                    kind,
-                    add_urls: &add_url,
-                    remove_urls: &remove_url,
-                    clear_urls,
-                    primary_url: primary_url.as_deref(),
-                    password_changed: changed_password,
-                    set_fields: &set_fields,
-                    remove_fields: &remove_fields,
-                    clear_fields,
-                },
-            );
-            if changed || metadata_changed {
-                vault.item_mut(id).unwrap().entry.modified = Timestamp::now();
-            }
-            Ok((changed || metadata_changed, changed || metadata_changed))
-        })
+        let changed_password = change
+            .password
+            .as_ref()
+            .is_some_and(|p| p.as_str() != self.item(id).unwrap().entry.password.as_str());
+        if changed_password {
+            let old = self.item(id).unwrap().entry.password.clone();
+            self.push_password_history_with_limit(id, old, limit);
+        }
+        let entry = &mut self.item_mut(id).unwrap().entry;
+        // Keep the existing primary while applying a replacement so an
+        // identical URL list remains a no-op. Clear it only when the
+        // request supplies no replacement primary.
+        let mut changed = clear_urls && change.update.url.is_none() && entry.url.take().is_some();
+        let update = std::mem::take(&mut change.update);
+        changed |= apply_update(entry, update, change.password.take());
+        if !clear_urls && entry.url.as_ref().is_some_and(|u| remove_url.contains(u)) {
+            entry.url = None;
+            changed = true;
+        }
+        let primary_url = entry.url.clone();
+        let metadata_changed = self.apply_metadata_update(
+            id,
+            MetadataUpdate {
+                kind,
+                add_urls: &add_url,
+                remove_urls: &remove_url,
+                clear_urls,
+                primary_url: primary_url.as_deref(),
+                password_changed: changed_password,
+                set_fields: &set_fields,
+                remove_fields: &remove_fields,
+                clear_fields,
+            },
+        );
+        if changed || metadata_changed {
+            self.item_mut(id).unwrap().entry.modified = Timestamp::now();
+        }
+        changed || metadata_changed
     }
     fn apply_metadata_update(&mut self, id: usize, update: MetadataUpdate<'_>) -> bool {
         let Some(item) = self.item_mut(id) else {

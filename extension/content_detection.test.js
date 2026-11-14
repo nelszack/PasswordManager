@@ -177,3 +177,24 @@ test("saving a shared form captures the selected login pair rather than another 
         username: "second", password: "second-secret", scope: form
     });
 });
+
+test("visibility caches share ancestor reads only within a synchronous scan", () => {
+    const original = global.getComputedStyle;
+    let reads = 0;
+    global.getComputedStyle = element => { reads++; return original(element); };
+    try {
+        const parent = new FakeInput();
+        const first = new FakeInput(), second = new FakeInput();
+        first.parentElement = parent; second.parentElement = parent;
+        detection.withVisibilityCache(() => {
+            assert.equal(detection.isElementVisible(first), true);
+            assert.equal(detection.isElementVisible(second), true);
+        });
+        assert.equal(reads, 3);
+        parent.style = { display: "none", visibility: "visible", opacity: "1" };
+        assert.equal(detection.isElementVisible(first), false);
+        assert.throws(() => detection.withVisibilityCache(() => { throw new Error("stop"); }), /stop/);
+        parent.style.display = "block";
+        assert.equal(detection.isElementVisible(first), true);
+    } finally { global.getComputedStyle = original; }
+});

@@ -7,6 +7,7 @@ impl App {
         payload: ResponsePayload,
         session_id: Option<String>,
         audit_warning: Option<String>,
+        incremental: bool,
     ) -> Task<Message> {
         if let Some((id, _)) = self.ui.undo_trash.as_ref() {
             let resolved = match action {
@@ -83,7 +84,9 @@ impl App {
                 self.item = None;
                 self.editor = Editor::Closed;
                 self.workspace.receive(payload);
-                let refresh = if self.connection.session.is_some() {
+                let refresh = if incremental {
+                    Task::none()
+                } else if self.connection.session.is_some() {
                     self.load_items()
                 } else {
                     self.status()
@@ -137,7 +140,7 @@ impl App {
                 {
                     self.workspace.reset_duo();
                 }
-                return self.refresh_editor(id);
+                return self.refresh_item(id, ItemIntent::Edit, incremental);
             }
             if consumed_hotp
                 && self.tab == Tab::Vault
@@ -153,11 +156,16 @@ impl App {
                 {
                     self.workspace.reset_duo();
                 }
-                return self.refresh_account(id);
+                return self.refresh_item(id, ItemIntent::View, incremental);
             }
             self.item = None;
             self.editor = Editor::Closed;
-            return Task::batch([self.load_items(), workflows::show_result()]);
+            let refresh = if incremental {
+                Task::none()
+            } else {
+                self.load_items()
+            };
+            return Task::batch([refresh, workflows::show_result()]);
         }
         if matches!(action, workflows::Action::ShowOtp(_)) && self.tab == Tab::Vault {
             return Task::none();

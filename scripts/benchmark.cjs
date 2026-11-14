@@ -30,7 +30,7 @@ for (const [key, minimum, maximum] of [["samples", 3, 100], ["sampleMs", 1, 1000
 if (!["all", "core", "desktop", "browser"].includes(options.suite) || !["release", "dev"].includes(options.profile)) throw new Error("Invalid suite or profile");
 const suites = options.suite === "all" ? ["core", "desktop", "browser"] : [options.suite];
 const previous = options.baseline ? JSON.parse(fs.readFileSync(path.resolve(root, options.baseline), "utf8")) : null;
-if (previous && (previous.schema_version !== 1 || previous.workload_version !== 1 || previous.manifest?.status !== "passed")) throw new Error("Incompatible or incomplete baseline report");
+if (previous && (previous.schema_version !== 1 || previous.workload_version !== 2 || previous.manifest?.status !== "passed")) throw new Error("Incompatible or incomplete baseline report");
 if (previous && previous.manifest.options.profile !== options.profile) throw new Error("Cannot compare Rust build profiles");
 const output = path.resolve(root, options.output || `test-results/benchmarks/${new Date().toISOString().replace(/[:.]/g, "-")}`);
 fs.mkdirSync(output, { recursive: true });
@@ -48,7 +48,7 @@ function sourceFingerprint() {
     return fingerprint.digest("hex");
 }
 const manifest = {
-    schema_version: 1, workload_version: 1, status: "running", started_at: new Date().toISOString(),
+    schema_version: 1, workload_version: 2, status: "running", started_at: new Date().toISOString(),
     options: { ...options, sizes }, suites,
     machine: { platform: process.platform, release: os.release(), arch: process.arch, cpu: os.cpus()[0]?.model, logical_cpus: os.cpus().length },
     runtime: { node: process.version, rustc: suites.some(s => s !== "browser") ? version("rustc", ["--version"]) : null },
@@ -78,9 +78,9 @@ try {
         if (!fs.existsSync(report)) throw new Error(`${suite} produced no measurements (benchmark filter may not match)`);
         const measured = fs.readFileSync(report, "utf8").trim().split("\n").map(line => JSON.parse(line));
         const expectedNames = {
-            core: ["serialize_full", "serialize_one_item_overlay", "search_cold", "search_warm", "search_notes", "import_portable"],
+            core: ["serialize_full", "serialize_one_item_overlay", "search_cold", "search_warm", "search_notes", "import_portable", "browser_matching_warm", "audit_cold", "mutation_durable", "batch_mutation_durable", "export_json_streamed"],
             desktop: ["directory_forced_scan", "directory_cached"],
-            browser: ["dom_initial", "dom_attributes", "dom_structural"]
+            browser: ["dom_initial", "dom_attributes", "dom_structural", "controls_position"]
         }[suite];
         if (measured.length !== sizes.length * expectedNames.length) throw new Error(`Incomplete ${suite} results`);
         for (const size of sizes) for (const name of expectedNames) {
@@ -91,7 +91,7 @@ try {
         manifest.completed_suites = [...(manifest.completed_suites || []), suite]; writeManifest();
         console.log(`${suite}: ${measured.length} measurements saved`);
     }
-    const summary = { schema_version: 1, workload_version: 1, manifest, records };
+    const summary = { schema_version: 1, workload_version: 2, manifest, records };
     if (options.baseline) {
         const comparisons = records.map(record => {
             const base = previous.records.find(r => r.suite === record.suite && r.name === record.name && r.size === record.size);

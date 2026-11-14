@@ -232,6 +232,7 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
             }),
             lifecycle: item.lifecycle,
             strength: CachedStrength::default(),
+            sites: browser::CachedSites::default(),
             search: query::CachedSearch::default(),
         };
         if data.items.insert(item.id, value).is_some() {
@@ -271,16 +272,14 @@ impl VaultStore {
         else {
             return Err(VaultError::Persistence("vault has no durable store".into()));
         };
-        let mut plaintext = encode_document(live, Some((staged, selected)))?;
-        validate_encrypted_size(plaintext.len(), 0, active_vault_limit(), "vault")?;
-        let mut candidate = key.clone();
-        let ciphertext =
-            try_encrypt_file_in_place(&mut candidate, std::mem::take(&mut *plaintext))?;
-        let result = persist_ciphertext(directory, filename, &ciphertext);
-        if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
-            *key = candidate;
-        }
-        result
+        persist_document(
+            directory,
+            filename,
+            live,
+            Some((staged, selected)),
+            key,
+            active_vault_limit(),
+        )
     }
 }
 fn active_vault_limit() -> u64 {
@@ -439,6 +438,7 @@ pub(super) fn lookup_vault_in(
             metadata: VaultMetadata {
                 filename,
                 duo_session: None,
+                changes: None,
             },
         },
     )))
@@ -527,6 +527,7 @@ pub(crate) fn create_vault(
         metadata: VaultMetadata {
             filename,
             duo_session: None,
+            changes: None,
         },
     };
     let result = write_vault(&created, credentials);
@@ -581,13 +582,25 @@ fn write_vault_with_limit(
             _ => Err(VaultError::Persistence("vault has no durable store".into())),
         };
     };
-    let mut buf = encode_document(&vlt.data, None)?;
-    validate_encrypted_size(buf.len(), 0, max_bytes, "vault")?;
-    let mut candidate = key_pass.clone();
-    let txt = try_encrypt_file_in_place(&mut candidate, std::mem::take(&mut *buf))?;
-    let result = persist_ciphertext(directory, filename, &txt);
+    persist_document(directory, filename, &vlt.data, None, key_pass, max_bytes)
+}
+
+/// Encrypt a candidate without advancing credentials until replacement commits.
+fn persist_document(
+    directory: &Path,
+    filename: &str,
+    data: &VaultData,
+    overlay: Option<(&VaultData, &HashSet<ItemId>)>,
+    credentials: &mut VaultCredentials,
+    max_bytes: u64,
+) -> Result<(), VaultError> {
+    let mut plaintext = encode_document(data, overlay)?;
+    validate_encrypted_size(plaintext.len(), 0, max_bytes, "vault")?;
+    let mut candidate = credentials.clone();
+    let ciphertext = try_encrypt_file_in_place(&mut candidate, std::mem::take(&mut *plaintext))?;
+    let result = persist_ciphertext(directory, filename, &ciphertext);
     if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
-        *key_pass = candidate;
+        *credentials = candidate;
     }
     result
 }
@@ -652,6 +665,42 @@ pub(super) fn persist_private_file(
     contents: &[u8],
     force: bool,
 ) -> Result<(), VaultError> {
+    persist_private_stream(path, force, |file| {
+        file.write_all(contents)
+            .map_err(|e| VaultError::Persistence(e.to_string()))
+    })
+}
+
+// Buffered streaming without leaving plaintext in an ordinary BufWriter allocation.
+struct PrivateWriter<'a> {
+    file: &'a mut fs::File,
+    buffer: Zeroizing<Vec<u8>>,
+}
+impl Write for PrivateWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        const CAPACITY: usize = 64 * 1024;
+        if self.buffer.len().saturating_add(bytes.len()) > CAPACITY {
+            self.flush()?;
+        }
+        if bytes.len() >= CAPACITY {
+            self.file.write_all(bytes)?;
+        } else {
+            self.buffer.extend_from_slice(bytes);
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.write_all(&self.buffer)?;
+        self.buffer.zeroize();
+        self.file.flush()
+    }
+}
+
+pub(super) fn persist_private_stream(
+    path: &Path,
+    force: bool,
+    write: impl FnOnce(&mut dyn Write) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
     crate::file::validate_external_output_path(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::InvalidInput {
             VaultError::InvalidInput(error.to_string())
@@ -670,12 +719,18 @@ pub(super) fn persist_private_file(
         set_private_perms(temporary.path()).map_err(|error| {
             VaultError::Persistence(format!("could not protect private temp file: {error}"))
         })?;
-        temporary
-            .write_all(contents)
-            .and_then(|_| temporary.as_file().sync_all())
-            .map_err(|error| {
-                VaultError::Persistence(format!("could not write private file: {error}"))
-            })?;
+        let mut writer = PrivateWriter {
+            file: temporary.as_file_mut(),
+            buffer: Zeroizing::new(Vec::with_capacity(64 * 1024)),
+        };
+        write(&mut writer)?;
+        writer
+            .flush()
+            .map_err(|e| VaultError::Persistence(format!("could not flush private file: {e}")))?;
+        drop(writer);
+        temporary.as_file().sync_all().map_err(|error| {
+            VaultError::Persistence(format!("could not write private file: {error}"))
+        })?;
         if force {
             temporary.persist(path).map_err(|error| {
                 VaultError::Persistence(format!("could not replace private file: {}", error.error))

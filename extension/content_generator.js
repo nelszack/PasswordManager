@@ -1,6 +1,7 @@
 "use strict";
+const { positionedButton } = require("./content_controls.js");
 const PasswordManagerGenerator = require("./password_generator.js");
-const { isElementVisible, scopeInputs, credentialScope, isNewPasswordInput } = require("./content_detection.js");
+const { scopeInputs, credentialScope, isNewPasswordInput } = require("./content_detection.js");
 module.exports.create = function create({ controls, bridge, credentials }) {
     const { registerPositionedControl } = controls;
     const { fillInput } = bridge;
@@ -52,20 +53,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
         });
         document.body.appendChild(button);
 
-        function positionButton() {
-            if (!isElementVisible(input)) {
-                button.style.display = "none";
-                return;
-            }
-            const rect = input.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) {
-                button.style.display = "none";
-                return;
-            }
-            button.style.display = "";
-            button.style.left = rect.right - 24 + "px";
-            button.style.top = rect.top + rect.height / 2 - 14 + "px";
-        }
+        const positionButton = positionedButton(input, button, 24);
 
         button.addEventListener("click", event => {
             if (!event.isTrusted) return;

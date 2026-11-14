@@ -36,7 +36,8 @@ impl Vault {
         });
         match options.sort {
             SortField::Name => entries.sort_by_cached_key(|e| e.name.to_lowercase()),
-            SortField::Id => entries.sort_by_key(|e| e.id),
+            // Search traverses the ID-ordered item map and retain preserves order.
+            SortField::Id => {}
             _ => entries.sort_by_cached_key(|e| {
                 parse_entry_timestamp(match options.sort {
                     SortField::Created => &e.created,
@@ -73,11 +74,17 @@ impl Vault {
                         .as_ref()
                         .is_none_or(|n| value.is_some_and(|v| v.contains(n.as_str())))
                 };
+                let normalized_notes = std::cell::OnceCell::new();
                 let notes_match = |needle: &str| {
-                    item.entry
-                        .notes
+                    normalized_notes
+                        .get_or_init(|| {
+                            item.entry
+                                .notes
+                                .as_ref()
+                                .map(|value| Zeroizing::new(value.to_lowercase()))
+                        })
                         .as_ref()
-                        .is_some_and(|value| Zeroizing::new(value.to_lowercase()).contains(needle))
+                        .is_some_and(|value| value.contains(needle))
                 };
                 metadata.is_none_or(|m| {
                     query.as_ref().is_none_or(|q| {

@@ -1310,3 +1310,34 @@ async fn automatic_browser_lookups_do_not_extend_inactivity() {
         "background detections must not keep an idle vault unlocked"
     );
 }
+
+#[tokio::test]
+async fn worker_returns_bounded_revision_deltas_and_does_not_replay_them() {
+    let state = test_connection_state();
+    let worker = test_worker(session(sample_vault()), &state);
+    let mut request = RequestEnvelope::new(ServerCommand::Delete(Target::Id(1)));
+    request.expected_session = worker.session_id();
+    let request_bytes = rmp_serde::to_vec_named(&request).unwrap();
+    let before = worker.vault_revision().unwrap();
+    let response = worker
+        .execute(state.clone(), request)
+        .await
+        .responses
+        .remove(0);
+    assert_eq!(response.code, 0);
+    let changes = response.changes.unwrap();
+    assert_eq!(changes.base_revision, before);
+    assert_eq!(changes.revision, before + 1);
+    assert_eq!(changes.removed, vec![1]);
+    assert!(changes.items.is_empty());
+    let retried = worker
+        .execute(
+            state.clone(),
+            rmp_serde::from_slice(&request_bytes).unwrap(),
+        )
+        .await
+        .responses
+        .remove(0);
+    assert!(retried.changes.is_none());
+    assert_eq!(worker.vault_revision(), Some(before + 1));
+}

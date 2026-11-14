@@ -1,4 +1,4 @@
-//! Synthetic in-memory workloads. No user profile, key files, network, or KDF.
+//! Synthetic workloads, including private temporary durable stores. No user profile, network, or KDF.
 use super::*;
 use crate::benchmarks::Config;
 use std::hint::black_box;
@@ -113,6 +113,97 @@ fn performance_benchmarks() {
                         notes: Some("private note 9".into()),
                         ..Default::default()
                     })
+                    .unwrap()
+            },
+        );
+        config.measure(
+            "core",
+            "browser_matching_warm",
+            size,
+            || (),
+            |_| vault.browser_logins(black_box("https://service-1.example.invalid")),
+        );
+        config.measure(
+            "core",
+            "audit_cold",
+            size,
+            || {
+                let mut cold = vault.clone();
+                for item in cold.data.items.values_mut() {
+                    item.strength = CachedStrength::default();
+                }
+                cold
+            },
+            |cold| cold.audit_snapshot(&AuditOptions::default()),
+        );
+        let durable = || {
+            let dir = tempfile::tempdir().unwrap();
+            let mut value = vault.clone();
+            value.store = VaultStore::File {
+                directory: dir.path().into(),
+                filename: "benchmark.enc".into(),
+            };
+            let mut key = VaultCredentials::Session {
+                encryption_key: [42; 32],
+                salt: [7; 16],
+                kdf: 1,
+                memory_kib: 8192,
+                iterations: 1,
+                parallelism: 1,
+            };
+            write_vault(&value, &mut key).unwrap();
+            (dir, value, key)
+        };
+        let change = |id| TypedUpdate {
+            entry: EntryUpdate {
+                target: Target::Id(id),
+                update: EntryChanges {
+                    name: Some("Changed synthetic account".into()),
+                    ..Default::default()
+                },
+                password: None,
+            },
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
+        };
+        config.measure(
+            "core",
+            "mutation_durable",
+            size,
+            durable,
+            |(_, value, key)| {
+                value
+                    .update_typed_entry_with_limit(change(1), key, 10)
+                    .unwrap()
+            },
+        );
+        config.measure(
+            "core",
+            "batch_mutation_durable",
+            size,
+            durable,
+            |(_, value, key)| {
+                value
+                    .update_many(vec![change(1), change(size)], key, 10)
+                    .unwrap()
+            },
+        );
+        config.measure(
+            "core",
+            "export_json_streamed",
+            size,
+            || tempfile::tempdir().unwrap(),
+            |dir| {
+                vault
+                    .export(
+                        dir.path().join("export.json").to_str().unwrap().into(),
+                        false,
+                    )
                     .unwrap()
             },
         );

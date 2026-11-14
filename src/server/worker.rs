@@ -115,7 +115,15 @@ impl Owner {
                     .filter(|size| *size <= RESULT_BYTES)
             });
             operation.responses = if bytes.is_some() {
-                responses.to_vec()
+                responses
+                    .iter()
+                    .cloned()
+                    .map(|mut response| {
+                        // Deltas are disposable metadata, not part of retry receipts.
+                        response.changes = None;
+                        response
+                    })
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -229,6 +237,10 @@ impl Owner {
                 return rejected;
             }
         }
+        let _ = self.session.with_unlocked(|vault, _| {
+            vault.metadata.changes = None;
+            Ok(())
+        });
         let before = self.session.epoch();
         let mut result = execute_command(state, request.command, &mut self.session);
         if before != self.session.epoch() || self.session.is_locked() {
@@ -237,6 +249,8 @@ impl Owner {
         result.session_id = self.session.session_id();
         for response in &mut result.responses {
             response.session_id = result.session_id.clone();
+            response.vault_revision = self.session.vault().map(Vault::vault_revision);
+            response.changes = self.session.vault().and_then(Vault::mutation_changes);
         }
         if let Some(id) = operation_id {
             if matches!(

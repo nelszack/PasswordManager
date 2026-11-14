@@ -60,3 +60,39 @@ impl Vault {
         self.management_item(id, reveal)
     }
 }
+
+impl Vault {
+    pub(crate) fn mutation_changes(&self) -> Option<pm_contracts::vault::ItemChanges> {
+        let (base_revision, revision, ids) = self.metadata.changes.as_ref()?;
+        let mut changes = pm_contracts::vault::ItemChanges {
+            base_revision: *base_revision,
+            revision: *revision,
+            items: Vec::new(),
+            removed: Vec::new(),
+        };
+        // Include the envelope/removal IDs and each URL's MessagePack prefix,
+        // not just string contents: many short URLs can otherwise exceed the cap.
+        let mut bytes = 128usize.saturating_add(ids.len().saturating_mul(16));
+        for &id in ids {
+            if let Some(item) = self.item(id) {
+                bytes = bytes
+                    .saturating_add(item.entry.name.len())
+                    .saturating_add(item.entry.username.as_ref().map_or(0, String::len))
+                    .saturating_add(
+                        self.all_urls(&item.entry)
+                            .map(|url| url.len().saturating_add(8))
+                            .sum::<usize>(),
+                    )
+                    .saturating_add(512);
+                if bytes > 64 * 1024 {
+                    return None;
+                }
+            }
+            match self.item(id).filter(|item| item.active()) {
+                Some(item) => changes.items.push(self.summary(item)),
+                None => changes.removed.push(id),
+            }
+        }
+        Some(changes)
+    }
+}

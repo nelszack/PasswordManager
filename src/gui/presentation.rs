@@ -50,7 +50,14 @@ impl std::fmt::Display for ScaleChoice {
     }
 }
 
+#[derive(Default)]
+struct ChoiceCache {
+    vaults: Vec<String>,
+    names: std::collections::BTreeMap<String, String>,
+    choices: Vec<vault_names::Choice>,
+}
 pub(super) struct State {
+    choices: std::cell::RefCell<ChoiceCache>,
     matching: std::cell::RefCell<Option<MatchingItems>>,
     search_text: std::cell::RefCell<Vec<Vec<zeroize::Zeroizing<String>>>>,
     pub progress: String,
@@ -90,6 +97,7 @@ pub(super) struct SavedItem {
 impl Default for State {
     fn default() -> Self {
         Self {
+            choices: std::cell::RefCell::default(),
             matching: std::cell::RefCell::default(),
             search_text: std::cell::RefCell::default(),
             progress: String::new(),
@@ -210,29 +218,72 @@ impl App {
     }
 
     pub(super) fn vault_choices(&self) -> Vec<vault_names::Choice> {
+        let mut cache = self.ui.choices.borrow_mut();
+        if cache.vaults == self.connection.vaults && cache.names == self.names.0 {
+            return cache.choices.clone();
+        }
         let labels: Vec<_> = self
             .connection
             .vaults
             .iter()
-            .map(|id| self.names.label(id, &self.connection.vaults))
+            .enumerate()
+            .map(|(index, id)| self.names.label_at(id, index, self.connection.vaults.len()))
             .collect();
-        self.connection
+        let mut counts = std::collections::HashMap::new();
+        for label in &labels {
+            *counts.entry(label.as_str()).or_insert(0usize) += 1;
+        }
+        let choices: Vec<_> = self
+            .connection
             .vaults
             .iter()
+            .zip(&labels)
             .enumerate()
-            .map(|(index, id)| {
-                let label = &labels[index];
-                let label = if labels.iter().filter(|value| *value == label).count() > 1 {
+            .map(|(index, (id, label))| vault_names::Choice {
+                id: id.clone(),
+                label: if counts[label.as_str()] > 1 {
                     format!("{label} · {}", index + 1)
                 } else {
                     label.clone()
-                };
-                vault_names::Choice {
-                    id: id.clone(),
-                    label,
-                }
+                },
             })
-            .collect()
+            .collect();
+        *cache = ChoiceCache {
+            vaults: self.connection.vaults.clone(),
+            names: self.names.0.clone(),
+            choices: choices.clone(),
+        };
+        choices
+    }
+
+    pub(super) fn apply_item_changes(
+        &mut self,
+        changes: &password_manager::vault::ItemChanges,
+    ) -> bool {
+        if self.items_revision != Some(changes.base_revision)
+            || changes.revision <= changes.base_revision
+        {
+            return false;
+        }
+        let replaced: std::collections::HashSet<_> = changes
+            .removed
+            .iter()
+            .copied()
+            .chain(changes.items.iter().map(|item| item.id))
+            .collect();
+        self.items.retain(|item| !replaced.contains(&item.id));
+        for item in &changes.items {
+            let key = item.name.to_lowercase();
+            let index = self.items.partition_point(|existing| {
+                (existing.name.to_lowercase(), existing.id) < (key.clone(), item.id)
+            });
+            self.items.insert(index, item.clone());
+        }
+        self.ui.matching.get_mut().take();
+        self.ui.search_text.get_mut().clear();
+        self.vault_revision = Some(changes.revision);
+        self.items_revision = Some(changes.revision);
+        true
     }
 
     pub(super) fn replace_items(&mut self, items: Vec<ItemSummary>) {

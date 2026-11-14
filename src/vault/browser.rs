@@ -29,19 +29,19 @@ impl Vault {
             return vec![];
         };
         self.active_items()
-            .filter(|i| login_matches_site(&i.entry, Some(&i.metadata), &requested))
+            .filter(|i| item_matches_site(i, &requested))
             .map(|i| self.summary(i))
             .collect()
     }
     pub(crate) fn browser_login_revision(&self, origin: &str, id: usize) -> Option<u64> {
         let requested = parse_site(origin, false)?;
         let item = self.item(id).filter(|item| item.active())?;
-        login_matches_site(&item.entry, Some(&item.metadata), &requested).then_some(item.revision)
+        item_matches_site(item, &requested).then_some(item.revision)
     }
     pub fn browser_login(&self, domain: &str, id: usize) -> Option<BrowserLogin> {
         let requested = parse_site(domain, false)?;
         let item = self.item(id).filter(|i| i.active())?;
-        if !login_matches_site(&item.entry, Some(&item.metadata), &requested) {
+        if !item_matches_site(item, &requested) {
             return None;
         }
         Some(BrowserLogin {
@@ -74,24 +74,33 @@ impl Vault {
         })
     }
 }
-fn login_matches_site(
-    entry: &VaultEntry,
-    metadata: Option<&EntryMetadata>,
-    requested: &Site,
-) -> bool {
-    metadata.is_none_or(|record| record.kind == ItemKind::Login)
-        && (entry
-            .url
-            .as_deref()
-            .is_some_and(|saved| saved_matches_site(saved, requested))
-            || metadata.is_some_and(|record| {
-                record
-                    .additional_urls
-                    .iter()
-                    .any(|saved| saved_matches_site(saved, requested))
-            }))
+// Normalized sites contain metadata only and are erased with the item/session.
+#[derive(Debug, Default, Clone)]
+pub(super) struct CachedSites(std::sync::Arc<std::sync::OnceLock<Vec<Site>>>);
+impl PartialEq for CachedSites {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+fn item_matches_site(item: &Item, requested: &Site) -> bool {
+    item.metadata.kind == ItemKind::Login
+        && item
+            .sites
+            .0
+            .get_or_init(|| {
+                item.entry
+                    .url
+                    .as_deref()
+                    .into_iter()
+                    .chain(item.metadata.additional_urls.iter().map(String::as_str))
+                    .filter_map(|value| parse_site(value, true))
+                    .collect()
+            })
+            .iter()
+            .any(|saved| site_matches(saved, requested))
 }
 
+#[derive(Debug, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct Site {
     scheme: String,
     host: String,
@@ -145,7 +154,7 @@ pub(super) fn hostname(value: &str) -> Option<String> {
     Some(if site.wildcard {
         format!("*.{}", site.host)
     } else {
-        site.host
+        site.host.clone()
     })
 }
 
@@ -155,16 +164,24 @@ pub(super) fn hosts_match(saved_url: &str, requested_url: &str) -> bool {
         .is_some_and(|requested| saved_matches_site(saved_url, &requested))
 }
 
+#[cfg(test)]
 fn saved_matches_site(saved_url: &str, requested: &Site) -> bool {
     let Some(saved) = parse_site(saved_url, true) else {
         return false;
     };
+    site_matches(&saved, requested)
+}
+
+fn site_matches(saved: &Site, requested: &Site) -> bool {
     if saved.scheme != requested.scheme || saved.port != requested.port {
         return false;
     }
     if saved.wildcard {
         return requested.host != saved.host
-            && requested.host.ends_with(&format!(".{}", saved.host));
+            && requested
+                .host
+                .strip_suffix(saved.host.as_str())
+                .is_some_and(|prefix| prefix.ends_with('.'));
     }
     saved.host == requested.host
 }

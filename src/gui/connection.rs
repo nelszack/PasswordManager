@@ -354,7 +354,7 @@ impl App {
                     } else {
                         self.notice = "Vault updated from another client or device.".into();
                         if let Some(id) = self.item.as_ref().map(|item| item.id) {
-                            return self.refresh_account(id);
+                            return self.refresh_item(id, ItemIntent::View, false);
                         }
                         return self.load_items();
                     }

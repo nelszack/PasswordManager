@@ -1335,3 +1335,147 @@ fn portable_import_fast_path_preserves_strict_fields_escaped_tags_and_external_c
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].entry.password.expose(), "exact password");
 }
+
+#[test]
+fn optimization_caches_preserve_unchanged_fields_and_refresh_sites() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::Locked;
+    let score = vault.item(1).unwrap().password_score();
+    let strength = vault.item(1).unwrap().strength.0.clone();
+    let mut change = update(1, "pw");
+    change.entry.password = None;
+    change.entry.update.name = Some("Renamed".into());
+    vault
+        .update_typed_entry_with_limit(change, &mut key, 10)
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &strength,
+        &vault.item(1).unwrap().strength.0
+    ));
+    assert_eq!(vault.item(1).unwrap().password_score(), score);
+    let mut change = update(1, "pw");
+    change.entry.password = None;
+    change.entry.update.url = Some("https://one.example.invalid".into());
+    vault
+        .update_typed_entry_with_limit(change, &mut key, 10)
+        .unwrap();
+    assert_eq!(vault.browser_logins("https://one.example.invalid").len(), 1);
+    let mut change = update(1, "pw");
+    change.entry.password = None;
+    change.entry.update.url = Some("https://two.example.invalid".into());
+    vault
+        .update_typed_entry_with_limit(change, &mut key, 10)
+        .unwrap();
+    assert!(
+        vault
+            .browser_logins("https://one.example.invalid")
+            .is_empty()
+    );
+    assert_eq!(vault.browser_logins("https://two.example.invalid").len(), 1);
+}
+
+#[test]
+fn batched_edits_commit_once_and_roll_back_together() {
+    let (_dir, mut vault, mut key) = persisted();
+    let before = vault.vault_revision();
+    let revision = vault.item_revision(1).unwrap();
+    let rename = || {
+        let mut change = update(1, "unused");
+        change.entry.password = None;
+        change.entry.update.name = Some("Batch name".into());
+        change
+    };
+    persistence::with_write_fault(1, || {
+        assert!(
+            vault
+                .update_many(
+                    vec![rename(), update(1, "new-batch-password")],
+                    &mut key,
+                    10
+                )
+                .is_err()
+        );
+    });
+    assert_eq!(vault.vault_revision(), before);
+    assert_ne!(vault.item(1).unwrap().entry.name, "Batch name");
+    assert!(
+        vault
+            .update_many(
+                vec![rename(), update(1, "new-batch-password")],
+                &mut key,
+                10
+            )
+            .unwrap()
+    );
+    assert_eq!(vault.vault_revision(), before + 1);
+    assert_eq!(vault.item_revision(1), Some(revision + 1));
+    let reopened = reopen(&vault);
+    assert_eq!(reopened.item(1).unwrap().entry.name, "Batch name");
+    assert_eq!(
+        reopened.item(1).unwrap().entry.password.expose(),
+        "new-batch-password"
+    );
+}
+
+#[test]
+fn cancelled_cold_audits_do_not_evaluate_passwords() {
+    let vault = memory();
+    let prepared = vault.prepare_audit(&AuditOptions::default());
+    assert!(prepared.finish(|| true).is_err());
+    assert!(vault.item(1).unwrap().strength.0.get().is_none());
+    let _ = vault
+        .prepare_audit(&AuditOptions::default())
+        .finish(|| false)
+        .unwrap();
+    assert!(vault.item(1).unwrap().strength.0.get().is_some());
+}
+
+#[test]
+fn batch_edits_resolve_initial_names_and_use_one_revision_increment() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::Locked;
+    vault.data.revision = MAX_ITEM_ID - 1;
+    vault.item_mut(1).unwrap().revision = MAX_ITEM_ID - 1;
+    let mut rename = update(1, "unused");
+    rename.entry.password = None;
+    rename.entry.target = Target::Name("first".into());
+    rename.entry.update.name = Some("Renamed".into());
+    let mut password = update(1, "batch password");
+    password.entry.target = Target::Name("first".into());
+    assert!(
+        vault
+            .update_many(vec![rename, password], &mut key, 10)
+            .unwrap()
+    );
+    assert_eq!(vault.vault_revision(), MAX_ITEM_ID);
+    assert_eq!(vault.item_revision(1), Some(MAX_ITEM_ID));
+    assert_eq!(vault.item(1).unwrap().entry.name, "Renamed");
+    assert_eq!(
+        vault.item(1).unwrap().entry.password.expose(),
+        "batch password"
+    );
+    assert_eq!(vault.item(1).unwrap().history.len(), 1);
+}
+
+#[test]
+fn mutation_delta_budget_includes_url_encoding_overhead() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::Locked;
+    vault.item_mut(1).unwrap().metadata.additional_urls = vec!["x".into(); 40_000];
+    assert!(
+        rmp_serde::to_vec_named(&vault.management_list(SearchFilter::default()).unwrap())
+            .unwrap()
+            .len()
+            > 64 * 1024
+    );
+    let mut rename = update(1, "unused");
+    rename.entry.password = None;
+    rename.entry.update.name = Some("Changed".into());
+    vault
+        .update_typed_entry_with_limit(rename, &mut key, 10)
+        .unwrap();
+    assert!(
+        vault.mutation_changes().is_none(),
+        "large metadata must fall back to a full refresh"
+    );
+}

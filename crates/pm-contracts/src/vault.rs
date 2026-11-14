@@ -113,3 +113,12 @@ pub struct ImportReport {
     /// Bounded, secret-free descriptions indexed by source row/item.
     pub losses: Vec<String>,
 }
+
+/// Bounded mutation delta, valid only against the stated vault revision/session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemChanges {
+    pub base_revision: u64,
+    pub revision: u64,
+    pub items: Vec<ItemSummary>,
+    pub removed: Vec<usize>,
+}

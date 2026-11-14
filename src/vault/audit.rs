@@ -179,7 +179,14 @@ async fn fetch_breached_prefix(
 }
 
 impl Vault {
+    #[cfg(test)]
     pub(crate) fn audit_snapshot(&self, options: &AuditOptions) -> AuditSnapshot {
+        self.prepare_audit(options)
+            .finish(|| false)
+            .expect("uncancelled audit")
+    }
+    pub(crate) fn prepare_audit(&self, options: &AuditOptions) -> PendingAudit {
+        let mut cold = Vec::new();
         let now = chrono::Utc::now();
         let entries = self
             .active_entries()
@@ -191,7 +198,20 @@ impl Vault {
                     name: entry.name.clone(),
                     username: entry.username.clone(),
                     password_hash: password_hash(&entry.password),
-                    weak: self.item(entry.id).unwrap().password_score() <= zxcvbn::Score::Two,
+                    weak: {
+                        let item = self.item(entry.id).unwrap();
+                        match item.strength.0.get() {
+                            Some(score) => *score <= zxcvbn::Score::Two,
+                            None => {
+                                cold.push((
+                                    entry.id,
+                                    entry.password.clone(),
+                                    item.strength.clone(),
+                                ));
+                                false
+                            }
+                        }
+                    },
                     stale: options
                         .stale_days
                         .is_some_and(|days| password_is_stale_at(changed, days, now)),
@@ -209,7 +229,44 @@ impl Vault {
                 }
             })
             .collect();
-        AuditSnapshot { entries }
+        PendingAudit {
+            revision: self.vault_revision(),
+            snapshot: AuditSnapshot { entries },
+            cold,
+        }
+    }
+}
+
+/// Only cold scores need temporary password copies; discard them before networking.
+pub(crate) struct PendingAudit {
+    pub(crate) revision: u64,
+    snapshot: AuditSnapshot,
+    cold: Vec<(usize, SecretString, CachedStrength)>,
+}
+impl PendingAudit {
+    pub(crate) fn finish(
+        mut self,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<AuditSnapshot, &'static str> {
+        let mut scores = HashMap::new();
+        for (id, password, cache) in self.cold.drain(..) {
+            if cancelled() {
+                return Err("Vault changed during audit; run it again");
+            }
+            let score = *cache
+                .0
+                .get_or_init(|| zxcvbn::zxcvbn(&password, &[]).score());
+            scores.insert(id, score);
+        }
+        if cancelled() {
+            return Err("Vault changed during audit; run it again");
+        }
+        for entry in &mut self.snapshot.entries {
+            if let Some(score) = scores.get(&entry.id) {
+                entry.weak = *score <= zxcvbn::Score::Two;
+            }
+        }
+        Ok(self.snapshot)
     }
 }
 

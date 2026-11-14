@@ -363,7 +363,7 @@ fn handle_unlocked(
                 // Build the local findings and one-way password hashes while
                 // the vault is available, then release the live state before
                 // any network-backed breach checks begin.
-                let audit_snapshot = vault.audit_snapshot(&options);
+                let audit_snapshot = vault.prepare_audit(&options);
                 *effect = CommandEffect::Audit(audit_snapshot, options.check_breaches);
             }
         }

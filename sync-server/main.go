@@ -53,9 +53,74 @@ type server struct {
 	changed    chan struct{}
 	generation string
 	reserved   int64 // Upload space reserved while request bodies stream without mu.
+	used       int64
+	usageReady bool
+	vaultLocks map[string]*vaultLock
 	slots      chan struct{}
 }
 
+type vaultLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// The global mutex protects accounting/events only; disk work uses per-vault locks.
+func (s *server) lockVault(id string) func() {
+	s.mu.Lock()
+	if s.vaultLocks == nil {
+		s.vaultLocks = make(map[string]*vaultLock)
+	}
+	lock := s.vaultLocks[id]
+	if lock == nil {
+		lock = &vaultLock{}
+		s.vaultLocks[id] = lock
+	}
+	lock.refs++
+	s.mu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.mu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(s.vaultLocks, id)
+		}
+		s.mu.Unlock()
+	}
+}
+func directoryUsage(root string) (int64, error) {
+	var used int64
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			used += info.Size()
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return used, err
+}
+
+// Reconstruct once at startup/first upload. Reservations cover all in-flight disk work.
+func (s *server) initializeUsage() error {
+	if s.usageReady {
+		return nil
+	}
+	used, err := directoryUsage(filepath.Join(s.root, "vaults"))
+	if err == nil {
+		s.used = used
+		s.usageReady = true
+	}
+	return err
+}
 func validID(s string, size int) bool {
 	b, err := hex.DecodeString(s)
 	return err == nil && len(b) == size && s == strings.ToLower(s)
@@ -161,14 +226,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "busy", 503)
 		return
 	}
-	s.mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			s.mu.Unlock()
-		}
-	}()
-	unlock := func() { s.mu.Unlock(); locked = false }
 	if r.URL.Path == "/v1/vaults" && r.Method == "GET" {
 		entries, err := os.ReadDir(filepath.Join(s.root, "vaults"))
 		if err != nil {
@@ -178,7 +235,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		vaults := []vaultInfo{}
 		for _, e := range entries {
 			if e.IsDir() && validID(e.Name(), 16) {
+				release := s.lockVault(e.Name())
 				h, err := s.head(e.Name())
+				release()
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
@@ -189,7 +248,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				vaults = append(vaults, vaultInfo{e.Name(), h})
 			}
 		}
-		unlock()
 		writeJSON(w, vaults)
 		return
 	}
@@ -198,6 +256,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	release := s.lockVault(id)
+	locked := true
+	unlock := func() {
+		if locked {
+			release()
+			locked = false
+		}
+	}
+	defer unlock()
 	h, err := s.head(id)
 	exists := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -232,27 +299,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "vault changed; reconcile both copies", 412)
 			return
 		}
-		// Stream to a temporary file; the quota includes retained snapshots and headroom.
-		var used int64
-		err := filepath.WalkDir(filepath.Join(s.root, "vaults"), func(path string, d os.DirEntry, e error) error {
-			if e != nil {
-				return e
-			}
-			if !d.IsDir() {
-				i, e := d.Info()
-				if e != nil {
-					return e
-				}
-				used += i.Size()
-			}
-			return nil
-		})
-		if err != nil {
+		// Reserve quota without holding any lock during the network transfer.
+		s.mu.Lock()
+		if err := s.initializeUsage(); err != nil {
+			s.mu.Unlock()
 			http.Error(w, "storage unavailable", 500)
 			return
 		}
-		available := min(int64(maxVault), s.budget-used-s.reserved-maxHeadBytes)
+		available := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
 		if available <= 0 {
+			s.mu.Unlock()
 			http.Error(w, "storage quota reached", 507)
 			return
 		}
@@ -261,12 +317,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		reservation := available + maxHeadBytes
 		s.reserved += reservation
+		s.mu.Unlock()
 		defer func() {
-			if !locked {
-				s.mu.Lock()
-				locked = true
-			}
+			s.mu.Lock()
 			s.reserved -= reservation
+			s.mu.Unlock()
 		}()
 		unlock()
 		dir := filepath.Join(s.root, "vaults", id)
@@ -294,7 +349,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Serialize the durable commit, not the network transfer. A competing
 		// writer may have advanced this vault while this body was arriving.
-		s.mu.Lock()
+		release = s.lockVault(id)
 		locked = true
 		current, err := s.head(id)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -306,6 +361,31 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "vault changed; reconcile both copies", 412)
 			return
 		}
+		beforeBytes, err := directoryUsage(dir)
+		if err != nil {
+			http.Error(w, "storage unavailable", 500)
+			return
+		}
+		// Reconcile even partially committed/failed writes, including orphan snapshots.
+		// Only this vault is scanned; unrelated commits continue concurrently.
+		accounted := false
+		reconcile := func() {
+			if accounted {
+				return
+			}
+			accounted = true
+			afterBytes, scanErr := directoryUsage(dir)
+			s.mu.Lock()
+			if scanErr != nil {
+				s.used += reservation
+			} else {
+				s.used += afterBytes - beforeBytes
+			}
+			s.reserved -= reservation
+			reservation = 0
+			s.mu.Unlock()
+		}
+		defer reconcile()
 		if err = os.MkdirAll(dir, 0700); err != nil {
 			http.Error(w, "storage unavailable", 500)
 			return
@@ -339,14 +419,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for i := max(s.keep-1, 0); i < len(previous); i++ {
 			_ = os.Remove(filepath.Join(dir, previous[i].Name()))
 		}
+		s.mu.Lock()
 		close(s.changed)
 		s.changed = make(chan struct{})
 		s.generation = randomID()
 		w.Header().Set("ETag", `"`+version+`"`)
-		// Drop the reservation before releasing the commit lock; the snapshot
-		// is now included in the on-disk quota scan for subsequent uploads.
-		s.reserved -= reservation
-		reservation = 0
+		s.mu.Unlock()
+		// Release accounting and this vault before a slow client reads its reply.
+		reconcile()
 		unlock()
 		writeJSON(w, next)
 	default:
@@ -444,6 +524,9 @@ func main() {
 	pending, _ := filepath.Glob(filepath.Join(*root, ".upload-*"))
 	for _, p := range pending {
 		_ = os.Remove(p)
+	}
+	if err := s.initializeUsage(); err != nil {
+		log.Fatal(err)
 	}
 	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16 << 10}
 	log.Printf("Encrypted vault sync listening on %s", *listen)

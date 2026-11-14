@@ -183,3 +183,36 @@ test("repeated visibility changes reuse discovery but still find late shadow roo
     assert.equal(container.scans, 2, "structural changes invalidate cached membership");
     assert.ok(env.controls.some(([input, kind]) => input === addedInput && kind === "card"));
 });
+
+test("extension child mutations preserve snapshots and unrelated subtree edits keep cached discovery", () => {
+    const left = new Element([new Input()]), right = new Element([new Input()]);
+    const env = environment([left, right]);
+    const attribute = root => ({ type: "attributes", target: root, attributeName: "class", addedNodes: [] });
+    env.notify([attribute(left), attribute(right)]); env.flush();
+    const leftScans = left.scans, rightScans = right.scans;
+    const own = new Element(); own.classList = { contains: name => name === "my-extension-ui" };
+    env.notify([{ type: "childList", target: left, addedNodes: [own], removedNodes: [] }]);
+    assert.equal(env.frames.length, 0);
+    env.notify([attribute(left)]); env.flush();
+    assert.equal(left.scans, leftScans);
+    const span = new Element(); span.parentNode = left; left.children.push(span);
+    env.notify([{ type: "childList", target: left, addedNodes: [span], removedNodes: [] }]); env.flush();
+    env.notify([attribute(left), attribute(right)]); env.flush();
+    assert.equal(left.scans, leftScans + 1);
+    assert.equal(right.scans, rightScans);
+});
+
+test("reinserting a subtree discovers controls changed while it was detached", () => {
+    const first = new Input();
+    const subtree = new Element([first]);
+    const env = environment([subtree]);
+    env.notify([{ type:"attributes",target:subtree,attributeName:"class",addedNodes:[] }]); env.flush();
+    env.document.children=[]; subtree.parentNode=null; subtree.isConnected=false;
+    env.notify([{type:"childList",target:env.document,addedNodes:[],removedNodes:[subtree]}]);
+    const replacement = new Input("totp"); replacement.parentNode=subtree;
+    subtree.children=[replacement]; first.isConnected=false;
+    subtree.parentNode=env.document; subtree.isConnected=true; env.document.children=[subtree];
+    env.controls.length=0;
+    env.notify([{type:"childList",target:env.document,addedNodes:[subtree],removedNodes:[]}]); env.flush();
+    assert.deepEqual(env.controls,[[replacement,"totp"]]);
+});

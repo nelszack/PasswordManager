@@ -321,6 +321,7 @@ struct App {
     recovery: Recovery,
     settings: SettingsDraft,
     vault_revision: Option<u64>,
+    items_revision: Option<u64>,
     confirm_reset_settings: bool,
     workspace: workflows::State,
 }
@@ -364,6 +365,7 @@ impl App {
             names: vault_names::Names::default(),
             settings: SettingsDraft::from(&conf),
             vault_revision: None,
+            items_revision: None,
             conf,
             tab: Tab::Vault,
             items: vec![],
@@ -571,18 +573,27 @@ impl App {
         )
     }
 
-    fn refresh_account(&mut self, id: usize) -> Task<Message> {
-        self.item = None;
-        self.load_items_for(Job::RefreshItem(id, ItemIntent::View))
+    fn open_item(&mut self, id: usize, intent: ItemIntent, revision: Option<u64>) -> Task<Message> {
+        self.request(
+            Job::OpenItem(id, intent),
+            ServerCommand::ManagementItem { id, reveal: false },
+            revision,
+        )
     }
 
-    fn refresh_editor(&mut self, id: usize) -> Task<Message> {
-        self.hide_secrets();
+    fn refresh_item(&mut self, id: usize, intent: ItemIntent, incremental: bool) -> Task<Message> {
+        if intent == ItemIntent::Edit {
+            self.hide_secrets();
+            self.editor = Editor::Closed;
+            self.workspace.prepared = None;
+            self.workspace.clear_inputs();
+        }
         self.item = None;
-        self.editor = Editor::Closed;
-        self.workspace.prepared = None;
-        self.workspace.clear_inputs();
-        self.load_items_for(Job::RefreshItem(id, ItemIntent::Edit))
+        if incremental {
+            self.open_item(id, intent, None)
+        } else {
+            self.load_items_for(Job::RefreshItem(id, intent))
+        }
     }
 
     fn hide_secrets(&mut self) {
@@ -619,6 +630,7 @@ impl App {
         self.connection.session = None;
         self.workspace.clear_vault();
         self.replace_items(Vec::new());
+        self.items_revision = None;
         self.query.zeroize();
         self.ui.item_page = 0;
         self.ui.kind = None;
@@ -1442,6 +1454,21 @@ impl App {
                 "The vault session changed. Unlock or reopen the vault to continue.".into();
             return self.status();
         }
+        let changed_id = response
+            .changes
+            .as_ref()
+            .and_then(|changes| changes.items.first())
+            .map(|item| item.id);
+        let incremental = response
+            .changes
+            .as_ref()
+            .is_some_and(|changes| self.apply_item_changes(changes));
+        if matches!(job, Job::List | Job::SavedList | Job::RefreshItem(..))
+            && matches!(response.payload, ResponsePayload::ItemPage(_))
+        {
+            self.items_revision = response.vault_revision;
+            self.vault_revision = response.vault_revision.or(self.vault_revision);
+        }
         match (job, response.payload) {
             (
                 job @ (Job::CloudList | Job::CloudConflicts | Job::CloudResolve | Job::Cloud),
@@ -1450,7 +1477,13 @@ impl App {
                 return self.complete_cloud(job, payload);
             }
             (Job::Workflow(action), payload) => {
-                return self.complete_workflow(action, payload, response.session_id, audit_warning);
+                return self.complete_workflow(
+                    action,
+                    payload,
+                    response.session_id,
+                    audit_warning,
+                    incremental,
+                );
             }
             (Job::UsernameValue, ResponsePayload::Item(item)) => {
                 if self.item.as_ref().is_some_and(|current| {
@@ -1491,22 +1524,14 @@ impl App {
                 self.replace_items(page.items);
                 if let Some(id) = selected {
                     let item = self.items.iter().find(|item| item.id == id).unwrap();
-                    return self.request(
-                        Job::OpenItem(id, ItemIntent::View),
-                        ServerCommand::ManagementItem { id, reveal: false },
-                        Some(item.revision),
-                    );
+                    return self.open_item(id, ItemIntent::View, Some(item.revision));
                 }
                 self.notice = "Item saved. Select it from your items to continue.".into();
             }
             (Job::RefreshItem(id, intent), ResponsePayload::ItemPage(page)) => {
                 self.replace_items(page.items);
                 if let Some(item) = self.items.iter().find(|item| item.id == id) {
-                    return self.request(
-                        Job::OpenItem(id, intent),
-                        ServerCommand::ManagementItem { id, reveal: false },
-                        Some(item.revision),
-                    );
+                    return self.open_item(id, intent, Some(item.revision));
                 }
                 self.workspace.hide_secrets();
                 self.notice = "This item is no longer available. Refresh the vault.".into();
@@ -1617,7 +1642,7 @@ impl App {
             (Job::SaveEditor, _) => {
                 if let Some(id) = self.editor.as_ref().and_then(|draft| draft.id) {
                     self.notice = "Item saved. You can configure its authenticators below.".into();
-                    return self.refresh_editor(id);
+                    return self.refresh_item(id, ItemIntent::Edit, incremental);
                 }
             }
             (Job::Save, _) => {
@@ -1636,8 +1661,11 @@ impl App {
                 self.item = None;
                 self.delete_confirm = false;
                 self.notice = "Item saved.".into();
-                if let Some(id) = id {
-                    return self.refresh_account(id);
+                if incremental {
+                    self.ui.saved_item = None;
+                }
+                if let Some(id) = id.or(incremental.then_some(changed_id).flatten()) {
+                    return self.refresh_item(id, ItemIntent::View, incremental);
                 }
                 return self.load_items_for(Job::SavedList);
             }
@@ -1653,7 +1681,11 @@ impl App {
                 self.notice =
                     "Item moved to encrypted trash. You can restore it from Tools → Deleted items."
                         .into();
-                return self.load_items();
+                return if incremental {
+                    Task::none()
+                } else {
+                    self.load_items()
+                };
             }
             (Job::Copy, _) => self.notice = "Secret copied with timed clipboard cleanup.".into(),
             _ => {

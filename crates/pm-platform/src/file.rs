@@ -1,7 +1,7 @@
 use directories::ProjectDirs;
 use std::{
     env, fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -152,6 +152,75 @@ pub fn sync_parent(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub fn sync_parent(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Whether the atomic installation may replace an existing destination.
+#[derive(Clone, Copy, Debug)]
+pub enum AtomicWriteMode {
+    Replace,
+    CreateNew,
+}
+
+#[derive(Debug)]
+pub struct AtomicWriteError {
+    pub phase: &'static str,
+    pub source: io::Error,
+    committed: bool,
+}
+impl AtomicWriteError {
+    pub fn committed(&self) -> bool {
+        self.committed
+    }
+}
+impl std::fmt::Display for AtomicWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.committed {
+            write!(f, "file saved but durability uncertain: {}", self.source)
+        } else {
+            write!(f, "could not {}: {}", self.phase, self.source)
+        }
+    }
+}
+impl std::error::Error for AtomicWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Install private bytes atomically. The caller owns parent creation and path policy.
+/// A directory-sync failure is reported as committed so callers never retry blindly.
+pub fn atomic_write_private(
+    path: &Path,
+    bytes: &[u8],
+    mode: AtomicWriteMode,
+) -> Result<(), AtomicWriteError> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let before = |phase, source| AtomicWriteError {
+        phase,
+        source,
+        committed: false,
+    };
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| before("create private temporary file", e))?;
+    set_private_perms(file.path()).map_err(|e| before("protect private temporary file", e))?;
+    file.write_all(bytes)
+        .map_err(|e| before("write private temporary file", e))?;
+    file.as_file()
+        .sync_all()
+        .map_err(|e| before("sync private temporary file", e))?;
+    match mode {
+        AtomicWriteMode::Replace => file.persist(path),
+        AtomicWriteMode::CreateNew => file.persist_noclobber(path),
+    }
+    .map_err(|e| before("install private file", e.error))?;
+    sync_parent(path).map_err(|source| AtomicWriteError {
+        phase: "sync parent directory",
+        source,
+        committed: true,
+    })
 }
 
 /// Export and backup destinations must not replace application-owned files.
@@ -312,6 +381,45 @@ pub fn list_vault_files(directory: &std::path::Path) -> std::io::Result<Vec<Stri
 mod test {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn atomic_private_writes_respect_creation_replacement_and_failed_installation() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("private.bin");
+        atomic_write_private(&path, b"original", AtomicWriteMode::CreateNew).unwrap();
+        let error =
+            atomic_write_private(&path, b"uncommitted", AtomicWriteMode::CreateNew).unwrap_err();
+        assert!(!error.committed());
+        assert_eq!(error.source.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        atomic_write_private(&path, b"replacement", AtomicWriteMode::Replace).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let directory = root.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        let error =
+            atomic_write_private(&directory, b"uncommitted", AtomicWriteMode::Replace).unwrap_err();
+        assert!(!error.committed());
+        assert!(directory.is_dir());
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            2,
+            "failed installation must remove temporary files"
+        );
+        let missing = root.path().join("missing").join("private.bin");
+        assert!(atomic_write_private(&missing, b"uncommitted", AtomicWriteMode::Replace).is_err());
+        assert!(
+            !missing.parent().unwrap().exists(),
+            "parent creation is caller policy"
+        );
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

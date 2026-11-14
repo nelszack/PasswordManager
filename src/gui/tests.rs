@@ -734,19 +734,24 @@ fn save_and_continue_editing_preserves_edits_until_saved_and_reopens_the_current
 
 #[test]
 fn locking_during_editor_refresh_prevents_the_old_editor_from_reappearing() {
-    let mut app = editor_app();
-    let _ = app.refresh_editor(1);
-    let old_serial = app.serial;
-    let _ = app.update(Message::Lock);
-    let _ = app.update(Message::Finished(
-        old_serial,
-        Job::OpenItem(1, ItemIntent::Edit),
-        Arc::new(Ok(reply(
-            ResponsePayload::Item(item()),
-            Some(&"a".repeat(64)),
-        ))),
-    ));
-    assert!(app.editor.is_none() && app.item.is_none() && app.connection.session.is_none());
+    for incremental in [false, true] {
+        let mut app = editor_app();
+        let _ = app.refresh_item(1, ItemIntent::Edit, incremental);
+        assert!(app.editor.is_none() && app.item.is_none());
+        assert!(app.workspace.authenticator.configuration.is_empty());
+        assert!(app.workspace.authenticator.activation.is_empty());
+        let old_serial = app.serial;
+        let _ = app.update(Message::Lock);
+        let _ = app.update(Message::Finished(
+            old_serial,
+            Job::OpenItem(1, ItemIntent::Edit),
+            Arc::new(Ok(reply(
+                ResponsePayload::Item(item()),
+                Some(&"a".repeat(64)),
+            ))),
+        ));
+        assert!(app.editor.is_none() && app.item.is_none() && app.connection.session.is_none());
+    }
 }
 
 fn account_app(duo: bool) -> App {
@@ -1942,4 +1947,61 @@ fn applying_cloud_resolution_discards_old_tool_results_and_confirmations() {
     assert!(app.workspace.result.is_none());
     assert!(app.workspace.authenticator.configuration.is_empty());
     assert!(app.item.is_none() && app.editor.is_none());
+}
+
+#[test]
+fn mutation_deltas_require_the_current_revision_and_save_without_a_full_list() {
+    let mut app = account_app(false);
+    app.vault_revision = Some(10);
+    app.items_revision = Some(10);
+    let mut updated = app.items[0].clone();
+    updated.name = "Renamed account".into();
+    updated.revision += 1;
+    let changes = password_manager::vault::ItemChanges {
+        base_revision: 9,
+        revision: 11,
+        items: vec![updated.clone()],
+        removed: vec![],
+    };
+    assert!(!app.apply_item_changes(&changes));
+    assert_ne!(app.items[0].name, updated.name);
+    let mut response = RpcResponse::success(ResponsePayload::Message("Saved".into()));
+    response.session_id = app.connection.session.clone();
+    response.changes = Some(password_manager::vault::ItemChanges {
+        base_revision: 10,
+        ..changes
+    });
+    let _ = app.complete(
+        Job::Save,
+        Reply::Server {
+            response: Box::new(response),
+            vaults: vec![],
+            pending: vec![],
+        },
+    );
+    assert_eq!(app.items[0].name, updated.name);
+    assert_eq!(app.vault_revision, Some(11));
+    assert!(
+        app.ui.saved_item.is_none(),
+        "a confirmed delta must not start new-item list discovery"
+    );
+    assert!(app.busy(), "fetch the changed item's details directly");
+}
+
+#[test]
+fn newer_status_cannot_make_an_old_item_list_eligible_for_deltas() {
+    let mut app = account_app(false);
+    app.vault_revision = Some(11);
+    app.items_revision = Some(10);
+    let mut updated = app.items[0].clone();
+    updated.name = "Changed".into();
+    assert!(
+        !app.apply_item_changes(&password_manager::vault::ItemChanges {
+            base_revision: 11,
+            revision: 12,
+            items: vec![updated],
+            removed: vec![],
+        })
+    );
+    assert_eq!(app.items_revision, Some(10));
 }

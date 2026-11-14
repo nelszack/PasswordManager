@@ -1,6 +1,6 @@
 use crate::{
     clipboard::copy_in_background,
-    file::{TOKEN_FILE, data_dir, set_private_perms, sync_parent},
+    file::{TOKEN_FILE, data_dir, sync_parent},
     protocol::{
         RequestEnvelope, ResponseCode, ResponsePayload, RpcResponse, SECURE_PREFACE,
         SECURE_RECORD_HEADER_LEN, decrypt_record, encrypt_record, server_hello,
@@ -14,7 +14,7 @@ use rand::RngExt;
 use serde::Deserialize;
 use std::{
     fs,
-    io::{Cursor, Write},
+    io::Cursor,
     path::Path,
     process::{Command, Stdio},
     sync::{
@@ -71,7 +71,7 @@ enum CommandEffect {
     #[default]
     None,
     StopServer,
-    Audit(crate::vault::AuditSnapshot, bool),
+    Audit(crate::vault::PendingAudit, bool),
     Duo(Box<crate::vault::PreparedDuoPoll>),
     DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
 }
@@ -268,6 +268,25 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
     else {
         return;
     };
+    // Bound audit-owned cold-password snapshots before the vault clones them.
+    static AUDIT_REQUEST: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _audit_permit = if matches!(request.command, ServerCommand::Audit(_)) {
+        match AUDIT_REQUEST.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let mut response = RpcResponse::message(
+                    ResponseCode::Failure,
+                    "An audit is already running; try again after it finishes",
+                );
+                response.request_id = Some(request.request_id.clone());
+                response.session_id = worker.session_id();
+                let _ = deliver_responses(vec![response], &mut stream, &response_key).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let operation_id = request.operation_id.clone();
     let request_id = request.request_id.clone();
     let kill_tx = state.kill_tx.clone();
@@ -371,6 +390,31 @@ async fn finish_external_effect(
             finish_duo_enrollment(*prepared, worker.clone(), &mut result.responses).await
         }
         CommandEffect::Audit(snapshot, check_breaches) => {
+            // One CPU audit at a time, outside the vault queue. Check the captured
+            // session/revision between scores so locking and edits remain responsive.
+            static AUDIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+            let permit = AUDIT.acquire().await.expect("audit semaphore stays open");
+            let expected_session = result.session_id.clone();
+            let expected_revision = Some(snapshot.revision);
+            let audit_worker = worker.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                snapshot.finish(|| {
+                    audit_worker.session_id() != expected_session
+                        || audit_worker.vault_revision() != expected_revision
+                })
+            })
+            .await;
+            drop(permit);
+            let snapshot = match prepared {
+                Ok(Ok(snapshot)) => snapshot,
+                _ => {
+                    outcome::respond_conflict(
+                        "Vault changed or audit evaluation failed; run it again",
+                        &mut result.responses,
+                    );
+                    return worker.finish_external(result, operation_id).await;
+                }
+            };
             let audit = snapshot.audit(check_breaches).await;
             let code = if audit.incomplete {
                 ResponseCode::Failure

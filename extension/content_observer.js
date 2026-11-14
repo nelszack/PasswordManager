@@ -1,5 +1,5 @@
 "use strict";
-const { isTotpInput, isCredentialInput, isUsableInput, isNewPasswordInput } = require("./content_detection.js");
+const { isTotpInput, isCredentialInput, isUsableInput, isNewPasswordInput, withVisibilityCache = action => action() } = require("./content_detection.js");
 module.exports.create = function create({ controls, generator, autofill, onRoot = () => {}, onRemoveRoot = () => {} }) {
     const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } = controls;
     const { createGeneratorButton, removeGeneratorButton } = generator;
@@ -9,7 +9,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     let disposed = false;
     const registeredRoots = new Set();
     // Attribute churn does not change subtree membership. Keep a small LRU of
-    // static discovery snapshots; child-list mutations invalidate them all.
+    // static discovery snapshots; child-list mutations invalidate affected trees.
     const snapshots = new Map();
     function snapshot(root) {
         let result = snapshots.get(root);
@@ -50,26 +50,28 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     // Visit each light DOM / open shadow DOM subtree once for both discovery and
     // observation. No credentials are fetched during this scan.
     function attachToInputs(root = document, observeRoot = () => {}) {
-        const roots = [root];
-        // Form classification is shared within this scan, then discarded so later
-        // DOM changes and user interactions always inspect the current fields.
-        const formUsernames = new WeakMap();
-        for (let index = 0; index < roots.length; index++) {
-            const openRoot = roots[index];
-            observeRoot(openRoot);
-            if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
-            if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
-            // Ordinary controls are leaves; unusual author-created descendants
-            // still receive full discovery.
-            if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
-            const discovered = snapshot(openRoot);
-            for (const input of discovered.inputs) attachInput(input, formUsernames);
-            // Inspect existing elements even on cache hits: a page may attach an
-            // open shadow root without a child-list mutation on its host.
-            for (const candidate of discovered.elements) {
-                if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+        return withVisibilityCache(() => {
+            const roots = [root];
+            // Form classification is shared within this scan, then discarded so later
+            // DOM changes and user interactions always inspect the current fields.
+            const formUsernames = new WeakMap();
+            for (let index = 0; index < roots.length; index++) {
+                const openRoot = roots[index];
+                observeRoot(openRoot);
+                if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
+                if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
+                // Ordinary controls are leaves; unusual author-created descendants
+                // still receive full discovery.
+                if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
+                const discovered = snapshot(openRoot);
+                for (const input of discovered.inputs) attachInput(input, formUsernames);
+                // Inspect existing elements even on cache hits: a page may attach an
+                // open shadow root without a child-list mutation on its host.
+                for (const candidate of discovered.elements) {
+                    if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+                }
             }
-        }
+        });
     }
 
     // Follow shadow hosts too: Node.contains does not cross shadow boundaries.
@@ -84,7 +86,24 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         const pendingRoots = new Set();
         let attachScheduled = false;
         observer = new MutationObserver((mutations) => {
-            if (mutations.some(mutation => mutation.type === "childList")) snapshots.clear();
+            const ownUI = node => node?.nodeType === 1 && node.classList?.contains("my-extension-ui");
+            mutations = mutations.filter(mutation => {
+                if (mutation.type !== "childList") return true;
+                const changed = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
+                return !changed.length || !changed.every(ownUI);
+            });
+            for (const mutation of mutations) {
+                if (mutation.type !== "childList") continue;
+                // Mutation targets invalidate ancestor snapshots, including across shadow hosts.
+                if (!mutation.target) { snapshots.clear(); continue; }
+                for (let node = mutation.target; node; node = node.parentNode || node.host) snapshots.delete(node);
+                // Detached trees may change outside observation. Invalidate cached
+                // descendants too when they leave or reenter an observed tree.
+                const changedRoots = new Set([...(mutation.addedNodes || []), ...(mutation.removedNodes || [])]);
+                for (const root of snapshots.keys()) {
+                    if (changedRoots.has(root) || coveredByPendingRoot(root, changedRoots)) snapshots.delete(root);
+                }
+            }
             let removedRoot = false;
             for (const root of registeredRoots) {
                 if (root.host && !root.host.isConnected) { onRemoveRoot(root); registeredRoots.delete(root); removedRoot = true; }

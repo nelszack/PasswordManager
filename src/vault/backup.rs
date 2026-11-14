@@ -72,6 +72,7 @@ pub(crate) fn restore_encrypted_backup(
         metadata: VaultMetadata {
             filename: filename.clone(),
             duo_session: None,
+            changes: None,
         },
     };
     write_vault_with_key(&vault, &mut candidate)?;

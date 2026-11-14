@@ -1,7 +1,6 @@
-use crate::file::{set_private_perms, sync_parent};
+use crate::file::{AtomicWriteMode, atomic_write_private};
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::Path};
-use tempfile::NamedTempFile;
+use std::{fs, path::Path};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -201,23 +200,12 @@ impl Default for ServerConfig {
 fn write_file(config: &Config, config_path: &Path) -> Result<(), String> {
     let toml_string = toml::to_string(config)
         .map_err(|error| format!("could not encode configuration: {error}"))?;
-    let parent = config_path
-        .parent()
-        .ok_or_else(|| "configuration path has no parent directory".to_string())?;
-    let mut temporary = NamedTempFile::new_in(parent)
-        .map_err(|error| format!("could not create configuration temp file: {error}"))?;
-    set_private_perms(temporary.path())
-        .map_err(|error| format!("could not protect configuration temp file: {error}"))?;
-    temporary
-        .write_all(toml_string.as_bytes())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| format!("could not write configuration: {error}"))?;
-    temporary
-        .persist(config_path)
-        .map_err(|error| format!("could not replace configuration: {}", error.error))?;
-    sync_parent(config_path)
-        .map_err(|error| format!("could not sync configuration directory: {error}"))?;
-    Ok(())
+    atomic_write_private(
+        config_path,
+        toml_string.as_bytes(),
+        AtomicWriteMode::Replace,
+    )
+    .map_err(|error| format!("could not save configuration: {error}"))
 }
 fn default_config(write_to_file: bool, config_path: &Path) -> Result<Config, String> {
     let config = Config::default();

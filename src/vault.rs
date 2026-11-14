@@ -37,7 +37,7 @@ mod browser;
 mod management;
 pub use pm_contracts::vault::{AutofillItem, BrowserLogin};
 pub use pm_contracts::vault::{
-    HistoryPage, ItemDetail, ItemField, ItemPage, ItemSummary, TrashPage, TrashSummary,
+    HistoryPage, ItemChanges, ItemDetail, ItemField, ItemPage, ItemSummary, TrashPage, TrashSummary,
 };
 mod query;
 use browser::hostname;
@@ -92,6 +92,7 @@ impl AuditEntrySnapshot {
 }
 
 mod audit;
+pub(crate) use audit::PendingAudit;
 
 mod import;
 
@@ -287,11 +288,12 @@ struct Item {
     duo: Option<DuoRecord>,
     lifecycle: Lifecycle,
     strength: CachedStrength,
+    sites: browser::CachedSites,
     search: query::CachedSearch,
 }
 // Derived runtime data never affects item equality, revisions, or persistence.
 #[derive(Debug, Default, Clone)]
-struct CachedStrength(std::sync::OnceLock<zxcvbn::Score>);
+struct CachedStrength(std::sync::Arc<std::sync::OnceLock<zxcvbn::Score>>);
 impl PartialEq for CachedStrength {
     fn eq(&self, _: &Self) -> bool {
         true
@@ -317,6 +319,7 @@ impl Item {
             duo: None,
             lifecycle: Lifecycle::Active,
             strength: CachedStrength::default(),
+            sites: browser::CachedSites::default(),
             search: query::CachedSearch::default(),
         }
     }
@@ -341,10 +344,16 @@ impl Default for VaultData {
     }
 }
 
-#[derive(Default, PartialEq, Clone)]
+#[derive(Default, Clone)]
 pub struct VaultMetadata {
     pub filename: String,
     pub(crate) duo_session: Option<[u8; 32]>,
+    pub(crate) changes: Option<(u64, u64, Vec<usize>)>,
+}
+impl PartialEq for VaultMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.filename == other.filename && self.duo_session == other.duo_session
+    }
 }
 impl std::fmt::Debug for VaultMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -357,6 +366,7 @@ impl Zeroize for VaultMetadata {
     fn zeroize(&mut self) {
         self.filename.zeroize();
         self.duo_session.zeroize();
+        self.changes = None;
     }
 }
 impl Drop for VaultMetadata {
@@ -398,7 +408,8 @@ impl Vault {
     }
     fn item_mut(&mut self, id: usize) -> Option<&mut Item> {
         let item = self.data.items.get_mut(&ItemId::from_public(id).ok()?)?;
-        item.strength.0.take();
+        item.strength = CachedStrength::default();
+        item.sites = browser::CachedSites::default();
         item.search.0.take();
         Some(item)
     }

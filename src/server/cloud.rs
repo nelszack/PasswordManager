@@ -337,7 +337,7 @@ async fn sync(
     }
     let remote_id = snap.id.clone();
     let c = client.clone();
-    let remote = c.list().await?.into_iter().find(|v| v.id == remote_id);
+    let remote = c.head(&remote_id).await?;
     let local_digest = digest(&snap.bytes);
     let local_changed = state.digest.as_deref() != Some(&local_digest);
     let remote_version = remote.as_ref().map(|v| v.version.clone());

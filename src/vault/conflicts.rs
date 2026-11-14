@@ -228,6 +228,7 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
                 .ok_or("Item revision exhausted")?;
             item.entry.modified = Timestamp::now();
             item.strength = CachedStrength::default();
+            item.sites = browser::CachedSites::default();
             item.search = query::CachedSearch::default();
             if let Some(duo) = &mut item.duo {
                 duo.review_key = None;
@@ -484,5 +485,48 @@ mod tests {
                 .merge_cloud(&credentials, &corrupt, &selected)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod site_cache_tests {
+    use super::*;
+    #[test]
+    fn cloud_merge_discards_cached_origins_before_matching_again() {
+        let local = Vault::from_entries(
+            vec![VaultEntry {
+                id: 1,
+                name: "Synthetic".into(),
+                url: Some("https://old.example.invalid".into()),
+                ..Default::default()
+            }],
+            None,
+        );
+        assert_eq!(local.browser_logins("https://old.example.invalid").len(), 1);
+        let mut remote = local.data.clone();
+        remote.items.get_mut(&ItemId(1)).unwrap().entry.url =
+            Some("https://new.example.invalid".into());
+        let choices: Vec<_> = compare(&local.data, &remote)
+            .into_iter()
+            .flat_map(|item| {
+                item.fields.into_iter().map(move |field| Choice {
+                    id: item.id,
+                    field: field.field,
+                    side: Side::Remote,
+                })
+            })
+            .collect();
+        let mut merged = Vault::memory();
+        merged.data = merge(&local.data, &remote, &choices).unwrap();
+        assert!(
+            merged
+                .browser_logins("https://old.example.invalid")
+                .is_empty()
+        );
+        assert_eq!(
+            merged.browser_logins("https://new.example.invalid").len(),
+            1
+        );
+        assert_eq!(local.browser_logins("https://old.example.invalid").len(), 1);
     }
 }
