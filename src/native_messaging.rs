@@ -28,6 +28,8 @@ const HOST_NAME: &str = "com.myproject.password_manager";
 const HOST_BINARY_NAME: &str = "pm-native-host";
 #[cfg(target_os = "windows")]
 const HOST_BINARY_NAME: &str = "pm-native-host.exe";
+#[cfg(any(feature = "desktop", target_os = "windows", test))]
+const DESKTOP_EXECUTABLE_FILE: &str = "desktop-executable.json";
 const MAX_NATIVE_MESSAGE: usize = 1024 * 1024;
 
 #[derive(Deserialize, Default)]
@@ -218,14 +220,6 @@ impl NativeResponse {
 }
 
 pub fn invoked_directly() -> bool {
-    // Windows installs a copy named pm-native-host.exe. An explicit GUI
-    // invocation must reach CLI dispatch rather than re-entering the bridge.
-    if std::env::args_os()
-        .skip(1)
-        .eq([std::ffi::OsString::from("gui")])
-    {
-        return false;
-    }
     std::env::args_os()
         .next()
         .and_then(|path| PathBuf::from(path).file_name().map(|name| name.to_owned()))
@@ -346,8 +340,21 @@ fn install_host_link(host_path: &Path) -> Result<(), String> {
         .and_then(fs::canonicalize)
         .map_err(|error| format!("could not locate the pm executable: {error}"))?;
     fs::copy(&executable, host_path)
-        .map(|_| ())
-        .map_err(|error| format!("could not install {}: {error}; fully close the browser, then rerun pm native-host update", host_path.display()))
+        .map_err(|error| format!("could not install {}: {error}; fully close the browser, then rerun pm native-host update", host_path.display()))?;
+    record_desktop_executable(host_path, &executable)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn record_desktop_executable(host_path: &Path, executable: &Path) -> Result<(), String> {
+    let path = host_path.with_file_name(DESKTOP_EXECUTABLE_FILE);
+    let encoded = serde_json::to_vec(executable)
+        .map_err(|error| format!("could not encode desktop executable path: {error}"))?;
+    fs::write(&path, encoded).map_err(|error| {
+        format!(
+            "could not record desktop executable at {}: {error}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -512,6 +519,7 @@ fn launch_desktop() -> Result<(), String> {
     {
         let executable = std::env::current_exe()
             .map_err(|error| format!("could not locate the desktop executable: {error}"))?;
+        let executable = desktop_executable(&executable)?;
         let mut command = desktop_command(&executable);
         let mut child = command
             .spawn()
@@ -522,6 +530,33 @@ fn launch_desktop() -> Result<(), String> {
         });
         Ok(())
     }
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn desktop_executable(host_executable: &Path) -> Result<PathBuf, String> {
+    let update_hint = "Run pm native-host update using the normal pm executable.";
+    // Resolve Unix's native-host symlink before choosing the GUI executable.
+    let executable = fs::canonicalize(host_executable)
+        .map_err(|error| format!("could not resolve desktop executable: {error}. {update_hint}"))?;
+    if executable
+        .file_name()
+        .is_none_or(|name| name != HOST_BINARY_NAME)
+    {
+        return Ok(executable);
+    }
+    // Windows uses a copy of pm for the bridge. The install/update command
+    // records the original application path beside that copy.
+    let registered = fs::read(executable.with_file_name(DESKTOP_EXECUTABLE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PathBuf>(&bytes).ok())
+        .filter(|path| path.is_absolute())
+        .and_then(|path| fs::canonicalize(path).ok())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name != HOST_BINARY_NAME)
+        })
+        .filter(|path| path.is_file());
+    registered.ok_or_else(|| format!("The normal pm executable could not be found. {update_hint}"))
 }
 
 #[cfg(feature = "desktop")]

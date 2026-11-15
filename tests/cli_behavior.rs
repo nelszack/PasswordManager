@@ -503,10 +503,20 @@ fn native_host_updates_are_explicit_and_preserve_browser_manifests() {
             std::fs::canonicalize(env!("CARGO_BIN_EXE_pm")).unwrap()
         );
         #[cfg(windows)]
-        assert_eq!(
-            std::fs::read(&host).unwrap(),
-            std::fs::read(env!("CARGO_BIN_EXE_pm")).unwrap()
-        );
+        {
+            assert_eq!(
+                std::fs::read(&host).unwrap(),
+                std::fs::read(env!("CARGO_BIN_EXE_pm")).unwrap()
+            );
+            let desktop: std::path::PathBuf = serde_json::from_slice(
+                &std::fs::read(host_dir.join("desktop-executable.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                desktop,
+                std::fs::canonicalize(env!("CARGO_BIN_EXE_pm")).unwrap()
+            );
+        }
     }
     #[cfg(unix)]
     {

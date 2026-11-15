@@ -551,7 +551,47 @@ fn desktop_launch_does_not_need_a_vault_server_and_preserves_errors() {
 #[cfg(feature = "desktop")]
 #[test]
 fn desktop_process_uses_explicit_gui_dispatch() {
-    let command = desktop_command(Path::new("/synthetic/pm-native-host.exe"));
-    assert_eq!(command.get_program(), "/synthetic/pm-native-host.exe");
+    let command = desktop_command(Path::new("/synthetic/pm"));
+    assert_eq!(command.get_program(), "/synthetic/pm");
     assert_eq!(command.get_args().collect::<Vec<_>>(), ["gui"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_launch_resolves_native_host_symlink_to_normal_pm() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("pm");
+    fs::write(&executable, "synthetic executable").unwrap();
+    let host = root.path().join(HOST_BINARY_NAME);
+    std::os::unix::fs::symlink(&executable, &host).unwrap();
+    assert_eq!(
+        desktop_executable(&host).unwrap(),
+        fs::canonicalize(&executable).unwrap()
+    );
+}
+
+#[test]
+fn copied_native_host_launches_registered_pm_and_rejects_unusable_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("pm.exe");
+    fs::write(&executable, "synthetic application").unwrap();
+    let host = root.path().join(HOST_BINARY_NAME);
+    fs::write(&host, "synthetic bridge copy").unwrap();
+    let error = desktop_executable(&host).unwrap_err();
+    assert!(error.contains("pm native-host update"));
+    record_desktop_executable(&host, &executable).unwrap();
+    assert_eq!(
+        desktop_executable(&host).unwrap(),
+        fs::canonicalize(&executable).unwrap()
+    );
+    for invalid in [
+        host.as_path(),
+        Path::new("relative-pm"),
+        &root.path().join("missing-pm"),
+    ] {
+        record_desktop_executable(&host, invalid).unwrap();
+        assert!(desktop_executable(&host).is_err());
+    }
+    fs::write(host.with_file_name(DESKTOP_EXECUTABLE_FILE), "invalid json").unwrap();
+    assert!(desktop_executable(&host).is_err());
 }
