@@ -90,7 +90,7 @@ pub(super) async fn command(
     action: crate::cloud::Action,
     expected_session: Option<String>,
     stopping: Arc<AtomicBool>,
-) -> Result<String, String> {
+) -> Result<ResponsePayload, String> {
     let _guard = SYNC.lock().await;
     if stopping.load(Ordering::Acquire) {
         return Err("Server is stopping".into());
@@ -103,8 +103,7 @@ pub(super) async fn command(
     match action {
         Action::List => {
             let client = client().await?;
-            let list = client.list().await?;
-            serde_json::to_string_pretty(&list).map_err(|e| e.to_string())
+            Ok(ResponsePayload::CloudVaults(client.list().await?))
         }
         Action::Pull(id) | Action::PullCopy(id) => {
             let client = client().await?;
@@ -125,31 +124,30 @@ pub(super) async fn command(
                     )
                 })
                 .await??;
-            Ok(format!(
+            Ok(ResponsePayload::Message(format!(
                 "Downloaded encrypted vault as {filename}. Unlock it with its existing password or external key."
-            ))
+            )))
         }
         Action::Conflicts => review_or_resolve(worker, None, expected_session, stopping).await,
         Action::Resolve(resolution) => {
             review_or_resolve(worker, Some(resolution), expected_session, stopping).await
         }
-        Action::Disable => {
-            worker
-                .with_session(move |session| {
-                    if session.session_id() != expected_session {
-                        return Err("Unlock session changed before disabling sync".into());
-                    }
-                    let path = session.vault().ok_or("Unlock a vault first")?.sync_path()?;
-                    let mut state = binding(&path)?.ok_or("This vault is not connected to sync")?;
-                    state.enabled = false;
-                    save_binding(&path, &state)?;
-                    Ok("Sync disabled for this vault".to_owned())
-                })
-                .await?
-        }
+        Action::Disable => worker
+            .with_session(move |session| {
+                if session.session_id() != expected_session {
+                    return Err("Unlock session changed before disabling sync".into());
+                }
+                let path = session.vault().ok_or("Unlock a vault first")?.sync_path()?;
+                let mut state = binding(&path)?.ok_or("This vault is not connected to sync")?;
+                state.enabled = false;
+                save_binding(&path, &state)?;
+                Ok("Sync disabled for this vault".to_owned())
+            })
+            .await?
+            .map(ResponsePayload::Message),
         Action::Status => {
             let snapshot = snapshot(worker).await?;
-            Ok(match snapshot.state {
+            Ok(ResponsePayload::Message(match snapshot.state {
                 Some(s) => format!(
                     "Vault: {}\nServer: {}\nEnabled: {}\nRemote version: {}\nLocal changes: {}",
                     s.vault_id,
@@ -159,17 +157,16 @@ pub(super) async fn command(
                     s.digest.as_deref() != Some(&digest(&snapshot.bytes))
                 ),
                 None => "This vault is not connected to sync. Run pm sync enable.".into(),
-            })
+            }))
         }
-        action => {
-            sync(
-                worker,
-                matches!(action, Action::Enable),
-                matches!(action, Action::Check),
-                expected_session,
-            )
-            .await
-        }
+        action => sync(
+            worker,
+            matches!(action, Action::Enable),
+            matches!(action, Action::Check),
+            expected_session,
+        )
+        .await
+        .map(ResponsePayload::Message),
     }
 }
 /// Bind consent to the exact two ciphertexts, connection, and unlock session.
@@ -191,7 +188,7 @@ async fn review_or_resolve(
     resolution: Option<crate::cloud::Resolution>,
     expected_session: Option<String>,
     stopping: Arc<AtomicBool>,
-) -> Result<String, String> {
+) -> Result<ResponsePayload, String> {
     let snap = snapshot(worker).await?;
     if expected_session.as_ref() != Some(&snap.session) {
         return Err("Unlock session changed before conflict review".into());
@@ -224,24 +221,25 @@ async fn review_or_resolve(
             return Err("Local vault or sync settings changed; review again".into());
         }
         session.with_unlocked(|vault, credentials| {
-            let work = (|| -> Result<String, String> {
+            let work = (|| -> Result<ResponsePayload, String> {
                 let Some(resolution) = resolution else {
                     let items = vault.cloud_conflicts(credentials, &bytes)?;
-                    return serde_json::to_string_pretty(&crate::cloud::ConflictReview { token, items }).map_err(|e| e.to_string());
+                    return Ok(ResponsePayload::CloudConflicts(crate::cloud::ConflictReview { token, items }));
                 };
                 let merged = vault.merge_cloud(credentials, &bytes, &resolution.choices)?;
                 // Preserve both full encrypted snapshots, including history/trash,
                 // before committing any decision. Recovery copies never auto-sync.
                 let local_copy = crate::cloud::install_download(&url, &snap.id, None, snap.bytes, true)?;
-                let remote_copy = crate::cloud::install_download(&url, &snap.id, Some(version.clone()), bytes.clone(), true)?;
-                vault.apply_cloud(credentials, &merged)?;
+                let remote_digest = digest(&bytes);
+                let remote_copy = crate::cloud::install_download(&url, &snap.id, Some(version.clone()), bytes, true)?;
+                vault.apply_prepared_cloud(credentials, merged).map_err(|error| error.to_string())?;
                 let mut state = snap.state.ok_or("Sync binding removed")?;
                 // The remote remains the upload's CAS base. A concurrent upload
                 // after review will cause normal sync to preserve both versions.
                 state.version = Some(version);
-                state.digest = Some(digest(&bytes));
+                state.digest = Some(remote_digest);
                 save_binding(&snap.path, &state)?;
-                Ok(format!("Resolution saved. Encrypted recovery copies: {local_copy} (local), {remote_copy} (cloud)."))
+                Ok(ResponsePayload::Message(format!("Resolution saved. Encrypted recovery copies: {local_copy} (local), {remote_copy} (cloud).")))
             })();
             work.map_err(crate::vault::VaultError::Persistence)
         }).map_err(|e| e.to_string())
@@ -249,14 +247,17 @@ async fn review_or_resolve(
     if !resolving {
         return Ok(result);
     }
+    let ResponsePayload::Message(result) = result else {
+        unreachable!("resolution produces a message")
+    };
     match sync(worker, false, false, expected_session).await {
         Ok(message) => {
             worker.set_cloud_warning(None).await;
-            Ok(format!("{result}\n{message}"))
+            Ok(ResponsePayload::Message(format!("{result}\n{message}")))
         }
-        Err(error) => Ok(format!(
+        Err(error) => Ok(ResponsePayload::Message(format!(
             "{result}\nSync pending: {error}. Review current state before retrying."
-        )),
+        ))),
     }
 }
 /// A comparison fetch is required before declaring a conflict: independently
@@ -419,38 +420,75 @@ async fn sync(
     save_binding(&snap.path, &state)?;
     Ok("Uploaded encrypted vault changes".into())
 }
+/// A disabled receiver owns no pending network request. Changes cancel the old
+/// request before credentials for the next connection are loaded.
+async fn event_loop<F, Fut>(
+    mut enabled: tokio::sync::watch::Receiver<Option<String>>,
+    wake: Arc<tokio::sync::Notify>,
+    fetch: F,
+) where
+    F: Fn(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut endpoint = None;
+    let mut generation = String::new();
+    loop {
+        let current = enabled.borrow_and_update().clone();
+        if current != endpoint {
+            endpoint = current;
+            generation.clear();
+        }
+        let Some(server) = endpoint.clone() else {
+            if enabled.changed().await.is_err() {
+                return;
+            }
+            continue;
+        };
+        let result = tokio::select! {
+            changed = enabled.changed() => {
+                if changed.is_err() { return; }
+                continue;
+            }
+            result = fetch(server, generation.clone()) => result,
+        };
+        match result {
+            Ok(next) => {
+                if next != generation {
+                    generation = next;
+                    wake.notify_one();
+                }
+            }
+            Err(_) => {
+                tokio::select! {
+                    changed = enabled.changed() => { if changed.is_err() { return; } }
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let wake = Arc::new(tokio::sync::Notify::new());
-        let events_wake = wake.clone();
-        let events_stop = stopping.clone();
-        let events = AbortTask(tokio::spawn(async move {
-            let mut generation = String::new();
-            while !events_stop.load(Ordering::Acquire) {
-                let result = async {
-                    let c = client().await?;
-                    let old = generation.clone();
-                    c.events(&old).await
+        let (events_enabled, enabled) = tokio::sync::watch::channel(None);
+        let events = AbortTask(tokio::spawn(event_loop(
+            enabled,
+            wake.clone(),
+            |url, generation| async move {
+                let client = client().await?;
+                if client.url != url {
+                    return Err("Sync connection changed".into());
                 }
-                .await;
-                match result {
-                    Ok(next) => {
-                        if next != generation {
-                            generation = next;
-                            events_wake.notify_one();
-                        }
-                    }
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    }
-                }
-            }
-        }));
+                client.events(&generation).await
+            },
+        )));
         let mut last_probe = None;
         let mut last_remote = std::time::Instant::now() - Duration::from_secs(60);
         while !stopping.load(Ordering::Acquire) {
             let notified = tokio::select! {_=tokio::time::sleep(Duration::from_secs(2))=>false,_=wake.notified()=>true};
             let Ok(config) = try_read_config(&config_dir().join("config.toml")) else {
+                events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
             };
@@ -458,17 +496,31 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
                 || config.sync.server_url.is_empty()
                 || worker.session_id().is_none()
             {
+                events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
             }
             let Ok(current) = probe(&worker, config.sync.server_url).await else {
+                events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
             };
-            if !current.binding.as_ref().is_some_and(|s| s.enabled) {
+            if !current.binding.as_ref().is_some_and(|state| {
+                state.enabled && state.server_url == current.configured_server.trim_end_matches('/')
+            }) {
+                events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
             }
+            events_enabled.send_if_modified(|value| {
+                let next = Some(current.configured_server.trim_end_matches('/').to_owned());
+                if *value == next {
+                    false
+                } else {
+                    *value = next;
+                    true
+                }
+            });
             // A full snapshot is needed only for a change, notification, or
             // bounded remote recheck. The recheck also covers external writes
             // whose timestamps/size happen to match the previous file.
@@ -575,5 +627,69 @@ mod decision_tests {
         assert_eq!(compare_snapshot(true, true), UpToDate);
         assert_eq!(compare_snapshot(true, false), Conflict);
         assert_eq!(compare_snapshot(false, false), Download);
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disabled_events_cancel_requests_and_connection_changes_reset_the_cursor() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (enabled, receiver) = tokio::sync::watch::channel(None);
+            let (calls, mut started) = tokio::sync::mpsc::unbounded_channel();
+            let wake = Arc::new(tokio::sync::Notify::new());
+            let task = tokio::spawn(event_loop(receiver, wake.clone(), move |url, cursor| {
+                let calls = calls.clone();
+                async move {
+                    struct Cancel(Option<tokio::sync::oneshot::Sender<()>>);
+                    impl Drop for Cancel {
+                        fn drop(&mut self) {
+                            if let Some(sender) = self.0.take() {
+                                let _ = sender.send(());
+                            }
+                        }
+                    }
+                    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+                    let _cancel = Cancel(Some(cancel));
+                    calls.send((url, cursor.clone(), cancelled)).unwrap();
+                    if cursor.is_empty() {
+                        Ok("generation".into())
+                    } else {
+                        std::future::pending().await
+                    }
+                }
+            }));
+            tokio::task::yield_now().await;
+            assert!(
+                started.try_recv().is_err(),
+                "disabled events must not load credentials or request events"
+            );
+            enabled.send(Some("first".into())).unwrap();
+            let (url, cursor, _) = started.recv().await.unwrap();
+            assert_eq!(url, "first");
+            assert!(cursor.is_empty());
+            let (_, cursor, cancelled) = started.recv().await.unwrap();
+            assert_eq!(cursor, "generation");
+            wake.notified().await;
+            enabled.send(None).unwrap();
+            cancelled.await.unwrap();
+            tokio::task::yield_now().await;
+            assert!(started.try_recv().is_err());
+            enabled.send(Some("second".into())).unwrap();
+            let (url, cursor, _) = started.recv().await.unwrap();
+            assert_eq!(url, "second");
+            assert!(
+                cursor.is_empty(),
+                "a new connection cannot reuse the old event cursor"
+            );
+            let (_, _, cancelled) = started.recv().await.unwrap();
+            drop(enabled);
+            cancelled.await.unwrap();
+            task.await.unwrap();
+        })
+        .await
+        .expect("event loop must respond to configuration changes");
     }
 }

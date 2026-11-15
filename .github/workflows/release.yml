@@ -110,6 +110,9 @@ jobs:
         with:
           name: release-completions
           path: release-completions
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
       - name: Build optimized binary
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package Unix archive
@@ -124,7 +127,7 @@ jobs:
           cp -R docs "dist/$package/"
           mkdir -p "dist/$package/fuzz"
           cp fuzz/README.md "dist/$package/fuzz/"
-          cp -R extension "dist/$package/"
+          node scripts/package_extension.cjs "dist/$package/extension"
           cp release-completions/* "dist/$package/completions/"
           tar -czf "dist/$package.tar.gz" -C dist "$package"
           rm -rf "dist/$package"
@@ -141,7 +144,8 @@ jobs:
           Copy-Item -Recurse docs "dist/$Package/"
           New-Item -ItemType Directory -Force "dist/$Package/fuzz" | Out-Null
           Copy-Item fuzz/README.md "dist/$Package/fuzz/"
-          Copy-Item -Recurse extension "dist/$Package/"
+          node scripts/package_extension.cjs "dist/$Package/extension"
+          if ($LASTEXITCODE -ne 0) { throw "Extension packaging failed" }
           Copy-Item "release-completions/*" "dist/$Package/completions/"
           Compress-Archive -Path "dist/$Package" -DestinationPath "dist/$Package.zip"
           Remove-Item -Recurse -Force "dist/$Package"

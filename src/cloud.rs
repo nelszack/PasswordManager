@@ -13,16 +13,10 @@ use std::{
 use zeroize::Zeroizing;
 
 pub use pm_contracts::cloud::{
-    Action, Choice, ConflictField, ConflictItem, ConflictReview, Resolution, Side,
+    Action, Choice, ConflictField, ConflictItem, ConflictReview, RemoteVault, Resolution, Side,
 };
 
 pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoteVault {
-    pub id: String,
-    pub version: String,
-    pub size: u64,
-}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -104,13 +98,15 @@ pub(crate) fn verify_identity(vault: &Path, id: [u8; 16]) -> Result<(), String> 
     }
     Ok(())
 }
+fn valid_device_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 pub fn install_token(token: &str) -> Result<(), String> {
     let token = token.trim();
-    if token.len() != 64
-        || !token
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+    if !valid_device_token(token) {
         return Err("Device token must contain 64 lowercase hexadecimal characters".into());
     }
     write_private(&config_dir().join("sync-token"), token.as_bytes(), true)
@@ -168,25 +164,14 @@ pub struct CloudClient {
 }
 impl CloudClient {
     pub fn new(config: &SyncConfig) -> Result<Self, String> {
-        validate_server_url(&config.server_url)?;
         let token = read_token_file(&config_dir().join("sync-token"))
             .map_err(|e| format!("Read sync credential: {e}; run pm sync connect"))?;
-        if token.len() != 64
-            || !token
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err("Invalid saved device credential; run pm sync connect".into());
-        }
         Self::with_token(&config.server_url, token)
+            .map_err(|error| format!("{error}; run pm sync connect"))
     }
     pub fn with_token(url: &str, token: Zeroizing<String>) -> Result<Self, String> {
         validate_server_url(url)?;
-        if token.len() != 64
-            || !token
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        if !valid_device_token(&token) {
             return Err("Invalid sync device credential".into());
         }
         // The transport holds no credentials: authorization is attached per

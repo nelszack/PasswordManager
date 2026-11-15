@@ -14,9 +14,11 @@ impl Vault {
         let Some(id) = self.entry_id(&target) else {
             return Ok(None);
         };
-        let (normalized, bits) = normalize_totp_configuration(configuration)?;
-        let normalized = Zeroizing::new(normalized);
-        let authenticator = Authenticator::parse(&normalized)?;
+        let (configuration, state, bits) = parse_authenticator_configuration(configuration)?;
+        let authenticator = Authenticator {
+            configuration: configuration.into(),
+            state,
+        };
         if self.item(id).unwrap().authenticator.as_ref() == Some(&authenticator) {
             return Ok(Some(bits));
         }
@@ -277,42 +279,52 @@ pub(super) fn compatible_totp_from_secret(secret: TotpSecret) -> Result<Totp, Va
 }
 
 pub(super) fn normalize_totp_configuration(value: &str) -> Result<(String, usize), VaultError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(("TOTP configuration cannot be empty".to_string()).into());
-    }
-    if trimmed.len() > 4096 {
-        return Err(("TOTP configuration is too long".to_string()).into());
-    }
-    if is_otpauth_uri(trimmed) {
-        let totp = if is_hotp_uri(trimmed) {
-            parse_hotp_configuration(trimmed)?.0
-        } else {
-            compatible_totp_from_url(trimmed)?
-        };
-        return Ok((trimmed.to_string(), totp.secret().as_ref().len() * 8));
-    }
-
-    let mut normalized: String = trimmed
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace() && *character != '-')
-        .flat_map(char::to_uppercase)
-        .collect();
-    let secret = match TotpSecret::try_from_base32(&normalized) {
-        Ok(secret) => secret,
-        Err(error) => {
-            normalized.zeroize();
-            return Err((format!("invalid Base32 TOTP secret: {error}")).into());
-        }
-    };
-    let secret_bits = secret.as_ref().len() * 8;
-    if let Err(error) = compatible_totp_from_secret(secret) {
-        normalized.zeroize();
-        return Err(error);
-    }
-    Ok((normalized, secret_bits))
+    let (configuration, _, bits) = parse_authenticator_configuration(value)?;
+    Ok((configuration, bits))
 }
 
+/// Normalize and validate once, retaining the parsed state for ingestion.
+pub(super) fn parse_authenticator_configuration(
+    value: &str,
+) -> Result<(String, AuthenticatorState, usize), VaultError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(VaultError::Validation(
+            "TOTP configuration cannot be empty".into(),
+        ));
+    }
+    if trimmed.len() > 4096 {
+        return Err(VaultError::Validation(
+            "TOTP configuration is too long".into(),
+        ));
+    }
+    if is_otpauth_uri(trimmed) {
+        let (state, bits) = if is_hotp_uri(trimmed) {
+            let (generator, counter) = parse_hotp_configuration(trimmed)?;
+            let bits = generator.secret().as_ref().len() * 8;
+            (AuthenticatorState::Hotp { generator, counter }, bits)
+        } else {
+            let generator = compatible_totp_from_url(trimmed)?;
+            let bits = generator.secret().as_ref().len() * 8;
+            (AuthenticatorState::Totp(generator), bits)
+        };
+        return Ok((trimmed.to_owned(), state, bits));
+    }
+    let mut normalized = Zeroizing::new(
+        trimmed
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace() && *character != '-')
+            .flat_map(char::to_uppercase)
+            .collect::<String>(),
+    );
+    let secret = TotpSecret::try_from_base32(&normalized)
+        .map_err(|error| VaultError::Validation(format!("invalid Base32 TOTP secret: {error}")))?;
+    let bits = secret.as_ref().len() * 8;
+    let state = AuthenticatorState::Totp(compatible_totp_from_secret(secret)?);
+    Ok((std::mem::take(&mut *normalized), state, bits))
+}
+
+#[cfg(test)]
 pub(super) fn parse_totp_configuration(value: &str) -> Result<Totp, VaultError> {
     if is_otpauth_uri(value) {
         compatible_totp_from_url(value)

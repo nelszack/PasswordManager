@@ -1,0 +1,35 @@
+name: Finish checks
+description: Require selected checks to pass and upload proof of the tested source tree.
+inputs:
+  workflow:
+    description: Workflow identity
+    required: true
+  results:
+    description: Job results JSON
+    required: true
+  selected:
+    description: Selected suites JSON
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Require successful selected checks
+      shell: bash
+      env:
+        RESULTS: ${{ inputs.results }}
+        CHECK_WORKFLOW: ${{ inputs.workflow }}
+      run: python3 scripts/ci/plan.py --workflow "$CHECK_WORKFLOW" --finish
+    - name: Record the tested source tree
+      shell: bash
+      env:
+        SELECTED: ${{ inputs.selected }}
+        CHECK_WORKFLOW: ${{ inputs.workflow }}
+      run: python3 scripts/ci/plan.py --workflow "$CHECK_WORKFLOW" --record
+    - name: Upload successful source-tree proof
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ${{ inputs.workflow }}-tested-tree
+        path: tested-tree.json
+        overwrite: true
+        retention-days: 14
+        if-no-files-found: error

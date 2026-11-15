@@ -30,7 +30,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
     function createGeneratorButton(input) {
         const existing = generatorControls.get(input);
         if (existing) {
-            existing.position();
+            controls.schedulePosition();
             return;
         }
 
@@ -68,8 +68,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             button.title = "Strong password generated and filled";
         });
 
-        positionButton();
-        const control = { position: positionButton, remove: null };
+        const control = { remove: null };
         control.remove = registerPositionedControl(input, button, positionButton, () => {
             if (generatorControls.get(input) === control) generatorControls.delete(input);
         });

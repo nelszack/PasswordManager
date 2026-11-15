@@ -82,13 +82,8 @@ fn resolved_file(path: String, console: &Output) -> String {
     if path.is_empty() {
         console.exit_error("file path cannot be empty", 2);
     }
-    std::path::absolute(&path)
+    password_manager::file::absolute_unicode_path(&path)
         .map_err(|error| format!("could not resolve file path: {error}"))
-        .and_then(|path| {
-            path.into_os_string()
-                .into_string()
-                .map_err(|_| "file path must contain valid Unicode".to_string())
-        })
         .unwrap_or_else(|error| console.exit_error(&error, 2))
 }
 

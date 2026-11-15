@@ -1,4 +1,11 @@
 use serde::{Deserialize, Serialize};
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteVault {
+    pub id: String,
+    pub version: String,
+    pub size: u64,
+}
+
 /// Local application commands; never accepted from the browser native host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

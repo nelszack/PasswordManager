@@ -453,6 +453,122 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
 }
 
 #[test]
+fn tool_search_trash_and_audit_pages_bound_widgets_and_keep_item_identity() {
+    use password_manager::vault::{AuditLabel, AuditReport, ItemPage, TrashPage, TrashSummary};
+    let items: Vec<_> = (0..103)
+        .map(|id| ItemSummary {
+            id,
+            revision: 1,
+            name: format!("Paged item {id:03}"),
+            username: None,
+            kind: ItemKind::Login,
+            urls: vec![],
+            has_totp: false,
+            has_duo: false,
+        })
+        .collect();
+    let label = |item: &ItemSummary| AuditLabel {
+        id: item.id,
+        name: item.name.clone(),
+        username: None,
+        password_changed: String::new(),
+    };
+    let audit = AuditReport {
+        total: items.len(),
+        healthy: 0,
+        score: 0,
+        weak: items[..49].iter().map(label).collect(),
+        reused: vec![items[49..101].iter().map(label).collect()],
+        duplicates: vec![],
+        stale: vec![],
+        missing_totp: vec![],
+        breached: items[101..].iter().map(|item| (label(item), 9)).collect(),
+        breach_error: Some("Synthetic incomplete check".into()),
+        unchecked: vec![],
+    };
+    let trash = TrashPage {
+        trash: items
+            .iter()
+            .map(|item| TrashSummary {
+                id: item.id,
+                name: item.name.clone(),
+                kind: item.kind,
+                username: None,
+                deleted: "yesterday".into(),
+                has_totp: false,
+            })
+            .collect(),
+    };
+    for (name, payload) in [
+        (
+            "search",
+            ResponsePayload::ItemPage(ItemPage {
+                total: items.len(),
+                items,
+            }),
+        ),
+        ("trash", ResponsePayload::Trash(trash)),
+        ("audit", ResponsePayload::Audit(audit)),
+    ] {
+        let mut app = tests::app();
+        app.request_state = RequestState::Idle;
+        app.connection.running = true;
+        app.connection.session = Some("synthetic-session".into());
+        app.tab = Tab::Tools;
+        app.workspace.section = match name {
+            "search" => workflows::Section::Search,
+            "trash" => workflows::Section::Trash,
+            _ => workflows::Section::Audit,
+        };
+        app.workspace.receive(payload);
+        let first = render(&app, &format!("paged-{name}"), 1060, 800, 1.0);
+        assert!(
+            first.1.iter().any(|text| text.contains("Paged item 000")),
+            "{name}"
+        );
+        assert!(
+            !first.1.iter().any(|text| text.contains("Paged item 050")),
+            "{name}"
+        );
+        let tree = accessibility_tree(&app, None);
+        assert!(format!("{:?}", tree.update).contains("Next page"), "{name}");
+        let _ = app.workflow(workflows::Event::ResultPage(usize::MAX));
+        assert_eq!(app.workspace.result_page, 2);
+        let last = render(&app, &format!("paged-{name}-last"), 480, 800, 1.0);
+        assert!(
+            last.1.iter().any(|text| text.contains("Paged item 102")),
+            "{name}"
+        );
+        assert!(
+            !last.1.iter().any(|text| text.contains("Paged item 049")),
+            "{name}"
+        );
+        if name == "audit" {
+            assert!(
+                last.1
+                    .iter()
+                    .any(|text| text.contains("Reused passwords · group 1"))
+            );
+            assert!(last.1.iter().any(|text| text.contains("seen 9 times")));
+            assert!(
+                last.1
+                    .iter()
+                    .any(|text| text.contains("Synthetic incomplete check"))
+            );
+        } else if name == "trash" {
+            let prepared = app
+                .workspace
+                .prepare(workflows::Action::RestoreTrash(102), &app)
+                .unwrap();
+            assert!(matches!(prepared.command, ServerCommand::RestoreTrash(102)));
+        }
+        app.workspace
+            .receive(ResponsePayload::Message("New result".into()));
+        assert_eq!(app.workspace.result_page, 0);
+    }
+}
+
+#[test]
 fn dynamic_banners_preserve_editor_focus_across_view_updates() {
     use renderer::Renderer as _;
     let mut app = tests::app();

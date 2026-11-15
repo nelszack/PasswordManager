@@ -42,6 +42,8 @@ def select(paths):
             selected.update(("extension", "browser", "npm_audit"))
         elif path == "playwright.config.cjs":
             selected.add("browser")
+        elif path == "scripts/package_extension.cjs":
+            selected.update(("extension", "browser"))
         elif path == "scripts/build_extension.cjs":
             selected.update(("extension", "browser", "rust"))
         elif path == "scripts/validate.cjs":

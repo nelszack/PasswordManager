@@ -116,22 +116,6 @@ pub fn try_prompt_for_confirmed_password(
     }
 }
 
-fn prompt_for_confirmed_password(require_minimum: bool) -> String {
-    try_prompt_for_confirmed_password(require_minimum, |message| eprintln!("{message}"))
-        .unwrap_or_else(|error| {
-            eprintln!("Error: {error}");
-            std::process::exit(1);
-        })
-}
-
-pub fn prompt_for_password() -> String {
-    prompt_for_confirmed_password(false)
-}
-
-pub fn prompt_for_new_master_password() -> String {
-    prompt_for_confirmed_password(true)
-}
-
 fn generate_key(path: &std::path::Path) -> Result<[u8; 32], String> {
     let key = Zeroizing::new(<[u8; 32]>::generate());
     let mut file = create_key_file(path)

@@ -675,12 +675,13 @@ fn unlock(app: &App) -> Element<'_, Message> {
 
 fn vault(app: &App) -> Element<'_, Message> {
     let mut entries = Column::new().spacing(6);
-    const PAGE_SIZE: usize = 50;
+    use presentation::PAGE_SIZE;
     let matching = app.matching_items();
     let count = matching.len();
-    let pages = count.div_ceil(PAGE_SIZE).max(1);
-    let page = app.ui.item_page.min(pages - 1);
-    for offset in (page * PAGE_SIZE..count).take(PAGE_SIZE) {
+    let window = presentation::Page::new(app.ui.item_page, count);
+    let pages = window.pages;
+    let page = window.index;
+    for offset in window.range {
         let index = if app.ui.reverse_items {
             count - 1 - offset
         } else {
@@ -1128,6 +1129,7 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
 
 fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
     let enabled = !app.busy();
+    let validation = draft.validation();
     let profile = model::profile(draft.kind);
     let mut name = column![
         label("Name (required)"),
@@ -1391,7 +1393,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                 .wrap(),
             ]
             .spacing(8);
-            if let Some(message) = draft.field_error(index) {
+            if let Some(message) = validation.field_error(index) {
                 custom = custom.push(error(message));
             }
             form = form.push(panel(custom));
@@ -1420,7 +1422,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
         }
     }
     if draft.dirty
-        && let Err(message) = draft.validate()
+        && let Some(message) = validation.error
     {
         footer = footer.push(error(message));
     }
@@ -1429,7 +1431,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             primary(
                 "Save item",
                 Message::Save,
-                app.writes_allowed() && !app.editor.conflicted() && draft.validate().is_ok()
+                app.writes_allowed() && !app.editor.conflicted() && validation.error.is_none()
             ),
             action("Cancel", Message::Navigate(Navigate::Close), enabled),
             text(if draft.dirty {

@@ -25,9 +25,7 @@ test("passphrases use the configured word count and separator", () => {
     assert.equal(generator.generate({ mode: "passphrase", words: 1 }).includes("-"), false);
 });
 
-test("site overrides match exact origins, preserve defaults, and reject unsafe destinations", () => {
-    assert.equal(generator.siteOrigin("https://Example.COM:8443/"), "https://example.com:8443");
-    for (const value of ["http://example.com", "https://user:password@example.com", "https://example.com/path", "https://example.com/?x=1", "not-a-url"]) assert.throws(() => generator.siteOrigin(value));
+test("site overrides match exact origins and preserve defaults", () => {
     const stored = { pmGenerator: { length: 25 }, pmGeneratorsByOrigin: { "https://example.com": { length: 31 } } };
     assert.equal(generator.settingsForSite(stored, "https://example.com/signup").length, 31);
     assert.equal(generator.settingsForSite(stored, "https://example.com:8443/signup").length, 25);

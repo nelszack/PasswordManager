@@ -447,21 +447,26 @@ fn hiding_multiline_input_masks_it_without_discarding_the_replacement() {
 fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
     use password_manager::{
         protocol::AuthenticatorResponse,
-        types::PasswordEntry,
+        types::{PasswordEntry, TypedEntry},
         vault::{Vault, VaultCredentials},
     };
     let mut vault = Vault::memory();
     let mut key =
         VaultCredentials::from(PasswordType::Password("synthetic fixture password".into()));
     vault
-        .add_entry(
-            PasswordEntry {
-                name: "Synthetic account".into(),
-                username: None,
-                password: "synthetic secret".into(),
-                url: None,
-                notes: None,
-                copy: false,
+        .add_typed_entry(
+            TypedEntry {
+                entry: PasswordEntry {
+                    name: "Synthetic account".into(),
+                    username: None,
+                    password: "synthetic secret".into(),
+                    url: None,
+                    notes: None,
+                    copy: false,
+                },
+                kind: ItemKind::Login,
+                additional_urls: vec![],
+                custom_fields: vec![],
             },
             &mut key,
         )
@@ -489,7 +494,7 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
             .workspace
             .prepare(workflows::Action::ShowOtp(false), &app)
             .unwrap();
-        vault.check_revision(1, prepared.revision.unwrap()).unwrap();
+        assert_eq!(vault.revision(1), prepared.revision);
         let code = vault.current_otp(Target::Id(1), &mut key).unwrap();
         assert_eq!(code.counter, Some(expected_counter));
         let payload = ResponsePayload::Authenticator(AuthenticatorResponse {
@@ -520,7 +525,7 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
             .workspace
             .prepare(workflows::Action::History, &app)
             .unwrap();
-        assert_eq!(next.revision, vault.item_revision(1));
+        assert_eq!(next.revision, vault.revision(1));
     }
 }
 

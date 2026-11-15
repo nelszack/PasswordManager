@@ -125,6 +125,15 @@ func validID(s string, size int) bool {
 	b, err := hex.DecodeString(s)
 	return err == nil && len(b) == size && s == strings.ToLower(s)
 }
+
+// Check both before streaming and under the commit lock: writers can race
+// while request bodies arrive.
+func uploadMatches(r *http.Request, current snapshot, exists bool) bool {
+	if exists {
+		return r.Header.Get("If-Match") == `"`+current.Version+`"`
+	}
+	return r.Header.Get("If-None-Match") == "*"
+}
 func randomID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -295,7 +304,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		unlock()
 		http.ServeContent(w, r, "vault", time.Time{}, f)
 	case "PUT":
-		if (exists && r.Header.Get("If-Match") != `"`+h.Version+`"`) || (!exists && r.Header.Get("If-None-Match") != "*") {
+		if !uploadMatches(r, h, exists) {
 			http.Error(w, "vault changed; reconcile both copies", 412)
 			return
 		}
@@ -356,8 +365,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage unavailable", 500)
 			return
 		}
-		if (err == nil && r.Header.Get("If-Match") != `"`+current.Version+`"`) ||
-			(errors.Is(err, os.ErrNotExist) && r.Header.Get("If-None-Match") != "*") {
+		if !uploadMatches(r, current, err == nil) {
 			http.Error(w, "vault changed; reconcile both copies", 412)
 			return
 		}

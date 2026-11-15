@@ -33,6 +33,8 @@ class SelectionTests(unittest.TestCase):
             "crates/pm-client/src/client.rs": {"rust", "browser", "cloud", "fuzz", "rust_audit"},
             ".github/workflows/ci.yml": set(plan.SUITES),
             "scripts/ci/plan.py": set(plan.SUITES),
+            ".github/actions/plan-checks/action.yml": set(plan.SUITES),
+            "scripts/package_extension.cjs": {"extension", "browser"},
             "new-build-input.toml": set(plan.SUITES),
         }
         for path, expected in cases.items():

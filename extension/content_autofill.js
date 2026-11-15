@@ -1,5 +1,6 @@
 "use strict";
 const { autocompleteTokens, inputDescriptors, isElementVisible } = require("./content_detection.js");
+const { setControlValue } = require("./content_value.js");
 const PasswordManagerContentFields = require("./content_fields.js");
 module.exports.create = function create({ bridge }) {
     const CARD_AUTOCOMPLETE_FIELDS = new Set([
@@ -64,7 +65,7 @@ module.exports.create = function create({ bridge }) {
         ]);
     }
 
-    function typedAutofillKind(input) {
+    function typedAutofillKind(input, context = new WeakMap()) {
         if (input.disabled || input.readOnly || !isElementVisible(input)) return null;
         if (autofillField(input, "payment-card")) return "payment-card";
 
@@ -74,13 +75,17 @@ module.exports.create = function create({ bridge }) {
 
         // Email and phone fields are common on login and search forms. Only attach
         // an identity picker when another address/name field establishes context.
-        const controls = formControls(formScope(input));
-        return controls.some(control => {
-            if (control.disabled || control.readOnly || !isElementVisible(control)
-                || fieldGroup(control) !== fieldGroup(input)) return false;
-            const field = autofillField(control, "identity");
-            return field && IDENTITY_CONTEXT_FIELDS.has(field);
-        }) ? "identity" : null;
+        const scope = formScope(input);
+        let groups = context.get(scope);
+        if (!groups) {
+            groups = new Set();
+            for (const control of formControls(scope)) {
+                if (control.disabled || control.readOnly || !isElementVisible(control)) continue;
+                if (IDENTITY_CONTEXT_FIELDS.has(autofillField(control, "identity"))) groups.add(fieldGroup(control));
+            }
+            context.set(scope, groups);
+        }
+        return groups.has(fieldGroup(input)) ? "identity" : null;
     }
 
     function customAutofillValue(item, aliases) {
@@ -137,19 +142,10 @@ module.exports.create = function create({ bridge }) {
                 || candidate.text.trim().toLowerCase() === wanted
             );
             if (!option) return;
-            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
-            if (setter) setter.call(control, option.value);
-            else control.value = option.value;
+            setControlValue(control, option.value);
         } else {
-            const prototype = control instanceof HTMLTextAreaElement
-                ? HTMLTextAreaElement.prototype
-                : HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-            if (setter) setter.call(control, value);
-            else control.value = value;
+            setControlValue(control, value);
         }
-        control.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        control.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
     function typedFillContext(input) {

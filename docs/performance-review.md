@@ -1,5 +1,39 @@
 # Performance, compilation, and test review
 
+## Follow-up implementation, 2026-11-14
+
+The current pass removes repeated extension discovery/layout work, caches idle
+Duo detection while keeping authorization checks live, pauses inactive cloud
+event polling, avoids redundant backup and conflict-resolution buffers, and
+parses authenticator configuration once. Desktop tool results now use the same
+50-row page bounds as the main list; editor validation is computed once per
+render, and incremental item updates retain unchanged normalized search data.
+Shared helpers replace duplicate atomic-file, path, authenticator-response,
+device-token, DOM setter, and conditional-upload logic.
+
+Cloud lists and conflict reviews now use typed response payloads. Local protocol
+version 5 requires restarting the daemon/native host and reloading the extension
+together; the encrypted vault format and cloud HTTP protocol are unchanged.
+Release archives stage an explicit runtime extension allowlist, CI planning and
+result recording use shared local actions, and benchmark fingerprints include
+patched vendor dependencies. Syntax checks retain Node's parser and use at most
+four workers. One local 73-file experiment took 3.57s with one worker and 1.42s
+with four; this is not a general CI or application speedup claim.
+
+Validation passed in the final sequential queue
+(`/tmp/check-queue-9cpuclrf/result.json`): shared validation (206 extension tests,
+214 library tests, 181 desktop tests, 32 CLI integration tests, two protocol
+tests, shared-crate/vendor suites, generated checks, formatting and strict
+Clippy), CLI-only compilation, desktop build, all 43 browser tests with coverage,
+two-device cloud sync, native accessibility, eight CI-selection tests, workflow
+linting, and diff checks. The two opt-in Rust benchmark tests remain ignored.
+Extension unit line coverage was 89.47%; browser content-runtime byte coverage
+was 88.78%, with 85.17% aggregate browser byte coverage. Go race tests and vet
+also passed separately. macOS/Windows execution, fuzzing, and Rust LLVM coverage
+were not rerun in this pass.
+
+The historical findings and measurements below describe earlier checkouts.
+
 Reviewed 2026-11-07 against the working checkout on `main`, then implemented locally at the user's request. Existing edits in four test files were preserved. The review findings below describe the original checkout; implementation status and measurements are tracked separately here.
 
 The later architecture simplification supersedes parts of this performance pass:

@@ -31,6 +31,20 @@ pub fn read_bounded_file(path: &Path, max_bytes: u64) -> io::Result<Zeroizing<Ve
     read_bounded(file, max_bytes)
 }
 
+/// Resolve a client-side path without opening it or requiring it to exist.
+/// Empty-input policy and user-facing context belong to the caller.
+pub fn absolute_unicode_path(path: impl AsRef<Path>) -> io::Result<String> {
+    std::path::absolute(path)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file path must contain valid Unicode",
+            )
+        })
+}
+
 fn read_bounded(reader: impl Read, max_bytes: u64) -> io::Result<Zeroizing<Vec<u8>>> {
     let mut contents = Zeroizing::new(Vec::new());
     reader
@@ -381,6 +395,29 @@ pub fn list_vault_files(directory: &std::path::Path) -> std::io::Result<Vec<Stri
 mod test {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn absolute_unicode_paths_preserve_names_without_requiring_an_existing_file() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("École vault ☃.json");
+        assert_eq!(
+            absolute_unicode_path(&missing).unwrap(),
+            missing.to_str().unwrap()
+        );
+        assert!(!missing.exists());
+        let relative = absolute_unicode_path("École vault ☃.json").unwrap();
+        assert!(Path::new(&relative).is_absolute());
+        assert!(Path::new(&relative).ends_with("École vault ☃.json"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let invalid = root.path().join(std::ffi::OsString::from_vec(vec![0xff]));
+            assert_eq!(
+                absolute_unicode_path(invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
 
     #[test]
     fn atomic_private_writes_respect_creation_replacement_and_failed_installation() {

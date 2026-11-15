@@ -183,6 +183,17 @@ pub struct Draft {
     pub copy_policy: ClipboardPolicy,
 }
 
+pub struct Validation {
+    fields: Vec<Option<&'static str>>,
+    pub error: Option<&'static str>,
+}
+
+impl Validation {
+    pub fn field_error(&self, index: usize) -> Option<&'static str> {
+        self.fields.get(index).copied().flatten()
+    }
+}
+
 impl Draft {
     pub fn from_item(item: &ItemDetail) -> Self {
         let notes = item.notes.clone().unwrap_or_default();
@@ -294,19 +305,16 @@ impl Draft {
             if !(field.changed || field.removed || field.original_name.is_none()) {
                 continue;
             }
-            let find = |item: &ItemDetail| {
-                item.fields
-                    .iter()
-                    .find(|candidate| {
-                        field
-                            .original_name
-                            .as_ref()
-                            .is_some_and(|name| candidate.name.eq_ignore_ascii_case(name))
-                    })
-                    .cloned()
-            };
-            let before = find(original);
-            let remote = find(latest);
+            fn find<'a>(
+                item: &'a ItemDetail,
+                name: Option<&str>,
+            ) -> Option<&'a password_manager::vault::ItemField> {
+                item.fields.iter().find(|candidate| {
+                    name.is_some_and(|name| candidate.name.eq_ignore_ascii_case(name))
+                })
+            }
+            let before = find(original, field.original_name.as_deref());
+            let remote = find(latest, field.original_name.as_deref());
             let secret = field.secret
                 || before.as_ref().is_some_and(|f| f.secret)
                 || remote.as_ref().is_some_and(|f| f.secret);
@@ -390,35 +398,48 @@ impl Draft {
         merged
     }
 
-    pub fn field_error(&self, index: usize) -> Option<String> {
-        let field = self.fields.get(index).filter(|field| !field.removed)?;
-        let name = field.name.trim();
-        if name.is_empty() {
-            return Some("Give this field a name.".into());
+    pub fn validation(&self) -> Validation {
+        let names: Vec<_> = self
+            .fields
+            .iter()
+            .map(|field| (!field.removed).then(|| field.name.trim().to_lowercase()))
+            .collect();
+        let mut counts = std::collections::HashMap::new();
+        for name in names.iter().flatten() {
+            *counts.entry(name.as_str()).or_insert(0usize) += 1;
         }
-        if self.fields.iter().enumerate().any(|(other, candidate)| {
-            other != index
-                && !candidate.removed
-                && candidate.name.trim().to_lowercase() == name.to_lowercase()
-        }) {
-            return Some("Use a unique name for each custom field.".into());
-        }
-        if (field.changed || field.original_name.is_none()) && field.hidden && !field.value_edited {
-            return Some("Enter a replacement value before changing this hidden field.".into());
-        }
-        None
+        let fields: Vec<_> = self
+            .fields
+            .iter()
+            .zip(&names)
+            .map(|(field, name)| {
+                let name = name.as_deref()?;
+                if name.is_empty() {
+                    Some("Give this field a name.")
+                } else if counts[name] > 1 {
+                    Some("Use a unique name for each custom field.")
+                } else if (field.changed || field.original_name.is_none())
+                    && field.hidden
+                    && !field.value_edited
+                {
+                    Some("Enter a replacement value before changing this hidden field.")
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let error = if self.name.trim().is_empty() {
+            Some("Enter an item name.")
+        } else {
+            fields.iter().copied().flatten().next()
+        };
+        Validation { fields, error }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.trim().is_empty() {
-            return Err("Enter an item name.".into());
-        }
-        for index in 0..self.fields.len() {
-            if let Some(error) = self.field_error(index) {
-                return Err(error);
-            }
-        }
-        Ok(())
+        self.validation()
+            .error
+            .map_or(Ok(()), |error| Err(error.into()))
     }
 
     pub fn command(&self) -> Result<ServerCommand, String> {
@@ -739,6 +760,57 @@ mod tests {
 #[cfg(test)]
 mod merge_tests {
     use super::*;
+    #[test]
+    fn validation_preserves_unicode_duplicates_hidden_values_and_error_order() {
+        let mut draft = Draft {
+            name: "Item".into(),
+            fields: vec![
+                FieldDraft {
+                    name: " ÉCOLE ".into(),
+                    hidden: true,
+                    ..Default::default()
+                },
+                FieldDraft {
+                    name: "école".into(),
+                    ..Default::default()
+                },
+                FieldDraft {
+                    removed: true,
+                    ..Default::default()
+                },
+                FieldDraft {
+                    name: "Hidden".into(),
+                    hidden: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let validation = draft.validation();
+        assert_eq!(
+            validation.error,
+            Some("Use a unique name for each custom field.")
+        );
+        assert_eq!(validation.field_error(0), validation.field_error(1));
+        assert_eq!(validation.field_error(2), None);
+        assert_eq!(
+            validation.field_error(3),
+            Some("Enter a replacement value before changing this hidden field.")
+        );
+        draft.fields[1].removed = true;
+        draft.fields[0].original_name = Some("ÉCOLE".into());
+        assert_eq!(
+            draft.validation().field_error(0),
+            None,
+            "unchanged hidden fields are preserved"
+        );
+        draft.fields[3].value_edited = true;
+        assert!(draft.command().is_ok());
+        draft.fields[0].name = " ".into();
+        assert_eq!(draft.validation().error, Some("Give this field a name."));
+        draft.name.clear();
+        assert_eq!(draft.validate().unwrap_err(), "Enter an item name.");
+    }
     #[test]
     fn reapply_preserves_concurrent_metadata_and_unedited_hidden_fields() {
         let original = ItemDetail {

@@ -9,6 +9,8 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     // Reposition secure picker and generator buttons as the page layout changes.
     const positionedControls = new Set();
     let layoutObserverStarted = false;
+    let disposed = false;
+    let schedulePosition = () => {};
     let repositionScheduled = false;
     let controlResizeObserver = null;
 
@@ -24,6 +26,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         positionedControls.add(record);
         startLayoutObserver();
         controlResizeObserver?.observe(input);
+        schedulePosition();
         return record.remove;
     }
 
@@ -32,10 +35,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         layoutObserverStarted = true;
 
         const reposition = () => {
-            if (repositionScheduled) return;
+            if (disposed || repositionScheduled) return;
             repositionScheduled = true;
             requestAnimationFrame(() => {
                 repositionScheduled = false;
+                if (disposed) return;
                 const writes = [];
                 withVisibilityCache(() => {
                     for (const control of positionedControls) {
@@ -51,6 +55,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             });
         };
 
+        schedulePosition = reposition;
         window.addEventListener("load", reposition, { signal: lifecycle.signal });
         window.addEventListener("scroll", reposition, { capture: true, signal: lifecycle.signal });
         window.addEventListener("resize", reposition, { signal: lifecycle.signal });
@@ -82,7 +87,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     function createSecurePickerButton(input, kind, icon, title, onSelection, selectionScope = () => undefined) {
         const existing = securePickerControls.get(input);
         if (existing?.kind === kind) {
-            existing.position();
+            schedulePosition();
             return;
         }
         existing?.remove();
@@ -101,8 +106,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         // Keep keyboard traversal beside the field the control belongs to.
         if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
         const positionButton = positionedButton(input, button, 30);
-        positionButton();
-        const control = { kind, position: positionButton, remove: null };
+        const control = { kind, remove: null };
         control.remove = registerPositionedControl(input, button, positionButton, () => {
             if (securePickerControls.get(input) === control) {
                 securePickerControls.delete(input);
@@ -169,11 +173,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function dispose() {
-        lifecycle.abort(); layoutObserver?.disconnect(); controlResizeObserver?.disconnect();
+        disposed = true; lifecycle.abort(); layoutObserver?.disconnect(); controlResizeObserver?.disconnect();
         for (const control of positionedControls) control.remove();
     }
 
-    return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, accountUsername, dispose };
+    return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, schedulePosition: () => schedulePosition(), accountUsername, dispose };
 };
 
 // Return deferred writes so callers can finish all style/geometry reads first.

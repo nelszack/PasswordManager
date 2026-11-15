@@ -665,6 +665,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
     let enabled = !app.busy();
     let writes = enabled && app.connection.session.is_some() && app.recovery.id().is_none();
     let result = state.result.as_ref().unwrap();
+    let window = presentation::Page::new(state.result_page, state.result_count());
     let mut form = column![].spacing(14);
     match result {
         ResponsePayload::History(_) if state.history_for(app).is_none() => {
@@ -676,7 +677,13 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             if page.history.is_empty() {
                 form = form.push(text("No saved password revisions."));
             }
-            for (index, changed) in page.history.iter().enumerate() {
+            for (index, changed) in page
+                .history
+                .iter()
+                .enumerate()
+                .skip(window.range.start)
+                .take(presentation::PAGE_SIZE)
+            {
                 form = form.push(
                     row![
                         text(format!(
@@ -696,7 +703,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             }
         }
         ResponsePayload::Trash(page) => {
-            for entry in &page.trash {
+            for entry in &page.trash[window.range.clone()] {
                 form = form.push(
                     column![
                         text(trash_label(entry)),
@@ -721,7 +728,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
         }
         ResponsePayload::ItemPage(page) => {
             form = form.push(text(format!("{} matching items", page.total)));
-            for item in &page.items {
+            for item in &page.items[window.range.clone()] {
                 form = form.push(
                     button(text(format!(
                         "{} · {}",
@@ -738,52 +745,17 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             form = form
                 .push(text(heading).size(25))
                 .push(text(detail).size(16));
-            for (label, entries) in [
-                ("Weak passwords", report.weak.as_slice()),
-                ("Old passwords", report.stale.as_slice()),
-                ("Missing authenticators", report.missing_totp.as_slice()),
-                ("Breach check incomplete", report.unchecked.as_slice()),
-            ] {
-                if !entries.is_empty() {
-                    form = form.push(text(format!("{label} · {}", entries.len())).size(19));
-                }
-                for entry in entries {
-                    form = form.push(
-                        button(text(&entry.name).size(16))
-                            .padding(12)
-                            .width(Fill)
-                            .style(crate::gui::view::quiet_button)
-                            .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
-                    );
-                }
-            }
-            for (title, groups) in [
-                ("Reused passwords", &report.reused),
-                ("Duplicate logins", &report.duplicates),
-            ] {
-                for group in groups {
-                    form = form.push(text(title).size(19));
-                    for entry in group {
-                        form = form.push(
-                            button(text(&entry.name).size(16))
-                                .padding(12)
-                                .style(crate::gui::view::quiet_button)
-                                .on_press_maybe(
-                                    enabled.then_some(AppMessage::OpenToolItem(entry.id)),
-                                ),
-                        );
-                    }
-                }
-            }
-            for (entry, count) in &report.breached {
-                form = form
-                    .push(text(format!("Exposed password · seen {count} times")).size(19))
-                    .push(
-                        button(text(&entry.name).size(16))
-                            .padding(12)
-                            .style(crate::gui::view::quiet_button)
-                            .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
-                    );
+            for (entry, finding) in audit_rows(report)
+                .skip(window.range.start)
+                .take(presentation::PAGE_SIZE)
+            {
+                form = form.push(text(finding.title()).size(19)).push(
+                    button(text(&entry.name).size(16))
+                        .padding(12)
+                        .width(Fill)
+                        .style(crate::gui::view::quiet_button)
+                        .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
+                );
             }
             if let Some(message) = &report.breach_error {
                 form = form
@@ -793,8 +765,36 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
         _ => form = form.push(text(report(result)).size(16)),
     }
 
+    let mut navigation = column![].spacing(8);
+    if window.pages > 1 {
+        navigation = navigation
+            .push(
+                text(format!(
+                    "Page {} of {} · {} per page",
+                    window.index + 1,
+                    window.pages,
+                    presentation::PAGE_SIZE
+                ))
+                .size(13),
+            )
+            .push(
+                row![
+                    button("Previous page").padding([7, 8]).on_press_maybe(
+                        (enabled && window.index > 0)
+                            .then_some(event(Event::ResultPage(window.index.saturating_sub(1))))
+                    ),
+                    button("Next page").padding([7, 8]).on_press_maybe(
+                        (enabled && window.index + 1 < window.pages)
+                            .then_some(event(Event::ResultPage(window.index + 1)))
+                    ),
+                ]
+                .spacing(8)
+                .wrap(),
+            );
+    }
     column![
         scrollable(form).spacing(12).id("vault-tools").height(Fill),
+        navigation,
         rule::horizontal(1),
         row![
             button("Back to options")
@@ -816,6 +816,58 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
     .spacing(14)
     .height(Fill)
     .into()
+}
+
+#[derive(Clone, Copy)]
+enum AuditFinding {
+    Category(&'static str),
+    Group(&'static str, usize),
+    Breached(u64),
+}
+impl AuditFinding {
+    fn title(self) -> String {
+        match self {
+            Self::Category(title) => title.into(),
+            Self::Group(title, group) => format!("{title} · group {group}"),
+            Self::Breached(count) => format!("Exposed password · seen {count} times"),
+        }
+    }
+}
+fn audit_rows(
+    report: &password_manager::vault::AuditReport,
+) -> impl Iterator<Item = (&password_manager::vault::AuditLabel, AuditFinding)> {
+    [
+        ("Weak passwords", report.weak.as_slice()),
+        ("Old passwords", report.stale.as_slice()),
+        ("Missing authenticators", report.missing_totp.as_slice()),
+        ("Breach check incomplete", report.unchecked.as_slice()),
+    ]
+    .into_iter()
+    .flat_map(|(title, entries)| {
+        entries
+            .iter()
+            .map(move |entry| (entry, AuditFinding::Category(title)))
+    })
+    .chain(
+        [
+            ("Reused passwords", &report.reused),
+            ("Duplicate logins", &report.duplicates),
+        ]
+        .into_iter()
+        .flat_map(|(title, groups)| {
+            groups.iter().enumerate().flat_map(move |(index, group)| {
+                group
+                    .iter()
+                    .map(move |entry| (entry, AuditFinding::Group(title, index + 1)))
+            })
+        }),
+    )
+    .chain(
+        report
+            .breached
+            .iter()
+            .map(|(entry, count)| (entry, AuditFinding::Breached(*count))),
+    )
 }
 
 fn overview(app: &App) -> Element<'_, AppMessage> {

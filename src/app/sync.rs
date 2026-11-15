@@ -107,11 +107,9 @@ fn choose_vault(client: &AuthenticatedClient, console: &Output) -> String {
     if response.code != 0 {
         console.exit_error(&response.error_message(), 1);
     }
-    let ResponsePayload::Message(message) = response.payload else {
+    let ResponsePayload::CloudVaults(vaults) = response.payload else {
         console.exit_error("Invalid cloud vault list", 1)
     };
-    let vaults: Vec<cloud::RemoteVault> =
-        serde_json::from_str(&message).unwrap_or_else(|e| console.exit_error(&e.to_string(), 1));
     if vaults.len() == 1 {
         return vaults[0].id.clone();
     }

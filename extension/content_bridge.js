@@ -1,16 +1,14 @@
 "use strict";
 const { isUsableInput } = require("./content_detection.js");
 
+const { setControlValue } = require("./content_value.js");
+
 module.exports.create = function create({} = {}) {
     let disposed = false;
     // Use the native value setter and input/change events to synchronize form frameworks.
     function fillInput(input, value) {
         if (!input || !isUsableInput(input)) return;
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        if (setter) setter.call(input, value);
-        else input.value = value;
-        input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
+        setControlValue(input, value);
     }
 
     // Result delivery and the opening callback use separate Chrome message

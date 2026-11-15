@@ -40,7 +40,7 @@ function version(command, argv) { try { return execFileSync(command, argv, { cwd
 // configuration contents into the report. Dirty checkouts remain identifiable.
 function sourceFingerprint() {
     const fingerprint = crypto.createHash("sha256");
-    const sourceFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "src", "crates/pm-contracts", "crates/pm-platform", "crates/pm-client", "extension", "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "scripts/benchmark.cjs", "scripts/benchmark_browser.cjs"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean).sort();
+    const sourceFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "vendor", "src", "crates/pm-contracts", "crates/pm-platform", "crates/pm-client", "extension", "Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "scripts/benchmark.cjs", "scripts/benchmark_browser.cjs"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean).sort();
     for (const file of sourceFiles) {
         const full = path.join(root, file);
         if (fs.statSync(full).isFile()) fingerprint.update(file).update("\0").update(fs.readFileSync(full)).update("\0");

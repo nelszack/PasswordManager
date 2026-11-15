@@ -22,7 +22,7 @@ section, details { background: var(--surface); }
 summary { cursor: pointer; font-weight: 600; }
 code { overflow-wrap: anywhere; }
 [hidden] { display: none !important; }
-#new, #editForm button:not([type]), #unlockForm button, #generatorForm button:not([type]), #add {
+#add {
   background: var(--accent); border-color: var(--accent); color: var(--on-accent);
 }
 @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } }

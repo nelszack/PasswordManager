@@ -423,16 +423,14 @@ module.exports.create = function create() {
 "use strict";
 const { isUsableInput } = require("content_detection.js");
 
+const { setControlValue } = require("content_value.js");
+
 module.exports.create = function create({} = {}) {
     let disposed = false;
     // Use the native value setter and input/change events to synchronize form frameworks.
     function fillInput(input, value) {
         if (!input || !isUsableInput(input)) return;
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        if (setter) setter.call(input, value);
-        else input.value = value;
-        input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
+        setControlValue(input, value);
     }
 
     // Result delivery and the opening callback use separate Chrome message
@@ -510,6 +508,21 @@ module.exports.create = function create({} = {}) {
     return { fillInput, openSecurePicker: kind => pickers.open({ kind }),
         openCredentialPrompt: (username, password) => prompts.open({ username, password }), dispose };
 };
+
+},
+"content_value.js": (module, exports, require) => {
+"use strict";
+// Callers validate eligibility and resolve select options before setting a value.
+function setControlValue(control, value) {
+    const prototype = control instanceof HTMLInputElement ? HTMLInputElement.prototype
+        : control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLSelectElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (setter) setter.call(control, value);
+    else control.value = value;
+    control.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    control.dispatchEvent(new Event("change", { bubbles: true }));
+}
+module.exports = { setControlValue };
 
 },
 "content_credentials.js": (module, exports, require) => {
@@ -639,6 +652,7 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
 "content_autofill.js": (module, exports, require) => {
 "use strict";
 const { autocompleteTokens, inputDescriptors, isElementVisible } = require("content_detection.js");
+const { setControlValue } = require("content_value.js");
 const PasswordManagerContentFields = require("content_fields.js");
 module.exports.create = function create({ bridge }) {
     const CARD_AUTOCOMPLETE_FIELDS = new Set([
@@ -703,7 +717,7 @@ module.exports.create = function create({ bridge }) {
         ]);
     }
 
-    function typedAutofillKind(input) {
+    function typedAutofillKind(input, context = new WeakMap()) {
         if (input.disabled || input.readOnly || !isElementVisible(input)) return null;
         if (autofillField(input, "payment-card")) return "payment-card";
 
@@ -713,13 +727,17 @@ module.exports.create = function create({ bridge }) {
 
         // Email and phone fields are common on login and search forms. Only attach
         // an identity picker when another address/name field establishes context.
-        const controls = formControls(formScope(input));
-        return controls.some(control => {
-            if (control.disabled || control.readOnly || !isElementVisible(control)
-                || fieldGroup(control) !== fieldGroup(input)) return false;
-            const field = autofillField(control, "identity");
-            return field && IDENTITY_CONTEXT_FIELDS.has(field);
-        }) ? "identity" : null;
+        const scope = formScope(input);
+        let groups = context.get(scope);
+        if (!groups) {
+            groups = new Set();
+            for (const control of formControls(scope)) {
+                if (control.disabled || control.readOnly || !isElementVisible(control)) continue;
+                if (IDENTITY_CONTEXT_FIELDS.has(autofillField(control, "identity"))) groups.add(fieldGroup(control));
+            }
+            context.set(scope, groups);
+        }
+        return groups.has(fieldGroup(input)) ? "identity" : null;
     }
 
     function customAutofillValue(item, aliases) {
@@ -776,19 +794,10 @@ module.exports.create = function create({ bridge }) {
                 || candidate.text.trim().toLowerCase() === wanted
             );
             if (!option) return;
-            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
-            if (setter) setter.call(control, option.value);
-            else control.value = option.value;
+            setControlValue(control, option.value);
         } else {
-            const prototype = control instanceof HTMLTextAreaElement
-                ? HTMLTextAreaElement.prototype
-                : HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-            if (setter) setter.call(control, value);
-            else control.value = value;
+            setControlValue(control, value);
         }
-        control.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        control.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
     function typedFillContext(input) {
@@ -889,6 +898,8 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     // Reposition secure picker and generator buttons as the page layout changes.
     const positionedControls = new Set();
     let layoutObserverStarted = false;
+    let disposed = false;
+    let schedulePosition = () => {};
     let repositionScheduled = false;
     let controlResizeObserver = null;
 
@@ -904,6 +915,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         positionedControls.add(record);
         startLayoutObserver();
         controlResizeObserver?.observe(input);
+        schedulePosition();
         return record.remove;
     }
 
@@ -912,10 +924,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         layoutObserverStarted = true;
 
         const reposition = () => {
-            if (repositionScheduled) return;
+            if (disposed || repositionScheduled) return;
             repositionScheduled = true;
             requestAnimationFrame(() => {
                 repositionScheduled = false;
+                if (disposed) return;
                 const writes = [];
                 withVisibilityCache(() => {
                     for (const control of positionedControls) {
@@ -931,6 +944,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             });
         };
 
+        schedulePosition = reposition;
         window.addEventListener("load", reposition, { signal: lifecycle.signal });
         window.addEventListener("scroll", reposition, { capture: true, signal: lifecycle.signal });
         window.addEventListener("resize", reposition, { signal: lifecycle.signal });
@@ -962,7 +976,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     function createSecurePickerButton(input, kind, icon, title, onSelection, selectionScope = () => undefined) {
         const existing = securePickerControls.get(input);
         if (existing?.kind === kind) {
-            existing.position();
+            schedulePosition();
             return;
         }
         existing?.remove();
@@ -981,8 +995,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         // Keep keyboard traversal beside the field the control belongs to.
         if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
         const positionButton = positionedButton(input, button, 30);
-        positionButton();
-        const control = { kind, position: positionButton, remove: null };
+        const control = { kind, remove: null };
         control.remove = registerPositionedControl(input, button, positionButton, () => {
             if (securePickerControls.get(input) === control) {
                 securePickerControls.delete(input);
@@ -1049,11 +1062,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function dispose() {
-        lifecycle.abort(); layoutObserver?.disconnect(); controlResizeObserver?.disconnect();
+        disposed = true; lifecycle.abort(); layoutObserver?.disconnect(); controlResizeObserver?.disconnect();
         for (const control of positionedControls) control.remove();
     }
 
-    return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, accountUsername, dispose };
+    return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, schedulePosition: () => schedulePosition(), accountUsername, dispose };
 };
 
 // Return deferred writes so callers can finish all style/geometry reads first.
@@ -1110,7 +1123,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
     function createGeneratorButton(input) {
         const existing = generatorControls.get(input);
         if (existing) {
-            existing.position();
+            controls.schedulePosition();
             return;
         }
 
@@ -1148,8 +1161,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             button.title = "Strong password generated and filled";
         });
 
-        positionButton();
-        const control = { position: positionButton, remove: null };
+        const control = { remove: null };
         control.remove = registerPositionedControl(input, button, positionButton, () => {
             if (generatorControls.get(input) === control) generatorControls.delete(input);
         });
@@ -1204,20 +1216,13 @@ const PasswordManagerGenerator = (() => {
         for (let i = characters.length - 1; i > 0; i--) { const j = randomIndex(i + 1); [characters[i], characters[j]] = [characters[j], characters[i]]; }
         return characters.join("");
     }
-    function siteOrigin(value) {
-        const url = new URL(value);
-        if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
-            throw new Error("Enter an HTTPS origin, such as https://example.com, without a path");
-        }
-        return url.origin;
-    }
     function settingsForSite(storage, url) {
         let origin; try { origin = new URL(url).origin; } catch (_) { origin = ""; }
         const override = Object.hasOwn(storage.pmGeneratorsByOrigin || {}, origin) ? storage.pmGeneratorsByOrigin[origin] : undefined;
         try { return validate(override || storage.pmGenerator || {}); }
         catch (_) { try { return validate(storage.pmGenerator || {}); } catch (_) { return defaults; } }
     }
-    return { defaults, validate, generate, siteOrigin, settingsForSite };
+    return { defaults, validate, generate, settingsForSite };
 })();
 if (typeof module !== "undefined") module.exports = PasswordManagerGenerator;
 
@@ -1252,10 +1257,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
             || element instanceof HTMLTextAreaElement;
     }
-    function attachInput(input, formUsernames) {
+    function attachInput(input, formUsernames, typedContext) {
         // Ignore extension UI elements
         if (!isFormControl(input) || input.classList.contains("my-extension-ui")) return;
-        const typedKind = typedAutofillKind(input);
+        const typedKind = typedAutofillKind(input, typedContext);
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
         } else if (typedKind) {
@@ -1280,16 +1285,17 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             // Form classification is shared within this scan, then discarded so later
             // DOM changes and user interactions always inspect the current fields.
             const formUsernames = new WeakMap();
+            const typedContext = new WeakMap();
             for (let index = 0; index < roots.length; index++) {
                 const openRoot = roots[index];
                 observeRoot(openRoot);
-                if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
+                if (isFormControl(openRoot)) attachInput(openRoot, formUsernames, typedContext);
                 if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
                 // Ordinary controls are leaves; unusual author-created descendants
                 // still receive full discovery.
                 if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
                 const discovered = snapshot(openRoot);
-                for (const input of discovered.inputs) attachInput(input, formUsernames);
+                for (const input of discovered.inputs) attachInput(input, formUsernames, typedContext);
                 // Inspect existing elements even on cache hits: a page may attach an
                 // open shadow root without a child-list mutation on its host.
                 for (const candidate of discovered.elements) {
@@ -1389,9 +1395,20 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
 const PasswordManagerDuoDetection = require("duo_detection.js");
 module.exports.create = function create() {
     let activeSince = 0, checking = false, timer, disposed = false;
-    function active() {
-        return document.visibilityState !== "hidden"
-            && PasswordManagerDuoDetection.challenge(document.body?.innerText, location.href);
+    let dirty = true, cached = false, scannedUrl;
+    // Mutation bursts only invalidate; the existing poll interval coalesces reads.
+    // Authorization requests always inspect the live rendered page instead.
+    const observer = new MutationObserver(() => { dirty = true; });
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    function active(fresh = false) {
+        if (disposed || document.visibilityState === "hidden") return false;
+        if (observer.takeRecords().length) dirty = true;
+        if (fresh || dirty || scannedUrl !== location.href) {
+            cached = PasswordManagerDuoDetection.challenge(document.body?.innerText, location.href);
+            scannedUrl = location.href;
+            dirty = false;
+        }
+        return cached;
     }
     function check() {
         if (disposed) return;
@@ -1412,15 +1429,16 @@ module.exports.create = function create() {
         });
     }
     const listener = (message, _sender, respond) => {
-        if (message.action === "getDuoChallengeState") respond({ active: active() });
+        if (message.action === "getDuoChallengeState") respond({ active: active(true) });
     };
     chrome.runtime.onMessage.addListener(listener);
-    document.addEventListener("visibilitychange", check);
+    const visibilityChanged = () => { dirty = true; check(); };
+    document.addEventListener("visibilitychange", visibilityChanged);
     const pagehide = () => clearTimeout(timer);
     window.addEventListener("pagehide", pagehide);
     check();
     return { dispose() {
-        disposed = true; clearTimeout(timer); document.removeEventListener("visibilitychange", check);
+        disposed = true; observer.disconnect(); clearTimeout(timer); document.removeEventListener("visibilitychange", visibilityChanged);
         window.removeEventListener("pagehide", pagehide);
         chrome.runtime.onMessage.removeListener(listener);
     } };

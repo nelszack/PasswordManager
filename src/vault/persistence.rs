@@ -339,10 +339,6 @@ impl Vault {
         }
         result
     }
-    pub fn lock_vault(&self, key: &mut VaultCredentials) -> Result<(), VaultError> {
-        *key = VaultCredentials::Locked;
-        Ok(())
-    }
 }
 /// List opaque vault IDs without opening or decrypting their contents.
 pub fn list_vaults() -> Result<Vec<String>, VaultError> {
@@ -658,17 +654,6 @@ pub(super) fn validate_encrypted_size(
         )));
     }
     Ok(())
-}
-
-pub(super) fn persist_private_file(
-    path: &Path,
-    contents: &[u8],
-    force: bool,
-) -> Result<(), VaultError> {
-    persist_private_stream(path, force, |file| {
-        file.write_all(contents)
-            .map_err(|e| VaultError::Persistence(e.to_string()))
-    })
 }
 
 // Buffered streaming without leaving plaintext in an ordinary BufWriter allocation.

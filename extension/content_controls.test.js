@@ -42,6 +42,8 @@ test("layout frames measure every control before applying any position", () => {
             position.measure=()=> {work.push(`read ${id}`);return()=>work.push(`write ${id}`);};
             controls.registerPositionedControl({isConnected:true},{remove(){}},position);
         }
+        assert.equal(frames.length, 1, "discovery schedules one shared layout frame");
+        assert.deepEqual(work, [], "registering controls performs no geometry work");
         events.resize(); events.scroll();
         assert.equal(frames.length,1);
         frames.shift()();

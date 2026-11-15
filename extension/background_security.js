@@ -1,14 +1,4 @@
 const PasswordManagerSecurity = (() => {
-    function senderDomain(sender) {
-        try {
-            const url = new URL(sender?.url || sender?.tab?.url || "");
-            if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-            return url.hostname.toLowerCase().replace(/\.$/, "");
-        } catch (_) {
-            return null;
-        }
-    }
-
     function senderOrigin(sender) {
         try {
             const url = new URL(sender?.url || sender?.tab?.url || "");
@@ -22,13 +12,6 @@ const PasswordManagerSecurity = (() => {
 
     function pendingStorageKey(sender) {
         return Number.isInteger(sender?.tab?.id) ? `pmPopupPending:${sender.tab.id}` : null;
-    }
-
-    function totpEntryAllowed(accounts, entryId) {
-        return Array.isArray(accounts)
-            && Number.isSafeInteger(entryId)
-            && entryId > 0
-            && accounts.some(account => account?.id === entryId && account.has_totp === true);
     }
 
     function securePickerSender(sender, extensionId, pickerUrl) {
@@ -46,7 +29,7 @@ const PasswordManagerSecurity = (() => {
         }
     }
 
-    return { senderDomain, senderOrigin, pendingStorageKey, totpEntryAllowed, securePickerSender };
+    return { senderOrigin, pendingStorageKey, securePickerSender };
 })();
 
 if (typeof module !== "undefined") module.exports = PasswordManagerSecurity;

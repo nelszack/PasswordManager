@@ -27,10 +27,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
             || element instanceof HTMLTextAreaElement;
     }
-    function attachInput(input, formUsernames) {
+    function attachInput(input, formUsernames, typedContext) {
         // Ignore extension UI elements
         if (!isFormControl(input) || input.classList.contains("my-extension-ui")) return;
-        const typedKind = typedAutofillKind(input);
+        const typedKind = typedAutofillKind(input, typedContext);
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
         } else if (typedKind) {
@@ -55,16 +55,17 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             // Form classification is shared within this scan, then discarded so later
             // DOM changes and user interactions always inspect the current fields.
             const formUsernames = new WeakMap();
+            const typedContext = new WeakMap();
             for (let index = 0; index < roots.length; index++) {
                 const openRoot = roots[index];
                 observeRoot(openRoot);
-                if (isFormControl(openRoot)) attachInput(openRoot, formUsernames);
+                if (isFormControl(openRoot)) attachInput(openRoot, formUsernames, typedContext);
                 if (openRoot.shadowRoot) roots.push(openRoot.shadowRoot);
                 // Ordinary controls are leaves; unusual author-created descendants
                 // still receive full discovery.
                 if (isFormControl(openRoot) && !openRoot.children?.length && !openRoot.shadowRoot) continue;
                 const discovered = snapshot(openRoot);
-                for (const input of discovered.inputs) attachInput(input, formUsernames);
+                for (const input of discovered.inputs) attachInput(input, formUsernames, typedContext);
                 // Inspect existing elements even on cache hits: a page may attach an
                 // open shadow root without a child-list mutation on its host.
                 for (const candidate of discovered.elements) {

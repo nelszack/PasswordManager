@@ -39,19 +39,12 @@ const PasswordManagerGenerator = (() => {
         for (let i = characters.length - 1; i > 0; i--) { const j = randomIndex(i + 1); [characters[i], characters[j]] = [characters[j], characters[i]]; }
         return characters.join("");
     }
-    function siteOrigin(value) {
-        const url = new URL(value);
-        if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
-            throw new Error("Enter an HTTPS origin, such as https://example.com, without a path");
-        }
-        return url.origin;
-    }
     function settingsForSite(storage, url) {
         let origin; try { origin = new URL(url).origin; } catch (_) { origin = ""; }
         const override = Object.hasOwn(storage.pmGeneratorsByOrigin || {}, origin) ? storage.pmGeneratorsByOrigin[origin] : undefined;
         try { return validate(override || storage.pmGenerator || {}); }
         catch (_) { try { return validate(storage.pmGenerator || {}); } catch (_) { return defaults; } }
     }
-    return { defaults, validate, generate, siteOrigin, settingsForSite };
+    return { defaults, validate, generate, settingsForSite };
 })();
 if (typeof module !== "undefined") module.exports = PasswordManagerGenerator;

@@ -7,8 +7,8 @@ test("production content scripts are injected only on HTTPS pages", () => {
     assert.deepEqual(manifest.content_scripts[0].matches, ["https://*/*"]);
 });
 
-test("sender domains and origins use trusted HTTP(S) metadata without unsafe fallbacks", () => {
-    for (const [label, sender, domain, origin] of [
+test("sender origins use trusted HTTP(S) metadata without unsafe fallbacks", () => {
+    for (const [label, sender, , origin] of [
         ["HTTPS sender", { url: "https://Login.Example.COM./path" }, "login.example.com", "https://login.example.com"],
         ["tab fallback", { tab: { url: "http://localhost:3000/login" } }, "localhost", "http://localhost:3000"],
         ["file", { url: "file:///tmp/login.html" }, null, null],
@@ -16,7 +16,6 @@ test("sender domains and origins use trusted HTTP(S) metadata without unsafe fal
         ["malformed", { url: "not a url" }, null, null],
         ["invalid sender with trusted tab", { url: "not a url", tab: { url: "https://trusted.example/login" } }, null, null]
     ]) {
-        assert.equal(security.senderDomain(sender), domain, label);
         assert.equal(security.senderOrigin(sender), origin, label);
     }
 });
@@ -28,20 +27,6 @@ test("pending credentials are isolated by browser tab", () => {
     assert.equal(security.pendingStorageKey({ tab: { id: "42" } }), null);
     assert.equal(security.pendingStorageKey({ tab: {} }), null);
     assert.equal(security.pendingStorageKey({}), null);
-});
-
-test("TOTP IDs must belong to a matching site credential", () => {
-    const accounts = [
-        { id: 7, has_totp: true },
-        { id: 8, has_totp: false }
-    ];
-    assert.equal(security.totpEntryAllowed(accounts, 7), true);
-    assert.equal(security.totpEntryAllowed(accounts, 8), false);
-    assert.equal(security.totpEntryAllowed(accounts, 9), false);
-    assert.equal(security.totpEntryAllowed(accounts, 7.5), false);
-    assert.equal(security.totpEntryAllowed(accounts, "7"), false);
-    assert.equal(security.totpEntryAllowed(accounts, 0), false);
-    assert.equal(security.totpEntryAllowed(null, 7), false);
 });
 
 test("secure picker messages only come from the extension picker page", () => {

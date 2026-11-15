@@ -306,6 +306,7 @@ impl Action {
 pub enum Event {
     Section(Section),
     ShowResults(bool),
+    ResultPage(usize),
     FileOperation(FileOperation),
     VaultOperation(VaultOperation),
     Field(Field, SecretString),
@@ -383,6 +384,7 @@ pub struct State {
     pub show_results: bool,
     pub selected: Option<Choice>,
     pub result: Option<ResponsePayload>,
+    pub result_page: usize,
     pub result_until: Option<Instant>,
     pub prepared: Option<Prepared>,
     pub secret_epoch: u64,
@@ -407,6 +409,7 @@ impl Default for State {
             show_results: false,
             selected: None,
             result: None,
+            result_page: 0,
             result_until: None,
             prepared: None,
             secret_epoch: 0,
@@ -416,6 +419,23 @@ impl Default for State {
     }
 }
 impl State {
+    pub fn result_count(&self) -> usize {
+        match self.result.as_ref() {
+            Some(ResponsePayload::History(page)) => page.history.len(),
+            Some(ResponsePayload::Trash(page)) => page.trash.len(),
+            Some(ResponsePayload::ItemPage(page)) => page.items.len(),
+            Some(ResponsePayload::Audit(report)) => {
+                report.weak.len()
+                    + report.stale.len()
+                    + report.missing_totp.len()
+                    + report.unchecked.len()
+                    + report.breached.len()
+                    + report.reused.iter().map(Vec::len).sum::<usize>()
+                    + report.duplicates.iter().map(Vec::len).sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
     pub fn clear_inputs(&mut self) {
         self.credentials.password.zeroize();
         self.credentials.confirmation.zeroize();
@@ -1068,6 +1088,7 @@ impl State {
             None
         };
         self.result = Some(payload);
+        self.result_page = 0;
         self.show_results = true;
     }
     pub fn duo_confirmation<'a>(&'a self, app: &'a App) -> Element<'a, super::Message> {
@@ -1097,11 +1118,7 @@ pub fn absolute(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
         return Err("Choose a file path.".into());
     }
-    std::path::absolute(value)
-        .map_err(|e| e.to_string())?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| "File paths must contain valid Unicode.".into())
+    password_manager::file::absolute_unicode_path(value).map_err(|error| error.to_string())
 }
 impl App {
     pub(super) fn stop_tool_watches(&mut self) {
@@ -1333,6 +1350,13 @@ impl App {
             self.request_state = RequestState::Idle;
         }
         match event {
+            Event::ResultPage(page) => {
+                if !self.busy() {
+                    self.workspace.result_page =
+                        presentation::Page::new(page, self.workspace.result_count()).index;
+                    return show_result();
+                }
+            }
             Event::ShowResults(show) => {
                 self.workspace.show_results = show;
                 return show_form();

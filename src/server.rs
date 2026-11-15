@@ -343,7 +343,7 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
                 .await
             };
             let mut response = match result {
-                Ok(message) => RpcResponse::message(ResponseCode::Success, message),
+                Ok(payload) => RpcResponse::success(payload),
                 Err(error) => RpcResponse::message(ResponseCode::Failure, error),
             };
             response.session_id = worker.session_id();

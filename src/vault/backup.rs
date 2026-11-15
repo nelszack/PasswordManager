@@ -36,11 +36,12 @@ impl Vault {
         let ciphertext =
             try_encrypt_file_in_place(&mut key.clone().into(), std::mem::take(&mut *bytes))?;
         key.zeroize();
-        let mut out = Vec::with_capacity(ciphertext.len() + 9);
-        out.extend_from_slice(BACKUP_MAGIC);
-        out.push(BACKUP_DOCUMENT_VERSION);
-        out.extend(ciphertext);
-        persist_private_file(destination, &out, force)
+        persistence::persist_private_stream(destination, force, |file| {
+            file.write_all(BACKUP_MAGIC)
+                .and_then(|()| file.write_all(&[BACKUP_DOCUMENT_VERSION]))
+                .and_then(|()| file.write_all(&ciphertext))
+                .map_err(|error| VaultError::Persistence(error.to_string()))
+        })
     }
 }
 pub(crate) fn restore_encrypted_backup(

@@ -74,13 +74,11 @@ test("cleanup after a worker restart removes expired and malformed session recor
     assert.deepEqual(env.stored, { otherSetting: "preserved" });
 });
 
-test("closing a tab and clearing pending state remove both memory and storage", async () => {
+test("closing a tab removes both memory and storage", async () => {
     const env = environment(), service = env.create(); await env.set(service);
     env.closeTab(7); await flush();
+    assert.equal(env.stored["pmPopupPending:7"], undefined);
     assert.equal(await service.takeRemembered(env.sender), null);
-    await env.set(service);
-    assert.equal((await env.call(service, "clear", env.sender)).success, true);
-    assert.equal((await env.call(service, "consume", env.sender)).pending, null);
 });
 
 test("remembered usernames are origin-bound and are not reusable", async () => {
@@ -111,7 +109,6 @@ test("invalid senders and oversized pending payloads fail before storage", async
         assert.equal((await env.call(service, "set", request, sender)).success, false);
         assert.equal((await env.call(service, "consume", sender)).success, false);
     }
-    assert.equal((await env.call(service, "clear", {})).success, false);
     assert.equal((await env.set(service, "x".repeat(4097))).success, false);
     assert.equal((await env.call(service, "set", {}, env.sender)).success, false);
     assert.deepEqual(env.stored, {});
@@ -125,12 +122,12 @@ test("navigation records reject password-bearing payloads and persist only usern
     assert.deepEqual(env.stored["pmPopupPending:7"], { domain: "https://example.com", username: "alice", time: 1000 });
 });
 
-test("embedded frames cannot replace, clear, consume, or take top-level username context", async () => {
+test("embedded frames cannot replace, consume, or take top-level username context", async () => {
     const env = environment(), service = env.create(); await env.set(service);
     for (const url of [env.sender.url, "https://embedded.example"]) {
         const frame = { ...env.sender, frameId: 3, url };
         assert.equal((await env.call(service, "set", { pending: { username: "mallory" } }, frame)).success, false);
-        for (const method of ["consume", "clear"]) assert.equal((await env.call(service, method, frame)).success, false);
+        assert.equal((await env.call(service, "consume", frame)).success, false);
         assert.equal(await service.takeRemembered(frame), null);
     }
     assert.equal((await env.call(service, "consume", env.sender)).pending.username, "alice");

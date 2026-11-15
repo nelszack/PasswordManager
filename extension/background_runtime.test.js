@@ -129,7 +129,12 @@ test("background worker publishes status and rejects obsolete credential command
     await new Promise(resolve => setImmediate(resolve));
     assert.ok(env.badge.some(value => value.text === "U"));
     const before = env.requests.length;
-    for (const action of ["getCredentials", "saveCredentials", "updateCredentials", "getRelayedCredentials", "saveRelayedCredentials", "updateRelayedCredentials", "relayToParent", "relayLoginResult"]) {
+    for (const request of [null, {}, { action: null }, "lockVault", []]) {
+        const response = await env.message(request);
+        assert.equal(response.success, false);
+        assert.equal(response.error, "Invalid extension request");
+    }
+    for (const action of ["getCredentials", "saveCredentials", "updateCredentials", "getRelayedCredentials", "saveRelayedCredentials", "updateRelayedCredentials", "relayToParent", "relayLoginResult", "clearPendingCredentials"]) {
         const response = await env.message({ action, username: "alice", id: 1 });
         assert.equal(response.success, false, action);
         assert.equal(response.error, "Unsupported extension request", action);
@@ -143,9 +148,6 @@ test("pending navigation records use trusted origins and can be consumed only on
     assert.equal(stored.success, true);
     const consumed = await env.message({ action: "consumePendingCredentials" });
     assert.equal(consumed.pending.domain, "https://shop.example");
-    assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
-    await env.message({ action: "setPendingCredentials", pending: { username: "alice" } });
-    assert.equal((await env.message({ action: "clearPendingCredentials" })).success, true);
     assert.equal((await env.message({ action: "consumePendingCredentials" })).pending, null);
 });
 

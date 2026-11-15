@@ -267,7 +267,7 @@ impl Vault {
         credentials: &VaultCredentials,
         bytes: &[u8],
         choices: &[Choice],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<sync::PreparedCloud, String> {
         let data = merge(
             &self.data,
             &self.conflict_data(credentials, bytes)?,
@@ -280,7 +280,11 @@ impl Vault {
         if encrypted.len() as u64 > crate::cloud::MAX_BYTES {
             return Err("Merged vault exceeds size limit".into());
         }
-        Ok(encrypted)
+        Ok(sync::PreparedCloud {
+            data,
+            bytes: encrypted,
+            credentials: key,
+        })
     }
 }
 
@@ -465,7 +469,7 @@ mod tests {
         let bytes = encrypt(&remote.data);
         let selected = choices(&local.data, &remote.data, Side::Remote);
         let merged = local.merge_cloud(&credentials, &bytes, &selected).unwrap();
-        let data = local.conflict_data(&credentials, &merged).unwrap();
+        let data = local.conflict_data(&credentials, &merged.bytes).unwrap();
         assert_eq!(
             data.items[&ItemId(1)].entry.password.expose(),
             "cloud-secret"

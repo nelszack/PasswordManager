@@ -30,10 +30,6 @@ const PasswordManagerBackgroundPickers = {
                 && record.fingerprint === fingerprint;
         }
 
-        function parseNativeItems(response) {
-            return protocol.parseItems(response);
-        }
-
         function pickerSenderAllowed(sender) {
             return security.securePickerSender(
                 sender,
@@ -46,11 +42,11 @@ const PasswordManagerBackgroundPickers = {
             let items, response;
             if (kind === "login" || kind === "totp") {
                 response = await nativeRequest("getLoginItems", { domain });
-                items = parseNativeItems(response);
+                items = protocol.parseItems(response);
                 if (kind === "totp") items = items.filter(item => item?.has_totp === true);
             } else {
                 response = await nativeRequest("getAutofillItems");
-                items = parseNativeItems(response);
+                items = protocol.parseItems(response);
                 items = items.filter(item => item?.kind === kind);
             }
             const summaries = items.map(item => ({
@@ -61,7 +57,7 @@ const PasswordManagerBackgroundPickers = {
                 kind,
                 has_duo: item.has_duo === true
             })).filter(item => Number.isSafeInteger(item.id) && item.id > 0);
-            return { items: summaries, summaries, sessionId: protocol.sessionId(response) };
+            return { items: summaries, sessionId: protocol.sessionId(response) };
         }
 
         function discardPicker(token, closeWindow = true) {
@@ -125,7 +121,6 @@ const PasswordManagerBackgroundPickers = {
                 tabId, frameId, documentId, kind, domain, topOrigin,
                 crossOrigin: domain !== topOrigin,
                 items: [],
-                summaries: [],
                 loading: true,
                 error: null,
                 expiresAt: Date.now() + 60_000,
@@ -156,12 +151,11 @@ const PasswordManagerBackgroundPickers = {
                     pending.windowId = window.id;
                     pickerWindows.set(window.id, token);
                     loadSecurePickerItems(kind, domain)
-                        .then(({ items, summaries, sessionId }) => {
+                        .then(({ items, sessionId }) => {
                             const pending = pendingPickers.get(token);
                             if (!pending) return;
                             pending.sessionId = sessionId;
                             pending.items = items;
-                            pending.summaries = summaries;
                             pending.loading = false;
                         })
                         .catch(loadError => {
@@ -269,7 +263,7 @@ const PasswordManagerBackgroundPickers = {
             if (!pickerSenderAllowed(sender)) return { success: false, error: "Invalid picker sender" };
             const pending = pendingPickers.get(request.token);
             if (request.retry === true && pending && pending.expiresAt > Date.now() && !pending.loading && !pending.completing) {
-                pending.loading = true; pending.error = null; pending.items = []; pending.summaries = []; pending.sessionId = null;
+                pending.loading = true; pending.error = null; pending.items = []; pending.sessionId = null;
                 requireCurrentDestination(request.token, pending)
                     .then(() => loadSecurePickerItems(pending.kind, pending.domain))
                     .then(result => {
@@ -281,7 +275,7 @@ const PasswordManagerBackgroundPickers = {
             }
             return pending && pending.expiresAt > Date.now()
                 ? { success: true, kind: pending.kind, origin: pending.domain, topOrigin: pending.topOrigin,
-                    crossOrigin: pending.crossOrigin, items: pending.summaries, loading: pending.loading, error: pending.error }
+                    crossOrigin: pending.crossOrigin, items: pending.items, loading: pending.loading, error: pending.error }
                 : { success: false, error: "Secure picker expired" };
         }
         function windowRemoved(windowId) {

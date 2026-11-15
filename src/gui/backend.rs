@@ -1,7 +1,10 @@
 use password_manager::{
     client::AuthenticatedClient,
     config::{self, Config, ConfigChanges},
-    file::{config_dir, data_dir, set_private_dir_perms, set_private_perms, sync_parent},
+    file::{
+        AtomicWriteMode, atomic_write_private, config_dir, data_dir, set_private_dir_perms,
+        set_private_perms, sync_parent,
+    },
     protocol::{OperationState, ProtocolResponse, RequestEnvelope, ResponsePayload},
     secret::SecretString,
     server,
@@ -547,7 +550,6 @@ pub fn save_completions(
     path: &std::path::Path,
 ) -> Result<Reply, Failure> {
     use clap::CommandFactory;
-    use std::io::Write;
     let mut bytes = Vec::new();
     clap_complete::generate(
         shell,
@@ -555,17 +557,8 @@ pub fn save_completions(
         "pm",
         &mut bytes,
     );
-    let parent = path
-        .parent()
-        .ok_or_else(|| Failure::from("Choose a destination file.".to_owned()))?;
-    let mut file =
-        tempfile::NamedTempFile::new_in(parent).map_err(|e| Failure::from(e.to_string()))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.as_file().sync_all())
-        .map_err(|e| Failure::from(e.to_string()))?;
-    file.persist_noclobber(path)
-        .map_err(|e| Failure::from(e.to_string()))?;
-    sync_parent(path).map_err(|e| Failure::from(e.to_string()))?;
+    atomic_write_private(path, &bytes, AtomicWriteMode::CreateNew)
+        .map_err(|error| Failure::from(error.to_string()))?;
     Ok(Reply::Local(format!(
         "Completions saved to {}",
         path.display()

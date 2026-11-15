@@ -69,11 +69,6 @@ const PasswordManagerBackgroundPending = {
                 return { success: true };
             });
         }
-        function clear(sender, sendResponse) {
-            const key = keyFor(sender);
-            if (!key) { sendResponse({ success: false, error: "Invalid tab" }); return; }
-            respond(clearKey(key), sendResponse);
-        }
         function takeRemembered(sender) {
             const key = keyFor(sender), domain = security.senderOrigin(sender);
             return key ? take(key, domain) : Promise.resolve(null);
@@ -83,7 +78,7 @@ const PasswordManagerBackgroundPending = {
             await Promise.all(Object.keys(stored || {}).filter(key => key.startsWith(prefix)).map(expire));
         }
         chrome.tabs.onRemoved?.addListener(tabId => { clearKey(`${prefix}${tabId}`).catch(() => {}); });
-        return { set, consume, clear, takeRemembered, cleanup };
+        return { set, consume, takeRemembered, cleanup };
     }
 };
 if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPending;

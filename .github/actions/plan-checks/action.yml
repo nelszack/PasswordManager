@@ -1,0 +1,47 @@
+name: Select checks
+description: Test suite selection safeguards and select checks for this workflow.
+inputs:
+  workflow:
+    description: Workflow identity
+    required: true
+  token:
+    description: Token for inspecting successful PR runs
+    required: true
+outputs:
+  rust:
+    description: Selection result for rust
+    value: ${{ steps.plan.outputs.rust }}
+  extension:
+    description: Selection result for extension
+    value: ${{ steps.plan.outputs.extension }}
+  browser:
+    description: Selection result for browser
+    value: ${{ steps.plan.outputs.browser }}
+  cloud:
+    description: Selection result for cloud
+    value: ${{ steps.plan.outputs.cloud }}
+  fuzz:
+    description: Selection result for fuzz
+    value: ${{ steps.plan.outputs.fuzz }}
+  rust_audit:
+    description: Selection result for rust_audit
+    value: ${{ steps.plan.outputs.rust_audit }}
+  npm_audit:
+    description: Selection result for npm_audit
+    value: ${{ steps.plan.outputs.npm_audit }}
+  reused:
+    description: Selection result for reused
+    value: ${{ steps.plan.outputs.reused }}
+runs:
+  using: composite
+  steps:
+    - name: Test CI selection and reuse safeguards
+      shell: bash
+      run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+    - name: Select suites or reuse successful PR result
+      id: plan
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CHECK_WORKFLOW: ${{ inputs.workflow }}
+      run: python3 scripts/ci/plan.py --workflow "$CHECK_WORKFLOW"

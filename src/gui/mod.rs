@@ -916,7 +916,11 @@ impl App {
                 self.ui.page_input.clear();
             }
             Message::JumpItemPage => {
-                let pages = self.matching_items().len().div_ceil(50).max(1);
+                let pages = self
+                    .matching_items()
+                    .len()
+                    .div_ceil(presentation::PAGE_SIZE)
+                    .max(1);
                 if let Ok(page) = self.ui.page_input.parse::<usize>()
                     && page > 0
                     && page <= pages

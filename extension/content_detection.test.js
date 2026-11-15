@@ -198,3 +198,23 @@ test("visibility caches share ancestor reads only within a synchronous scan", ()
         assert.equal(detection.isElementVisible(first), true);
     } finally { global.getComputedStyle = original; }
 });
+
+test("typed identity context is shared per scan and refreshed on the next scan", () => {
+    const { typedAutofillKind } = require("./content_autofill.js").create({ bridge: {} });
+    const email = new FakeInput("email", { autocomplete: "section-a email" });
+    const phone = new FakeInput("tel", { autocomplete: "section-a tel" });
+    const otherGroup = new FakeInput("email", { autocomplete: "section-b email" });
+    const name = new FakeInput("text", { autocomplete: "section-a name" });
+    const form = new FakeForm([email, phone, otherGroup, name]);
+    const fields = form.elements;
+    let scans = 0;
+    Object.defineProperty(form, "elements", { get() { scans++; return fields; } });
+    const cache = new WeakMap();
+    assert.equal(typedAutofillKind(email, cache), "identity");
+    assert.equal(typedAutofillKind(phone, cache), "identity");
+    assert.equal(typedAutofillKind(otherGroup, cache), null);
+    assert.equal(scans, 1);
+    name.disabled = true;
+    assert.equal(typedAutofillKind(email, new WeakMap()), null);
+    assert.equal(scans, 2);
+});

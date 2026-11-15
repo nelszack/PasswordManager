@@ -473,19 +473,9 @@ fn handle_unlocked(
                     }
                     respond_payload(
                         ResponseCode::Success,
-                        crate::protocol::ResponsePayload::Authenticator(
-                            crate::protocol::AuthenticatorResponse {
-                                code: code.code.to_string().into(),
-                                expires_in: code.expires_in,
-                                counter: code.counter,
-                                mode: if code.counter.is_some() {
-                                    "hotp"
-                                } else {
-                                    "totp"
-                                }
-                                .into(),
-                            },
-                        ),
+                        crate::protocol::ResponsePayload::Authenticator(authenticator_response(
+                            code,
+                        )),
                         responses,
                     );
                 }
@@ -739,17 +729,7 @@ fn respond_authenticator(
 ) {
     match result {
         Ok(code) => {
-            let payload = crate::protocol::AuthenticatorResponse {
-                code: code.code.to_string().into(),
-                expires_in: code.expires_in,
-                counter: code.counter,
-                mode: if code.counter.is_some() {
-                    "hotp"
-                } else {
-                    "totp"
-                }
-                .into(),
-            };
+            let payload = authenticator_response(code);
             respond_payload(
                 ResponseCode::Success,
                 crate::protocol::ResponsePayload::Authenticator(payload),
@@ -757,5 +737,21 @@ fn respond_authenticator(
             );
         }
         Err(error) => respond_domain_error(&error, responses),
+    }
+}
+
+fn authenticator_response(
+    code: crate::vault::AuthenticatorCode,
+) -> crate::protocol::AuthenticatorResponse {
+    crate::protocol::AuthenticatorResponse {
+        code: code.code.to_string().into(),
+        expires_in: code.expires_in,
+        counter: code.counter,
+        mode: if code.counter.is_some() {
+            "hotp"
+        } else {
+            "totp"
+        }
+        .into(),
     }
 }

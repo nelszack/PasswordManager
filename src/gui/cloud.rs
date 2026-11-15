@@ -94,31 +94,20 @@ impl App {
 impl App {
     pub(super) fn complete_cloud(&mut self, job: Job, payload: ResponsePayload) -> Task<Message> {
         match (job, payload) {
-            (Job::CloudList, ResponsePayload::Message(message)) => {
-                match serde_json::from_str::<Vec<password_manager::cloud::RemoteVault>>(&message) {
-                    Ok(vaults) => {
-                        self.cloud.vaults = vaults.into_iter().map(|v| v.id).collect();
-                        self.cloud.vault = self.cloud.vaults.first().cloned();
-                        self.notice =
-                            format!("{} cloud vault(s) available", self.cloud.vaults.len());
-                    }
-                    Err(e) => self.notice = format!("Invalid vault list: {e}"),
-                }
+            (Job::CloudList, ResponsePayload::CloudVaults(vaults)) => {
+                self.cloud.vaults = vaults.into_iter().map(|v| v.id).collect();
+                self.cloud.vault = self.cloud.vaults.first().cloned();
+                self.notice = format!("{} cloud vault(s) available", self.cloud.vaults.len());
             }
-            (Job::CloudConflicts, ResponsePayload::Message(message)) => {
-                match serde_json::from_str::<password_manager::cloud::ConflictReview>(&message) {
-                    Ok(review) => {
-                        self.notice = if review.items.is_empty() {
-                            "No item differences. Apply the resolution to reconcile the snapshots."
-                        } else {
-                            "Choose which values to keep, then apply the resolution."
-                        }
-                        .into();
-                        self.cloud.choices.clear();
-                        self.cloud.review = Some(review);
-                    }
-                    Err(e) => self.notice = format!("Invalid conflict review: {e}"),
+            (Job::CloudConflicts, ResponsePayload::CloudConflicts(review)) => {
+                self.notice = if review.items.is_empty() {
+                    "No item differences. Apply the resolution to reconcile the snapshots."
+                } else {
+                    "Choose which values to keep, then apply the resolution."
                 }
+                .into();
+                self.cloud.choices.clear();
+                self.cloud.review = Some(review);
             }
             (Job::CloudResolve, ResponsePayload::Message(message)) => {
                 self.notice = message;
@@ -140,5 +129,38 @@ impl App {
             }
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_cloud_replies_populate_picker_and_clear_previous_choices() {
+        let mut app = super::super::tests::app();
+        let _ = app.complete_cloud(
+            Job::CloudList,
+            ResponsePayload::CloudVaults(vec![password_manager::cloud::RemoteVault {
+                id: "a".repeat(32),
+                version: "b".repeat(32),
+                size: 123,
+            }]),
+        );
+        assert_eq!(app.cloud.vault.as_deref(), Some("a".repeat(32).as_str()));
+        app.cloud.choices.push(password_manager::cloud::Choice {
+            id: 1,
+            field: "name".into(),
+            side: password_manager::cloud::Side::Local,
+        });
+        let _ = app.complete_cloud(
+            Job::CloudConflicts,
+            ResponsePayload::CloudConflicts(password_manager::cloud::ConflictReview {
+                token: "review".into(),
+                items: vec![],
+            }),
+        );
+        assert!(app.cloud.choices.is_empty());
+        assert_eq!(app.cloud.review.as_ref().unwrap().token, "review");
     }
 }

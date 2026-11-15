@@ -38,13 +38,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - name: Test CI selection and reuse safeguards
-        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
-      - name: Select suites or reuse successful PR result
+      - uses: ./.github/actions/plan-checks
         id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/plan.py --workflow security
+        with:
+          workflow: security
+          token: ${{ github.token }}
 
   rustsec:
     needs: plan
@@ -100,19 +98,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Require successful selected checks
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: python3 scripts/ci/plan.py --workflow security --finish
-      - name: Record the tested source tree
-        env:
-          SELECTED: ${{ toJSON(needs.plan.outputs) }}
-        run: python3 scripts/ci/plan.py --workflow security --record
-      - name: Upload successful source-tree proof
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - uses: ./.github/actions/finish-checks
         with:
-          name: security-tested-tree
-          path: tested-tree.json
-          overwrite: true
-          retention-days: 14
-          if-no-files-found: error
+          workflow: security
+          results: ${{ toJSON(needs) }}
+          selected: ${{ toJSON(needs.plan.outputs) }}

@@ -1,6 +1,7 @@
 use super::*;
 
 impl Vault {
+    #[cfg(test)]
     pub fn add_entry(
         &mut self,
         info: PasswordEntry,

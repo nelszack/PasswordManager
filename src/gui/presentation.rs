@@ -2,6 +2,27 @@ use super::*;
 use iced::{Color, theme::Palette};
 use password_manager::config::Appearance;
 
+pub(super) const PAGE_SIZE: usize = 50;
+
+/// Shared bounds for the item list and tool results. Empty lists retain page 1.
+pub(super) struct Page {
+    pub index: usize,
+    pub pages: usize,
+    pub range: std::ops::Range<usize>,
+}
+impl Page {
+    pub fn new(requested: usize, total: usize) -> Self {
+        let pages = total.div_ceil(PAGE_SIZE).max(1);
+        let index = requested.min(pages - 1);
+        let start = index * PAGE_SIZE;
+        Self {
+            index,
+            pages,
+            range: start..start.saturating_add(PAGE_SIZE).min(total),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum SettingsSection {
     #[default]
@@ -59,7 +80,7 @@ struct ChoiceCache {
 pub(super) struct State {
     choices: std::cell::RefCell<ChoiceCache>,
     matching: std::cell::RefCell<Option<MatchingItems>>,
-    search_text: std::cell::RefCell<Vec<Vec<zeroize::Zeroizing<String>>>>,
+    search_text: std::cell::RefCell<std::collections::HashMap<usize, SearchText>>,
     pub progress: String,
     pub progress_started: Option<Instant>,
     pub page_input: String,
@@ -91,7 +112,7 @@ pub(super) struct State {
 pub(super) struct SavedItem {
     pub name: String,
     pub kind: ItemKind,
-    pub previous_ids: Vec<usize>,
+    pub previous_ids: std::collections::HashSet<usize>,
 }
 
 impl Default for State {
@@ -280,7 +301,9 @@ impl App {
             self.items.insert(index, item.clone());
         }
         self.ui.matching.get_mut().take();
-        self.ui.search_text.get_mut().clear();
+        for id in replaced {
+            self.ui.search_text.get_mut().remove(&id);
+        }
         self.vault_revision = Some(changes.revision);
         self.items_revision = Some(changes.revision);
         true
@@ -301,29 +324,23 @@ impl App {
         }) {
             let query = zeroize::Zeroizing::new(self.query.trim().to_lowercase());
             let mut search_text = self.ui.search_text.borrow_mut();
-            if !query.is_empty() && search_text.len() != self.items.len() {
-                *search_text = self
-                    .items
-                    .iter()
-                    .map(|item| {
-                        std::iter::once(item.name.as_str())
-                            .chain(item.username.as_deref())
-                            .chain(item.urls.iter().map(String::as_str))
-                            .map(|value| zeroize::Zeroizing::new(value.to_lowercase()))
-                            .collect()
-                    })
-                    .collect();
-            }
             let indices = self
                 .items
                 .iter()
                 .enumerate()
                 .filter_map(|(index, item)| {
                     (self.ui.kind.is_none_or(|kind| kind == item.kind)
-                        && (query.is_empty()
-                            || search_text[index]
+                        && (query.is_empty() || {
+                            let text = search_text
+                                .entry(item.id)
+                                .or_insert_with(|| SearchText::new(item));
+                            if text.revision != item.revision {
+                                *text = SearchText::new(item);
+                            }
+                            text.values
                                 .iter()
-                                .any(|value| value.contains(query.as_str()))))
+                                .any(|value| value.contains(query.as_str()))
+                        }))
                     .then_some(index)
                 })
                 .collect();
@@ -346,6 +363,23 @@ struct MatchingItems {
     kind: Option<ItemKind>,
     source_len: usize,
     indices: Vec<usize>,
+}
+
+struct SearchText {
+    revision: u64,
+    values: Vec<zeroize::Zeroizing<String>>,
+}
+impl SearchText {
+    fn new(item: &ItemSummary) -> Self {
+        Self {
+            revision: item.revision,
+            values: std::iter::once(item.name.as_str())
+                .chain(item.username.as_deref())
+                .chain(item.urls.iter().map(String::as_str))
+                .map(|value| zeroize::Zeroizing::new(value.to_lowercase()))
+                .collect(),
+        }
+    }
 }
 
 fn surface_text(color: Color) -> Color {
@@ -385,6 +419,72 @@ pub(super) fn display_date(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn page_windows_clamp_empty_partial_and_extreme_requests() {
+        for (requested, total, index, pages, range) in [
+            (8, 0, 0, 1, 0..0),
+            (0, 50, 0, 1, 0..50),
+            (1, 51, 1, 2, 50..51),
+            (usize::MAX, 100, 1, 2, 50..100),
+        ] {
+            let page = Page::new(requested, total);
+            assert_eq!((page.index, page.pages, page.range), (index, pages, range));
+        }
+        let page = Page::new(usize::MAX, usize::MAX);
+        assert_eq!(page.range.end, usize::MAX);
+        assert!(page.range.len() <= PAGE_SIZE);
+    }
+
+    #[test]
+    fn item_deltas_preserve_unchanged_search_text_and_remove_stale_metadata() {
+        let mut app = crate::gui::tests::app();
+        let item = |id, name: &str| ItemSummary {
+            id,
+            revision: 1,
+            name: name.into(),
+            username: None,
+            kind: ItemKind::Login,
+            urls: vec![],
+            has_totp: false,
+            has_duo: false,
+        };
+        app.replace_items(vec![item(1, "Alpha"), item(2, "ÉCOLE")]);
+        app.items_revision = Some(1);
+        app.query = "École".into();
+        assert_eq!(&*app.matching_items(), &[1]);
+        let unchanged = app.ui.search_text.borrow()[&2].values[0].as_ptr();
+        let mut changed = item(1, "Zulu");
+        changed.revision = 2;
+        assert!(
+            app.apply_item_changes(&password_manager::vault::ItemChanges {
+                base_revision: 1,
+                revision: 2,
+                items: vec![changed],
+                removed: vec![],
+            })
+        );
+        assert_eq!(
+            app.ui.search_text.borrow()[&2].values[0].as_ptr(),
+            unchanged
+        );
+        assert!(!app.ui.search_text.borrow().contains_key(&1));
+        assert_eq!(app.items[app.matching_items()[0]].id, 2);
+        app.query = "alpha".into();
+        assert!(app.matching_items().is_empty());
+        app.query = "zulu".into();
+        assert_eq!(app.items[app.matching_items()[0]].id, 1);
+        assert!(
+            app.apply_item_changes(&password_manager::vault::ItemChanges {
+                base_revision: 2,
+                revision: 3,
+                items: vec![],
+                removed: vec![2],
+            })
+        );
+        assert!(!app.ui.search_text.borrow().contains_key(&2));
+        app.clear_vault();
+        assert!(app.ui.search_text.borrow().is_empty());
+    }
     #[test]
     fn cached_matches_follow_search_kind_refresh_and_lock() {
         let mut app = crate::gui::tests::app();

@@ -1,4 +1,6 @@
 use crate::secret::SecretString;
+#[cfg(test)]
+use crate::types::PasswordEntry;
 use crate::{
     encryption::{
         decrypt_file, try_encrypt_file_in_place, try_gen_master_key, validate_new_password,
@@ -6,8 +8,8 @@ use crate::{
     file::{data_dir, key_file_path, new_key_file_path, set_private_perms, sync_parent},
     types::{
         AuditOptions, ConflictPolicy, CustomField, DuoCredentials, EntryChanges, EntryUpdate,
-        ItemKind, ListOptions, PasswordEntry, PasswordType, SearchFilter, SortField, Target,
-        TypedEntry, TypedUpdate,
+        ItemKind, ListOptions, PasswordType, SearchFilter, SortField, Target, TypedEntry,
+        TypedUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -57,7 +59,7 @@ pub(crate) use persistence::unlock_selected_vault;
 pub(crate) use persistence::with_write_fault;
 pub(crate) use persistence::{create_vault, delete_vault};
 pub use persistence::{list_vaults, validate_vault_filename};
-use persistence::{persist_private_file, write_vault, write_vault_with_key};
+use persistence::{write_vault, write_vault_with_key};
 mod transaction;
 use transaction::TransactionScope;
 
@@ -258,16 +260,9 @@ enum AuthenticatorState {
 }
 impl Authenticator {
     fn parse(value: &str) -> Result<Self, VaultError> {
-        let (configuration, _) = totp::normalize_totp_configuration(value)?;
-        let mut configuration = Zeroizing::new(configuration);
-        let state = if totp::is_hotp_uri(&configuration) {
-            let (generator, counter) = totp::parse_hotp_configuration(&configuration)?;
-            AuthenticatorState::Hotp { generator, counter }
-        } else {
-            AuthenticatorState::Totp(totp::parse_totp_configuration(&configuration)?)
-        };
+        let (configuration, state, _) = totp::parse_authenticator_configuration(value)?;
         Ok(Self {
-            configuration: std::mem::take(&mut *configuration).into(),
+            configuration: configuration.into(),
             state,
         })
     }
@@ -449,6 +444,7 @@ impl Vault {
     pub fn revision(&self, id: usize) -> Option<u64> {
         self.item(id).map(|i| i.revision)
     }
+    #[cfg(test)]
     pub fn item_revision(&self, id: usize) -> Option<u64> {
         self.revision(id)
     }
@@ -458,6 +454,7 @@ impl Vault {
     pub fn vault_revision(&self) -> u64 {
         self.data.revision
     }
+    #[cfg(test)]
     pub fn check_revision(&self, id: usize, expected: u64) -> Result<(), VaultError> {
         let revision = self
             .revision(id)

@@ -3,6 +3,12 @@ use crate::{protocol::ResponsePayload, terminal::metadata};
 pub fn render(payload: &ResponsePayload) -> String {
     match payload {
         ResponsePayload::Message(message) => message.clone(),
+        ResponsePayload::CloudVaults(vaults) => {
+            serde_json::to_string_pretty(vaults).expect("cloud vaults serialize")
+        }
+        ResponsePayload::CloudConflicts(review) => {
+            serde_json::to_string_pretty(review).expect("cloud conflicts serialize")
+        }
         ResponsePayload::Secret(secret) => secret.expose().to_owned(),
         ResponsePayload::Status(status) => format!(
             "Status: {}\nVersion: {}{}",

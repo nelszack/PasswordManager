@@ -133,7 +133,7 @@ pub fn decrypt_record_stream(
     Ok(plaintext)
 }
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const DEFAULT_PORT: u16 = 7878;
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()
@@ -318,6 +318,8 @@ pub enum ResponsePayload {
     DuoRequests(Vec<crate::types::DuoPushRequest>),
     History(crate::vault::HistoryPage),
     Trash(crate::vault::TrashPage),
+    CloudVaults(Vec<crate::cloud::RemoteVault>),
+    CloudConflicts(crate::cloud::ConflictReview),
 }
 impl ResponsePayload {
     pub fn into_json(self) -> serde_json::Value {
@@ -344,6 +346,12 @@ impl ResponsePayload {
             Self::Audit(value) => serde_json::to_value(value).expect("audit is serializable"),
             Self::History(value) => serde_json::to_value(value).expect("history serializes"),
             Self::Trash(value) => serde_json::to_value(value).expect("trash serializes"),
+            Self::CloudVaults(value) => {
+                serde_json::to_value(value).expect("cloud vaults serialize")
+            }
+            Self::CloudConflicts(value) => {
+                serde_json::to_value(value).expect("cloud conflicts serialize")
+            }
         }
     }
 }
@@ -440,6 +448,32 @@ pub fn decode_responses(bytes: &[u8]) -> Result<RpcResponse, String> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn cloud_records_roundtrip_without_embedded_json_strings() {
+        let cases = [
+            (
+                ResponsePayload::CloudVaults(vec![crate::cloud::RemoteVault {
+                    id: "a".repeat(32),
+                    version: "b".repeat(32),
+                    size: 123,
+                }]),
+                serde_json::json!([{ "id": "a".repeat(32), "version": "b".repeat(32), "size": 123 }]),
+            ),
+            (
+                ResponsePayload::CloudConflicts(crate::cloud::ConflictReview {
+                    token: "review".into(),
+                    items: vec![],
+                }),
+                serde_json::json!({ "token": "review", "items": [] }),
+            ),
+        ];
+        for (payload, expected) in cases {
+            let response = RpcResponse::success(payload);
+            let decoded = decode_responses(&encode_rpc_response(&response).unwrap()).unwrap();
+            assert_eq!(decoded.payload.into_json(), expected);
+        }
+    }
 
     #[test]
     fn authenticator_responses_preserve_codes_lifetimes_and_full_u64_counters() {
