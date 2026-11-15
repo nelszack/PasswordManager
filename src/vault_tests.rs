@@ -25,7 +25,7 @@ fn memory() -> Vault {
         None,
     )
 }
-fn key(byte: u8) -> VaultCredentials {
+pub(super) fn key(byte: u8) -> VaultCredentials {
     VaultCredentials::Session {
         encryption_key: [byte; 32],
         salt: [7; 16],
@@ -39,16 +39,23 @@ fn credentials() -> VaultCredentials {
     key(42)
 }
 fn persisted() -> (tempfile::TempDir, Vault, VaultCredentials) {
-    let dir = tempfile::tempdir().unwrap();
-    let mut vault = memory();
-    vault.metadata.filename = "test.enc".into();
+    persist_fixture(memory(), "test.enc")
+}
+/// Own the temporary store for the complete fixture lifetime, including panics.
+/// Callers supply their records and filename so each regression keeps its data.
+pub(super) fn persist_fixture(
+    mut vault: Vault,
+    filename: &str,
+) -> (tempfile::TempDir, Vault, VaultCredentials) {
+    let directory = tempfile::tempdir().unwrap();
+    vault.metadata.filename = filename.into();
     vault.store = VaultStore::File {
-        directory: dir.path().to_owned(),
-        filename: "test.enc".into(),
+        directory: directory.path().to_owned(),
+        filename: filename.into(),
     };
     let mut credentials = credentials();
     write_vault(&vault, &mut credentials).unwrap();
-    (dir, vault, credentials)
+    (directory, vault, credentials)
 }
 fn update(id: usize, password: &str) -> TypedUpdate {
     TypedUpdate {

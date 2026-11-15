@@ -3,46 +3,31 @@ const assert = require("node:assert/strict");
 const prompt = require("./credential_prompt_state.js");
 
 test("credential lookups distinguish missing sites from native and malformed errors", () => {
-    // a missing site is treated as an empty credential lookup
-    {
-        assert.deepEqual(prompt.accountsFromLookup({
-            success: false,
-            error: "Not found."
-        }), []);
-        assert.deepEqual(prompt.accountsFromLookup({
-            success: true,
-            data: [{"id": 7, "username": "alice"}]
-        }), [{ id: 7, username: "alice" }]);
-    }
-    // credential lookup still reports native and malformed response errors
-    {
-        assert.throws(() => prompt.accountsFromLookup({
-            success: false,
-            error: "Vault is locked"
-        }), /locked/);
-        assert.throws(() => prompt.accountsFromLookup({
-            success: true,
-            data: "not json"
-        }), /Invalid credential response/);
-        assert.throws(() => prompt.accountsFromLookup({
-            success: true,
-            data: {}
-        }), /Invalid credential response/);
-    }
+    const accounts = [{ id: 7, username: "alice" }];
+    for (const [label, response, expected] of [
+        ["new site", { success: false, error: "Not found." }, []],
+        ["existing site", { success: true, data: accounts }, accounts]
+    ]) assert.deepEqual(prompt.accountsFromLookup(response), expected, label);
+    for (const [label, response, error] of [
+        ["locked vault", { success: false, error: "Vault is locked" }, /locked/],
+        ["encoded data", { success: true, data: "not json" }, /Invalid credential response/],
+        ["object data", { success: true, data: {} }, /Invalid credential response/]
+    ]) assert.throws(() => prompt.accountsFromLookup(response), error, label);
 });
-
 
 test("matching usernames, including literal None, select their own update target", () => {
     for (const [label, username, name] of [["ordinary username", "bob", "Work"], ["literal None", "None", "None account"]]) {
         const data = prompt.describe([
             { id: 7, name: "Other account", username: "alice" },
-            { id: 8, name, username }
+            { id: 8, name, username, get password() { assert.fail("descriptions must not compare passwords"); } }
         ], username, "https://login.example.com");
         assert.equal(data.hasAccounts, true, label);
         assert.deepEqual(data.updateTarget, { id: 8, name }, label);
         assert.equal(data.suggestedName, name, label);
         assert.equal(data.askForUsername, false, label);
         assert.match(data.message, /already exists/, label);
+        assert.equal(data.message.includes("different"), false, label);
+        assert.equal(JSON.stringify(data).includes("password"), false, label);
     }
     assert.equal(prompt.accountUsername({ username: null }), "");
 });
@@ -54,15 +39,6 @@ test("new-site metadata suggests the captured hostname and requests a username",
     assert.equal(data.suggestedName, "login.example.com");
     assert.equal(data.askForUsername, true);
     assert.equal(data.updateTarget, null);
-});
-
-test("prompt descriptions use usernames and never make password comparisons", () => {
-    const accounts = [{ id: 1, name: "Personal", username: "alice" }];
-    const data = prompt.describe(accounts, "alice", "https://example.com");
-    assert.equal(data.hasAccounts, true);
-    assert.match(data.message, /already exists/);
-    assert.equal(data.message.includes("different"), false);
-    assert.equal(JSON.stringify(data).includes("password"), false);
 });
 
 test("completion builds only authorized add and update operations", () => {

@@ -84,7 +84,6 @@ mod tests {
     #[test]
     fn prepared_merge_adopts_data_only_when_replacement_commits() {
         for fault in [0, 1, 2] {
-            let directory = tempfile::tempdir().unwrap();
             let mut vault = Vault::from_entries(
                 vec![
                     VaultEntry {
@@ -101,18 +100,6 @@ mod tests {
                 ],
                 None,
             );
-            vault.store = VaultStore::File {
-                directory: directory.path().to_owned(),
-                filename: "test.enc".into(),
-            };
-            let mut credentials = VaultCredentials::Session {
-                encryption_key: [42; 32],
-                salt: [7; 16],
-                kdf: 1,
-                memory_kib: 8192,
-                iterations: 1,
-                parallelism: 1,
-            };
             let duo_key = crate::duo::crypto::new_key().unwrap();
             vault.item_mut(2).unwrap().duo = Some(DuoRecord {
                 credentials: DuoCredentials {
@@ -126,7 +113,8 @@ mod tests {
                 },
                 review_key: Some([37; 32]),
             });
-            write_vault(&vault, &mut credentials).unwrap();
+            let (directory, mut vault, mut credentials) =
+                crate::vault::test::persist_fixture(vault, "test.enc");
             let original = vault.data.clone();
             let original_file = fs::read(directory.path().join("test.enc")).unwrap();
             let mut remote = vault.clone();

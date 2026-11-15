@@ -454,14 +454,7 @@ mod tests {
     #[test]
     fn encrypted_merge_checks_identity_and_key_and_roundtrips() {
         let (local, remote) = pair();
-        let credentials = VaultCredentials::Session {
-            encryption_key: [42; 32],
-            salt: [7; 16],
-            kdf: 1,
-            memory_kib: 8192,
-            iterations: 1,
-            parallelism: 1,
-        };
+        let credentials = crate::vault::test::key(42);
         let encrypt = |data: &VaultData| {
             let plaintext = persistence::encode_document(data, None).unwrap();
             try_encrypt_file_in_place(&mut credentials.clone(), plaintext.to_vec()).unwrap()

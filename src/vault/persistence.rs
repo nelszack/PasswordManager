@@ -792,6 +792,7 @@ pub(crate) fn delete_vault(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::test::{key as session, persist_fixture};
     #[test]
     fn overlay_preserves_document_bytes_for_replacements_deletions_and_insertions() {
         let entry = |id, name: &str| VaultEntry {
@@ -871,35 +872,19 @@ mod tests {
             }
         }
     }
-    fn session(byte: u8) -> VaultCredentials {
-        VaultCredentials::Session {
-            encryption_key: [byte; 32],
-            salt: [7; 16],
-            kdf: 1,
-            memory_kib: 8192,
-            iterations: 1,
-            parallelism: 1,
-        }
-    }
     fn stored() -> (tempfile::TempDir, Vault, VaultCredentials) {
-        let directory = tempfile::tempdir().unwrap();
-        let mut vault = Vault::from_entries(
-            vec![VaultEntry {
-                id: 1,
-                name: "Example".into(),
-                password: "before".into(),
-                ..Default::default()
-            }],
-            None,
-        );
-        vault.metadata.filename = "vault.enc".into();
-        vault.store = VaultStore::File {
-            directory: directory.path().to_owned(),
-            filename: "vault.enc".into(),
-        };
-        let mut credentials = session(42);
-        write_vault(&vault, &mut credentials).unwrap();
-        (directory, vault, credentials)
+        persist_fixture(
+            Vault::from_entries(
+                vec![VaultEntry {
+                    id: 1,
+                    name: "Example".into(),
+                    password: "before".into(),
+                    ..Default::default()
+                }],
+                None,
+            ),
+            "vault.enc",
+        )
     }
     #[test]
     fn size_limits_include_authenticated_encryption_and_backup_overhead() {

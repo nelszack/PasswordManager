@@ -614,6 +614,29 @@ impl ServerGuard {
     }
 }
 
+// Each caller still owns its temporary home and server guard. A setup failure
+// therefore stops that server before the caller's temporary directory is removed.
+fn create_unlocked_key_vault(root: &Path, port: u16, timeout: Option<u64>) -> PathBuf {
+    let key = root.join("vault.key");
+    for action in ["new", "unlock"] {
+        let mut command = isolated_pm(root);
+        command
+            .args(["--port", &port.to_string(), action, "--key"])
+            .arg(&key);
+        if action == "unlock"
+            && let Some(seconds) = timeout
+        {
+            command.args(["--timeout", &seconds.to_string()]);
+        }
+        let output = command.output_timeout(&format!("key-vault fixture {action}"));
+        assert!(
+            output.status.success(),
+            "key-vault fixture {action}: {output:?}"
+        );
+    }
+    key
+}
+
 #[test]
 fn kill_exits_during_stalled_cloud_headers_and_body() {
     use std::io::Write;
@@ -792,15 +815,7 @@ fn file_commands_resolve_client_paths_and_preserve_application_files() {
         port,
         active: true,
     };
-    let key = root.path().join("vault.key");
-    for command in ["new", "unlock"] {
-        let result = run(
-            root.path(),
-            port,
-            &[command, "--key", key.to_str().unwrap()],
-        );
-        assert!(result.status.success(), "{result:?}");
-    }
+    let key = create_unlocked_key_vault(root.path(), port, None);
     std::fs::write(client_directory.join("import.json"),
         r#"[{"name":"Synthetic account","username":"alice","password":"synthetic-secret","url":"https://example.com"}]"#).unwrap();
     let from_client = |args: &[&str]| {
@@ -945,18 +960,7 @@ fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() 
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
     let _server = ServerGuard::start(root.path(), port);
-    let key = root.path().join("vault.key");
-    for args in [
-        vec!["new", "--key", key.to_str().unwrap()],
-        vec!["unlock", "--key", key.to_str().unwrap(), "--timeout", "0"],
-    ] {
-        let result = run(root.path(), port, &args);
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
+    let _key = create_unlocked_key_vault(root.path(), port, Some(0));
     let name = "Synthetic\x1b]52;c;c3ludGhldGlj\x07\nForged row";
     let secret = "raw\x1b[2Jsecret";
     let path = root.path().join("import.csv");
@@ -1124,20 +1128,8 @@ fn config_and_completion_commands_persist_in_an_isolated_home() {
 fn machine_readable_secrets_preserve_whitespace_empty_values_and_unicode() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
-    let key = root.path().join("vault.key");
     let _server = ServerGuard::start(root.path(), port);
-    for command in ["new", "unlock"] {
-        let output = run(
-            root.path(),
-            port,
-            &[command, "--key", key.to_str().unwrap()],
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let _key = create_unlocked_key_vault(root.path(), port, None);
     let secrets = ["  padded  ", "", "\n\n", "private key\r\n\r\n", "🔐\t\0 "];
     let items = secrets
         .iter()
@@ -1186,19 +1178,8 @@ fn machine_readable_secrets_preserve_whitespace_empty_values_and_unicode() {
 fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
-    let key = root.path().join("vault.key");
     let _server = ServerGuard::start(root.path(), port);
-    for command in ["new", "unlock"] {
-        assert!(
-            run(
-                root.path(),
-                port,
-                &[command, "--key", key.to_str().unwrap()]
-            )
-            .status
-            .success()
-        );
-    }
+    let key = create_unlocked_key_vault(root.path(), port, None);
     let input = root.path().join("otp.json");
     std::fs::write(
         &input,
@@ -1954,21 +1935,7 @@ fn permanent_deletion_requires_explicit_noninteractive_confirmation() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
     let _guard = ServerGuard::start(root.path(), port);
-    let key = root.path().join("vault.key");
-    assert!(
-        run(root.path(), port, &["new", "--key", key.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(
-        run(
-            root.path(),
-            port,
-            &["unlock", "--key", key.to_str().unwrap()]
-        )
-        .status
-        .success()
-    );
+    let key = create_unlocked_key_vault(root.path(), port, None);
     assert!(
         run(
             root.path(),
@@ -2106,21 +2073,7 @@ fn operation_inspection_and_empty_audits_have_clear_outcomes() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
     let _guard = ServerGuard::start(root.path(), port);
-    let key = root.path().join("vault.key");
-    assert!(
-        run(root.path(), port, &["new", "--key", key.to_str().unwrap()])
-            .status
-            .success()
-    );
-    assert!(
-        run(
-            root.path(),
-            port,
-            &["unlock", "--key", key.to_str().unwrap()]
-        )
-        .status
-        .success()
-    );
+    let _key = create_unlocked_key_vault(root.path(), port, None);
     let report = run(root.path(), port, &["audit"]);
     assert!(report.status.success());
     let text = String::from_utf8(report.stdout).unwrap();

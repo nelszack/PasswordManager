@@ -138,22 +138,27 @@ test("picker runtime discloses destinations and requires trusted, confirmed sele
     }
 });
 
-test("credential prompt runtime renders metadata and submits only trusted actions", async () => {
+// Each view gets a fresh document, worker transport, and response map. Recovery
+// scenarios replace only their response; metadata setup stays identical.
+async function credentialPromptEnvironment(responses = {}) {
+    Object.assign(responses, {
+        getCredentialPromptData: { success: true, data: {
+            site: "https://example.com", message: "Save this login?", suggestedName: "Example",
+            username: "alice", askForUsername: false, hasAccounts: true, updateTarget: { name: "Personal" }
+        } },
+        completeCredentialPrompt: { success: true },
+        ...responses
+    });
     const env = environment([
-        "credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "update", "cancel"
-    ], {
-        getCredentialPromptData: {
-            success: true,
-            data: {
-                site: "https://example.com", message: "Save this login?", suggestedName: "Example",
-                username: "alice", askForUsername: false, hasAccounts: true,
-                updateTarget: { name: "Personal" }
-            }
-        },
-        completeCredentialPrompt: { success: true }
-    }, "?token=prompt-token");
+        "credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "add", "update", "cancel"
+    ], responses, "?token=prompt-token");
     execute("credential_prompt.js", env.context);
     await settle();
+    return env;
+}
+
+test("credential prompt runtime renders metadata and submits only trusted actions", async () => {
+    const env = await credentialPromptEnvironment();
     assert.equal(env.elements.credentials.hidden, false);
     assert.equal(env.elements.update.textContent, "Update Personal");
     env.elements.update.dispatch("click", { isTrusted: true });
@@ -167,8 +172,7 @@ test("credential prompt disables writes after an uncertain save and still allows
         getCredentialPromptData: { success: true, data: { site: "https://example.com", message: "Save?", suggestedName: "Example", username: "alice", hasAccounts: true } },
         completeCredentialPrompt: { success: false, error: "Save may still complete. Review the vault.", uncertain: true }
     };
-    const env = environment(["credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "add", "update", "cancel"], responses, "?token=prompt-token");
-    execute("credential_prompt.js", env.context); await settle();
+    const env = await credentialPromptEnvironment(responses);
     env.elements.credentials.dispatch("submit", { isTrusted: true }); await settle();
     assert.equal(env.elements.add.disabled, true);
     assert.equal(env.elements.update.disabled, true);
