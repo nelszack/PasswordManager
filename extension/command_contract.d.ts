@@ -14,6 +14,7 @@ export interface DuoRequest { id: string; application: string; username: string;
 export interface NativeRequests {
     status: { };
     lock: { operationId: string; };
+    openDesktop: { };
     duoRequests: { entryId: number; expectedSession: string; };
     duoRespond: { operationId: string; entryId: number; requestId: string; fingerprint: string; approve: boolean; expectedSession: string; verificationCode?: string; };
     getAutofillItems: { };
@@ -29,6 +30,7 @@ export interface NativeRequests {
 export interface NativeResults {
     status: ServerStatus;
     lock: string | OperationReceipt;
+    openDesktop: string;
     duoRequests: DuoRequest[];
     duoRespond: string | OperationReceipt;
     getAutofillItems: ItemSummary[];

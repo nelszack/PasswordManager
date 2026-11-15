@@ -93,6 +93,12 @@ const PasswordManagerBackgroundRouter = {
                 pendingCredentials.consume(sender, sendResponse);
                 return true;
             }
+            if (request.action === "openDesktop") {
+                const trusted = security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("popup.html"));
+                if (!trusted) { sendResponse({ success: false, error: "Invalid desktop launch request" }); return false; }
+                sendAction("openDesktop", {}, sendResponse);
+                return true;
+            }
             if (request.action === "lockVault") {
                 const trusted = ["popup.html"].some(path => security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path)));
                 if (!trusted || !contract.operations.lock.allowedSenders.some(role => ["popup"].includes(role))) { sendResponse({ success: false, error: "Invalid lock request" }); return false; }

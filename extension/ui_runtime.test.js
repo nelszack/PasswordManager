@@ -68,7 +68,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 
 async function popupEnvironment(responses) {
     const env = environment([
-        "statusDot", "statusText", "lockBtn", "output", "nativeHint", "recovery", "operation",
+        "statusDot", "statusText", "lockBtn", "openDesktopBtn", "output", "nativeHint", "recovery", "operation",
         "reviewOperation", "unknownReview", "inspected", "acknowledgeOperation"
     ], responses);
     env.context.PasswordManagerPopupState = require("./popup_state.js");
@@ -209,4 +209,19 @@ test("popup requires a reviewed unknown outcome and explicit inspection without 
     assert.equal(env.elements.recovery.hidden, true);
     assert.equal(env.messages.filter(message => message.action === "acknowledgeUnknownOperation").length, 1);
     assert.equal(env.messages.some(message => ["saveCredentials", "updateCredentials"].includes(message.action)), false);
+});
+
+test("popup opens the desktop while disconnected and reports launch errors", async () => {
+    for (const response of [{ success: true }, { success: false, error: "Native host unavailable" }, {}]) {
+        const env = await popupEnvironment({ getStatus: { native: false }, openDesktop: response });
+        const button = env.elements.openDesktopBtn;
+        assert.equal(button.disabled, false);
+        const opening = button.dispatch("click");
+        assert.equal(button.disabled, true);
+        await opening;
+        assert.equal(button.disabled, false);
+        assert.equal(env.messages.at(-1).action, "openDesktop");
+        assert.equal(env.elements.output.innerText, response.success
+            ? "Desktop app launch requested." : response.error || "Could not open the desktop app");
+    }
 });

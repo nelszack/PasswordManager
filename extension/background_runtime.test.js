@@ -395,3 +395,17 @@ test("only the popup may acknowledge unknown outcomes and content scripts cannot
     const popup = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "popup.html") };
     assert.equal((await env.message({ action: "acknowledgeUnknownOperation", operationId: "unchecked", inspected: true }, popup)).success, false);
 });
+
+test("only the extension popup can launch the desktop app", async () => {
+    const env = securityEnvironment();
+    await new Promise(resolve => setImmediate(resolve));
+    for (const sender of [env.sender, env.pickerSender,
+        { id: "other-extension", url: env.context.chrome.runtime.getURL("popup.html") }]) {
+        assert.equal((await env.message({ action: "openDesktop" }, sender)).success, false);
+    }
+    assert.equal(env.requests.some(request => request.action === "openDesktop"), false);
+    const popup = { id: env.context.chrome.runtime.id, url: env.context.chrome.runtime.getURL("popup.html") };
+    assert.equal((await env.message({ action: "openDesktop" }, popup)).success, true);
+    assert.equal(env.requests.at(-1).action, "openDesktop");
+    assert.equal(env.requests.at(-1).operationId, undefined);
+});

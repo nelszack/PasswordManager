@@ -89,3 +89,14 @@ document.getElementById("acknowledgeOperation").addEventListener("click", async 
     resetReview();
     await refreshStatus();
 });
+
+document.getElementById("openDesktopBtn").addEventListener("click", async () => {
+    const button = document.getElementById("openDesktopBtn");
+    button.disabled = true;
+    document.getElementById("output").innerText = "Opening desktop app…";
+    const response = await sendMessage({ action: "openDesktop" });
+    document.getElementById("output").innerText = response?.success
+        ? "Desktop app launch requested."
+        : response?.error || "Could not open the desktop app";
+    button.disabled = false;
+});

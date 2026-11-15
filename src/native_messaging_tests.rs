@@ -524,3 +524,34 @@ fn browser_password_updates_preserve_saved_site_information() {
     assert_eq!(update.entry.update.url, None);
     assert_eq!(update.entry.password.unwrap().expose(), "new-password");
 }
+
+#[test]
+fn desktop_launch_does_not_need_a_vault_server_and_preserves_errors() {
+    let client = AuthenticatedClient::new(0);
+    for outcome in [Ok(()), Err("synthetic launch failure".to_string())] {
+        let expected = outcome.clone();
+        let request: NativeRequest =
+            serde_json::from_value(json!({"id": 91, "action": "openDesktop"})).unwrap();
+        let response = handle_request_with_launcher(&client, request, || outcome);
+        assert_eq!(response.id, 91);
+        assert_eq!(response.success, expected.is_ok());
+        assert_eq!(response.error, expected.err());
+        assert!(!response.uncertain);
+    }
+    let request: NativeRequest = serde_json::from_value(
+        json!({"id": 92, "action": "openDesktop", "domain": "https://example.com"}),
+    )
+    .unwrap();
+    let response = handle_request_with_launcher(&client, request, || {
+        panic!("invalid requests must not launch")
+    });
+    assert!(!response.success);
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn desktop_process_uses_explicit_gui_dispatch() {
+    let command = desktop_command(Path::new("/synthetic/pm-native-host.exe"));
+    assert_eq!(command.get_program(), "/synthetic/pm-native-host.exe");
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["gui"]);
+}

@@ -6,6 +6,7 @@ pub enum NativeAction {
     #[default]
     Status,
     Lock,
+    OpenDesktop,
     DuoRequests,
     DuoRespond,
     GetAutofillItems,
@@ -30,9 +31,10 @@ pub struct NativePolicy {
     pub result_shape: &'static str,
 }
 impl NativeAction {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Status,
         Self::Lock,
+        Self::OpenDesktop,
         Self::DuoRequests,
         Self::DuoRespond,
         Self::GetAutofillItems,
@@ -49,6 +51,7 @@ impl NativeAction {
         match self {
             Self::Status => "status",
             Self::Lock => "lock",
+            Self::OpenDesktop => "openDesktop",
             Self::DuoRequests => "duoRequests",
             Self::DuoRespond => "duoRespond",
             Self::GetAutofillItems => "getAutofillItems",
@@ -72,19 +75,19 @@ impl NativeAction {
                 | Self::UpdateCredentials
         );
         let lane = match self {
-            Self::Status | Self::Lock | Self::OperationStatus => "control",
+            Self::Status | Self::Lock | Self::OpenDesktop | Self::OperationStatus => "control",
             Self::DuoRequests | Self::DuoRespond | Self::GetDuoItems => "duo",
             _ => "work",
         };
         let allowed_senders: &[&str] = match self {
-            Self::Lock => &["popup", "background"],
+            Self::Lock | Self::OpenDesktop => &["popup", "background"],
             Self::OperationStatus => &["popup", "prompt", "background"],
             _ => &["background"],
         };
         let (required_fields, optional_fields, result_shape): (&[&str], &[&str], &str) = match self
         {
             Self::Status => (&[], &[], "status"),
-            Self::Lock => (&[], &[], "message"),
+            Self::Lock | Self::OpenDesktop => (&[], &[], "message"),
             Self::DuoRequests => (&["entryId", "expectedSession"], &[], "duoArray"),
             Self::DuoRespond => (
                 &[

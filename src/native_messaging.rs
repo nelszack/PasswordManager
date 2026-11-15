@@ -218,6 +218,14 @@ impl NativeResponse {
 }
 
 pub fn invoked_directly() -> bool {
+    // Windows installs a copy named pm-native-host.exe. An explicit GUI
+    // invocation must reach CLI dispatch rather than re-entering the bridge.
+    if std::env::args_os()
+        .skip(1)
+        .eq([std::ffi::OsString::from("gui")])
+    {
+        return false;
+    }
     std::env::args_os()
         .next()
         .and_then(|path| PathBuf::from(path).file_name().map(|name| name.to_owned()))
@@ -495,7 +503,51 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
     Ok(value)
 }
 
-fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> NativeResponse {
+fn launch_desktop() -> Result<(), String> {
+    #[cfg(not(feature = "desktop"))]
+    return Err(
+        "This build has no desktop interface. Install a build with desktop support.".into(),
+    );
+    #[cfg(feature = "desktop")]
+    {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("could not locate the desktop executable: {error}"))?;
+        let mut command = desktop_command(&executable);
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("could not open the desktop app: {error}"))?;
+        // Reap the GUI when it exits without blocking the native message loop.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn desktop_command(executable: &Path) -> std::process::Command {
+    #[cfg(target_os = "windows")]
+    let mut command = hidden_windows_command(executable);
+    #[cfg(not(target_os = "windows"))]
+    let mut command = std::process::Command::new(executable);
+    // The GUI must never inherit native messaging's framed stdin/stdout pipes.
+    command
+        .arg("gui")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+fn handle_request(client: &AuthenticatedClient, request: NativeRequest) -> NativeResponse {
+    handle_request_with_launcher(client, request, launch_desktop)
+}
+
+fn handle_request_with_launcher(
+    client: &AuthenticatedClient,
+    mut request: NativeRequest,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> NativeResponse {
     let id = request.id;
     let operation_id = request.operation_id.clone();
     let mut uncertain = false;
@@ -504,6 +556,10 @@ fn handle_request(client: &AuthenticatedClient, mut request: NativeRequest) -> N
     let mut session_id = None;
     let result = (|| {
         request.validate()?;
+        if request.action == NativeAction::OpenDesktop {
+            launch()?;
+            return Ok(json!("Desktop app launch requested."));
+        }
         command_for_request(&mut request).and_then(|command| {
             let mut envelope=RequestEnvelope::new(command).with_operation(operation_id.clone(),request.expected_revision);
             envelope.expected_session = request.expected_session.clone();

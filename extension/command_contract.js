@@ -136,6 +136,18 @@
     "optionalFields": [],
     "resultShape": "message"
   },
+  "openDesktop": {
+    "mutates": false,
+    "lane": "control",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "popup",
+      "background"
+    ],
+    "requiredFields": [],
+    "optionalFields": [],
+    "resultShape": "message"
+  },
   "operationStatus": {
     "mutates": false,
     "lane": "control",
