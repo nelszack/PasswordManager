@@ -295,6 +295,19 @@ impl PartialEq for CachedStrength {
     }
 }
 impl Item {
+    fn urls(&self) -> impl Iterator<Item = &str> {
+        self.entry
+            .url
+            .as_deref()
+            .into_iter()
+            .chain(self.metadata.additional_urls.iter().map(String::as_str))
+    }
+    fn password_changed(&self) -> &str {
+        self.metadata
+            .password_changed
+            .as_ref()
+            .map_or(self.entry.created.as_str(), Timestamp::as_str)
+    }
     fn password_score(&self) -> zxcvbn::Score {
         *self
             .strength
@@ -427,16 +440,6 @@ impl Vault {
     fn metadata(&self, id: usize) -> Option<&EntryMetadata> {
         self.item(id).map(|i| &i.metadata)
     }
-    fn item_kind(&self, id: usize) -> ItemKind {
-        self.metadata(id).map_or(ItemKind::Login, |m| m.kind)
-    }
-    fn all_urls<'a>(&'a self, entry: &'a VaultEntry) -> impl Iterator<Item = &'a str> {
-        entry.url.as_deref().into_iter().chain(
-            self.metadata(entry.id)
-                .into_iter()
-                .flat_map(|m| m.additional_urls.iter().map(String::as_str)),
-        )
-    }
     fn custom_fields(&self, id: usize) -> &[CustomField] {
         self.metadata(id)
             .map_or(&[], |m| m.custom_fields.as_slice())
@@ -476,7 +479,7 @@ impl Vault {
             entry: &item.entry,
             metadata: Some(&item.metadata),
             has_totp: item.authenticator.is_some(),
-            urls: self.all_urls(&item.entry).collect(),
+            urls: item.urls().collect(),
         })
     }
 }

@@ -296,7 +296,7 @@ impl App {
         for item in &changes.items {
             let key = item.name.to_lowercase();
             let index = self.items.partition_point(|existing| {
-                (existing.name.to_lowercase(), existing.id) < (key.clone(), item.id)
+                (&existing.name.to_lowercase(), existing.id) < (&key, item.id)
             });
             self.items.insert(index, item.clone());
         }

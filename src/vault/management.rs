@@ -7,18 +7,15 @@ impl Vault {
             name: item.entry.name.clone(),
             username: item.entry.username.clone(),
             kind: item.metadata.kind,
-            urls: self.all_urls(&item.entry).map(str::to_owned).collect(),
+            urls: item.urls().map(str::to_owned).collect(),
             has_totp: item.authenticator.is_some(),
             has_duo: item.duo.is_some(),
         }
     }
     pub fn management_list(&self, filter: SearchFilter) -> Result<ItemPage, VaultError> {
-        let entries = self.apply_list_options(self.search_entries(&filter), &filter.list);
-        let total = entries.len();
-        let items = entries
-            .into_iter()
-            .map(|e| self.summary(self.item(e.id).unwrap()))
-            .collect();
+        let items = self.apply_list_options(self.search_items(&filter), &filter.list);
+        let total = items.len();
+        let items = items.into_iter().map(|item| self.summary(item)).collect();
         Ok(ItemPage { items, total })
     }
     pub fn management_item(&self, id: usize, reveal: bool) -> Result<ItemDetail, VaultError> {
@@ -33,7 +30,7 @@ impl Vault {
             name: e.name.clone(),
             username: e.username.clone(),
             kind: item.metadata.kind,
-            urls: self.all_urls(e).map(str::to_owned).collect(),
+            urls: item.urls().map(str::to_owned).collect(),
             notes: e.notes.clone(),
             password: reveal.then(|| e.password.clone()),
             has_secret: !e.password.is_empty(),
@@ -74,12 +71,13 @@ impl Vault {
         // not just string contents: many short URLs can otherwise exceed the cap.
         let mut bytes = 128usize.saturating_add(ids.len().saturating_mul(16));
         for &id in ids {
-            if let Some(item) = self.item(id) {
+            let item = self.item(id);
+            if let Some(item) = item {
                 bytes = bytes
                     .saturating_add(item.entry.name.len())
                     .saturating_add(item.entry.username.as_ref().map_or(0, String::len))
                     .saturating_add(
-                        self.all_urls(&item.entry)
+                        item.urls()
                             .map(|url| url.len().saturating_add(8))
                             .sum::<usize>(),
                     )
@@ -88,7 +86,7 @@ impl Vault {
                     return None;
                 }
             }
-            match self.item(id).filter(|item| item.active()) {
+            match item.filter(|item| item.active()) {
                 Some(item) => changes.items.push(self.summary(item)),
                 None => changes.removed.push(id),
             }

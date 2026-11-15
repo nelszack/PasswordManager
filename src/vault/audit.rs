@@ -189,17 +189,17 @@ impl Vault {
         let mut cold = Vec::new();
         let now = chrono::Utc::now();
         let entries = self
-            .active_entries()
-            .filter(|entry| self.item_kind(entry.id) == ItemKind::Login)
-            .map(|entry| {
-                let changed = self.password_changed_with_metadata(entry, self.metadata(entry.id));
+            .active_items()
+            .filter(|item| item.metadata.kind == ItemKind::Login)
+            .map(|item| {
+                let entry = &item.entry;
+                let changed = item.password_changed();
                 AuditEntrySnapshot {
                     id: entry.id,
                     name: entry.name.clone(),
                     username: entry.username.clone(),
                     password_hash: password_hash(&entry.password),
                     weak: {
-                        let item = self.item(entry.id).unwrap();
                         match item.strength.0.get() {
                             Some(score) => *score <= zxcvbn::Score::Two,
                             None => {
@@ -216,8 +216,7 @@ impl Vault {
                         .stale_days
                         .is_some_and(|days| password_is_stale_at(changed, days, now)),
                     password_changed: changed.to_string(),
-                    missing_totp: options.require_totp
-                        && self.item(entry.id).unwrap().authenticator.is_none(),
+                    missing_totp: options.require_totp && item.authenticator.is_none(),
                     identity: (
                         entry
                             .url

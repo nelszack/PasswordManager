@@ -328,12 +328,18 @@ fn summaries_and_search_never_include_secret_fields_or_passwords() {
         }],
     );
     vault.item_mut(1).unwrap().entry.notes = Some("private note".into());
-    let encoded =
-        serde_json::to_string(&vault.management_list(SearchFilter::default()).unwrap()).unwrap();
+    let page = vault.management_list(SearchFilter::default()).unwrap();
+    let encoded = serde_json::to_string(&page).unwrap();
     for secret in ["secret-token", "private note", "other-secret"] {
         assert!(!encoded.contains(secret));
     }
     let detail = vault.management_item(1, false).unwrap();
+    assert_eq!(
+        detail.urls,
+        ["https://example.com", "https://accounts.example.com"]
+    );
+    assert_eq!(page.items[0].urls, detail.urls);
+    assert_eq!(vault.view_id(1).unwrap().urls, detail.urls);
     assert!(detail.password.is_none());
     assert!(detail.fields[0].value.is_none());
     assert_eq!(
@@ -398,6 +404,45 @@ fn list_filters_type_authenticator_age_and_sorting_from_complete_items() {
         })
         .unwrap();
     assert_eq!(ordered.items[0].id, 2);
+
+    let first = vault.item_mut(1).unwrap();
+    first.entry.name = "Zulu".into();
+    first.entry.modified = "2030-01-01T00:00:00Z".into();
+    first.metadata.password_changed = Some("2025-01-01T00:00:00Z".into());
+    let second = vault.item_mut(2).unwrap();
+    second.entry.name = "alpha".into();
+    second.entry.created = "2021-01-01T00:00:00Z".into();
+    second.entry.modified = "2022-01-01T00:00:00Z".into();
+    // PasswordAge must use the explicit password-change date for one item
+    // and fall back to creation time for the other.
+    for (sort, ascending) in [
+        (SortField::Id, vec![1, 2]),
+        (SortField::Name, vec![2, 1]),
+        (SortField::Created, vec![1, 2]),
+        (SortField::Modified, vec![2, 1]),
+        (SortField::PasswordAge, vec![2, 1]),
+    ] {
+        for descending in [false, true] {
+            let page = vault
+                .management_list(SearchFilter {
+                    list: ListOptions {
+                        sort,
+                        descending,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+            let mut expected = ascending.clone();
+            if descending {
+                expected.reverse();
+            }
+            assert_eq!(
+                page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
 }
 #[test]
 fn trash_retention_handles_canonical_dates_and_extreme_thresholds() {

@@ -1,57 +1,41 @@
 use super::*;
 impl Vault {
-    fn is_weak(&self, entry: &VaultEntry) -> bool {
-        !entry.password.is_empty()
-            && self.item(entry.id).unwrap().password_score() <= zxcvbn::Score::Two
-    }
-    fn password_changed<'a>(&'a self, entry: &'a VaultEntry) -> &'a str {
-        self.metadata(entry.id)
-            .and_then(|m| m.password_changed.as_ref())
-            .map_or(entry.created.as_str(), Timestamp::as_str)
-    }
-    pub(super) fn password_changed_with_metadata<'a>(
-        &'a self,
-        entry: &'a VaultEntry,
-        metadata: Option<&'a EntryMetadata>,
-    ) -> &'a str {
-        metadata
-            .and_then(|m| m.password_changed.as_ref())
-            .map_or(entry.created.as_str(), Timestamp::as_str)
-    }
     pub(super) fn apply_list_options<'a>(
         &'a self,
-        mut entries: Vec<&'a VaultEntry>,
+        mut items: Vec<&'a Item>,
         options: &ListOptions,
-    ) -> Vec<&'a VaultEntry> {
+    ) -> Vec<&'a Item> {
         let now = chrono::Utc::now();
-        entries.retain(|e| {
-            options.kind.is_none_or(|k| self.item_kind(e.id) == k)
-                && options.has_totp.is_none_or(|expected| {
-                    self.item(e.id).unwrap().authenticator.is_some() == expected
-                })
-                && (!options.weak || self.is_weak(e))
+        items.retain(|item| {
+            options.kind.is_none_or(|kind| item.metadata.kind == kind)
+                && options
+                    .has_totp
+                    .is_none_or(|expected| item.authenticator.is_some() == expected)
+                && (!options.weak
+                    || (!item.entry.password.is_empty()
+                        && item.password_score() <= zxcvbn::Score::Two))
                 && options
                     .stale_days
-                    .is_none_or(|days| password_is_stale_at(self.password_changed(e), days, now))
+                    .is_none_or(|days| password_is_stale_at(item.password_changed(), days, now))
         });
         match options.sort {
-            SortField::Name => entries.sort_by_cached_key(|e| e.name.to_lowercase()),
+            SortField::Name => items.sort_by_cached_key(|item| item.entry.name.to_lowercase()),
             // Search traverses the ID-ordered item map and retain preserves order.
             SortField::Id => {}
-            _ => entries.sort_by_cached_key(|e| {
+            _ => items.sort_by_cached_key(|item| {
                 parse_entry_timestamp(match options.sort {
-                    SortField::Created => &e.created,
-                    SortField::Modified => &e.modified,
-                    _ => self.password_changed(e),
+                    SortField::Created => &item.entry.created,
+                    SortField::Modified => &item.entry.modified,
+                    _ => item.password_changed(),
                 })
             }),
         }
         if options.descending {
-            entries.reverse();
+            items.reverse();
         }
-        entries
+        items
     }
-    pub(super) fn search_entries(&self, filter: &SearchFilter) -> Vec<&VaultEntry> {
+    pub(super) fn search_items(&self, filter: &SearchFilter) -> Vec<&Item> {
         let lower =
             |value: &Option<String>| value.as_ref().map(|v| Zeroizing::new(v.to_lowercase()));
         let query = lower(&filter.query);
@@ -103,7 +87,6 @@ impl Vault {
                             .is_none_or(|q| m.urls.iter().any(|v| v.contains(q.as_str())))
                 }) && notes.as_ref().is_none_or(|q| notes_match(q))
             })
-            .map(|item| &item.entry)
             .collect()
     }
     pub fn get_secret(&self, target: &Target) -> Result<Zeroizing<String>, VaultError> {
