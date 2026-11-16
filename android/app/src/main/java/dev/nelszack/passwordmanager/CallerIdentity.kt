@@ -11,6 +11,7 @@ import java.security.MessageDigest
 import javax.net.ssl.HttpsURLConnection
 
 object CallerIdentity {
+    data class BrowserSite(val origin: String, val hostnameOnly: Boolean)
     private fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)
     private fun fingerprints(context: Context, packageName: String): List<ByteArray> {
         val info = context.packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
@@ -58,6 +59,14 @@ object CallerIdentity {
         val origin = websiteOrigin("https://${uri.rawAuthority}")
         check(URI(origin).host == URI(reportedOrigin).host) { "Browser address does not match the form" }
         return origin
+    }
+    fun browserSite(reportedOrigin: String, nativeAddresses: List<String>): BrowserSite {
+        val reported = websiteOrigin(reportedOrigin)
+        if (nativeAddresses.isEmpty()) return BrowserSite(reported, true)
+        // Conflicting native evidence must never fall back to hostname matching.
+        val origins = nativeAddresses.map { addressBarOrigin(it, reported) }.toSet()
+        check(origins.size == 1) { "Ambiguous native browser address" }
+        return BrowserSite(origins.single(), false)
     }
     fun passwordOrigin(context: Context, info: CallingAppInfo): String =
         info.getOrigin(allowlist(context))?.let(::websiteOrigin) ?: appOrigin(context, info.packageName)

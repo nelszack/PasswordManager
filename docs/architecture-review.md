@@ -1,5 +1,14 @@
 # Architecture review
 
+Current documentation note, 2026-11-16: this is a historical review and its
+implementation follow-up, not a fresh audit of today's tree. The current
+[contributor architecture](development.md#architecture) includes an in-process
+Rust/JNI Android client alongside the desktop daemon. See
+[Android development](development.md#android-development) and the
+[mobile acceptance checklist](mobile-implementation.md) for that adapter's
+lifecycle, security boundaries and verification. Historical source links and
+test counts below are retained as evidence of the reviewed revisions.
+
 Reviewed 2026-10-18 against the pre-refactor checkout (`c1fe149`). Source line references below describe that historical implementation. The approved refactor is implemented on `refactor/architecture`; the [contributor guide](development.md#architecture) describes the current design. This is a design recommendation, not a security certification. Three independent reviews covered the vault/store, application/protocol, and browser extension; the primary review checked the consequential findings against source and ran the existing suites.
 
 ## Recommendation

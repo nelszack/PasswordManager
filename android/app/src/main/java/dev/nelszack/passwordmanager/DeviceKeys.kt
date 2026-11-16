@@ -7,6 +7,8 @@ import android.util.Base64
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import java.security.KeyStore
 import java.security.MessageDigest
 import javax.crypto.Cipher
@@ -38,17 +40,25 @@ object DeviceKeys {
         store().deleteEntry(alias(vault))
     }
     fun enable(activity: SecureActivity, vault: String, material: ByteArray, done: () -> Unit) {
-        check(Vault.primaryUnlock) { "Unlock with your original password or key file first" }
-        disable(activity, vault)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.ENCRYPT_MODE, key(alias(vault), true)); updateAAD(vault.toByteArray())
-        }
-        prompt(activity, "Enable biometric unlock", cipher, onCancel = { material.fill(0) }) { approved ->
-            try {
-                val encrypted = approved.doFinal(material)
-                check(prefs(activity).edit().putString(alias(vault), encode(approved.iv) + "." + encode(encrypted)).commit())
-                done()
-            } finally { material.fill(0) }
+        try {
+            check(Vault.primaryUnlock) { "Unlock with your original password or key file first" }
+            disable(activity, vault)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, key(alias(vault), true))
+            }
+            prompt(activity, "Enable biometric unlock", cipher, onCancel = { material.fill(0) }) { approved ->
+                try {
+                    // Auth-per-use keys cannot process AAD until CryptoObject
+                    // authentication succeeds. Doing so earlier poisons the operation.
+                    approved.updateAAD(vault.toByteArray())
+                    val encrypted = approved.doFinal(material)
+                    check(prefs(activity).edit().putString(alias(vault), encode(approved.iv) + "." + encode(encrypted)).commit())
+                    done()
+                } finally { material.fill(0) }
+            }
+        } catch (error: Exception) {
+            material.fill(0)
+            throw error
         }
     }
     fun unlock(activity: SecureActivity, vault: String, done: (ByteArray) -> Unit) {
@@ -56,23 +66,63 @@ object DeviceKeys {
             val parts = prefs(activity).getString(alias(vault), null)?.split('.') ?: error("Biometric unlock is not enabled")
             val secret = store().getKey(alias(vault), null) as? SecretKey ?: error("Biometric key unavailable")
             val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.DECRYPT_MODE, secret, GCMParameterSpec(128, decode(parts[0]))); updateAAD(vault.toByteArray())
+                init(Cipher.DECRYPT_MODE, secret, GCMParameterSpec(128, decode(parts[0])))
             }
-            prompt(activity, "Unlock vault", cipher) { approved -> done(approved.doFinal(decode(parts[1]))) }
+            prompt(activity, "Unlock vault", cipher) { approved ->
+                val material = try {
+                    approved.updateAAD(vault.toByteArray())
+                    approved.doFinal(decode(parts[1]))
+                } catch (error: Exception) {
+                    disable(activity, vault)
+                    throw IllegalStateException("Biometric key unavailable. Use your original password or key file.", error)
+                }
+                try { done(material) } catch (error: Exception) { material.fill(0); throw error }
+            }
         } catch (error: Exception) {
             disable(activity, vault)
-            throw IllegalStateException("Biometric key unavailable. Use your original password or key file.")
+            throw IllegalStateException("Biometric key unavailable. Use your original password or key file.", error)
         }
     }
     private fun prompt(activity: SecureActivity, title: String, cipher: Cipher, onCancel: () -> Unit = {}, done: (Cipher) -> Unit) {
         check(BiometricManager.from(activity).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS) { "Strong biometrics are unavailable" }
+        var finished = false
+        lateinit var observer: DefaultLifecycleObserver
+        val complete = activity.sessionCallback<BiometricPrompt.AuthenticationResult>(onCancel) { result ->
+            done(requireNotNull(result.cryptoObject?.cipher))
+        }
+        val failure = activity.sessionCallback<CharSequence> { message -> error(message.toString()) }
+        fun finish(): Boolean {
+            if (finished) return false
+            finished = true
+            activity.lifecycle.removeObserver(observer)
+            return true
+        }
         val prompt = BiometricPrompt(activity, ContextCompat.getMainExecutor(activity), object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { done(requireNotNull(result.cryptoObject?.cipher)) }
-            override fun onAuthenticationError(code: Int, message: CharSequence) { onCancel() }
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                if (finish()) complete(result)
+            }
+            override fun onAuthenticationError(code: Int, message: CharSequence) {
+                if (!finish()) return
+                onCancel()
+                if (code !in setOf(BiometricPrompt.ERROR_CANCELED, BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON)) failure(message)
+            }
         })
-        prompt.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle(title)
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-            .setNegativeButtonText("Use password or key file").build(), BiometricPrompt.CryptoObject(cipher))
+        observer = object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                if (finish()) {
+                    onCancel()
+                    prompt.cancelAuthentication()
+                }
+            }
+        }
+        activity.lifecycle.addObserver(observer)
+        try {
+            prompt.authenticate(BiometricPrompt.PromptInfo.Builder().setTitle(title)
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .setNegativeButtonText("Use password or key file").build(), BiometricPrompt.CryptoObject(cipher))
+        } catch (error: Exception) {
+            finish(); onCancel(); throw error
+        }
     }
     fun saveToken(context: Context, token: String) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key("pm.sync-token", false)) }

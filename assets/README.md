@@ -4,6 +4,11 @@ pixels to avoid adding an image decoder dependency. The extension uses PNGs.
 Windows shortcuts can use `password-manager.ico`, which contains sizes from
 16 × 16 through 256 × 256 pixels.
 
+Android currently uses its own vector icon at
+`android/app/src/main/res/drawable/ic_key.xml`; the regeneration commands below
+do not update that icon. Native mobile colors/themes and the navigation chevron
+are Android resources, documented in [Android development](../docs/development.md#android-development).
+
 After editing the SVG, regenerate the derived assets from the repository root
 with `rsvg-convert` (librsvg) and `magick` (ImageMagick):
 

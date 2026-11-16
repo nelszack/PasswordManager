@@ -4,6 +4,7 @@
 
 - [Architecture](#architecture)
 - [Testing and coverage](#testing)
+- [Android development](#android-development)
 - [Releases](#releases)
 - [Development and generated artifacts](#development)
 
@@ -20,6 +21,10 @@
 - `crates/pm-client/src/client/presentation.rs` - Human-readable rendering of typed response records
 - `src/native_messaging.rs` - Chrome native host protocol and registration
 - `src/vault.rs` and `src/vault/` - Complete item aggregates, staged mutations, import/export, and versioned document storage
+- `src/vault/mobile.rs` and `mobile_tools.rs` - In-process mobile operations, settings, sync, recovery, and byte-based document workflows
+- `src/passkey.rs` - ES256 WebAuthn construction and encrypted passkey-field validation
+- `crates/pm-mobile/` - JNI adapter and cancellation signal over the shared Rust vault library
+- `android/` - Native Kotlin app, secure autofill sheet, Android 14+ credential provider, Keystore integration, and isolated device fixtures
 - `src/secret.rs` - Redacted secret fields that wipe their contents on drop
 - `src/encryption.rs` - Encryption/decryption utilities
 - `src/password.rs` - Password generation and strength checking
@@ -32,7 +37,7 @@
 - `src/clipboard.rs` - Clipboard operations
 - `src/file.rs` - Shared platform exports for paths, vault discovery, private permissions, and atomic file writes
 - `crates/pm-contracts/src/protocol.rs` and `crates/pm-contracts/src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
-- `src/lib.rs` - Shared production library used by the CLI and fuzz harness
+- `src/lib.rs` - Shared production library used by the desktop/CLI, Android adapter, and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
 - `docs/commands.template.html` - Static layout used by the command-reference generator
 - `extension/` - Browser extension (Chrome/Chromium); `ui_transport.js` shares window messaging and reports failures without retrying mutations
@@ -76,6 +81,9 @@ The Rust workspace separates reusable contracts and client infrastructure:
 - `password_manager` composes the vault owner, persistence, integrations, CLI,
   native host, and optional desktop. Existing module paths remain available as
   compatibility exports, and the `pm` executable/launcher behavior is unchanged.
+- `pm-mobile` builds the JNI shared library with the root application's desktop
+  feature disabled. Android owns a separate in-process `MobileVault`; it does
+  not use `AuthenticatedClient` or run the desktop daemon on the phone.
 
 Exercise the extracted components with:
 
@@ -165,8 +173,11 @@ CI runs on pull requests and pushes to `main`; feature-branch pushes do not
 start a second run. A planner selects whole suites from the complete Git diff,
 including deletions and both sides of renames:
 
-- Ordinary Markdown documentation skips application tests. Generated command
-  references still run Rust validation.
+- Top-level README/security documentation and Markdown under `docs/`, `vendor/`,
+  `fuzz/`, and `sync-server/` skip application suites. Other paths follow the
+  planner's conservative rules; for example, `assets/` selects Rust and an
+  unrecognized path selects all suites. Generated command references run Rust
+  validation. The separate Android workflow has its own path filters.
 - GUI/assets changes run Rust tests, coverage, and platform checks.
 - Shared Rust, integration-test, and vendor changes also run browser, cloud,
   and fuzz integration checks.
@@ -270,7 +281,8 @@ or unlocking automatically.
 
 CI validates the default desktop build on Linux, Windows, and macOS, checks a
 CLI-only build on each platform, and checks both Intel and Apple Silicon macOS
-targets. Feature branch pushes run these checks before merging. Native visual
+targets. Relevant pull requests and pushes to `main` select these suites;
+feature-branch pushes alone do not trigger them. Native visual
 and file-dialog smoke tests still need a desktop session on each OS.
 
 Vault IDs identify files; credentials authenticate the selected vault. When there
@@ -377,6 +389,66 @@ production implementation through `src/lib.rs`.
 Vault persistence tests distinguish failures before atomic replacement from
 failures afterward. The latter retain committed memory and keys and report
 uncertain durability, so callers should inspect state before retrying a mutation.
+
+## Android development
+
+Use [the Android build guide](../android/README.md#build) for JDK/Gradle/SDK/NDK
+versions and signing setup. Build JNI libraries and the APK together; Gradle
+alone only packages existing `jniLibs` and does not rebuild Rust:
+
+```bash
+python3 scripts/build_android.py
+# Physical ARM64 phone only:
+python3 scripts/build_android.py --abi arm64-v8a
+```
+
+The helper runs Android JVM tests and lint. Shared Rust changes still need the
+normal root validation and `pm-mobile` checks; Kotlin/resource changes need the
+Android build and the relevant isolated instrumentation tests. A host build of
+`pm-mobile` does not compile its Android-only JNI module. The Android CI workflow
+builds both supported ABIs, runs JVM tests/lint, and uploads a debug APK; it does
+not run emulator or phone instrumentation tests.
+
+Management widgets live in `MobileUi.kt` and `MobileScaffold.kt`, workflows in
+`ManagementActivity.kt`, and vault/home/settings screens in `MainActivity.kt`.
+`FillActivity.kt` retains the separate compact secure autofill sheet. The root
+Rust library owns encryption, validation, persistence, history, import/backup,
+OTP/Duo, sync and passkey rules. Mobile preference defaults/ranges live in
+`src/vault/mobile_tools.rs`; keep `MobilePreferences.kt` explanations consistent.
+
+`SecureActivity` invalidates results on background/lock and captures a screen
+revision so late callbacks cannot replace a newer page. Native cancellation
+bypasses the JNI mutex, interrupts network waits, and returns the owner to locked
+state at a safe boundary. Do not weaken these checks to make a UI test pass.
+
+The JNI adapter caches its first storage directory for the process lifetime.
+Run each isolated test class in a separate instrumentation process with the
+target app force-stopped first. Cache-only test classes prime JNI before launching
+UI; `MobileIntegrationTest` is **emulator-only** because it uses normal app vault
+storage. Never run the complete instrumentation suite against a personal phone.
+For example, after installing the current main/test APKs on an isolated emulator:
+
+```bash
+adb -s "$ANDROID_SERIAL" shell am force-stop dev.nelszack.passwordmanager
+adb -s "$ANDROID_SERIAL" shell am instrument -w \
+  -e class dev.nelszack.passwordmanager.MobileRedesignTest \
+  dev.nelszack.passwordmanager.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+See [Android verification](../android/README.md#verification) for each test's
+scope and opt-in interactive biometric behavior. `MobileRedesignTest` can select
+light/dark and a fixture-only font scale. Its optional screenshot capture clears
+protection only on the isolated emulator with synthetic records; physical-phone
+test windows keep `FLAG_SECURE`. Never capture a personal vault for UI review.
+Debug fixture activities/document providers are absent from the release manifest.
+
+After phone tests, remove only `dev.nelszack.passwordmanager.test`, force-stop the
+main app, restore any temporary device settings, and reopen MainActivity so JNI
+uses normal private storage. Never clear or uninstall the main app to update it.
+Keep device acceptance separate from synthetic test success in the
+[mobile checklist](mobile-implementation.md). Desktop/CLI versioning follows the
+workspace; the APK's `versionName`/`versionCode` are maintained independently in
+`android/app/build.gradle.kts`. Desktop release archives do not contain an APK.
 
 ## Releases
 
@@ -488,10 +560,12 @@ an unknown operation plus explicit inspection; it never replays the original wri
 retired editor operations remain reviewable after an extension upgrade.
 
 CLI `view` and `search` and desktop search translate into one `List(SearchFilter)`
-RPC. Protocol version 3 rejects older contracts. Stop the daemon with the previous
-build before replacing it, then update the native host (`pm native-host update`),
+RPC. The current local protocol version is **5**, defined by
+`crates/pm-contracts/src/protocol.rs`; older contracts are rejected. Stop the
+daemon with the previous build before replacing it, then update the native host (`pm native-host update`),
 reload the extension, and start the new daemon. An older daemon cannot accept a
-version-3 stop command. The durable vault schema is unchanged.
+current-protocol stop command. Local protocol versions, encrypted document schema,
+cloud HTTP API, and Android APK versions are independent.
 
 Session lifecycle commands run before unlocked dispatch. Other commands borrow a
 complete vault and its cached credentials through `with_unlocked`; ordinary errors

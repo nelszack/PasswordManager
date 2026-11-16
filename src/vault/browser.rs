@@ -1,5 +1,61 @@
 use super::*;
 impl Vault {
+    /// Android's legacy browser autofill API omits the page port. These are
+    /// metadata-only choices for an explicit account/address picker, never an
+    /// authorization to release a secret. Secret retrieval still checks the
+    /// selected saved origin through the ordinary exact-origin API.
+    pub(super) fn mobile_browser_choices(
+        &self,
+        origin: &str,
+        hostname_only: bool,
+        otp_only: bool,
+    ) -> Vec<(ItemSummary, String)> {
+        let Some(requested) = parse_site(origin, false).filter(|site| site.scheme == "https")
+        else {
+            return vec![];
+        };
+        self.active_items()
+            .filter(|item| {
+                item.metadata.kind == ItemKind::Login
+                    && if otp_only {
+                        matches!(
+                            item.authenticator.as_ref().map(|auth| &auth.state),
+                            Some(AuthenticatorState::Totp(_))
+                        )
+                    } else {
+                        !item.entry.password.is_empty()
+                    }
+            })
+            .flat_map(|item| {
+                let origins: std::collections::BTreeSet<_> = item
+                    .urls()
+                    .filter_map(|value| parse_site(value, true))
+                    .filter(|saved| {
+                        saved.scheme == "https"
+                            && !saved.wildcard
+                            && saved.host == requested.host
+                            && (hostname_only || saved.port == requested.port)
+                    })
+                    .map(|saved| {
+                        if saved.port == 443 {
+                            format!("https://{}", saved.host)
+                        } else {
+                            format!("https://{}:{}", saved.host, saved.port)
+                        }
+                    })
+                    .collect();
+                origins.into_iter().map(move |origin| {
+                    let mut summary = self.summary(item);
+                    summary.has_totp = matches!(
+                        item.authenticator.as_ref().map(|auth| &auth.state),
+                        Some(AuthenticatorState::Totp(_))
+                    );
+                    (summary, origin)
+                })
+            })
+            .collect()
+    }
+
     pub fn browser_duo_items(&self, origin: &str) -> Vec<ItemSummary> {
         let Ok(url) = url::Url::parse(origin) else {
             return vec![];

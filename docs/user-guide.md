@@ -4,6 +4,8 @@
 
 - [Installation and upgrades](#installation)
 - [Desktop interface](#desktop-interface)
+- [Android app](#android-app)
+- [Android preferences](#android-preferences)
 - [Vaults, entries, search, and recovery](#usage)
 - [Authenticators and Duo Push](#totp-and-hotp-authenticators)
 - [Import, export, and encrypted backups](#importexport)
@@ -338,7 +340,112 @@ Reopen the browser after updating. The copied Windows native host allows future
 builds while the browser is open. A server started from `target\release\pm.exe`
 still needs to be stopped with `pm kill` before rebuilding that executable.
 
+## Android app
+
+The native Android app manages its own encrypted local vault using the shared
+Rust core. It works without a running desktop. Install or update the private APK
+using the [Android build and installation guide](../android/README.md). Updates
+must use the same signing key; install over the existing app to retain its data.
+Android 9+ on ARM64/x86_64 supports the app and password autofill. Android 14+ is
+required for the password/passkey credential provider. iPhone is not implemented.
+
+### Get started on Android
+
+Choose **Set up your vault** or **Add or restore a vault**. You can download from
+your sync server, import an encrypted `.enc` file, create a vault, restore an
+encrypted backup, or use an external key file. Choose **Open a local vault** to
+select another vault already stored on this device. Unlock an existing vault
+with its original password or key file; your server credential is separate.
+
+For cloud setup, open **Settings → Cloud sync settings / download vault**. Enter
+the full HTTPS server URL, including its port, and the credential issued for
+this phone, then choose **Save connection**. Choose **List cloud vaults**, download
+the desired vault, and unlock it. See [cloud setup and troubleshooting](cloud-sync.md).
+
+### Find, edit, and recover items
+
+Use the bottom navigation to switch between **Vault**, **Tools**, and **Settings**.
+The vault list searches as you type. Swipe the type filters horizontally to see
+all eight types. Open an item to reveal or copy its password, verification code,
+notes, or custom fields. Passwords and notes start hidden; copy actions do not
+require revealing them first. TOTP codes refresh for each copy and display an
+expiry countdown when shown. HOTP generation is an explicit action that advances
+the saved counter.
+
+Choose **Add item** or **Edit item** for typed editing, multiple website addresses,
+notes, and custom fields. **Save item** and **Cancel** stay at the bottom while
+the form scrolls. Back and Cancel ask before discarding changed drafts. A failed
+save keeps your draft so you can correct the problem. Leaving the app or locking
+still clears sensitive views; a draft is not a saved recovery copy.
+
+**Tools** groups generation, advanced search, vault health, vault credentials,
+deleted items, files/backups, sync controls, and mobile preferences. Password
+history and authenticator/Duo controls are on the item's details screen. File
+operations use Android's document picker with a 16 MiB transfer limit. Returning
+from the picker requires unlocking again for vault exports. Restore a complete
+encrypted backup for history/trash/authenticator/passkey preservation; plaintext
+CSV has fewer fields and cannot export vaults containing passkeys.
+
+### Fingerprint unlock and autofill
+
+After an original password/key-file unlock, open **Settings → Biometric unlock**
+and choose **Enable biometric unlock**. The page shows whether it is enabled for
+this vault on this device. The home and unlock screens also show its status.
+Enrollment is optional and local to the phone. Keep the original password/key
+for recovery after a credential change, new fingerprint enrollment, or new phone.
+
+Open **Settings → Enable password autofill** and select Password Manager in
+Android's settings. Chrome may also need its autofill preference changed to use
+other providers. On Android 14+, use **Enable password and passkey provider**
+for Credential Manager. These are separate system settings.
+
+Tap a site's username/password field and choose the Password Manager suggestion.
+The compact unlock sheet offers configured biometrics automatically. After a
+completed fill, another explicit account selection on the same site can reuse
+that unlock for up to five minutes; the configured inactivity timeout can end
+it sooner. Changing sites/callers, cancelling, opening management, locking,
+screen-off, or restarting the process revokes that grant. Website-matched TOTP
+entries can fill recognized verification-code fields or offer **Copy verification
+code and return**. The vault must already contain that site's authenticator.
+
+On Android's legacy Chrome autofill API, the page port may be unavailable. The
+exact-hostname picker then requires explicit login/address selection and shows
+saved nonstandard ports; it cannot verify the current page port. See the
+[origin and browser restrictions](../android/README.md#setup). Native-app matching
+uses the app's package and signing certificate. Android card/identity autofill
+and desktop browser passkey use remain unimplemented.
+
+### Android preferences
+
+Open **Settings → Mobile settings**. Tap a preference for its explanation, units,
+default, supported range, and validated edit dialog. Save applies that preference;
+Cancel keeps its previous value. Light/dark appearance follows Android, and the
+screens support larger system text.
+
+| Preference | Default | Supported values / meaning |
+| --- | --- | --- |
+| Lock after inactivity | 5 minutes | 15 seconds–24 hours; leaving management or turning off the screen also locks. |
+| Clear copied secrets after | 30 seconds | 1–300 seconds; verification-code expiry may shorten it. Cleanup is best effort and never clears a newer clipboard value. |
+| Previous passwords to keep | 10 per item | 0–1,000; zero stops keeping history on future password changes. |
+| Deleted-item retention | Off | 0–36,500 days; zero disables age-based purging. Apply it explicitly from Deleted items. |
+| Generated password length | 24 characters | 1–255 characters; existing passwords are unchanged. |
+| Generated passphrase length | 6 words | 1–64 words. |
+
+These device-local preferences are independent of desktop `pm config` and are
+not synchronized with the vault. Generator character groups and separators are
+chosen in the generator. Android stores vaults, checkpoints and
+`mobile-settings.json` in private app storage; its server token is protected by
+Android Keystore. Desktop environment-variable path overrides do not configure
+the installed Android app.
+
+See the [mobile acceptance checklist](mobile-implementation.md) for measured
+coverage and remaining interactive/device checks. Successful synthetic tests do
+not establish live Google MFA, Duo, or Android 14+ passkey-provider acceptance.
+
 ## Usage
+
+The commands below use the desktop/CLI service. For native phone controls and
+device-specific defaults, use [Android app](#android-app).
 
 ### Create Your First Vault
 
@@ -1111,6 +1218,9 @@ a 15-second clipboard timeout, a 15-minute inactivity timeout, ten password-hist
 revisions, disabled trash expiration, and server port 7878. `pm config --reset`
 restores all defaults. Invalid configuration files produce an error and are left
 unchanged.
+
+These are desktop/CLI defaults. Android uses independent
+[mobile preferences](#android-preferences) and private app storage.
 
 ### Structured and Scripted Output
 

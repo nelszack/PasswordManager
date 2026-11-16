@@ -162,6 +162,29 @@ pub struct CloudClient {
     token: std::sync::Arc<Zeroizing<String>>,
     http: reqwest::Client,
 }
+
+fn transport_error(error: reqwest::Error) -> String {
+    let summary = if error.is_timeout() {
+        "Sync request timed out"
+    } else if error.is_connect() {
+        "Could not connect to sync server"
+    } else {
+        "Sync request failed"
+    };
+    // Display alone hides DNS, socket, and certificate failures. Include their
+    // causes, but never format Debug (which may contain request details) or URLs.
+    let error = error.without_url();
+    let mut message = format!("{summary}: {error}");
+    let mut cause = std::error::Error::source(&error);
+    for _ in 0..8 {
+        let Some(current) = cause else { break };
+        message.push_str(": ");
+        message.push_str(&current.to_string());
+        cause = current.source();
+    }
+    message.chars().take(2048).collect()
+}
+
 impl CloudClient {
     pub fn new(config: &SyncConfig) -> Result<Self, String> {
         let token = read_token_file(&config_dir().join("sync-token"))
@@ -186,7 +209,7 @@ impl CloudClient {
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()
                 .build()
-                .map_err(|e| e.to_string())?;
+                .map_err(transport_error)?;
             let _ = HTTP.set(http);
             HTTP.get().expect("transport initialized").clone()
         };
@@ -218,7 +241,7 @@ impl CloudClient {
             return Err("Sync response exceeds size limit".into());
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
             if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
                 return Err("Sync response exceeds size limit".into());
             }
@@ -231,7 +254,7 @@ impl CloudClient {
             self.request(reqwest::Method::GET, "/v1/vaults")
                 .send()
                 .await
-                .map_err(|e| e.to_string())?,
+                .map_err(transport_error)?,
         )?;
         let vaults: Vec<RemoteVault> =
             serde_json::from_slice(&Self::read(response, 1024 * 1024).await?)
@@ -263,7 +286,7 @@ impl CloudClient {
             .request(reqwest::Method::HEAD, &format!("/v1/vaults/{id}"))
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(transport_error)?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -290,7 +313,7 @@ impl CloudClient {
             self.request(reqwest::Method::GET, &format!("/v1/vaults/{id}"))
                 .send()
                 .await
-                .map_err(|e| e.to_string())?,
+                .map_err(transport_error)?,
         )?;
         let version = Self::response_version(&response)?;
         let bytes = Self::read(response, MAX_BYTES).await?;
@@ -313,13 +336,7 @@ impl CloudClient {
         } else {
             request.header(reqwest::header::IF_NONE_MATCH, "*")
         };
-        let response = Self::checked(
-            request
-                .body(bytes)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?,
-        )?;
+        let response = Self::checked(request.body(bytes).send().await.map_err(transport_error)?)?;
         let value: serde_json::Value = serde_json::from_slice(&Self::read(response, 4096).await?)
             .map_err(|e| e.to_string())?;
         value
@@ -337,7 +354,7 @@ impl CloudClient {
             self.request(reqwest::Method::GET, &format!("/v1/events?since={since}"))
                 .send()
                 .await
-                .map_err(|e| e.to_string())?,
+                .map_err(transport_error)?,
         )?;
         let value: serde_json::Value = serde_json::from_slice(&Self::read(response, 4096).await?)
             .map_err(|e| e.to_string())?;
@@ -391,6 +408,47 @@ pub(crate) fn install_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transport_failure_preserves_cause_without_request_secrets() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"invalid HTTP response\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let request_url = format!("http://{address}/private-vault?token=synthetic-query-secret");
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(&request_url)
+            .bearer_auth("synthetic-bearer-secret")
+            .send()
+            .await
+            .unwrap_err();
+        let mut cause = std::error::Error::source(&error).unwrap();
+        while let Some(next) = cause.source() {
+            cause = next;
+        }
+        let root_cause = cause.to_string();
+        let message = transport_error(error);
+        assert!(message.contains(&root_cause), "Missing cause: {message}");
+        assert!(!message.contains("synthetic-query-secret"));
+        assert!(!message.contains("synthetic-bearer-secret"));
+        assert!(!message.contains("private-vault"));
+        assert!(!message.contains(&address.to_string()));
+        server.await.unwrap();
+    }
+
     #[test]
     fn validates_origins_and_ids() {
         for url in [

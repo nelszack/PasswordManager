@@ -1,0 +1,10 @@
+<resources>
+    <style name="AutofillSheet" parent="android:style/Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowCloseOnTouchOutside">true</item>
+        <item name="android:windowSoftInputMode">stateAlwaysHidden|adjustResize</item>
+        <item name="android:windowBackground">@drawable/autofill_sheet</item>
+        <item name="android:backgroundDimAmount">0.25</item>
+        <item name="android:buttonStyle">@style/AutofillButton</item>
+    </style>
+    <color name="autofill_surface">#252525</color>
+</resources>

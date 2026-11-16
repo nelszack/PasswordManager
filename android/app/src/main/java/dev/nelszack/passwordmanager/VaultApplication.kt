@@ -12,6 +12,7 @@ import java.util.concurrent.Executors
 
 object NativeBridge {
     init { System.loadLibrary("pm_mobile") }
+    @JvmStatic external fun invalidate()
     @JvmStatic external fun call(context: Context, directory: String, request: String): String
 }
 
@@ -22,29 +23,48 @@ object Vault {
     private val main = Handler(Looper.getMainLooper())
     private val expire = Runnable { lock() }
     private var lastNativeTouch = 0L
+    @Volatile private var nativeUnlockSeconds: Long? = null
+    @Volatile private var nativeClipboardSeconds: Int? = null
+    internal val clipboardSeconds get() = nativeClipboardSeconds ?: context.getSharedPreferences("settings", Context.MODE_PRIVATE).getInt("clipboard_seconds", 30)
+    internal val autofillSession = AutofillSession { android.os.SystemClock.elapsedRealtime() }
     @Volatile var primaryUnlock = false
         private set
     fun request(op: String, vararg args: Pair<String, Any?>): Any {
-        if (op == "unlock" || op == "biometric_unlock" || op == "lock") primaryUnlock = false
+        if (op in setOf("unlock", "biometric_unlock", "lock", "create", "create_key", "restore_backup", "rekey", "delete_vault")) {
+            primaryUnlock = false
+            autofillSession.clear()
+        }
         val body = JSONObject().put("op", op)
         args.forEach { (key, value) -> if (value != null) body.put(key, value) }
         val reply = JSONObject(NativeBridge.call(context, context.filesDir.resolve("vaults").absolutePath, body.toString()))
         check(reply.getBoolean("ok")) { reply.optString("error", "Vault operation failed") }
-        if (op == "unlock" || op == "create") primaryUnlock = true
+        if (op == "unlock" || op == "create" || op == "create_key") primaryUnlock = true
         if (op == "biometric_unlock" || op == "lock") primaryUnlock = false
-        return reply.get("data")
+        val data = reply.get("data")
+        if (data is JSONObject && data.has("unlock_seconds") && data.has("clipboard_seconds")) {
+            val seconds = data.getLong("unlock_seconds").coerceIn(15, 86400)
+            if (nativeUnlockSeconds != seconds) {
+                nativeUnlockSeconds = seconds
+                main.removeCallbacks(expire); main.postDelayed(expire, seconds * 1000L)
+            }
+            nativeClipboardSeconds = data.getInt("clipboard_seconds").coerceIn(1, 300)
+        }
+        return data
     }
     fun json(op: String, vararg args: Pair<String, Any?>) = request(op, *args) as JSONObject
     fun lock() {
+        runCatching { NativeBridge.invalidate() }
+        autofillSession.clear()
         primaryUnlock = false
         main.removeCallbacks(expire)
         worker.execute { runCatching { request("lock") } }
         context.sendBroadcast(Intent(LOCKED).setPackage(context.packageName))
     }
     fun touch() {
-        main.removeCallbacks(expire); main.postDelayed(expire, 5 * 60 * 1000L)
+        val seconds = (nativeUnlockSeconds ?: context.getSharedPreferences("settings", Context.MODE_PRIVATE).getLong("unlock_seconds", 300)).coerceIn(15, 86400)
+        main.removeCallbacks(expire); main.postDelayed(expire, seconds * 1000L)
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastNativeTouch > 30000L) {
+        if (now - lastNativeTouch > minOf(30000L, seconds * 500L)) {
             lastNativeTouch = now
             worker.execute { runCatching { request("status") } }
         }
@@ -82,7 +102,11 @@ abstract class SecureActivity : FragmentActivity() {
     }
     override fun onUserInteraction() { super.onUserInteraction(); Vault.touch() }
     override fun onStart() { super.onStart(); active = true }
-    override fun onStop() { active = false; generation++; super.onStop(); Vault.lock(); clearSecrets() }
+    protected open fun retainVaultOnStop(): Boolean = false
+    protected open fun uiRevision(): Long = 0L
+    protected open fun onWorkStarted() {}
+    protected open fun onWorkFinished() {}
+    override fun onStop() { active = false; generation++; super.onStop(); if (!retainVaultOnStop()) Vault.lock(); clearSecrets() }
     override fun onDestroy() { unregisterReceiver(lockReceiver); super.onDestroy() }
     protected open fun onSessionLocked() { finish() }
     protected open fun clearSecrets() {}
@@ -90,16 +114,40 @@ abstract class SecureActivity : FragmentActivity() {
         android.app.AlertDialog.Builder(this).setTitle("Password Manager")
             .setMessage(error.message ?: "Operation failed").setPositiveButton("OK", null).show()
     }
-    protected fun <T> task(action: () -> T, done: (T) -> Unit) {
+    internal fun <T> sessionCallback(onDiscard: () -> Unit = {}, action: (T) -> Unit): (T) -> Unit {
         val ticket = generation
+        val screen = uiRevision()
+        return { value ->
+            if (isFinishing || isDestroyed || !active || ticket != generation || screen != uiRevision() || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                onDiscard()
+            } else {
+                runCatching { action(value) }.onFailure { error -> onDiscard(); showFailure(error) }
+            }
+        }
+    }
+    protected fun <T> task(action: () -> T, done: (T) -> Unit) = taskDiscarding(action, {}, done)
+    protected fun <T> taskDiscarding(action: () -> T, onDiscard: (T) -> Unit, done: (T) -> Unit) {
+        val ticket = generation
+        val screen = uiRevision()
+        onWorkStarted()
         Vault.worker.execute {
-            if (!active || ticket != generation) return@execute
+            if (!active || ticket != generation || screen != uiRevision()) {
+                ui.post { if (ticket == generation) onWorkFinished() }
+                return@execute
+            }
             val result = runCatching(action)
-            if (!active || ticket != generation) runCatching { Vault.request("lock") }
+            if (!active || ticket != generation) {
+                result.getOrNull()?.let(onDiscard)
+                runCatching { Vault.request("lock") }
+                return@execute
+            }
             ui.post {
-                if (!isFinishing && !isDestroyed && ticket == generation && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) result.fold(done) { error ->
+                if (ticket == generation) onWorkFinished()
+                if (!isFinishing && !isDestroyed && ticket == generation && screen == uiRevision() && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) result.fold({ value ->
+                    runCatching { done(value) }.onFailure(::showFailure)
+                }) { error ->
                     showFailure(error)
-                }
+                } else result.getOrNull()?.let(onDiscard)
             }
         }
     }

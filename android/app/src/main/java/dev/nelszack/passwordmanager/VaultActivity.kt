@@ -7,11 +7,21 @@ import android.view.View
 import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.view.ViewCompat
 
 abstract class VaultActivity : SecureActivity() {
     protected lateinit var layout: LinearLayout
+    protected open val modernUi = false
+    @Volatile private var screenRevision = 0L
+    override fun uiRevision() = screenRevision
+    protected open fun onPageChanged(title: String) {}
     private var picked: ((ByteArray) -> Unit)? = null
+    private var pickedLimit = 1024 * 1024
     private var unlockContinuation: (() -> Unit)? = null
+    private var offeredBiometrics = false
+    private var originalUnlockOnly = false
+    protected open fun automaticBiometrics() = false
+    protected open fun contentScroller(): ScrollView = ScrollView(this)
     protected val settings get() = getSharedPreferences("settings", MODE_PRIVATE)
     protected var selectedVault: String
         get() = settings.getString("vault", "").orEmpty()
@@ -22,34 +32,52 @@ abstract class VaultActivity : SecureActivity() {
             orientation = LinearLayout.VERTICAL; setPadding(24, 40, 24, 24)
             importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         }
-        setContentView(ScrollView(this).apply { addView(layout) })
+        setContentView(contentScroller().apply { addView(layout) })
     }
-    protected fun page(title: String) { layout.removeAllViews(); label(title, 24f) }
-    protected fun label(value: String, size: Float = 16f): TextView = TextView(this).apply {
-        text = value; textSize = size; setPadding(0, 12, 0, 12); this@VaultActivity.layout.addView(this)
+    protected fun page(title: String) {
+        screenRevision++; layout.removeAllViews()
+        if (modernUi) { onPageChanged(title); layout.requestFocus(); ViewCompat.setAccessibilityPaneTitle(layout,title) }
+        else label(title,24f)
     }
-    protected fun button(title: String, action: () -> Unit) = Button(this).apply {
-        text = title; setOnClickListener { guarded(action) }; this@VaultActivity.layout.addView(this)
+    protected fun label(value: String, size: Float = 16f): TextView {
+        if (modernUi) return MobileUi.text(this,value,size,muted=size<18f,bold=size>=18f).apply {
+            layoutParams = MobileUi.margins(this@VaultActivity,12)
+            this@VaultActivity.layout.addView(this)
+        }
+        return TextView(this).apply { text=value; textSize=size; setPadding(0,12,0,12); this@VaultActivity.layout.addView(this) }
     }
-    protected fun edit(hint: String, value: String = "", secret: Boolean = false): EditText = EditText(this).apply {
-        this.hint = hint; setText(value); isSaveEnabled = false
-        inputType = if (secret) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-        this@VaultActivity.layout.addView(this)
+    protected fun button(title: String, action: () -> Unit): Button {
+        if (modernUi) return MobileUi.button(this,title,danger=listOf("Delete","Permanently","Empty trash","Remove ").any { title.startsWith(it) }) { guarded(action) }
+            .also(layout::addView)
+        return Button(this).apply { text=title; setOnClickListener { guarded(action) }; this@VaultActivity.layout.addView(this) }
+    }
+    protected fun edit(hint: String, value: String = "", secret: Boolean = false): EditText {
+        if (modernUi) return MobileUi.field(this,layout,hint,value,secret)
+        return EditText(this).apply {
+            this.hint=hint; setText(value); isSaveEnabled=false
+            inputType=if(secret) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            importantForAutofill=View.IMPORTANT_FOR_AUTOFILL_NO
+            this@VaultActivity.layout.addView(this)
+        }
     }
     protected fun guarded(action: () -> Unit) {
         runCatching(action).onFailure(::showFailure)
     }
+    protected fun biometricStatusText(vault: String): String =
+        if (DeviceKeys.enabled(this, vault)) "Biometric unlock: Enabled on this device"
+        else "Biometric unlock: Disabled on this device"
+    protected fun unlockOriginal(done: () -> Unit) { originalUnlockOnly = true; unlock(done, fresh = true) }
     protected fun unlock(done: () -> Unit, fresh: Boolean = false) {
+        val complete = { unlockContinuation = null; originalUnlockOnly = false; done() }
         task({ if (fresh) Vault.request("lock"); Vault.json("status").getBoolean("unlocked") }) { unlocked ->
-            if (unlocked) done() else unlockForm(done)
+            if (unlocked) complete() else unlockForm(complete)
         }
     }
     private fun unlockForm(done: () -> Unit) {
         unlockContinuation = done
         task({ Vault.request("vaults") as JSONArray }) { vaults ->
             page("Unlock vault")
+            if (originalUnlockOnly) label("Use your original password or key file for this operation.")
             if (vaults.length() == 0) {
                 label("Open Password Manager and import or download your encrypted vault first.")
                 button("Open vault manager") { startActivity(Intent(this, MainActivity::class.java)); finish() }
@@ -61,6 +89,7 @@ abstract class VaultActivity : SecureActivity() {
                 setSelection(names.indexOf(selectedVault).coerceAtLeast(0))
             }
             layout.addView(spinner)
+            val biometricStatus = label("")
             val password = edit("Master password", secret = true)
             fun chosen() = names[spinner.selectedItemPosition].also { selectedVault = it }
             button("Unlock with password") {
@@ -74,29 +103,46 @@ abstract class VaultActivity : SecureActivity() {
                     finally { bytes.fill(0) }
                 }) { done() } }
             }
-            button("Unlock with biometrics") {
+            val biometricUnlock = button("Unlock with biometrics") {
                 val name = chosen()
                 DeviceKeys.unlock(this, name) { material -> task({
                     try { Vault.request("biometric_unlock", "vault" to name, "material" to DeviceKeys.encode(material)) }
                     finally { material.fill(0) }
                 }) { done() } }
             }
+            fun refreshBiometricStatus() {
+                val name = names[spinner.selectedItemPosition]
+                biometricStatus.text = biometricStatusText(name)
+                biometricUnlock.isEnabled = !originalUnlockOnly && DeviceKeys.enabled(this, name)
+            }
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { refreshBiometricStatus() }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+            refreshBiometricStatus()
             button("Cancel") { setResult(RESULT_CANCELED); finish() }
+            if (!originalUnlockOnly && automaticBiometrics() && !offeredBiometrics && selectedVault in names && DeviceKeys.enabled(this, selectedVault)) {
+                offeredBiometrics = true
+                val begin = sessionCallback<Unit> { biometricUnlock.performClick() }
+                layout.post { begin(Unit) }
+            }
         }
     }
     protected fun pickFile(maxBytes: Int = 1024 * 1024, done: (ByteArray) -> Unit) {
-        picked = { bytes -> check(bytes.size <= maxBytes) { "File exceeds size limit" }; done(bytes) }
+        require(maxBytes in 1..(16 * 1024 * 1024))
+        pickedLimit = maxBytes
+        picked = done
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE) }, 1)
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        val callback = picked; picked = null
+        val callback = picked; val limit = pickedLimit
+        if (requestCode == 1) picked = null
         if (requestCode == 1 && resultCode == RESULT_OK && data?.data != null) {
             val uri = requireNotNull(data.data)
-            task({ contentResolver.openInputStream(uri)?.use { stream ->
-                val bytes = stream.readBounded(128 * 1024 * 1024)
-                check(bytes.size <= 128 * 1024 * 1024) { "File exceeds size limit" }; bytes
-            } ?: error("Could not open file") }) { bytes -> guarded { callback?.invoke(bytes) } }
+            taskDiscarding({ contentResolver.openInputStream(uri)?.use { stream ->
+                stream.readBounded(limit)
+            } ?: error("Could not open file") }, onDiscard = { it.fill(0) }) { bytes -> guarded { callback?.invoke(bytes) } }
         } else if (requestCode == 1 && unlockContinuation != null) {
             unlockForm(requireNotNull(unlockContinuation))
         }
@@ -106,10 +152,13 @@ abstract class VaultActivity : SecureActivity() {
     )
     protected fun syncAfterChange(): String {
         if (settings.getString("server", "").isNullOrBlank()) return "Saved locally"
+        if (!Vault.json("sync_status").getBoolean("enabled")) return "Saved locally (sync disabled)"
         return runCatching { Vault.request("sync", *syncArgs()); "Saved and synchronized" }
             .getOrElse { "Saved locally. Sync pending: ${it.message}" }
     }
+    override fun onDestroy() { picked = null; unlockContinuation = null; super.onDestroy() }
     override fun clearSecrets() {
+        screenRevision++
         if (::layout.isInitialized) layout.removeAllViews()
     }
 }

@@ -2,12 +2,10 @@
 """Build Rust JNI libraries then a private APK; never download tools or keys."""
 import argparse
 import os
-import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGETS = {
@@ -35,15 +33,6 @@ def main():
         if missing:
             parser.error("Release signing requires: " + ", ".join(missing))
     abis = args.abi or list(TARGETS)
-    # Resolve the JVM companion shipped by the exact Rust TLS verifier in Cargo.lock.
-    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "aarch64-linux-android"], cwd=ROOT))
-    package = next(p for p in metadata["packages"] if p["name"] == "rustls-platform-verifier-android")
-    verifier = Path(package["manifest_path"]).parent
-    archive = verifier / f"maven/rustls/rustls-platform-verifier/{package['version']}/rustls-platform-verifier-{package['version']}.aar"
-    libs = ROOT / "android/app/libs"
-    libs.mkdir(exist_ok=True)
-    with zipfile.ZipFile(archive) as aar:
-        (libs / "rustls-platform-verifier.jar").write_bytes(aar.read("classes.jar"))
     # Package only libraries built by this invocation, never stale ABIs.
     destination = ROOT / "android/app/src/main/jniLibs"
     if destination.exists():

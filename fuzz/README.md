@@ -4,6 +4,11 @@ The targets exercise the production Rust library without running a server or
 reading personal vaults. Cargo's `fuzzing` feature exposes parser-only helpers;
 normal builds do not include those helpers.
 
+These parser targets also exercise shared formats consumed by Android, but they
+do not run JNI, Android widgets, Keystore, autofill, or the credential provider.
+Use the [Android verification guide](../android/README.md#verification) for those
+boundaries; mobile tests use synthetic vaults separately from fuzz corpora.
+
 Clone the source repository before running these commands; release archives
 contain this guide but not the developer fuzz harness.
 

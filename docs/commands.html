@@ -34,7 +34,8 @@
     <section class="intro">
       <h2>About this reference</h2>
       <p>Usage, command descriptions, options, and defaults below are generated. Run <code>pm &lt;COMMAND&gt; --help</code> for terminal help and available examples.</p>
-      <p>Global <code>--port PORT</code> overrides the configured loopback port for one invocation; <code>--json</code> wraps output in an object containing <code>ok</code> and <code>output</code> or <code>error</code>; <code>--quiet</code> suppresses successful output. <code>--json</code> and <code>--quiet</code> cannot be combined. See the <a href="../README.md">README</a> for setup, defaults, and workflows.</p>
+      <p>Global <code>--port PORT</code> overrides the configured loopback port for one invocation. <code>--json</code> returns <code>ok</code> with structured <code>data</code> for server responses and supported local commands; text-only results use <code>output</code>, and failures include <code>error</code>. <code>--quiet</code> suppresses successful output and cannot be combined with <code>--json</code>. See the <a href="user-guide.md#structured-and-scripted-output">output guide</a> for details.</p>
+      <p>This reference covers the desktop/CLI executable. See the <a href="user-guide.md#android-app">Android guide</a> for native phone workflows and the <a href="README.md">documentation index</a> for setup and administration.</p>
     </section>
     <section class="command" id="pm-gui">
       <h2><code>pm gui</code></h2>

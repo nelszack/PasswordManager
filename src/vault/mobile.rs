@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "mobile_tools.rs"]
+mod tools;
+
 /// One vault per app process. The native bridge serializes all access, including
 /// file replacement and sync. Adapters must also lock on background/screen lock.
 pub struct MobileVault {
@@ -18,6 +21,9 @@ pub struct MobileVault {
     touched: Instant,
     review: Option<MobileReview>,
     primary_unlock: bool,
+    settings: tools::MobileSettings,
+    import_review: Option<(String, u64, String, ConflictPolicy)>,
+    cancellation: Option<&'static std::sync::atomic::AtomicBool>,
 }
 struct MobileReview {
     token: String,
@@ -39,6 +45,7 @@ impl MobileVault {
         fs::create_dir_all(&directory).map_err(|_| "Could not create mobile storage")?;
         crate::file::set_private_dir_perms(&directory)
             .map_err(|_| "Could not protect mobile storage")?;
+        let settings = tools::MobileSettings::load(&directory)?;
         Ok(Self {
             directory,
             vault: None,
@@ -46,16 +53,24 @@ impl MobileVault {
             touched: Instant::now(),
             review: None,
             primary_unlock: false,
+            settings,
+            import_review: None,
+            cancellation: None,
         })
+    }
+    /// Android's lock signal is independent of the serialized JNI vault mutex.
+    pub fn set_cancellation(&mut self, flag: &'static std::sync::atomic::AtomicBool) {
+        self.cancellation = Some(flag);
     }
     pub fn lock(&mut self) {
         self.vault = None;
         self.credentials.zeroize();
         self.review = None;
+        self.import_review = None;
         self.primary_unlock = false;
     }
     fn open(&mut self) -> Result<&mut Vault, String> {
-        if self.touched.elapsed() >= Duration::from_secs(300) {
+        if self.touched.elapsed() >= Duration::from_secs(self.settings.unlock_seconds) {
             self.lock();
         }
         self.touched = Instant::now();
@@ -172,9 +187,22 @@ impl MobileVault {
         }
         let mut request: Value =
             serde_json::from_str(input).map_err(|_| "Invalid mobile request")?;
+        if request.get("op").and_then(Value::as_str) != Some("lock") && cancelled(self.cancellation)
+        {
+            wipe_json(&mut request);
+            self.lock();
+            return Err("Vault is locked".into());
+        }
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(&request)));
         wipe_json(&mut request);
+        if cancelled(self.cancellation) {
+            if let Ok(Ok(mut value)) = result {
+                wipe_response(&mut value);
+            }
+            self.lock();
+            return Err("Operation interrupted; vault locked. A remote change may have completed; inspect before retrying".into());
+        }
         match result {
             Ok(result) => result,
             Err(_) => {
@@ -185,14 +213,22 @@ impl MobileVault {
     }
     fn dispatch(&mut self, r: &Value) -> Result<Value, String> {
         let op = string(r, "op")?;
+        if let Some(result) = self.local_tool(op, r).map_err(|e| e.to_string())? {
+            return Ok(result);
+        }
         match op {
             "lock" => {
+                if let Some(flag) = self.cancellation {
+                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
                 self.lock();
                 return Ok(json!({}));
             }
             "status" => {
                 let unlocked = self.open().is_ok();
-                return Ok(json!({"unlocked":unlocked}));
+                return Ok(
+                    json!({"unlocked":unlocked,"unlock_seconds":self.settings.unlock_seconds,"clipboard_seconds":self.settings.clipboard_seconds}),
+                );
             }
             "vaults" => {
                 let mut names = Vec::new();
@@ -276,14 +312,25 @@ impl MobileVault {
             "cloud_list" => {
                 let client = client(r)?;
                 let rt = mobile_runtime()?;
-                return Ok(json!(rt.block_on(client.list())?));
+                return Ok(json!(
+                    rt.block_on(interruptible(self.cancellation, client.list()))??
+                ));
             }
             "cloud_download" => {
                 let id = string(r, "id")?;
                 let client = client(r)?;
                 let rt = mobile_runtime()?;
-                let (version, bytes) = rt.block_on(client.download(id))?;
-                let name = format!("{id}.enc");
+                let (version, bytes) =
+                    rt.block_on(interruptible(self.cancellation, client.download(id)))??;
+                let comparison = r.get("copy").and_then(Value::as_bool).unwrap_or(false);
+                let name = if comparison {
+                    format!(
+                        "comparison-{id}-{}.enc",
+                        hex::encode(rand::random::<[u8; 8]>())
+                    )
+                } else {
+                    format!("{id}.enc")
+                };
                 let path = self.path(&name)?;
                 crate::cloud::write_private(&path, &bytes, false)?;
                 crate::cloud::save_binding(
@@ -293,7 +340,7 @@ impl MobileVault {
                         vault_id: id.into(),
                         version: Some(version),
                         digest: Some(crate::cloud::digest(&bytes)),
-                        enabled: true,
+                        enabled: !comparison,
                     },
                 )?;
                 return Ok(json!({"vault":name}));
@@ -301,13 +348,19 @@ impl MobileVault {
             _ => {}
         }
         self.open()?;
+        if let Some(result) = self.parity_tool(op, r).map_err(|e| e.to_string())? {
+            return Ok(result);
+        }
         match op {
             "list" => Ok(json!(self.vault.as_ref().unwrap().management_list(SearchFilter {query:r.get("query").and_then(Value::as_str).map(str::to_owned),..Default::default()}).map_err(|e|e.to_string())?)),
             "item" => {
                 let mut detail=self.vault.as_ref().unwrap().management_item(id(r)?,true).map_err(|e|e.to_string())?;
                 // Never send passkey private keys to the normal item UI.
                 detail.fields.retain(|f|f.name!=passkey::FIELD);
-                Ok(json!(detail))
+                let is_passkey = self.vault.as_ref().unwrap().item(id(r)?).is_some_and(|i| i.metadata.custom_fields.iter().any(|f| f.name == passkey::FIELD));
+                let mut value = json!(detail);
+                value["is_passkey"] = json!(is_passkey);
+                Ok(value)
             }
             "save" => {
                 let name=string(r,"name")?;if name.trim().is_empty() {return Err("Name is required".into());}
@@ -317,7 +370,7 @@ impl MobileVault {
                 let password=string(r,"password")?;
                 let notes=r.get("notes").and_then(Value::as_str).map(SecretString::from);
                 if let Some(id)=r.get("id").and_then(Value::as_u64) {
-                    vault.update_entry_with_limit(EntryUpdate {target:Target::Id(id as usize),update:EntryChanges {name:Some(name.into()),username,url,notes},password:Some(password.into())},&mut self.credentials,10).map_err(|e|e.to_string())?;
+                    vault.update_entry_with_limit(EntryUpdate {target:Target::Id(id as usize),update:EntryChanges {name:Some(name.into()),username,url,notes},password:Some(password.into())},&mut self.credentials,self.settings.history_limit).map_err(|e|e.to_string())?;
                 } else {
                     let added=vault.add_typed_entry(TypedEntry {entry:crate::types::PasswordEntry {name:name.into(),username,password:password.into(),url,notes,copy:false},kind:ItemKind::Login,additional_urls:vec![],custom_fields:vec![]},&mut self.credentials).map_err(|e|e.to_string())?;
                     if !added {return Err("An entry with this name and username already exists".into());}
@@ -328,13 +381,29 @@ impl MobileVault {
             "generate" => Ok(json!({"password":crate::password::generate_password(24)})),
             "otp" => {let (code,expires)=self.vault.as_ref().unwrap().current_totp(Target::Id(id(r)?)).map_err(|e|e.to_string())?;Ok(json!({"code":code,"expires_in":expires}))}
             "logins" => {let vault=self.vault.as_ref().unwrap();Ok(json!(self.login_ids(string(r,"origin")?).iter().map(|id|vault.summary(vault.item(*id).unwrap())).collect::<Vec<_>>()))},
+            "hostname_logins" | "otp_logins" => {
+                let otp_only = op == "otp_logins";
+                let hostname_only = !otp_only || r.get("hostname_only").and_then(Value::as_bool).unwrap_or(false);
+                Ok(json!(self.vault.as_ref().unwrap().mobile_browser_choices(string(r,"origin")?,hostname_only,otp_only).into_iter().map(|(item,origin)|json!({"id":item.id,"name":item.name,"username":item.username,"origin":origin,"has_totp":item.has_totp})).collect::<Vec<_>>()))
+            },
+            "site_otp" => {
+                let id = id(r)?;
+                let origin = string(r,"origin")?;
+                let vault = self.vault.as_ref().unwrap();
+                let matches = if origin.starts_with("androidapp://") {
+                    self.login_ids(origin).contains(&id) && vault.item(id).is_some_and(|item| matches!(item.authenticator.as_ref().map(|auth| &auth.state),Some(AuthenticatorState::Totp(_))))
+                } else { vault.mobile_browser_choices(origin,false,true).iter().any(|(item,_)|item.id==id) };
+                if !matches { return Err("No matching authenticator".into()); }
+                let (code,expires) = vault.current_totp(Target::Id(id)).map_err(|e|e.to_string())?;
+                Ok(json!({"code":code,"expires_in":expires}))
+            },
             "login" => {
                 let id=id(r)?;
                 if !self.login_ids(string(r,"origin")?).contains(&id) {return Err("No matching login".into());}
                 let vault=self.vault.as_ref().unwrap();let item=vault.item(id).unwrap();
                 Ok(json!(BrowserLogin {id,revision:item.revision,name:item.entry.name.clone(),username:item.entry.username.clone(),password:item.entry.password.clone(),has_totp:item.authenticator.is_some()}))
             }
-            "snapshot" => {let path=self.vault.as_ref().unwrap().sync_path()?;Ok(json!({"data":passkey::encode(fs::read(path).map_err(|_|"Could not read encrypted vault")?)}))}
+            "snapshot" => {let path=self.vault.as_ref().unwrap().sync_path()?;let bytes=crate::file::read_bounded_file(&path,16*1024*1024).map_err(|_|"Encrypted vault exceeds mobile transfer limit or could not be read")?;Ok(json!({"data":passkey::encode(bytes)}))}
             "biometric_material" => {
                 if !self.primary_unlock {return Err("Unlock with the original password or key file before enabling biometrics".into());}
                 let path=self.vault.as_ref().unwrap().sync_path()?;
@@ -371,7 +440,10 @@ impl MobileVault {
             return Err("Sync connection does not match this vault".into());
         }
         let rt = mobile_runtime()?;
-        let (version, bytes) = rt.block_on(client.download(&hex::encode(vault.vault_id())))?;
+        let (version, bytes) = rt.block_on(interruptible(
+            self.cancellation,
+            client.download(&hex::encode(vault.vault_id())),
+        ))??;
         let items = vault.cloud_conflicts(&self.credentials, &bytes)?;
         let token = hex::encode(rand::random::<[u8; 32]>());
         self.review = Some(MobileReview {
@@ -399,7 +471,11 @@ impl MobileVault {
         let id = hex::encode(vault.vault_id());
         let path = vault.sync_path()?;
         let rt = mobile_runtime()?;
-        if rt.block_on(client.head(&id))?.map(|v| v.version) != Some(review.version.clone()) {
+        if rt
+            .block_on(interruptible(self.cancellation, client.head(&id)))??
+            .map(|v| v.version)
+            != Some(review.version.clone())
+        {
             return Err("Cloud changed; review conflicts again".into());
         }
         let choices: Vec<crate::cloud::Choice> =
@@ -435,7 +511,13 @@ impl MobileVault {
         let client = client(r)?;
         let path = self.vault.as_ref().unwrap().sync_path()?;
         let vault_id = hex::encode(self.vault.as_ref().unwrap().vault_id());
-        let mut binding = crate::cloud::binding(&path)?.unwrap_or(crate::cloud::Binding {
+        let existing = crate::cloud::binding(&path)?;
+        if existing.is_none() && recovery_copy(&path) {
+            return Err(
+                "Recovery/comparison copy: enable sync explicitly before synchronizing".into(),
+            );
+        }
+        let mut binding = existing.unwrap_or(crate::cloud::Binding {
             server_url: client.url.clone(),
             vault_id: vault_id.clone(),
             version: None,
@@ -445,16 +527,20 @@ impl MobileVault {
         if binding.server_url != client.url || binding.vault_id != vault_id {
             return Err("Sync connection does not match this vault".into());
         }
+        if !binding.enabled {
+            return Err("Sync is disabled for this vault".into());
+        }
         let rt = mobile_runtime()?;
         let local = fs::read(&path).map_err(|_| "Could not read local snapshot")?;
         let digest = crate::cloud::digest(&local);
-        let remote = rt.block_on(client.head(&vault_id))?;
+        let remote = rt.block_on(interruptible(self.cancellation, client.head(&vault_id)))??;
         let remote_version = remote.as_ref().map(|v| v.version.clone());
         if remote.is_none() && binding.version.is_some() {
             return Err("Cloud vault is missing; local copy preserved".into());
         }
         if remote_version != binding.version && remote.is_some() {
-            let (version, bytes) = rt.block_on(client.download(&vault_id))?;
+            let (version, bytes) =
+                rt.block_on(interruptible(self.cancellation, client.download(&vault_id)))??;
             // Verify before storing or adopting remote ciphertext.
             let mut key = self.credentials.clone();
             let plain = Zeroizing::new(
@@ -488,8 +574,10 @@ impl MobileVault {
             binding.version = Some(version);
             binding.digest = Some(crate::cloud::digest(&bytes));
         } else if binding.digest.as_ref() != Some(&digest) {
-            binding.version =
-                Some(rt.block_on(client.upload(&vault_id, binding.version.as_deref(), local))?);
+            binding.version = Some(rt.block_on(interruptible(
+                self.cancellation,
+                client.upload(&vault_id, binding.version.as_deref(), local),
+            ))??);
             binding.digest = Some(digest);
         }
         crate::cloud::save_binding(&path, &binding)?;
@@ -546,8 +634,161 @@ pub fn wipe_response(value: &mut Value) {
 #[path = "mobile_sync_tests.rs"]
 mod sync_tests;
 
+fn cancelled(flag: Option<&std::sync::atomic::AtomicBool>) -> bool {
+    flag.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+}
+async fn interruptible<T>(
+    flag: Option<&std::sync::atomic::AtomicBool>,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, &'static str> {
+    tokio::select! {
+        result=future => Ok(result),
+        _=async {
+            loop {
+                if cancelled(flag) { break; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        } => Err("Operation interrupted; inspect any remote change before retrying"),
+    }
+}
+
+fn recovery_copy(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            ["rekey-recovery-", "conflict-", "comparison-"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn website_otp_supports_code_only_items_and_rejects_wrong_origins_and_hotp() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        for (name, origin) in [
+            ("Login", "https://accounts.example.com"),
+            ("Code only", "https://accounts.example.com:8443"),
+            ("HOTP", "https://accounts.example.com"),
+        ] {
+            api.call(&json!({"op":"save","name":name,"username":"synthetic-user","password":"","url":origin}).to_string()).unwrap();
+        }
+        let vault = api.vault.as_mut().unwrap();
+        for id in [1, 2] {
+            vault.set_test_totp(
+                id,
+                "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            );
+        }
+        vault.set_test_totp(
+            3,
+            "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+        );
+        let choices = api.call(r#"{"op":"otp_logins","origin":"https://accounts.example.com","hostname_only":true}"#).unwrap();
+        assert_eq!(choices.as_array().unwrap().len(), 2);
+        assert!(!choices.to_string().contains("GEZDGNBV"));
+        assert_eq!(
+            api.call(r#"{"op":"otp_logins","origin":"https://accounts.example.com"}"#)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            api.call(r#"{"op":"site_otp","origin":"https://accounts.example.com","id":2}"#)
+                .is_err()
+        );
+        assert!(
+            api.call(r#"{"op":"site_otp","origin":"https://evil.example.com","id":1}"#)
+                .is_err()
+        );
+        assert!(
+            api.call(r#"{"op":"site_otp","origin":"https://accounts.example.com","id":3}"#)
+                .is_err()
+        );
+        let code = api
+            .call(r#"{"op":"site_otp","origin":"https://accounts.example.com:8443","id":2}"#)
+            .unwrap();
+        assert_eq!(code["code"].as_str().unwrap().len(), 6);
+        assert!((1..=30).contains(&code["expires_in"].as_u64().unwrap()));
+        api.lock();
+        assert!(
+            api.call(r#"{"op":"site_otp","origin":"https://accounts.example.com","id":1}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn hostname_choices_require_unlock_and_do_not_relax_secret_origin_checks() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        let request = r#"{"op":"hostname_logins","origin":"https://accounts.example.com"}"#;
+        assert!(api.call(request).is_err());
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        for (name, url) in [
+            ("Default", "https://accounts.example.com/login"),
+            ("Other port", "https://accounts.example.com:8443"),
+            ("Other host", "https://example.com"),
+            ("Lookalike", "https://accounts.example.com.evil.test"),
+            ("HTTP", "http://accounts.example.com"),
+            ("Wildcard", "https://*.example.com"),
+            ("Deleted", "https://accounts.example.com"),
+        ] {
+            api.call(&json!({"op":"save","name":name,"username":"synthetic-user","password":"synthetic-secret","url":url}).to_string()).unwrap();
+        }
+        api.call(r#"{"op":"delete","id":7}"#).unwrap();
+        let choices = api.call(request).unwrap();
+        let entries = choices.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["origin"], "https://accounts.example.com");
+        assert_eq!(entries[1]["origin"], "https://accounts.example.com:8443");
+        assert!(!choices.to_string().contains("synthetic-secret"));
+        assert!(
+            api.call(r#"{"op":"hostname_logins","origin":"http://accounts.example.com"}"#)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let exact = api
+            .call(r#"{"op":"logins","origin":"https://accounts.example.com"}"#)
+            .unwrap();
+        assert!(
+            exact
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == 1)
+        );
+        // Existing explicit wildcard rules remain supported by the exact-origin
+        // path, but the alternate port must not be authorized there.
+        assert!(
+            exact
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["id"] != 2)
+        );
+        assert!(
+            api.call(r#"{"op":"login","origin":"https://accounts.example.com","id":2}"#)
+                .is_err()
+        );
+        assert!(
+            api.call(r#"{"op":"login","origin":"https://accounts.example.com:8443","id":2}"#)
+                .is_ok()
+        );
+        api.lock();
+        assert!(api.call(request).is_err());
+    }
+
     use super::*;
     #[test]
     fn external_key_contents_unlock_without_desktop_paths() {

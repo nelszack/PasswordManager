@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CallerIdentityTest {
+    @Test fun hostnameFallbackRequiresMissingNativeEvidenceAndDoesNotGuessAPort() {
+        val fallback = CallerIdentity.browserSite("https://accounts.example.com", emptyList())
+        assertTrue(fallback.hostnameOnly)
+        assertEquals("https://accounts.example.com", fallback.origin)
+        val exact = CallerIdentity.browserSite("https://accounts.example.com", listOf("https://accounts.example.com:8443/login"))
+        assertFalse(exact.hostnameOnly)
+        assertEquals("https://accounts.example.com:8443", exact.origin)
+        assertThrows(IllegalStateException::class.java) { CallerIdentity.browserSite("https://accounts.example.com", listOf("https://evil.example")) }
+        assertThrows(IllegalStateException::class.java) { CallerIdentity.browserSite("https://accounts.example.com", listOf("https://accounts.example.com", "https://accounts.example.com:8443")) }
+        assertThrows(IllegalStateException::class.java) { CallerIdentity.browserSite("http://accounts.example.com", emptyList()) }
+    }
     @Test fun browserAddressPreservesPortAndMustMatchFormHost() {
         assertEquals("https://example.com:8443", CallerIdentity.addressBarOrigin("example.com:8443/login", "https://example.com"))
         assertEquals("https://example.com", CallerIdentity.addressBarOrigin("https://example.com/login", "https://example.com"))

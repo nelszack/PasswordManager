@@ -38,20 +38,48 @@ struct PortableRevisionRef<'a> {
 
 impl Vault {
     pub fn export(&self, path: String, force: bool) -> Result<(), VaultError> {
-        if Path::new(&path)
+        let json = Path::new(&path)
             .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
-        {
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+        persistence::persist_private_stream(Path::new(&path), force, |file| {
+            self.write_export(file, json)
+        })
+    }
+    pub(crate) fn export_bytes(&self, json: bool) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        let mut bytes = Zeroizing::new(Vec::new());
+        struct Bounded<'a>(&'a mut Vec<u8>);
+        impl Write for Bounded<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.0.len().saturating_add(bytes.len()) > 16 * 1024 * 1024 {
+                    return Err(std::io::Error::other(
+                        "Export exceeds the 16 MiB mobile transfer limit",
+                    ));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        self.write_export(Bounded(&mut bytes), json)?;
+        if bytes.len() as u64 > MAX_IMPORT_BYTES {
+            return Err(VaultError::InvalidInput(
+                "Export exceeds mobile transfer limit".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+    fn write_export(&self, destination: impl Write, json: bool) -> Result<(), VaultError> {
+        if json {
             let export = PortableExportRef {
                 format: PORTABLE_FORMAT,
                 version: PORTABLE_VERSION,
                 exported_at: chrono::Utc::now().to_rfc3339(),
                 items: ExportItems(self),
             };
-            return persistence::persist_private_stream(Path::new(&path), force, |file| {
-                serde_json::to_writer_pretty(file, &export)
-                    .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")))
-            });
+            return serde_json::to_writer_pretty(destination, &export)
+                .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")));
         }
         if self.active_items().any(|item| {
             item.metadata
@@ -91,8 +119,8 @@ impl Vault {
                 }
             }
         }
-        persistence::persist_private_stream(Path::new(&path), force, |file| {
-            let mut writer = csv::Writer::from_writer(file);
+        {
+            let mut writer = csv::Writer::from_writer(destination);
             for entry in self.active_entries() {
                 writer
                     .serialize(entry)
@@ -101,7 +129,7 @@ impl Vault {
             writer
                 .flush()
                 .map_err(|e| VaultError::Persistence(e.to_string()))
-        })
+        }
     }
 }
 

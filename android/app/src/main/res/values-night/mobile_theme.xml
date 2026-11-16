@@ -1,0 +1,24 @@
+<resources>
+    <color name="pm_background">#101C21</color>
+    <color name="pm_surface">#1A2A30</color>
+    <color name="pm_text">#E6EFEE</color>
+    <color name="pm_muted">#ACBFBE</color>
+    <color name="pm_accent">#91D6BF</color>
+    <color name="pm_on_accent">#10392E</color>
+    <color name="pm_accent_soft">#25473D</color>
+    <color name="pm_outline">#385058</color>
+    <color name="pm_danger">#FFB1BA</color>
+    <style name="PasswordManagerTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">@color/pm_accent</item>
+        <item name="android:windowBackground">@color/pm_background</item>
+        <item name="android:colorBackground">@color/pm_background</item>
+        <item name="android:textColorPrimary">@color/pm_text</item>
+        <item name="android:textColorSecondary">@color/pm_muted</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:statusBarColor">@color/pm_background</item>
+        <item name="android:navigationBarColor">@color/pm_surface</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+    </style>
+</resources>

@@ -49,7 +49,8 @@ namespace, configure its proxy to reach the service instead. See the official
 Alternatively, place the service behind your own HTTPS reverse proxy and use
 that URL when connecting clients. Manual connections do not require a Tailscale
 hostname or SSH enrollment; use a separately issued device token as shown below.
-Clients require HTTPS except for localhost development. They do not follow
+Desktop/CLI clients permit localhost HTTP for development; Android's connection
+form requires HTTPS. Clients do not follow
 redirects or use environment HTTP proxies.
 
 For a background user service, install `sync-server/pm-sync.service` into
@@ -88,7 +89,9 @@ Serve, use its reported URL, such as `https://server.example-tailnet.ts.net:8443
 Omit `--token-file` to paste it into a hidden prompt. The client saves the token
 in its private configuration directory as `sync-token`, separately from
 `config.toml`. Treat transferred credential files as secrets. The server stores
-only token hashes, labels, and creation dates. Every enrolled device has access
+only token hashes, labels, and creation dates. On Android, enter the token in
+**Settings → Cloud sync settings / download vault**; it is stored using Android
+Keystore instead of the desktop token file. Every enrolled device has access
 to all vaults on this personal server; multi-user vault access controls are not
 implemented.
 
@@ -210,6 +213,12 @@ Repository Rust/GUI checks and command-reference generation apply as usual.
 The label supplied to the server's `--add-device` command identifies that device's
 credential. Labels do not grant different access rights: every credential on this
 personal server can access its encrypted vault snapshots.
+
+The label is for administrator recognition and does not have to match the
+phone's Android device name or any app setting. Authentication checks the token
+hash; a label or revocation ID is not a usable token. See
+[connection troubleshooting](cloud-sync.md#connection-troubleshooting) for
+unauthorized responses and Android's cleared credential input.
 
 ## Updates
 

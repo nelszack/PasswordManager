@@ -1,8 +1,9 @@
 # Password Manager
 
-A local-first password manager with an Iced desktop GUI, a Rust CLI, and a
-Chrome/Chromium browser extension. One `pm` executable provides the GUI, CLI,
-and independent background server. Vaults use Argon2id key derivation and
+A local-first password manager with an Iced desktop GUI, a Rust CLI, a
+Chrome/Chromium browser extension, and a native Android app. One desktop `pm`
+executable provides the GUI, CLI, and independent background server. The Android
+APK embeds the same Rust vault library. Vaults use Argon2id key derivation and
 XChaCha20-Poly1305 encryption.
 
 - Store logins, secure notes, payment cards, identities, Wi-Fi credentials,
@@ -11,18 +12,24 @@ XChaCha20-Poly1305 encryption.
   duplicate, stale, or breached passwords and missing authenticators.
 - Use TOTP/HOTP codes and experimental Duo passcode and manual Push enrollment.
 - Autofill logins, cards, identities, and OTP codes; generate signup passwords
-  and save credentials through site-scoped browser prompts. Edit vaults in the desktop app or CLI.
+  and save credentials through site-scoped desktop browser prompts. Manage vaults
+  in the desktop app, CLI, or Android app; Android autofills passwords and TOTP.
 - Recover password history and deleted entries; import/export CSV or portable
   JSON, preview import conflicts and data loss, and create encrypted full-vault backups.
 - Keep stable entry IDs, timed clipboard cleanup, and inactivity/system-event locking.
 
 [User guide](docs/user-guide.md) · [Command reference](docs/commands.html) ·
-[Contributor guide](docs/development.md) · [Security policy](SECURITY.md)
+[Contributor guide](docs/development.md) · [Security policy](SECURITY.md) ·
+[All documentation](docs/README.md)
 
 Android development: [private APK build and setup](android/README.md) ·
 [mobile/passkey implementation and device acceptance checklist](docs/mobile-implementation.md).
-The Android client uses the same Rust vault library, with native autofill and an
-Android 14+ passkey provider. See the checklist for current verification status.
+Android supports 64-bit Android 9+ with Vault/Tools/Settings navigation, live
+search, typed editing, recovery tools, encrypted sync, optional fingerprint
+unlock, and native password/TOTP autofill. Its passkey provider requires Android
+14+. Install privately by APK; no store publication is needed. iPhone support
+remains planned. See the checklist for implemented features and remaining device
+acceptance checks.
 
 ## Installation
 
@@ -170,6 +177,9 @@ and an explicit decision for each request.
 
 ## Configuration
 
+The following defaults and commands apply to the desktop/CLI service. Android
+has independent [mobile preferences](docs/user-guide.md#android-preferences).
+
 ```bash
 pm config
 pm config --length 24 --clipboard-timeout 30 --unlock-timeout 15m
@@ -231,3 +241,6 @@ npm run validate
 The [contributor guide](docs/development.md) covers architecture, browser tests,
 coverage, generated extension bundles and command contracts, and manual release
 packaging. See the [fuzzing guide](fuzz/README.md) for fuzz targets and reproduction.
+
+Android builds, JVM tests/lint, and isolated emulator/phone checks are separate;
+follow [Android development](docs/development.md#android-development).

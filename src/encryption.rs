@@ -272,6 +272,23 @@ pub(crate) fn credentials_from_keyfile_bytes(
     cached_credentials(encrypted, encryption_key_from_master(&master))
 }
 
+/// New sandboxed vault/key change from document-picker key bytes; no filesystem path.
+pub(crate) fn new_keyfile_credentials(bytes: &[u8]) -> Result<VaultCredentials, String> {
+    if bytes.is_empty() || bytes.len() > MAX_KEY_FILE_BYTES as usize {
+        return Err("Invalid key file size".into());
+    }
+    let master = Zeroizing::new(master_key_from_keyfile(bytes));
+    let parameters = active_kdf_parameters();
+    Ok(VaultCredentials::Session {
+        encryption_key: encryption_key_from_master(&master),
+        salt: <[u8; SALT_LEN]>::generate(),
+        kdf: KDF_KEYFILE,
+        memory_kib: parameters.memory_kib,
+        iterations: parameters.iterations,
+        parallelism: parameters.parallelism,
+    })
+}
+
 pub(crate) fn cached_credentials(
     encrypted: &[u8],
     encryption_key: [u8; 32],

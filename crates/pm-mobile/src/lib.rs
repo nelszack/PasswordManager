@@ -13,6 +13,15 @@ mod android {
     };
     use zeroize::Zeroizing;
 
+    static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_nelszack_passwordmanager_NativeBridge_invalidate(
+        _: EnvUnowned<'_>,
+        _: JClass<'_>,
+    ) {
+        CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     static VAULT: OnceLock<Mutex<MobileVault>> = OnceLock::new();
 
     #[unsafe(no_mangle)]
@@ -32,7 +41,8 @@ mod android {
                 let request = Zeroizing::new(request.try_to_string(env)?);
                 let result = (|| -> Result<serde_json::Value, String> {
                     if VAULT.get().is_none() {
-                        let vault = MobileVault::new(PathBuf::from(directory))?;
+                        let mut vault = MobileVault::new(PathBuf::from(directory))?;
+                        vault.set_cancellation(&CANCELLED);
                         let _ = VAULT.set(Mutex::new(vault));
                     }
                     let mut vault = VAULT

@@ -4,6 +4,9 @@ Install the server and issue a token per device using the
 [administration guide](cloud-sync-admin.md). Client-side SSH setup and remote
 updates are not part of the application.
 
+These commands configure the desktop/CLI client. For the phone's native settings
+and credential handling, see [Connect a device](cloud-sync.md#connect-a-device).
+
 ## Connect and enable a local vault
 
 ```bash
