@@ -1000,6 +1000,12 @@ sensitive identity numbers stay secret fields; secure-note bodies become primary
 secrets rather than ordinary searchable notes. History follows the configured
 retention limit.
 
+Android-created passkeys are preserved by encrypted backups and portable JSON
+exports as reserved secret fields. CSV export refuses vaults containing passkeys
+because CSV cannot preserve their signing keys. The desktop browser extension
+currently fills passwords; Android passkey creation and sign-in use the native
+credential provider. See [Android setup](../android/README.md).
+
 Both previews and completed imports report unsupported item counts and bounded,
 secret-free warnings. These identify omitted passkeys, attachments, linked fields,
 and unsupported matching/access policies. Unsupported authenticator configurations

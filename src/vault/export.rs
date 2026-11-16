@@ -53,6 +53,16 @@ impl Vault {
                     .map_err(|e| VaultError::Persistence(format!("could not encode export: {e}")))
             });
         }
+        if self.active_items().any(|item| {
+            item.metadata
+                .custom_fields
+                .iter()
+                .any(|f| f.name == crate::passkey::FIELD)
+        }) {
+            return Err(VaultError::Validation(
+                "CSV cannot preserve passkeys; use portable JSON or an encrypted backup".into(),
+            ));
+        }
         // CSV quoting does not prevent spreadsheet formula evaluation. Refuse
         // unsafe cells without altering credential bytes; JSON remains lossless.
         for entry in self.active_entries() {

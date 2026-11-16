@@ -2882,6 +2882,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-mobile"
+version = "0.1.0"
+dependencies = [
+ "jni",
+ "password_manager",
+ "rustls-platform-verifier",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "pm-platform"
 version = "0.1.0"
 dependencies = [
@@ -3069,7 +3080,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

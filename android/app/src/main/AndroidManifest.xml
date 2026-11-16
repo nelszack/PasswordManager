@@ -1,0 +1,28 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <queries>
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="https" /></intent>
+    </queries>
+    <application android:name=".VaultApplication" android:label="Password Manager"
+        android:icon="@drawable/ic_key" android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false" android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+        </activity>
+        <activity android:name=".FillActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".CredentialActivity" android:exported="false" android:excludeFromRecents="true" android:enabled="@bool/supports_credentials" tools:targetApi="34" />
+        <service android:name=".VaultAutofillService" android:exported="true"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE" android:label="Password Manager">
+            <intent-filter><action android:name="android.service.autofill.AutofillService" /></intent-filter>
+            <meta-data android:name="android.autofill" android:resource="@xml/autofill_service" />
+        </service>
+        <service android:name=".VaultCredentialService" android:exported="true" android:enabled="@bool/supports_credentials" tools:targetApi="34"
+            android:permission="android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE" android:label="Password Manager">
+            <intent-filter><action android:name="android.service.credentials.CredentialProviderService" /></intent-filter>
+            <meta-data android:name="android.credentials.provider" android:resource="@xml/credential_provider" />
+        </service>
+    </application>
+</manifest>

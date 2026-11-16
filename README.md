@@ -19,6 +19,11 @@ XChaCha20-Poly1305 encryption.
 [User guide](docs/user-guide.md) · [Command reference](docs/commands.html) ·
 [Contributor guide](docs/development.md) · [Security policy](SECURITY.md)
 
+Android development: [private APK build and setup](android/README.md) ·
+[mobile/passkey implementation and device acceptance checklist](docs/mobile-implementation.md).
+The Android client uses the same Rust vault library, with native autofill and an
+Android 14+ passkey provider. See the checklist for current verification status.
+
 ## Installation
 
 Build with a current stable Rust toolchain and a native C/C++ toolchain
