@@ -35,3 +35,28 @@ Its Connection settings also offer a one-time port override.
 Regression tests cover command construction, secret/session handling, settings,
 generation, recovery, and completion output. Rendering tests cover native Iced
 widget layouts; a full interactive platform acceptance pass remains separate.
+
+## Android feature map
+
+Android calls the shared Rust vault library in process and has separate
+device-local settings. Version 0.3.0 uses the following routes:
+
+| Capability | Android route |
+| --- | --- |
+| Vault selection/create/import/restore | Vault home → Add or restore a vault; Open a local vault selects existing local storage. |
+| Items and search | Vault → live search/type filters, Add item, item details → Edit item. Tools → Advanced search adds filters/sorting. |
+| Reveal/copy, history, authenticators | Item details → show/copy actions, Password history, Authenticator & Duo. HOTP requires explicit confirmed generation. |
+| Generation and health | Tools → Password generator / Vault health; standalone generation is available while locked. |
+| Trash and recovery | Tools → Deleted items / Files & backups; imports have preview/policy approval, and file transfers use Android's picker. |
+| Credential changes and key files | Tools → Vault credentials; home setup → External-key vault tools. Rekey/deletion require original credentials. |
+| Settings and biometrics | Settings → Mobile settings / Biometric unlock. Mobile defaults and ranges differ from desktop `pm config`. |
+| Sync | Settings → Cloud sync settings / download vault / Review sync conflicts; Tools → Sync controls for per-vault status, check, enable/disable and explicit synchronization. |
+| Browser/system integration | Settings → Enable password autofill; Android 14+ → Enable password and passkey provider. Android autofills passwords/TOTP; desktop card/identity autofill does not imply mobile support. |
+
+Daemon/process administration, desktop shortcut/native-host registration, shell
+completions, terminal flags, and desktop watch/notification switches have no
+one-to-one mobile route. Android does not run a continuous desktop-style sync
+daemon. Passkey data is interoperable, but desktop browser passkey creation and
+sign-in remain unimplemented. See the [mobile feature and acceptance matrix](mobile-implementation.md#mobile-feature-parity-roadmap)
+for per-capability limits and the [Android user guide](user-guide.md#android-app)
+for daily workflows. Implementation is distinct from real provider acceptance.

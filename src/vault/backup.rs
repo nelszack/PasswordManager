@@ -31,17 +31,26 @@ impl Vault {
                 "backup cannot overwrite the active vault".into(),
             ));
         }
-        let mut bytes = persistence::encode_document(&self.data, None)?;
-        persistence::validate_encrypted_size(bytes.len(), 9, max, "backup")?;
-        let ciphertext =
-            try_encrypt_file_in_place(&mut key.clone().into(), std::mem::take(&mut *bytes))?;
+        let bytes = self.backup_bytes(&mut key.clone().into(), max)?;
         key.zeroize();
         persistence::persist_private_stream(destination, force, |file| {
-            file.write_all(BACKUP_MAGIC)
-                .and_then(|()| file.write_all(&[BACKUP_DOCUMENT_VERSION]))
-                .and_then(|()| file.write_all(&ciphertext))
+            file.write_all(&bytes)
                 .map_err(|error| VaultError::Persistence(error.to_string()))
         })
+    }
+    pub(crate) fn backup_bytes(
+        &self,
+        key: &mut VaultCredentials,
+        max: u64,
+    ) -> Result<Vec<u8>, VaultError> {
+        let mut bytes = persistence::encode_document(&self.data, None)?;
+        persistence::validate_encrypted_size(bytes.len(), 9, max, "backup")?;
+        let ciphertext = try_encrypt_file_in_place(key, std::mem::take(&mut *bytes))?;
+        let mut result = Vec::with_capacity(ciphertext.len() + 9);
+        result.extend_from_slice(BACKUP_MAGIC);
+        result.push(BACKUP_DOCUMENT_VERSION);
+        result.extend_from_slice(&ciphertext);
+        Ok(result)
     }
 }
 pub(crate) fn restore_encrypted_backup(
@@ -50,35 +59,46 @@ pub(crate) fn restore_encrypted_backup(
 ) -> Result<String, VaultError> {
     let bytes = crate::file::read_bounded_file(Path::new(path), MAX_BACKUP_BYTES)
         .map_err(|e| VaultError::Persistence(e.to_string()))?;
-    if bytes.len() < 9 || &bytes[..8] != BACKUP_MAGIC || bytes[8] != BACKUP_DOCUMENT_VERSION {
-        return Err(VaultError::Validation(
-            "unsupported encrypted backup format".into(),
-        ));
-    }
     let mut candidate = VaultCredentials::from(key.clone());
-    let plaintext = Zeroizing::new(decrypt_file(&mut candidate, &bytes[9..]).ok_or_else(|| {
-        VaultError::Validation("wrong backup password/key or modified backup".into())
-    })?);
-    let mut data = persistence::decode_document(&plaintext)?;
-    // Restores always get an independent identity. Replacing a selected vault is
-    // an explicit future operation, never inferred by password equality.
-    data.vault_id = rand::random();
-    let filename = format!("{}.enc", hex::encode(data.vault_id));
-    let vault = Vault {
-        data,
-        store: VaultStore::File {
-            directory: data_dir(),
-            filename: filename.clone(),
-        },
-        metadata: VaultMetadata {
-            filename: filename.clone(),
-            duo_session: None,
-            changes: None,
-        },
-    };
+    let vault = decode_backup(&bytes, &mut candidate, data_dir())?;
+    let filename = vault.metadata.filename.clone();
     write_vault_with_key(&vault, &mut candidate)?;
     key.zeroize();
     Ok(filename)
+}
+
+pub(super) fn decode_backup(
+    bytes: &[u8],
+    key: &mut VaultCredentials,
+    directory: std::path::PathBuf,
+) -> Result<Vault, VaultError> {
+    if bytes.len() as u64 > MAX_BACKUP_BYTES
+        || bytes.len() < 9
+        || &bytes[..8] != BACKUP_MAGIC
+        || bytes[8] != BACKUP_DOCUMENT_VERSION
+    {
+        return Err(VaultError::Validation(
+            "unsupported encrypted backup format or size".into(),
+        ));
+    }
+    let plaintext = Zeroizing::new(decrypt_file(key, &bytes[9..]).ok_or_else(|| {
+        VaultError::Validation("wrong backup password/key or modified backup".into())
+    })?);
+    let mut data = persistence::decode_document(&plaintext)?;
+    data.vault_id = rand::random();
+    let filename = format!("{}.enc", hex::encode(data.vault_id));
+    Ok(Vault {
+        data,
+        store: VaultStore::File {
+            directory,
+            filename: filename.clone(),
+        },
+        metadata: VaultMetadata {
+            filename,
+            duo_session: None,
+            changes: None,
+        },
+    })
 }
 
 #[cfg(test)]

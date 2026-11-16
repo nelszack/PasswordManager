@@ -1,5 +1,13 @@
 # Performance, compilation, and test review
 
+Current documentation note, 2026-11-16: the measurements and test counts below
+belong to their dated checkouts. Android 0.3.0 adds native navigation, live
+search and revised settings/editor screens; this document contains no Android
+performance measurements. Use the [current benchmark instructions](development.md#performance-benchmarks)
+for reproducible measurements and the [mobile verification record](mobile-implementation.md)
+for Android evidence. Mobile build and device checks are separate from the
+desktop/browser benchmark suite.
+
 ## Follow-up implementation, 2026-11-14
 
 The current pass removes repeated extension discovery/layout work, caches idle

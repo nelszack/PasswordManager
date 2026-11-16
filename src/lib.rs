@@ -8,7 +8,10 @@ pub mod docs;
 mod duo;
 pub mod encryption;
 pub mod file;
+pub mod mobile;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod native_messaging;
+pub mod passkey;
 pub mod password;
 pub mod protocol;
 pub mod secret;

@@ -28,11 +28,12 @@ maintained security-fix branch.
 
 The assets are master passwords, external keys, decrypted entries, password
 history, deleted items, TOTP/HOTP secrets and counters, Duo device signing keys,
-and the authenticated local session token.
+passkey private keys, sync device credentials, and the authenticated local
+session token.
 
 The trusted components are the local operating system and user account, the
-`pm` executable, its dependencies, and the installed browser extension and native
-host. Websites, page scripts, imported documents, encrypted file headers, native
+`pm` executable, Android app and Keystore, their dependencies, and the installed
+browser extension and native host. Websites, page scripts, imported documents, encrypted file headers, native
 messages, and network responses are untrusted inputs.
 
 Vaults and backups authenticate their ciphertext and format metadata. Password
@@ -201,3 +202,88 @@ tests check replacement, deadlines, lock cleanup, and transient failures.
 The [fuzzing guide](fuzz/README.md) describes coverage-guided targets for encrypted
 headers, native messages, and import parsers. Use synthetic data exclusively;
 fuzz corpora, crash artifacts, and browser traces may preserve their inputs.
+
+## Android client
+
+The Android app embeds the Rust vault implementation and keeps encrypted vaults
+in app-private storage. It does not expose the desktop server to the network or
+host a web vault. Screenshot capture and Android cloud/device-transfer backups
+are disabled. Explicit encrypted vault exports remain available.
+
+Optional biometric unlock stores a vault encryption key wrapped by an Android
+Keystore key requiring strong biometric authentication for each use. The prompt
+uses a CryptoObject; authentication authorizes the decryption itself. The wrapped
+key is bound to the local vault filename and its encryption header. It is not
+synchronized, and biometric enrollment changes invalidate its protecting key.
+The original password or external key remains necessary for recovery and new
+devices. A phone enrolled this way can unlock without presenting the external
+key file again, which is the intended opt-in convenience policy.
+
+The Android system controls access to the autofill and credential-provider
+services. Browser-delegated origins require a matching release certificate in
+the bundled privileged-browser allowlist. Native password entries bind to the
+app package and signing certificate. Native passkey requests additionally require
+a matching Digital Asset Link served over HTTPS by the relying party. Ambiguous
+or untrusted form origins are rejected. The adapter obtains the final credential
+request from Android before consent and signing, rather than trusting an earlier
+query or a page-supplied origin.
+
+Legacy Android autofill omits website ports. A matching native browser address
+bar can supply the full origin. In release-signed Chrome without that evidence,
+the explicitly approved fallback matches the exact HTTPS hostname and requires
+an explicit account/saved-address choice; saved nonstandard ports are shown.
+It cannot verify the current page port. Wildcard, parent, sibling, and lookalike
+hosts do not match in this fallback. HTML URL attributes never establish trust,
+and other browsers without full native origin evidence are rejected. Rust still
+checks the chosen saved origin before releasing its secret.
+
+Only a completed autofill handoff can retain a memory-only grant for the same
+caller/site, for up to five minutes between completed fills, also bounded by
+vault inactivity. Another caller/site, cancellation, opening management,
+screen-off, explicit lock, or process restart revokes it. Each step requires an
+explicit account choice. Inline suggestions hold authentication actions and null
+field values until selected; the selected account, vault and origin are checked
+again. Passkey/provider requests require fresh authentication. TOTP autofill is
+site-matched and uses a fresh code; automatic filling never consumes HOTP.
+
+Mobile copy actions mark clipboard contents sensitive and clear them on a
+best-effort ownership-checked timer, shortened by code expiry. Clipboard history
+and copies made by other software remain outside that cleanup guarantee.
+
+Passkey private keys use the existing encrypted vault's reserved secret field
+`pm.passkey.v1`. Portable JSON therefore includes signing keys and must be handled
+as plaintext secrets; encrypted backups include them as encrypted data. CSV
+export refuses passkeys to prevent silent key loss. The initial authenticator
+supports ES256, discoverable credentials, no identifying attestation, and zero
+signature counters for credentials eligible for synchronization. It sets backup
+eligibility without claiming that a backup has completed. Desktop browser
+passkey use, direct credential exchange, PRF/largeBlob extensions, hardware
+attestation, and cross-device QR authentication are outside this initial adapter.
+
+Locking clears sensitive Android views and invalidates UI callbacks immediately.
+Screen-off, backgrounding and inactivity request a lock, except the bounded
+completed-autofill grant above. A native cancellation flag bypasses the JNI
+mutex, interrupts pending network waits, and is checked between audit entries;
+the serialized owner clears its session when control returns. An in-progress
+KDF or filesystem commit still reaches a safe boundary before native keys are
+dropped. A remote action may already have completed when cancellation arrives;
+inspect its outcome before retrying. Navigation also discards stale screen
+callbacks without granting another screen their results. Rust
+request/response buffers are wiped where owned; copies in Android/JVM strings
+remain subject to garbage collection. A compromised phone OS or app process is
+outside this protection boundary, just as a compromised desktop process is for
+the desktop client. Use a privately signed release build for long-term use;
+debuggable APKs are development artifacts.
+
+Mobile document transfers are bounded to 16 MiB and use byte/stream APIs through
+Android's system picker. Complete encrypted backups preserve passkeys, history,
+trash and authenticators. Portable JSON and CSV exports are plaintext and require
+explicit consent; no plaintext staging files are written in app storage. File
+picker returns reauthenticate before unlocked exports. Import approval binds the
+file digest, duplicate policy and local revision and is invalidated by locking.
+Rekey/deletion require an original-credential unlock, and rekey saves an
+encrypted recovery copy before replacement. Recovery/comparison copies have
+sync disabled until explicitly enabled.
+
+See [the mobile acceptance checklist](docs/mobile-implementation.md) for tested
+behavior and the physical-phone checks still required before a release claim.

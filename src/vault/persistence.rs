@@ -301,12 +301,6 @@ impl Vault {
         if !matches!(self.store, VaultStore::Memory) && credentials.is_locked() {
             return Err(VaultError::Locked);
         }
-        let next_revision = self
-            .data
-            .revision
-            .checked_add(1)
-            .filter(|value| *value <= MAX_ITEM_ID)
-            .ok_or_else(|| VaultError::Conflict("vault revision exhausted".into()))?;
         if let PasswordType::Password(password) = &new_key {
             validate_new_password(password).map_err(|e| VaultError::Validation(e.into()))?;
         }
@@ -321,21 +315,40 @@ impl Vault {
             let mut material = try_gen_master_key(&mut new_key, true)?;
             material.zeroize();
         }
+        let result = self.rekey_credentials(credentials, VaultCredentials::from(new_key));
+        if result.as_ref().is_err_and(|e| !e.committed())
+            && let Some(path) = generated
+        {
+            let _ = fs::remove_file(path);
+        }
+        result
+    }
+    pub(crate) fn rekey_credentials(
+        &mut self,
+        credentials: &mut VaultCredentials,
+        mut replacement: VaultCredentials,
+    ) -> Result<(), VaultError> {
+        if !matches!(self.store, VaultStore::Memory) && credentials.is_locked() {
+            return Err(VaultError::Locked);
+        }
+        let next_revision = self
+            .data
+            .revision
+            .checked_add(1)
+            .filter(|value| *value <= MAX_ITEM_ID)
+            .ok_or_else(|| VaultError::Conflict("vault revision exhausted".into()))?;
         let staged = VaultData {
             items: BTreeMap::new(),
             vault_id: self.data.vault_id,
             next_item_id: self.data.next_item_id,
             revision: next_revision,
         };
-        let mut replacement = VaultCredentials::from(new_key);
         let result =
             self.store
                 .commit_overlay(&self.data, &staged, &HashSet::new(), &mut replacement);
         if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
             self.data.revision = next_revision;
             *credentials = std::mem::take(&mut replacement);
-        } else if let Some(path) = generated {
-            let _ = fs::remove_file(path);
         }
         result
     }

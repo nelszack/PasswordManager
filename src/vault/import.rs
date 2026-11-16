@@ -272,11 +272,31 @@ impl Vault {
                 return Err((format!("import file {path:?} is not valid UTF-8")).into());
             }
         };
+        self.import_contents(
+            &contents,
+            conflicts,
+            preview,
+            password_history_limit,
+            key_pass,
+        )
+    }
+    pub(crate) fn import_contents(
+        &mut self,
+        contents: &str,
+        conflicts: ConflictPolicy,
+        preview: bool,
+        password_history_limit: usize,
+        key_pass: &mut VaultCredentials,
+    ) -> Result<ImportReport, VaultError> {
+        if contents.len() as u64 > MAX_IMPORT_BYTES {
+            return Err(VaultError::InvalidInput("Import exceeds size limit".into()));
+        }
+        let path = "selected import";
         let trimmed = contents.trim_start();
         let (imported, mut losses) = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            import_json_with_losses(&contents, &path)?
+            import_json_with_losses(contents, path)?
         } else {
-            formats::csv_with_losses(&contents, &path)?
+            formats::csv_with_losses(contents, path)?
         };
         if imported.len() + losses.unsupported > MAX_IMPORT_ITEMS {
             return Err(

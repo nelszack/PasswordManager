@@ -14,7 +14,7 @@ desktop = ["dep:iced", "dep:iced_winit", "dep:rfd"]
 
 [dependencies]
 pm-contracts = { path = "crates/pm-contracts", features = ["cli"] }
-pm-platform = { path = "crates/pm-platform", features = ["clipboard"] }
+pm-platform = { path = "crates/pm-platform" }
 pm-client = { path = "crates/pm-client" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
@@ -83,6 +83,9 @@ fontdb = { path = "vendor/fontdb-compat" }
 zbus = { version = "6.1", default-features = false, features = ["tokio", "proxy"] }
 futures-lite = "2"
 
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+pm-platform = { path = "crates/pm-platform", features = ["clipboard"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 
@@ -93,7 +96,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSDate", "NSNotification", "NSDistributedNotificationCenter", "NSRunLoop", "NSString", "NSOperation"] }
 
 [workspace]
-members = ["crates/pm-contracts", "crates/pm-platform", "crates/pm-client", "vendor/atspi-common", "vendor/zbus-lockstep"]
+members = ["crates/pm-contracts", "crates/pm-platform", "crates/pm-client", "crates/pm-mobile", "vendor/atspi-common", "vendor/zbus-lockstep"]
 default-members = ["."]
 exclude = ["fuzz", "vendor/iced_core", "vendor/iced_widget", "vendor/iced_winit", "vendor/iced_tiny_skia", "vendor/fontdb-compat", "vendor/accesskit_unix", "vendor/accesskit_atspi_common", "vendor/atspi-proxies", "vendor/zbus-lockstep-macros"]
 

@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries><package android:name="dev.nelszack.passwordmanager.test" /></queries>
+    <application>
+        <activity android:name=".MobileRedesignFixtureActivity" android:exported="false" />
+        <activity android:name=".MobileManagementFixtureActivity" android:exported="false" />
+        <provider android:name=".ParityDocumentProvider" android:authorities="dev.nelszack.passwordmanager.paritydocuments" android:exported="false" />
+        <activity android:name=".AutofillSessionFixtureActivity" android:exported="false" />
+    </application>
+</manifest>

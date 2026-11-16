@@ -327,7 +327,7 @@ pub(super) fn external_json(
             (
                 login,
                 "fido2Credentials",
-                "passkeys omitted; passkey storage is unsupported",
+                "passkeys omitted; this external passkey import format is unsupported",
             ),
             (
                 value,

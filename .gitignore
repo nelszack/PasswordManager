@@ -9,3 +9,12 @@
 
 /sync-server/pm-sync
 /sync-server/sync-data/
+
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties
+/android/**/build/
+/android/app/src/main/jniLibs/
+/android/app/libs/*.jar
+*.jks
+*.keystore

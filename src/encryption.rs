@@ -257,6 +257,53 @@ fn encryption_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
     blake3::derive_key("vault-encryption-v1", master_key)
 }
 
+/// Mobile adapters supply key-file contents from the system document picker;
+/// resolving desktop data paths would be invalid in an application sandbox.
+pub(crate) fn credentials_from_keyfile_bytes(
+    encrypted: &[u8],
+    bytes: &[u8],
+) -> Result<VaultCredentials, String> {
+    validate_vault_header(encrypted)?;
+    if encrypted[9] != KDF_KEYFILE || bytes.is_empty() || bytes.len() > MAX_KEY_FILE_BYTES as usize
+    {
+        return Err("This vault does not accept the supplied key file".into());
+    }
+    let master = Zeroizing::new(master_key_from_keyfile(bytes));
+    cached_credentials(encrypted, encryption_key_from_master(&master))
+}
+
+/// New sandboxed vault/key change from document-picker key bytes; no filesystem path.
+pub(crate) fn new_keyfile_credentials(bytes: &[u8]) -> Result<VaultCredentials, String> {
+    if bytes.is_empty() || bytes.len() > MAX_KEY_FILE_BYTES as usize {
+        return Err("Invalid key file size".into());
+    }
+    let master = Zeroizing::new(master_key_from_keyfile(bytes));
+    let parameters = active_kdf_parameters();
+    Ok(VaultCredentials::Session {
+        encryption_key: encryption_key_from_master(&master),
+        salt: <[u8; SALT_LEN]>::generate(),
+        kdf: KDF_KEYFILE,
+        memory_kib: parameters.memory_kib,
+        iterations: parameters.iterations,
+        parallelism: parameters.parallelism,
+    })
+}
+
+pub(crate) fn cached_credentials(
+    encrypted: &[u8],
+    encryption_key: [u8; 32],
+) -> Result<VaultCredentials, String> {
+    validate_vault_header(encrypted)?;
+    Ok(VaultCredentials::Session {
+        encryption_key,
+        salt: encrypted[22..38].try_into().map_err(|_| "Invalid salt")?,
+        kdf: encrypted[9],
+        memory_kib: u32::from_be_bytes(encrypted[10..14].try_into().map_err(|_| "Invalid KDF")?),
+        iterations: u32::from_be_bytes(encrypted[14..18].try_into().map_err(|_| "Invalid KDF")?),
+        parallelism: u32::from_be_bytes(encrypted[18..22].try_into().map_err(|_| "Invalid KDF")?),
+    })
+}
+
 fn encryption_master(key_pass: &mut PasswordType, salt: &[u8]) -> Result<[u8; 32], String> {
     match key_pass {
         PasswordType::Password(pass) => Ok(master_key_from_password(pass, salt)),

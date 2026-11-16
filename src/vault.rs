@@ -25,6 +25,7 @@ use tempfile::NamedTempFile;
 use totp_rs::{Builder as TotpBuilder, Secret as TotpSecret, Totp, TotpError};
 use zeroize::{Zeroize, Zeroizing};
 
+pub(crate) mod mobile;
 mod session;
 pub use session::{VaultCredentials, VaultSession};
 mod error;
