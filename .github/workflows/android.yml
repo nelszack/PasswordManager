@@ -28,10 +28,13 @@ jobs:
         with:
           key: android
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install SDK and Gradle
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 build-tools;36.0.0 ndk;28.2.13676358'
+      - name: Install Gradle
         shell: bash
         run: |
-          sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'build-tools;36.0.0' 'ndk;28.2.13676358'
           curl -fsSL https://services.gradle.org/distributions/gradle-8.13-bin.zip -o "$RUNNER_TEMP/gradle.zip"
           echo '20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78  '"$RUNNER_TEMP/gradle.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
