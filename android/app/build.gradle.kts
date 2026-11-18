@@ -3,8 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Keep the complete AAR (including its certificate-revocation network policy)
-// synchronized with the Rust dependency instead of extracting only classes.jar.
+// Keep the complete AAR synchronized with the Rust dependency instead of extracting
+// only classes.jar. Its revocation network policy is adjusted by RevocationPolicy below.
 val rustlsCompanionVersion =
     providers.fileContents(rootProject.layout.projectDirectory.file("../Cargo.lock")).asText.map {
         lock ->
@@ -72,6 +72,64 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+}
+
+/**
+ * The verifier companion's network policy lets Android fetch revocation data over HTTP. It allows
+ * DigiCert's CRLs but not DigiCert's OCSP responder, so every DigiCert-issued host (including every
+ * Duo endpoint) fell back to an 11 MB CRL that exhausted the app heap. This override, generated
+ * from the companion's own policy, lets DigiCert answer by OCSP and never downloads that CRL.
+ * Revocation checking is soft-fail either way.
+ */
+abstract class RevocationPolicy : DefaultTask() {
+    @get:InputFiles abstract val companion: ConfigurableFileCollection
+    @get:OutputDirectory abstract val output: DirectoryProperty
+    @get:Inject abstract val archives: ArchiveOperations
+
+    @TaskAction
+    fun generate() {
+        var policy =
+            archives
+                .zipTree(companion.singleFile)
+                .matching { include("res/xml/network_security_config.xml") }
+                .singleFile
+                .readText()
+        for (host in listOf("crl3.digicert.com", "crl4.digicert.com")) {
+            val entry =
+                Regex("""\s*<domain includeSubdomains="true">${Regex.escape(host)}</domain>""")
+            check(entry.containsMatchIn(policy)) {
+                "Verifier policy no longer lists $host; review the revocation override"
+            }
+            policy = entry.replace(policy, "")
+        }
+        val cleartext = """<domain-config cleartextTrafficPermitted="true">"""
+        check(policy.contains(cleartext)) { "Unrecognized verifier network policy" }
+        policy =
+            policy.replaceFirst(
+                cleartext,
+                "$cleartext\n    <domain includeSubdomains=\"false\">ocsp.digicert.com</domain>",
+            )
+        output.file("xml/network_security_config.xml").get().asFile.apply {
+            parentFile.mkdirs()
+            writeText(policy)
+        }
+    }
+}
+
+val rustlsCompanion by configurations.creating { isTransitive = false }
+
+dependencies {
+    rustlsCompanion("org.rustls:rustls-platform-verifier:${rustlsCompanionVersion.get()}@aar")
+}
+
+val revocationPolicy by
+    tasks.registering(RevocationPolicy::class) {
+        companion.from(rustlsCompanion)
+        output.set(layout.buildDirectory.dir("generated/revocationPolicy"))
+    }
+
+androidComponents.onVariants { variant ->
+    variant.sources.res?.addGeneratedSourceDirectory(revocationPolicy, RevocationPolicy::output)
 }
 
 val verifyNativeLibraries by tasks.registering {
