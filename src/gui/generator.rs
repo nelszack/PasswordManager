@@ -294,7 +294,9 @@ impl App {
                         String::new()
                     };
                     self.generation.value.set_visible(false);
-                    self.notice = "New secret ready. Copy it or save it in an item; it clears from this screen after 60 seconds.".into();
+                    self.notice = "New secret ready. Copy it or save it in an item; it clears \
+                                   from this screen after 60 seconds."
+                        .into();
                     let show = iced::widget::operation::snap_to(
                         "generator-form",
                         iced::widget::operation::RelativeOffset::START,

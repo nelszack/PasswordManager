@@ -513,7 +513,13 @@ impl App {
         }
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(work).await.unwrap_or_else(|_| Err(Failure::from("The desktop operation could not finish. Inspect the vault before retrying any change.".to_owned())))
+                tokio::task::spawn_blocking(work).await.unwrap_or_else(|_| {
+                    Err(Failure::from(
+                        "The desktop operation could not finish. Inspect the vault before \
+                         retrying any change."
+                            .to_owned(),
+                    ))
+                })
             },
             move |result| Message::Finished(serial, job, Arc::new(result)),
         )
@@ -792,7 +798,10 @@ impl App {
                         if let Some(id) = error.uncertain_operation {
                             self.recovery = Recovery::AwaitingOutcome(id);
 
-                            self.notice.push_str(" The change may have completed. Check its outcome before making another change.");
+                            self.notice.push_str(
+                                " The change may have completed. Check its outcome before making \
+                                 another change.",
+                            );
                             self.editor = Editor::Closed;
                             self.hide_secrets();
                         }
@@ -824,7 +833,9 @@ impl App {
                     self.generation.stats.clear();
                     self.ui.transfer_generated = false;
                     if self.notice.starts_with("New secret ready.") {
-                        self.notice = "Generated secret cleared after 60 seconds. Generate another when you need it.".into();
+                        self.notice = "Generated secret cleared after 60 seconds. Generate \
+                                       another when you need it."
+                            .into();
                     }
                 }
                 if !self.busy()
@@ -1249,7 +1260,9 @@ impl App {
                     && let Some(latest) = self.editor.reapply(original)
                 {
                     self.item = Some(latest);
-                    self.notice = "Your edits are reapplied to the reviewed version. Review the draft, then Save item.".into();
+                    self.notice = "Your edits are reapplied to the reviewed version. Review the \
+                                   draft, then Save item."
+                        .into();
                     self.ui.notice_error = false;
                 }
             }
@@ -1307,8 +1320,12 @@ impl App {
                     };
                     self.conf = conf;
                     self.notice = if restart_required {
-                        "Settings saved. Restart the server to apply recovery settings. The lock timeout applies on the next unlock."
-                    } else { "Settings saved. The lock timeout applies on the next unlock." }.into();
+                        "Settings saved. Restart the server to apply recovery settings. The lock \
+                         timeout applies on the next unlock."
+                    } else {
+                        "Settings saved. The lock timeout applies on the next unlock."
+                    }
+                    .into();
                 }
                 Reply::Vaults { vaults, names } => {
                     self.names = names;
@@ -1429,7 +1446,10 @@ impl App {
                     && self.item.is_some()
                 {
                     self.editor.require_review();
-                    self.notice.push_str(" Your unsaved edits are kept. Review the latest item before reapplying them.");
+                    self.notice.push_str(
+                        " Your unsaved edits are kept. Review the latest item before reapplying \
+                         them.",
+                    );
                 } else {
                     self.clear_vault();
                     self.notice
@@ -1597,7 +1617,10 @@ impl App {
                     }
                     OperationState::Unknown | OperationState::CommittedDurabilityUnknown => {
                         self.recovery = Recovery::AwaitingAcknowledgement(receipt.clone());
-                        self.notice = "The previous outcome or storage durability is uncertain. Inspect the vault before acknowledging it; the operation will not be retried.".into();
+                        self.notice = "The previous outcome or storage durability is uncertain. \
+                                       Inspect the vault before acknowledging it; the operation \
+                                       will not be retried."
+                            .into();
                     }
                 }
                 if self.connection.session.is_some() {
@@ -1682,9 +1705,9 @@ impl App {
                 self.editor = Editor::Closed;
                 self.item = None;
                 self.delete_confirm = false;
-                self.notice =
-                    "Item moved to encrypted trash. You can restore it from Tools → Deleted items."
-                        .into();
+                self.notice = "Item moved to encrypted trash. You can restore it from Tools → \
+                               Deleted items."
+                    .into();
                 return if incremental {
                     Task::none()
                 } else {

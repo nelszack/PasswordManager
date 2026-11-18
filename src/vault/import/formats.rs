@@ -33,7 +33,11 @@ fn totp(item: &mut ImportedItem, value: Option<String>, index: usize, losses: &m
                 // Retain unsupported providers (for example Steam) as a secret
                 // field. Never echo the seed or parser error into the report.
                 field(item, "imported authenticator", Some(value), true);
-                losses.warn(index, "authenticator configuration retained as a secret field; code generation is unavailable");
+                losses.warn(
+                    index,
+                    "authenticator configuration retained as a secret field; code generation is \
+                     unavailable",
+                );
             }
         }
     }
@@ -119,7 +123,11 @@ pub(super) fn external_json(
                 urls.push(url);
             }
             if uri.get("match").is_some_and(|m| !m.is_null()) {
-                losses.warn(index, "URL match policy omitted; imported URLs use this application's origin matching");
+                losses.warn(
+                    index,
+                    "URL match policy omitted; imported URLs use this application's origin \
+                     matching",
+                );
             }
         }
         for url in value
@@ -496,7 +504,11 @@ pub(super) fn external_json(
                 Some(Value::Object(extra).to_string()),
                 true,
             );
-            losses.warn(index, "additional JSON properties retained as a secret field; their behavior is unsupported");
+            losses.warn(
+                index,
+                "additional JSON properties retained as a secret field; their behavior is \
+                 unsupported",
+            );
         }
         let mut field_names = HashSet::new();
         for field in &mut item.custom_fields {
@@ -692,7 +704,11 @@ pub(super) fn csv_with_losses(
                     Some(value.into()),
                     true,
                 );
-                losses.warn(index, "additional CSV column retained as a secret field; column-specific behavior is unavailable");
+                losses.warn(
+                    index,
+                    "additional CSV column retained as a secret field; column-specific behavior \
+                     is unavailable",
+                );
             }
         }
         item.portable =
@@ -775,7 +791,12 @@ mod tests {
         assert!(items[0].custom_fields.iter().all(|f| f.secret));
         assert_eq!(losses.count, 2);
         assert!(!losses.messages.join("\n").contains("synthetic"));
-        let (items, losses) = csv_with_losses("name,login_username,login_password,login_totp,api_token\nAccount,alice, padded ,JBSWY3DPEHPK3PXP,synthetic-token\n", "synthetic.csv").unwrap();
+        let (items, losses) = csv_with_losses(
+            "name,login_username,login_password,login_totp,api_token\nAccount,alice, padded \
+             ,JBSWY3DPEHPK3PXP,synthetic-token\n",
+            "synthetic.csv",
+        )
+        .unwrap();
         assert_eq!(items[0].entry.password, " padded ");
         assert!(items[0].totp.is_some());
         assert_eq!(items[0].custom_fields[0].name, "CSV api_token");
@@ -831,7 +852,12 @@ mod tests {
 
     #[test]
     fn typed_csv_preserves_multiline_notes_and_card_or_key_secrets() {
-        let (items, _) = csv_with_losses("name,type,notes,password\nNote,secure-note,\"  first\nsecond  \",\nSeparate,secure-note,additional note,primary secret\n", "synthetic.csv").unwrap();
+        let (items, _) = csv_with_losses(
+            "name,type,notes,password\nNote,secure-note,\"  first\nsecond  \
+             \",\nSeparate,secure-note,additional note,primary secret\n",
+            "synthetic.csv",
+        )
+        .unwrap();
         assert_eq!(items[0].entry.password, "  first\nsecond  ");
         assert!(items[0].entry.notes.is_none());
         assert_eq!(items[1].entry.password, "primary secret");

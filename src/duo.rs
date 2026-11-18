@@ -38,7 +38,8 @@ fn enrollment_user_agent() -> String {
     // identifying our implementation. Rustls verifies certificates using its
     // root store; we do not claim to implement Duo's certificate pinning.
     format!(
-        "DuoMobileApp/{MOBILE_VERSION} (Android {ANDROID_VERSION}; {DEVICE_MODEL}) password-manager/{} ca_bundle/1.0 (ca_pinning=disabled)",
+        "DuoMobileApp/{MOBILE_VERSION} (Android {ANDROID_VERSION}; {DEVICE_MODEL}) \
+         password-manager/{} ca_bundle/1.0 (ca_pinning=disabled)",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -261,7 +262,8 @@ fn rejection_error(
             Some(40002) => "invalid request parameters",
             _ => match status.map(|status| status.as_u16()) {
                 Some(403) => {
-                    "request forbidden; the response does not establish whether the cause is client compatibility or organization policy"
+                    "request forbidden; the response does not establish whether the cause is \
+                     client compatibility or organization policy"
                 }
                 Some(429) => "too many requests; wait before retrying",
                 Some(500..=599) => "Duo service error; try again later",

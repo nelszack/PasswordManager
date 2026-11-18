@@ -225,7 +225,11 @@ impl MobileVault {
                     "Confirm generation; HOTP advances its counter",
                 )?;
                 let code = vault.current_otp(Target::Id(id(r)?), credentials)?;
-                json!({ "code": &*code.code, "expires_in": code.expires_in, "counter": code.counter })
+                json!({
+                    "code": &*code.code,
+                    "expires_in": code.expires_in,
+                    "counter": code.counter,
+                })
             }
             "authenticator_info" => {
                 let item = vault

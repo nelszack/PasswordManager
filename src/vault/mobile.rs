@@ -271,8 +271,8 @@ impl MobileVault {
             }
             self.lock();
             return Err(
-                "Operation interrupted; vault locked. A remote change may have \
-                        completed; inspect before retrying"
+                "Operation interrupted; vault locked. A remote change may have completed; inspect \
+                 before retrying"
                     .into(),
             );
         }
@@ -780,8 +780,8 @@ impl MobileVault {
                     crate::cloud::write_private(&comparison, &bytes, false)?;
                 }
                 return Err(
-                    "Sync conflict: both copies preserved. Review the encrypted \
-                            comparison copy before retrying"
+                    "Sync conflict: both copies preserved. Review the encrypted comparison copy \
+                     before retrying"
                         .into(),
                 );
             }

@@ -102,9 +102,12 @@ pub fn validate_origin(rp: &str, origin: &str) -> Result<()> {
 }
 fn client_data(kind: &str, request: &Value, origin: &str) -> Result<Vec<u8>> {
     let challenge = bytes(request, "challenge", 8192)?;
-    serde_json::to_vec(
-        &json!({"type":kind,"challenge":encode(challenge),"origin":origin,"crossOrigin":false}),
-    )
+    serde_json::to_vec(&json!({
+        "type": kind,
+        "challenge": encode(challenge),
+        "origin": origin,
+        "crossOrigin": false,
+    }))
     .map_err(|_| "Could not encode client data".into())
 }
 // Minimal canonical CBOR for WebAuthn's fixed COSE/attestation structures.
@@ -212,21 +215,37 @@ pub fn create(
         display_name: display.into(),
         private_key: encode(pkcs8.as_ref()),
     };
-    let mut response = json!({"attestationObject":encode(attestation),"transports":["internal"]});
-    if client_hash.is_none() {
-        response["clientDataJSON"] = encode(client).into();
-    } else {
-        // Android browsers supply their own client-data hash and replace this
-        // placeholder. The response field must still exist for JSON parsers.
-        response["clientDataJSON"] = encode(b"{}").into();
-    }
+    let response = json!({
+        "attestationObject": encode(attestation),
+        "transports": ["internal"],
+        "clientDataJSON": client_data_field(&client, client_hash),
+    });
     let extensions = if request["extensions"]["credProps"] == true {
-        json!({"credProps":{"rk":true}})
+        json!({ "credProps": { "rk": true } })
     } else {
         json!({})
     };
-    let value = json!({"id":passkey.credential_id,"rawId":passkey.credential_id,"type":"public-key","authenticatorAttachment":"platform","clientExtensionResults":extensions,"response":response});
+    let value = credential(&passkey.credential_id, extensions, response);
     Ok((passkey, value))
+}
+/// Android browsers supply their own client-data hash and replace this
+/// placeholder. The response field must still exist for JSON parsers.
+fn client_data_field(client: &[u8], client_hash: Option<&[u8]>) -> String {
+    match client_hash {
+        None => encode(client),
+        Some(_) => encode(b"{}"),
+    }
+}
+/// A `PublicKeyCredential` as serialized by WebAuthn's `toJSON()`.
+fn credential(id: &str, extensions: Value, response: Value) -> Value {
+    json!({
+        "id": id,
+        "rawId": id,
+        "type": "public-key",
+        "authenticatorAttachment": "platform",
+        "clientExtensionResults": extensions,
+        "response": response,
+    })
 }
 impl Passkey {
     pub fn validate(&self) -> Result<()> {
@@ -299,15 +318,13 @@ impl Passkey {
             .key()?
             .sign(&SystemRandom::new(), &message)
             .map_err(|_| "Passkey signing failed")?;
-        let mut response = json!({"authenticatorData":encode(auth),"signature":encode(signature.as_ref()),"userHandle":self.user_handle});
-        if client_hash.is_none() {
-            response["clientDataJSON"] = encode(client).into();
-        } else {
-            response["clientDataJSON"] = encode(b"{}").into();
-        }
-        Ok(
-            json!({"id":self.credential_id,"rawId":self.credential_id,"type":"public-key","authenticatorAttachment":"platform","clientExtensionResults":{},"response":response}),
-        )
+        let response = json!({
+            "authenticatorData": encode(auth),
+            "signature": encode(signature.as_ref()),
+            "userHandle": self.user_handle,
+            "clientDataJSON": client_data_field(&client, client_hash),
+        });
+        Ok(credential(&self.credential_id, json!({}), response))
     }
 }
 

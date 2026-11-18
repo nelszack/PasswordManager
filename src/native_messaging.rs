@@ -262,7 +262,11 @@ pub fn update() -> Result<PathBuf, String> {
 fn update_host_in(host_dir: &Path) -> Result<PathBuf, String> {
     let host_path = host_dir.join(HOST_BINARY_NAME);
     fs::symlink_metadata(&host_path).map_err(|error| {
-        format!("could not find registered native host at {}: {error}; run pm native-host install first", host_path.display())
+        format!(
+            "could not find registered native host at {}: {error}; run pm native-host install \
+             first",
+            host_path.display()
+        )
     })?;
     install_host_link(&host_path)?;
     Ok(host_path)
@@ -339,8 +343,13 @@ fn install_host_link(host_path: &Path) -> Result<(), String> {
     let executable = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|error| format!("could not locate the pm executable: {error}"))?;
-    fs::copy(&executable, host_path)
-        .map_err(|error| format!("could not install {}: {error}; fully close the browser, then rerun pm native-host update", host_path.display()))?;
+    fs::copy(&executable, host_path).map_err(|error| {
+        format!(
+            "could not install {}: {error}; fully close the browser, then rerun pm native-host \
+             update",
+            host_path.display()
+        )
+    })?;
     record_desktop_executable(host_path, &executable)
 }
 
@@ -480,7 +489,8 @@ fn write_message(writer: &mut impl Write, response: &NativeResponse) -> Result<(
         fallback.uncertain = response.uncertain || response.operation_id.is_some();
         if fallback.uncertain {
             fallback.error.as_mut().unwrap().push_str(
-                " The change may already have completed. Review its operation outcome before retrying.",
+                " The change may already have completed. Review its operation outcome before \
+                 retrying.",
             );
         }
         payload.zeroize();
@@ -596,31 +606,62 @@ fn handle_request_with_launcher(
             return Ok(json!("Desktop app launch requested."));
         }
         command_for_request(&mut request).and_then(|command| {
-            let mut envelope=RequestEnvelope::new(command).with_operation(operation_id.clone(),request.expected_revision);
+            let mut envelope = RequestEnvelope::new(command)
+                .with_operation(operation_id.clone(), request.expected_revision);
             envelope.expected_session = request.expected_session.clone();
             envelope.validate()?;
-            if matches!(request.action,NativeAction::UpdateCredentials) && request.expected_revision.is_none() {
+            if matches!(request.action, NativeAction::UpdateCredentials)
+                && request.expected_revision.is_none()
+            {
                 return Err("item edits require the revision that was reviewed".into());
             }
-            client.request_envelope_tracked(envelope).map_err(|e| {
-                uncertain=e.sent && request.action.policy().mutates;e.message
-            }).and_then(|response|{
-                session_id=response.session_id.clone();
-                receipt=response.operation.clone();
-                if let ResponsePayload::Operation(operation)=&response.payload && request.action.policy().mutates {
-                        receipt=Some(operation.clone());
-                        if matches!(operation.state,OperationState::Pending|OperationState::Unknown) {
-                            uncertain=true;return Err("Operation outcome is unresolved. Review before another change.".into());
+            client
+                .request_envelope_tracked(envelope)
+                .map_err(|e| {
+                    uncertain = e.sent && request.action.policy().mutates;
+                    e.message
+                })
+                .and_then(|response| {
+                    session_id = response.session_id.clone();
+                    receipt = response.operation.clone();
+                    if let ResponsePayload::Operation(operation) = &response.payload
+                        && request.action.policy().mutates
+                    {
+                        receipt = Some(operation.clone());
+                        if matches!(
+                            operation.state,
+                            OperationState::Pending | OperationState::Unknown
+                        ) {
+                            uncertain = true;
+                            return Err("Operation outcome is unresolved. Review before another \
+                                        change."
+                                .into());
                         }
-                        if operation.state==OperationState::Failed {return Err("The previous operation failed. Refresh before retrying.".into());}
-                }
-                if response.code!=0 {
-                    error_code=Some(response.code);
-                    uncertain=response.code==crate::protocol::ResponseCode::Durability as i32 && request.action.policy().mutates;
-                    return Err(if response.code==crate::protocol::ResponseCode::Durability as i32 {format!("{} The operation committed; durability could not be confirmed.",response.error_message())}else{response.error_message()});
-                }
-                Ok(response.payload.into_json())
-            })
+                        if operation.state == OperationState::Failed {
+                            return Err(
+                                "The previous operation failed. Refresh before retrying.".into()
+                            );
+                        }
+                    }
+                    if response.code != 0 {
+                        error_code = Some(response.code);
+                        uncertain = response.code
+                            == crate::protocol::ResponseCode::Durability as i32
+                            && request.action.policy().mutates;
+                        return Err(
+                            if response.code == crate::protocol::ResponseCode::Durability as i32 {
+                                format!(
+                                    "{} The operation committed; durability could not be \
+                                     confirmed.",
+                                    response.error_message()
+                                )
+                            } else {
+                                response.error_message()
+                            },
+                        );
+                    }
+                    Ok(response.payload.into_json())
+                })
         })
     })();
     request.zeroize();

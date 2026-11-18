@@ -155,15 +155,27 @@ impl PreparedRequest {
                 .checked_duration_since(Instant::now())
                 .ok_or_else(|| invalid("Duo request expired before it could be sent"))?,
         );
-        let mut response = self.client.execute(self.request).await.map_err(|_| invalid(if self.decision {
-            "Duo decision request failed; its outcome is unknown. Check the login before retrying"
-        } else { "could not fetch Duo push requests" }))?;
+        let mut response = self.client.execute(self.request).await.map_err(|_| {
+            invalid(if self.decision {
+                "Duo decision request failed; its outcome is unknown. Check the login before \
+                 retrying"
+            } else {
+                "could not fetch Duo push requests"
+            })
+        })?;
         let status = response.status();
         let mut body = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response.chunk().await.map_err(|_| invalid(if self.decision {
-            "could not read Duo decision response; its outcome is unknown. Check the login before retrying"
-        } else { "could not read Duo push response" }))? {
-            if body.len().saturating_add(chunk.len()) as u64 > MAX_RESPONSE_BYTES { return Err(invalid("Duo push response exceeded the size limit")); }
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            invalid(if self.decision {
+                "could not read Duo decision response; its outcome is unknown. Check the login \
+                 before retrying"
+            } else {
+                "could not read Duo push response"
+            })
+        })? {
+            if body.len().saturating_add(chunk.len()) as u64 > MAX_RESPONSE_BYTES {
+                return Err(invalid("Duo push response exceeded the size limit"));
+            }
             body.extend_from_slice(&chunk);
         }
         if !status.is_success() {

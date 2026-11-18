@@ -50,7 +50,8 @@ pub fn profile(kind: ItemKind) -> Profile {
             owner: "Cardholder",
             secret: "Card number",
             name_hint: "e.g. Everyday card",
-            guidance: "Keep your card number, cardholder, and optional expiry and security code together.",
+            guidance: "Keep your card number, cardholder, and optional expiry and security code \
+                       together.",
             suggested: &[
                 ("Expiry", false),
                 ("Security code", true),
@@ -91,7 +92,8 @@ pub fn profile(kind: ItemKind) -> Profile {
             owner: "User or host",
             secret: "Private key",
             name_hint: "e.g. Production SSH key",
-            guidance: "Store the private key with its connection details. Use the multiline editor to paste a key.",
+            guidance: "Store the private key with its connection details. Use the multiline \
+                       editor to paste a key.",
             suggested: &[
                 ("Hostname", false),
                 ("Port", false),
@@ -299,7 +301,11 @@ impl Draft {
             ));
         }
         if self.replace_password {
-            rows.push("Primary secret · your replacement will replace the latest stored value. Stored values stay hidden; secret changes cannot be compared.".into());
+            rows.push(
+                "Primary secret · your replacement will replace the latest stored value. Stored \
+                 values stay hidden; secret changes cannot be compared."
+                    .into(),
+            );
         }
         for field in &self.fields {
             if !(field.changed || field.removed || field.original_name.is_none()) {
@@ -319,7 +325,16 @@ impl Draft {
                 || before.as_ref().is_some_and(|f| f.secret)
                 || remote.as_ref().is_some_and(|f| f.secret);
             if secret {
-                rows.push(format!("Custom field {} · {}. Secret values stay hidden; your change replaces or removes the latest field.", field.name, if field.removed { "remove field" } else { "set field" }));
+                rows.push(format!(
+                    "Custom field {} · {}. Secret values stay hidden; your change replaces or \
+                     removes the latest field.",
+                    field.name,
+                    if field.removed {
+                        "remove field"
+                    } else {
+                        "set field"
+                    }
+                ));
             } else {
                 rows.push(comparison(
                     &format!("Custom field {}", field.name),

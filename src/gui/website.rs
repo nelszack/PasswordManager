@@ -12,7 +12,8 @@ pub(super) fn address(value: &str) -> Result<String, &'static str> {
         || url.password().is_some()
     {
         return Err(
-            "Open website supports http:// and https:// addresses without embedded credentials or wildcards.",
+            "Open website supports http:// and https:// addresses without embedded credentials or \
+             wildcards.",
         );
     }
     Ok(url.into())

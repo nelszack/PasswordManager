@@ -319,9 +319,9 @@ impl App {
                         });
                     }
                     self.connection.creation = None;
-                    self.notice =
-                        "Your vault was created. Select the new vault and unlock it to continue."
-                            .into();
+                    self.notice = "Your vault was created. Select the new vault and unlock it to \
+                                   continue."
+                        .into();
                 }
                 if self.connection.select_created_vault {
                     self.connection.vault = vaults
@@ -350,7 +350,9 @@ impl App {
                 }
                 if revision_changed {
                     if self.editor.is_some() || self.recovery.id().is_some() {
-                        self.notice="The vault changed on another client or device. Your draft is preserved; reopen the item before saving if it changed.".into();
+                        self.notice = "The vault changed on another client or device. Your draft \
+                                       is preserved; reopen the item before saving if it changed."
+                            .into();
                     } else {
                         self.notice = "Vault updated from another client or device.".into();
                         if let Some(id) = self.item.as_ref().map(|item| item.id) {

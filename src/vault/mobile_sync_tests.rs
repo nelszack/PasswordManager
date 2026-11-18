@@ -106,7 +106,8 @@ impl Peer {
                     response.len()
                 };
                 let header = format!(
-                    "HTTP/1.1 {code} Result\r\nConnection: close\r\nContent-Length: {size}\r\nETag: \"{:032x}\"\r\n\r\n",
+                    "HTTP/1.1 {code} Result\r\nConnection: close\r\nContent-Length: \
+                     {size}\r\nETag: \"{:032x}\"\r\n\r\n",
                     remote.version
                 );
                 let _ = stream.write_all(header.as_bytes());
