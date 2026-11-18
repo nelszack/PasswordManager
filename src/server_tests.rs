@@ -1110,7 +1110,7 @@ async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let handle = worker.clone();
     let pending = tokio::spawn(async move {
         let mut responses = vec![];
-        finish_duo(prepared, handle, &mut responses).await;
+        crate::operations::finish_duo(prepared, &handle, &mut responses).await;
         responses
     });
     tokio::time::timeout(Duration::from_secs(2), ready)
