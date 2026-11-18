@@ -1,16 +1,32 @@
 use super::*;
 use crate::{
-    cloud::CloudClient,
+    cloud::{Binding, CloudClient},
     passkey::{self, Passkey},
 };
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 #[path = "mobile_tools.rs"]
 mod tools;
+
+const LOCKED: &str = "Vault is locked";
+/// Largest request accepted over the FFI boundary (encoded imports and backups).
+const MAX_REQUEST_BYTES: usize = 180 * 1024 * 1024;
+/// Largest encrypted vault handed back to the app as a snapshot.
+const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
+/// Biometric material is a 32-byte key followed by the vault's authenticated
+/// 38-byte format/KDF/salt prefix, so a re-keyed vault invalidates it.
+const KEY_BYTES: usize = 32;
+const HEADER_PREFIX_BYTES: usize = 38;
+/// Encrypted copies that must never sync until the user enables it explicitly.
+const RECOVERY_PREFIXES: [&str; 3] = ["rekey-recovery-", "conflict-", "comparison-"];
 
 /// One vault per app process. The native bridge serializes all access, including
 /// file replacement and sync. Adapters must also lock on background/screen lock.
@@ -20,11 +36,14 @@ pub struct MobileVault {
     credentials: VaultCredentials,
     touched: Instant,
     review: Option<MobileReview>,
+    /// True only when unlocked with the original password or key file, not biometrics.
     primary_unlock: bool,
     settings: tools::MobileSettings,
-    import_review: Option<(String, u64, String, ConflictPolicy)>,
-    cancellation: Option<&'static std::sync::atomic::AtomicBool>,
+    import_review: Option<ImportReview>,
+    cancellation: Option<&'static AtomicBool>,
 }
+
+/// A conflict review the user must confirm against unchanged local and cloud state.
 struct MobileReview {
     token: String,
     revision: u64,
@@ -32,11 +51,21 @@ struct MobileReview {
     version: String,
     bytes: Vec<u8>,
 }
+
+/// An import preview the user must confirm against unchanged input and vault state.
+struct ImportReview {
+    token: String,
+    revision: u64,
+    digest: String,
+    conflicts: ConflictPolicy,
+}
+
 impl Drop for MobileVault {
     fn drop(&mut self) {
         self.lock();
     }
 }
+
 impl MobileVault {
     pub fn new(directory: PathBuf) -> Result<Self, String> {
         if !directory.is_absolute() {
@@ -58,10 +87,12 @@ impl MobileVault {
             cancellation: None,
         })
     }
+
     /// Android's lock signal is independent of the serialized JNI vault mutex.
-    pub fn set_cancellation(&mut self, flag: &'static std::sync::atomic::AtomicBool) {
+    pub fn set_cancellation(&mut self, flag: &'static AtomicBool) {
         self.cancellation = Some(flag);
     }
+
     pub fn lock(&mut self) {
         self.vault = None;
         self.credentials.zeroize();
@@ -69,17 +100,38 @@ impl MobileVault {
         self.import_review = None;
         self.primary_unlock = false;
     }
+
+    /// Applies the idle timeout, then returns the open vault.
     fn open(&mut self) -> Result<&mut Vault, String> {
         if self.touched.elapsed() >= Duration::from_secs(self.settings.unlock_seconds) {
             self.lock();
         }
         self.touched = Instant::now();
-        self.vault.as_mut().ok_or_else(|| "Vault is locked".into())
+        self.vault.as_mut().ok_or_else(|| LOCKED.into())
     }
+
+    fn vault(&self) -> Result<&Vault, String> {
+        self.vault.as_ref().ok_or_else(|| LOCKED.into())
+    }
+
+    /// Borrows the vault and its credentials together for mutations.
+    fn unlocked(&mut self) -> Result<(&mut Vault, &mut VaultCredentials), String> {
+        match &mut self.vault {
+            Some(vault) => Ok((vault, &mut self.credentials)),
+            None => Err(LOCKED.into()),
+        }
+    }
+
     fn path(&self, name: &str) -> Result<PathBuf, String> {
         validate_vault_filename(name).map_err(|e| e.to_string())?;
         Ok(self.directory.join(name))
     }
+
+    fn read_vault_file(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        crate::file::read_bounded_file(&self.path(name)?, MAX_VAULT_BYTES)
+            .map_err(|_| "Could not read vault".into())
+    }
+
     fn unlock(
         &mut self,
         name: &str,
@@ -90,22 +142,37 @@ impl MobileVault {
         let (_, vault) = persistence::lookup_vault_in(&self.directory, &mut key, Some(name))
             .map_err(|e| e.to_string())?
             .ok_or("Vault not found")?;
+        self.adopt(vault, key, primary);
+        Ok(())
+    }
+
+    /// Replaces any open session with `vault`.
+    fn adopt(&mut self, vault: Vault, key: VaultCredentials, primary: bool) {
+        self.lock();
         self.vault = Some(vault);
         self.credentials = key;
         self.primary_unlock = primary;
         self.touched = Instant::now();
-        Ok(())
     }
+
+    /// Writes a new, empty vault and opens it as a primary unlock.
+    fn create_with_key(&mut self, mut key: VaultCredentials) -> Result<Value, VaultError> {
+        let mut vault = Vault::memory();
+        let name = format!("{}.enc", hex::encode(vault.vault_id()));
+        vault.store = VaultStore::File {
+            directory: self.directory.clone(),
+            filename: name.clone(),
+        };
+        vault.metadata.filename = name.clone();
+        write_vault_with_key(&vault, &mut key)?;
+        self.adopt(vault, key, true);
+        Ok(json!({ "vault": name }))
+    }
+
     fn passkeys(&self) -> Result<Vec<(usize, Passkey)>, String> {
-        let vault = self.vault.as_ref().ok_or("Vault is locked")?;
         let mut result = Vec::new();
-        for item in vault.active_items() {
-            if let Some(field) = item
-                .metadata
-                .custom_fields
-                .iter()
-                .find(|f| f.name == passkey::FIELD)
-            {
+        for item in self.vault()?.active_items() {
+            if let Some(field) = passkey_field(item) {
                 let p: Passkey =
                     serde_json::from_str(&field.value).map_err(|_| "Invalid stored passkey")?;
                 p.validate()?;
@@ -114,6 +181,7 @@ impl MobileVault {
         }
         Ok(result)
     }
+
     fn save_passkey(&mut self, p: &Passkey) -> Result<(), String> {
         p.validate()?;
         let entry = TypedEntry {
@@ -140,17 +208,17 @@ impl MobileVault {
                 secret: true,
             }],
         };
-        let added = self
-            .vault
-            .as_mut()
-            .ok_or("Vault is locked")?
-            .add_typed_entry(entry, &mut self.credentials)
+        let (vault, credentials) = self.unlocked()?;
+        let added = vault
+            .add_typed_entry(entry, credentials)
             .map_err(|e| e.to_string())?;
         if !added {
             return Err("Passkey entry already exists; retry registration".into());
         }
         Ok(())
     }
+
+    /// IDs of logins with a password that may be filled for `origin`.
     fn login_ids(&self, origin: &str) -> Vec<usize> {
         let Some(vault) = self.vault.as_ref() else {
             return vec![];
@@ -180,9 +248,10 @@ impl MobileVault {
             vec![]
         }
     }
+
     /// JSON is only a process-local FFI envelope. Never log requests or results.
     pub fn call(&mut self, input: &str) -> Result<Value, String> {
-        if input.len() > 180 * 1024 * 1024 {
+        if input.len() > MAX_REQUEST_BYTES {
             return Err("Mobile request exceeds limit".into());
         }
         let mut request: Value =
@@ -191,95 +260,77 @@ impl MobileVault {
         {
             wipe_json(&mut request);
             self.lock();
-            return Err("Vault is locked".into());
+            return Err(LOCKED.into());
         }
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(&request)));
         wipe_json(&mut request);
         if cancelled(self.cancellation) {
             if let Ok(Ok(mut value)) = result {
-                wipe_response(&mut value);
+                wipe_json(&mut value);
             }
             self.lock();
-            return Err("Operation interrupted; vault locked. A remote change may have completed; inspect before retrying".into());
+            return Err(
+                "Operation interrupted; vault locked. A remote change may have \
+                        completed; inspect before retrying"
+                    .into(),
+            );
         }
-        match result {
-            Ok(result) => result,
-            Err(_) => {
-                self.lock();
-                Err("Mobile operation failed; vault locked".into())
-            }
-        }
+        result.unwrap_or_else(|_| {
+            self.lock();
+            Err("Mobile operation failed; vault locked".into())
+        })
     }
+
     fn dispatch(&mut self, r: &Value) -> Result<Value, String> {
         let op = string(r, "op")?;
         if let Some(result) = self.local_tool(op, r).map_err(|e| e.to_string())? {
             return Ok(result);
         }
-        match op {
+        if let Some(result) = self.session_op(op, r)? {
+            return Ok(result);
+        }
+        self.open()?;
+        if let Some(result) = self.parity_tool(op, r).map_err(|e| e.to_string())? {
+            return Ok(result);
+        }
+        self.vault_op(op, r)
+    }
+
+    /// Operations that work without an open vault.
+    fn session_op(&mut self, op: &str, r: &Value) -> Result<Option<Value>, String> {
+        Ok(Some(match op {
             "lock" => {
                 if let Some(flag) = self.cancellation {
-                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    flag.store(false, Ordering::SeqCst);
                 }
                 self.lock();
-                return Ok(json!({}));
+                json!({})
             }
-            "status" => {
-                let unlocked = self.open().is_ok();
-                return Ok(
-                    json!({"unlocked":unlocked,"unlock_seconds":self.settings.unlock_seconds,"clipboard_seconds":self.settings.clipboard_seconds}),
-                );
-            }
-            "vaults" => {
-                let mut names = Vec::new();
-                for entry in fs::read_dir(&self.directory)
-                    .map_err(|_| "Could not list vaults")?
-                    .flatten()
-                {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.ends_with(".enc")
-                        && validate_vault_filename(&name).is_ok()
-                        && entry.file_type().is_ok_and(|t| t.is_file())
-                    {
-                        names.push(name);
-                    }
-                }
-                names.sort();
-                return Ok(json!(names));
-            }
+            "status" => json!({
+                "unlocked": self.open().is_ok(),
+                "unlock_seconds": self.settings.unlock_seconds,
+                "clipboard_seconds": self.settings.clipboard_seconds,
+            }),
+            "vaults" => json!(self.vault_names()?),
             "unlock" => {
                 self.lock();
                 let name = string(r, "vault")?;
-                let key = if let Some(bytes) = r.get("key_file").and_then(Value::as_str) {
-                    let data = Zeroizing::new(passkey::decode(bytes)?);
-                    let encrypted =
-                        crate::file::read_bounded_file(&self.path(name)?, MAX_VAULT_BYTES)
-                            .map_err(|_| "Could not read vault")?;
+                let key = if let Some(encoded) = opt_str(r, "key_file") {
+                    let data = Zeroizing::new(passkey::decode(encoded)?);
+                    let encrypted = self.read_vault_file(name)?;
                     crate::encryption::credentials_from_keyfile_bytes(&encrypted, &data)?
                 } else {
-                    VaultCredentials::from(PasswordType::Password(string(r, "password")?.into()))
+                    PasswordType::Password(string(r, "password")?.into()).into()
                 };
                 self.unlock(name, key, true)?;
-                return Ok(json!({}));
+                json!({})
             }
             "create" => {
                 let password = string(r, "password")?;
                 validate_new_password(password)?;
-                let mut key = VaultCredentials::from(PasswordType::Password(password.into()));
-                let mut vault = Vault::memory();
-                let name = format!("{}.enc", hex::encode(vault.vault_id()));
-                vault.store = VaultStore::File {
-                    directory: self.directory.clone(),
-                    filename: name.clone(),
-                };
-                vault.metadata.filename = name.clone();
-                persistence::write_vault_with_key(&vault, &mut key).map_err(|e| e.to_string())?;
-                self.lock();
-                self.vault = Some(vault);
-                self.credentials = key;
-                self.primary_unlock = true;
-                self.touched = Instant::now();
-                return Ok(json!({"vault":name}));
+                let key = PasswordType::Password(password.into()).into();
+                self.create_with_key(key).map_err(|e| e.to_string())?
             }
             "import_vault" => {
                 let data = passkey::decode(string(r, "data")?)?;
@@ -289,161 +340,326 @@ impl MobileVault {
                 }
                 let name = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
                 crate::cloud::write_private(&self.path(&name)?, &data, false)?;
-                return Ok(json!({"vault":name}));
+                json!({ "vault": name })
             }
             "biometric_unlock" => {
                 self.lock();
                 let name = string(r, "vault")?;
                 let data = Zeroizing::new(passkey::decode(string(r, "material")?)?);
-                let encrypted = crate::file::read_bounded_file(&self.path(name)?, MAX_VAULT_BYTES)
-                    .map_err(|_| "Could not read vault")?;
+                let encrypted = self.read_vault_file(name)?;
                 crate::encryption::validate_vault_header(&encrypted)?;
-                // 32-byte key + 38-byte authenticated format/KDF/salt prefix.
-                if data.len() != 70 || data[32..] != encrypted[..38] {
+                if data.len() != KEY_BYTES + HEADER_PREFIX_BYTES
+                    || data[KEY_BYTES..] != encrypted[..HEADER_PREFIX_BYTES]
+                {
                     return Err("Biometric key is stale; use password or key file".into());
                 }
                 let key = crate::encryption::cached_credentials(
                     &encrypted,
-                    data[..32].try_into().map_err(|_| "Invalid key")?,
+                    data[..KEY_BYTES].try_into().map_err(|_| "Invalid key")?,
                 )?;
                 self.unlock(name, key, false)?;
-                return Ok(json!({}));
+                json!({})
             }
             "cloud_list" => {
                 let client = client(r)?;
-                let rt = mobile_runtime()?;
-                return Ok(json!(
-                    rt.block_on(interruptible(self.cancellation, client.list()))??
-                ));
+                json!(self.block_on(client.list())??)
             }
-            "cloud_download" => {
-                let id = string(r, "id")?;
-                let client = client(r)?;
-                let rt = mobile_runtime()?;
-                let (version, bytes) =
-                    rt.block_on(interruptible(self.cancellation, client.download(id)))??;
-                let comparison = r.get("copy").and_then(Value::as_bool).unwrap_or(false);
-                let name = if comparison {
-                    format!(
-                        "comparison-{id}-{}.enc",
-                        hex::encode(rand::random::<[u8; 8]>())
-                    )
-                } else {
-                    format!("{id}.enc")
-                };
-                let path = self.path(&name)?;
-                crate::cloud::write_private(&path, &bytes, false)?;
-                crate::cloud::save_binding(
-                    &path,
-                    &crate::cloud::Binding {
-                        server_url: client.url.clone(),
-                        vault_id: id.into(),
-                        version: Some(version),
-                        digest: Some(crate::cloud::digest(&bytes)),
-                        enabled: !comparison,
-                    },
-                )?;
-                return Ok(json!({"vault":name}));
-            }
-            _ => {}
-        }
-        self.open()?;
-        if let Some(result) = self.parity_tool(op, r).map_err(|e| e.to_string())? {
-            return Ok(result);
-        }
+            "cloud_download" => self.cloud_download(r)?,
+            _ => return Ok(None),
+        }))
+    }
+
+    /// Operations that require an open vault.
+    fn vault_op(&mut self, op: &str, r: &Value) -> Result<Value, String> {
         match op {
-            "list" => Ok(json!(self.vault.as_ref().unwrap().management_list(SearchFilter {query:r.get("query").and_then(Value::as_str).map(str::to_owned),..Default::default()}).map_err(|e|e.to_string())?)),
+            "list" => {
+                let filter = SearchFilter {
+                    query: opt_string(r, "query"),
+                    ..Default::default()
+                };
+                Ok(json!(
+                    self.vault()?
+                        .management_list(filter)
+                        .map_err(|e| e.to_string())?
+                ))
+            }
             "item" => {
-                let mut detail=self.vault.as_ref().unwrap().management_item(id(r)?,true).map_err(|e|e.to_string())?;
+                let id = id(r)?;
+                let vault = self.vault()?;
+                let mut detail = vault.management_item(id, true).map_err(|e| e.to_string())?;
                 // Never send passkey private keys to the normal item UI.
-                detail.fields.retain(|f|f.name!=passkey::FIELD);
-                let is_passkey = self.vault.as_ref().unwrap().item(id(r)?).is_some_and(|i| i.metadata.custom_fields.iter().any(|f| f.name == passkey::FIELD));
+                detail.fields.retain(|f| f.name != passkey::FIELD);
+                let is_passkey = vault.item(id).is_some_and(|i| passkey_field(i).is_some());
                 let mut value = json!(detail);
                 value["is_passkey"] = json!(is_passkey);
                 Ok(value)
             }
-            "save" => {
-                let name=string(r,"name")?;if name.trim().is_empty() {return Err("Name is required".into());}
-                let vault=self.vault.as_mut().unwrap();
-                let username=r.get("username").and_then(Value::as_str).map(str::to_owned);
-                let url=r.get("url").and_then(Value::as_str).map(str::to_owned);
-                let password=string(r,"password")?;
-                let notes=r.get("notes").and_then(Value::as_str).map(SecretString::from);
-                if let Some(id)=r.get("id").and_then(Value::as_u64) {
-                    vault.update_entry_with_limit(EntryUpdate {target:Target::Id(id as usize),update:EntryChanges {name:Some(name.into()),username,url,notes},password:Some(password.into())},&mut self.credentials,self.settings.history_limit).map_err(|e|e.to_string())?;
-                } else {
-                    let added=vault.add_typed_entry(TypedEntry {entry:crate::types::PasswordEntry {name:name.into(),username,password:password.into(),url,notes,copy:false},kind:ItemKind::Login,additional_urls:vec![],custom_fields:vec![]},&mut self.credentials).map_err(|e|e.to_string())?;
-                    if !added {return Err("An entry with this name and username already exists".into());}
-                }
+            "save" => self.save_login(r),
+            "delete" => {
+                let id = id(r)?;
+                let (vault, credentials) = self.unlocked()?;
+                vault
+                    .delete_entry(Target::Id(id), credentials)
+                    .map_err(|e| e.to_string())?;
                 Ok(json!({}))
             }
-            "delete" => {self.vault.as_mut().unwrap().delete_entry(Target::Id(id(r)?),&mut self.credentials).map_err(|e|e.to_string())?;Ok(json!({}))}
-            "generate" => Ok(json!({"password":crate::password::generate_password(24)})),
-            "otp" => {let (code,expires)=self.vault.as_ref().unwrap().current_totp(Target::Id(id(r)?)).map_err(|e|e.to_string())?;Ok(json!({"code":code,"expires_in":expires}))}
-            "logins" => {let vault=self.vault.as_ref().unwrap();Ok(json!(self.login_ids(string(r,"origin")?).iter().map(|id|vault.summary(vault.item(*id).unwrap())).collect::<Vec<_>>()))},
+            "generate" => Ok(json!({ "password": crate::password::generate_password(24) })),
+            "otp" => {
+                let (code, expires) = self
+                    .vault()?
+                    .current_totp(Target::Id(id(r)?))
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "code": code, "expires_in": expires }))
+            }
+            "logins" => {
+                let vault = self.vault()?;
+                let logins: Vec<_> = self
+                    .login_ids(string(r, "origin")?)
+                    .into_iter()
+                    .filter_map(|id| vault.item(id))
+                    .map(|item| vault.summary(item))
+                    .collect();
+                Ok(json!(logins))
+            }
             "hostname_logins" | "otp_logins" => {
                 let otp_only = op == "otp_logins";
-                let hostname_only = !otp_only || r.get("hostname_only").and_then(Value::as_bool).unwrap_or(false);
-                Ok(json!(self.vault.as_ref().unwrap().mobile_browser_choices(string(r,"origin")?,hostname_only,otp_only).into_iter().map(|(item,origin)|json!({"id":item.id,"name":item.name,"username":item.username,"origin":origin,"has_totp":item.has_totp})).collect::<Vec<_>>()))
-            },
+                let hostname_only = !otp_only || flag(r, "hostname_only");
+                let choices: Vec<_> = self
+                    .vault()?
+                    .mobile_browser_choices(string(r, "origin")?, hostname_only, otp_only)
+                    .into_iter()
+                    .map(|(item, origin)| {
+                        json!({
+                            "id": item.id,
+                            "name": item.name,
+                            "username": item.username,
+                            "origin": origin,
+                            "has_totp": item.has_totp,
+                        })
+                    })
+                    .collect();
+                Ok(json!(choices))
+            }
             "site_otp" => {
                 let id = id(r)?;
-                let origin = string(r,"origin")?;
-                let vault = self.vault.as_ref().unwrap();
+                let origin = string(r, "origin")?;
+                let vault = self.vault()?;
                 let matches = if origin.starts_with("androidapp://") {
-                    self.login_ids(origin).contains(&id) && vault.item(id).is_some_and(|item| matches!(item.authenticator.as_ref().map(|auth| &auth.state),Some(AuthenticatorState::Totp(_))))
-                } else { vault.mobile_browser_choices(origin,false,true).iter().any(|(item,_)|item.id==id) };
-                if !matches { return Err("No matching authenticator".into()); }
-                let (code,expires) = vault.current_totp(Target::Id(id)).map_err(|e|e.to_string())?;
-                Ok(json!({"code":code,"expires_in":expires}))
-            },
+                    self.login_ids(origin).contains(&id)
+                        && vault.item(id).is_some_and(|item| {
+                            matches!(
+                                item.authenticator.as_ref().map(|auth| &auth.state),
+                                Some(AuthenticatorState::Totp(_))
+                            )
+                        })
+                } else {
+                    vault
+                        .mobile_browser_choices(origin, false, true)
+                        .iter()
+                        .any(|(item, _)| item.id == id)
+                };
+                if !matches {
+                    return Err("No matching authenticator".into());
+                }
+                let (code, expires) = vault
+                    .current_totp(Target::Id(id))
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "code": code, "expires_in": expires }))
+            }
             "login" => {
-                let id=id(r)?;
-                if !self.login_ids(string(r,"origin")?).contains(&id) {return Err("No matching login".into());}
-                let vault=self.vault.as_ref().unwrap();let item=vault.item(id).unwrap();
-                Ok(json!(BrowserLogin {id,revision:item.revision,name:item.entry.name.clone(),username:item.entry.username.clone(),password:item.entry.password.clone(),has_totp:item.authenticator.is_some()}))
+                let id = id(r)?;
+                if !self.login_ids(string(r, "origin")?).contains(&id) {
+                    return Err("No matching login".into());
+                }
+                let item = self.vault()?.item(id).ok_or("No matching login")?;
+                Ok(json!(BrowserLogin {
+                    id,
+                    revision: item.revision,
+                    name: item.entry.name.clone(),
+                    username: item.entry.username.clone(),
+                    password: item.entry.password.clone(),
+                    has_totp: item.authenticator.is_some(),
+                }))
             }
-            "snapshot" => {let path=self.vault.as_ref().unwrap().sync_path()?;let bytes=crate::file::read_bounded_file(&path,16*1024*1024).map_err(|_|"Encrypted vault exceeds mobile transfer limit or could not be read")?;Ok(json!({"data":passkey::encode(bytes)}))}
-            "biometric_material" => {
-                if !self.primary_unlock {return Err("Unlock with the original password or key file before enabling biometrics".into());}
-                let path=self.vault.as_ref().unwrap().sync_path()?;
-                let encrypted=crate::file::read_bounded_file(&path,MAX_VAULT_BYTES).map_err(|_|"Could not read vault")?;
-                let VaultCredentials::Session {encryption_key,..}=&self.credentials else {return Err("Vault is locked".into());};
-                let mut material=Zeroizing::new(encryption_key.to_vec());material.extend_from_slice(&encrypted[..38]);
-                Ok(json!({"material":passkey::encode(&*material),"vault":self.vault.as_ref().unwrap().metadata.filename}))
+            "snapshot" => {
+                let path = self.vault()?.sync_path()?;
+                let bytes = crate::file::read_bounded_file(&path, MAX_SNAPSHOT_BYTES).map_err(
+                    |_| "Encrypted vault exceeds mobile transfer limit or could not be read",
+                )?;
+                Ok(json!({ "data": passkey::encode(bytes) }))
             }
-            "passkeys" => Ok(json!(self.passkeys()?.iter().filter(|(_,p)|r.get("request").is_none_or(|q|p.matches(q))).map(|(id,p)|json!({"id":id,"credential_id":p.credential_id,"rp_id":p.rp_id,"user_name":p.user_name,"display_name":p.display_name})).collect::<Vec<_>>())),
+            "biometric_material" => self.biometric_material(),
+            "passkeys" => {
+                let request = r.get("request");
+                let passkeys: Vec<_> = self
+                    .passkeys()?
+                    .iter()
+                    .filter(|(_, p)| request.is_none_or(|q| p.matches(q)))
+                    .map(|(id, p)| {
+                        json!({
+                            "id": id,
+                            "credential_id": p.credential_id,
+                            "rp_id": p.rp_id,
+                            "user_name": p.user_name,
+                            "display_name": p.display_name,
+                        })
+                    })
+                    .collect();
+                Ok(json!(passkeys))
+            }
             "passkey_create" => {
-                let existing=self.passkeys()?.into_iter().map(|(_,p)|p).collect::<Vec<_>>();
-                let hash=r.get("client_hash").and_then(Value::as_str).map(passkey::decode).transpose()?;
-                let (p,response)=passkey::create(&r["request"],string(r,"origin")?,hash.as_deref(),&existing)?;
-                self.save_passkey(&p)?;Ok(response)
+                let existing: Vec<_> = self.passkeys()?.into_iter().map(|(_, p)| p).collect();
+                let hash = client_hash(r)?;
+                let (p, response) = passkey::create(
+                    &r["request"],
+                    string(r, "origin")?,
+                    hash.as_deref(),
+                    &existing,
+                )?;
+                self.save_passkey(&p)?;
+                Ok(response)
             }
             "passkey_get" => {
-                let selected=id(r)?;
-                let p=self.passkeys()?.into_iter().find(|(id,_)|*id==selected).ok_or("Passkey not found")?.1;
-                let hash=r.get("client_hash").and_then(Value::as_str).map(passkey::decode).transpose()?;
-                p.authenticate(&r["request"],string(r,"origin")?,hash.as_deref())
+                let selected = id(r)?;
+                let (_, p) = self
+                    .passkeys()?
+                    .into_iter()
+                    .find(|(id, _)| *id == selected)
+                    .ok_or("Passkey not found")?;
+                p.authenticate(
+                    &r["request"],
+                    string(r, "origin")?,
+                    client_hash(r)?.as_deref(),
+                )
             }
             "sync" => self.sync(r),
             "cloud_conflicts" => self.conflicts(r),
             "cloud_resolve" => self.resolve(r),
-            _=>Err("Unsupported mobile operation".into()),
+            _ => Err("Unsupported mobile operation".into()),
         }
     }
+
+    fn vault_names(&self) -> Result<Vec<String>, String> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&self.directory)
+            .map_err(|_| "Could not list vaults")?
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".enc")
+                && validate_vault_filename(&name).is_ok()
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                names.push(name);
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Adds a login, or updates the password-bearing fields of an existing one.
+    fn save_login(&mut self, r: &Value) -> Result<Value, String> {
+        let name = string(r, "name")?;
+        if name.trim().is_empty() {
+            return Err("Name is required".into());
+        }
+        let username = opt_string(r, "username");
+        let url = opt_string(r, "url");
+        let password = string(r, "password")?;
+        let notes = opt_str(r, "notes").map(SecretString::from);
+        let history_limit = self.settings.history_limit;
+        let (vault, credentials) = self.unlocked()?;
+        if let Some(id) = r.get("id").and_then(Value::as_u64) {
+            let update = EntryUpdate {
+                target: Target::Id(id as usize),
+                update: EntryChanges {
+                    name: Some(name.into()),
+                    username,
+                    url,
+                    notes,
+                },
+                password: Some(password.into()),
+            };
+            vault
+                .update_entry_with_limit(update, credentials, history_limit)
+                .map_err(|e| e.to_string())?;
+        } else {
+            let entry = TypedEntry {
+                entry: crate::types::PasswordEntry {
+                    name: name.into(),
+                    username,
+                    password: password.into(),
+                    url,
+                    notes,
+                    copy: false,
+                },
+                kind: ItemKind::Login,
+                additional_urls: vec![],
+                custom_fields: vec![],
+            };
+            let added = vault
+                .add_typed_entry(entry, credentials)
+                .map_err(|e| e.to_string())?;
+            if !added {
+                return Err("An entry with this name and username already exists".into());
+            }
+        }
+        Ok(json!({}))
+    }
+
+    fn biometric_material(&self) -> Result<Value, String> {
+        if !self.primary_unlock {
+            return Err(
+                "Unlock with the original password or key file before enabling biometrics".into(),
+            );
+        }
+        let vault = self.vault()?;
+        let encrypted = crate::file::read_bounded_file(&vault.sync_path()?, MAX_VAULT_BYTES)
+            .map_err(|_| "Could not read vault")?;
+        let VaultCredentials::Session { encryption_key, .. } = &self.credentials else {
+            return Err(LOCKED.into());
+        };
+        let mut material = Zeroizing::new(encryption_key.to_vec());
+        material.extend_from_slice(&encrypted[..HEADER_PREFIX_BYTES]);
+        Ok(json!({
+            "material": passkey::encode(&*material),
+            "vault": vault.metadata.filename,
+        }))
+    }
+
+    fn cloud_download(&self, r: &Value) -> Result<Value, String> {
+        let id = string(r, "id")?;
+        let client = client(r)?;
+        let (version, bytes) = self.block_on(client.download(id))??;
+        let comparison = flag(r, "copy");
+        let name = if comparison {
+            let nonce = hex::encode(rand::random::<[u8; 8]>());
+            format!("comparison-{id}-{nonce}.enc")
+        } else {
+            format!("{id}.enc")
+        };
+        let path = self.path(&name)?;
+        crate::cloud::write_private(&path, &bytes, false)?;
+        let binding = Binding {
+            server_url: client.url.clone(),
+            vault_id: id.into(),
+            version: Some(version),
+            digest: Some(crate::cloud::digest(&bytes)),
+            enabled: !comparison,
+        };
+        crate::cloud::save_binding(&path, &binding)?;
+        Ok(json!({ "vault": name }))
+    }
+
     fn conflicts(&mut self, r: &Value) -> Result<Value, String> {
         let client = client(r)?;
-        let vault = self.vault.as_ref().ok_or("Vault is locked")?;
+        let vault = self.vault()?;
         let path = vault.sync_path()?;
         let binding = crate::cloud::binding(&path)?.ok_or("Synchronize this vault first")?;
         if binding.server_url != client.url {
             return Err("Sync connection does not match this vault".into());
         }
-        let rt = mobile_runtime()?;
-        let (version, bytes) = rt.block_on(interruptible(
-            self.cancellation,
-            client.download(&hex::encode(vault.vault_id())),
-        ))??;
+        let (version, bytes) = self.block_on(client.download(&hex::encode(vault.vault_id())))??;
         let items = vault.cloud_conflicts(&self.credentials, &bytes)?;
         let token = hex::encode(rand::random::<[u8; 32]>());
         self.review = Some(MobileReview {
@@ -453,15 +669,16 @@ impl MobileVault {
             version,
             bytes,
         });
-        Ok(json!({"token":token,"items":items}))
+        Ok(json!({ "token": token, "items": items }))
     }
+
     fn resolve(&mut self, r: &Value) -> Result<Value, String> {
         let client = client(r)?;
         let review = self
             .review
             .take()
             .ok_or("Review the current conflicts first")?;
-        let vault = self.vault.as_mut().ok_or("Vault is locked")?;
+        let vault = self.vault()?;
         if review.token != string(r, "review_token")?
             || review.revision != vault.vault_revision()
             || review.server != client.url
@@ -470,12 +687,8 @@ impl MobileVault {
         }
         let id = hex::encode(vault.vault_id());
         let path = vault.sync_path()?;
-        let rt = mobile_runtime()?;
-        if rt
-            .block_on(interruptible(self.cancellation, client.head(&id)))??
-            .map(|v| v.version)
-            != Some(review.version.clone())
-        {
+        let head = self.block_on(client.head(&id))??;
+        if head.map(|v| v.version).as_ref() != Some(&review.version) {
             return Err("Cloud changed; review conflicts again".into());
         }
         let choices: Vec<crate::cloud::Choice> =
@@ -494,10 +707,11 @@ impl MobileVault {
             &review.bytes,
             false,
         )?;
+        let (vault, credentials) = self.unlocked()?;
         vault
-            .apply_prepared_cloud(&mut self.credentials, prepared)
+            .apply_prepared_cloud(credentials, prepared)
             .map_err(|e| e.to_string())?;
-        let binding = crate::cloud::Binding {
+        let binding = Binding {
             server_url: client.url.clone(),
             vault_id: id,
             version: Some(review.version),
@@ -507,17 +721,19 @@ impl MobileVault {
         crate::cloud::save_binding(&path, &binding)?;
         self.sync(r)
     }
+
     fn sync(&mut self, r: &Value) -> Result<Value, String> {
         let client = client(r)?;
-        let path = self.vault.as_ref().unwrap().sync_path()?;
-        let vault_id = hex::encode(self.vault.as_ref().unwrap().vault_id());
+        let vault = self.vault()?;
+        let path = vault.sync_path()?;
+        let vault_id = hex::encode(vault.vault_id());
         let existing = crate::cloud::binding(&path)?;
         if existing.is_none() && recovery_copy(&path) {
             return Err(
                 "Recovery/comparison copy: enable sync explicitly before synchronizing".into(),
             );
         }
-        let mut binding = existing.unwrap_or(crate::cloud::Binding {
+        let mut binding = existing.unwrap_or(Binding {
             server_url: client.url.clone(),
             vault_id: vault_id.clone(),
             version: None,
@@ -530,17 +746,15 @@ impl MobileVault {
         if !binding.enabled {
             return Err("Sync is disabled for this vault".into());
         }
-        let rt = mobile_runtime()?;
         let local = fs::read(&path).map_err(|_| "Could not read local snapshot")?;
         let digest = crate::cloud::digest(&local);
-        let remote = rt.block_on(interruptible(self.cancellation, client.head(&vault_id)))??;
-        let remote_version = remote.as_ref().map(|v| v.version.clone());
-        if remote.is_none() && binding.version.is_some() {
+        let remote = self.block_on(client.head(&vault_id))??;
+        let remote_version = remote.map(|v| v.version);
+        if remote_version.is_none() && binding.version.is_some() {
             return Err("Cloud vault is missing; local copy preserved".into());
         }
-        if remote_version != binding.version && remote.is_some() {
-            let (version, bytes) =
-                rt.block_on(interruptible(self.cancellation, client.download(&vault_id)))??;
+        if remote_version.is_some() && remote_version != binding.version {
+            let (version, bytes) = self.block_on(client.download(&vault_id))??;
             // Verify before storing or adopting remote ciphertext.
             let mut key = self.credentials.clone();
             let plain = Zeroizing::new(
@@ -555,7 +769,7 @@ impl MobileVault {
                 binding.version = Some(version);
                 binding.digest = Some(digest);
                 crate::cloud::save_binding(&path, &binding)?;
-                return Ok(json!({"synced":true}));
+                return Ok(json!({ "synced": true }));
             }
             if binding.digest.as_ref() != Some(&digest) {
                 // Preserve a comparison snapshot without overwriting either side.
@@ -565,27 +779,40 @@ impl MobileVault {
                 if !comparison.exists() {
                     crate::cloud::write_private(&comparison, &bytes, false)?;
                 }
-                return Err("Sync conflict: both copies preserved. Review the encrypted comparison copy before retrying".into());
+                return Err(
+                    "Sync conflict: both copies preserved. Review the encrypted \
+                            comparison copy before retrying"
+                        .into(),
+                );
             }
-            self.vault
-                .as_mut()
-                .unwrap()
-                .apply_cloud(&mut self.credentials, &bytes)?;
+            let (vault, credentials) = self.unlocked()?;
+            vault.apply_cloud(credentials, &bytes)?;
             binding.version = Some(version);
             binding.digest = Some(crate::cloud::digest(&bytes));
         } else if binding.digest.as_ref() != Some(&digest) {
-            binding.version = Some(rt.block_on(interruptible(
-                self.cancellation,
-                client.upload(&vault_id, binding.version.as_deref(), local),
-            ))??);
+            let upload = client.upload(&vault_id, binding.version.as_deref(), local);
+            binding.version = Some(self.block_on(upload)??);
             binding.digest = Some(digest);
         }
         crate::cloud::save_binding(&path, &binding)?;
-        Ok(json!({"synced":true}))
+        Ok(json!({ "synced": true }))
+    }
+
+    fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> Result<T, String> {
+        block_on(self.cancellation, future)
     }
 }
+
+/// Runs network work on the shared runtime; the app's lock signal aborts it.
+fn block_on<T>(
+    cancellation: Option<&AtomicBool>,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    Ok(mobile_runtime()?.block_on(interruptible(cancellation, future))?)
+}
+
 fn mobile_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     if let Some(runtime) = RUNTIME.get() {
         return Ok(runtime);
     }
@@ -600,17 +827,50 @@ fn mobile_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
         .ok_or_else(|| "Could not initialize sync runtime".into())
 }
 
+fn passkey_field(item: &Item) -> Option<&CustomField> {
+    item.metadata
+        .custom_fields
+        .iter()
+        .find(|f| f.name == passkey::FIELD)
+}
+
 fn client(r: &Value) -> Result<CloudClient, String> {
     CloudClient::with_token(
         string(r, "server")?,
         Zeroizing::new(string(r, "token")?.into()),
     )
 }
-fn string<'a>(r: &'a Value, key: &str) -> Result<&'a str, String> {
-    r.get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("Missing {key}"))
+
+fn client_hash(r: &Value) -> Result<Option<Vec<u8>>, String> {
+    opt_str(r, "client_hash").map(passkey::decode).transpose()
 }
+
+fn string<'a>(r: &'a Value, key: &str) -> Result<&'a str, String> {
+    opt_str(r, key).ok_or_else(|| format!("Missing {key}"))
+}
+
+fn opt_str<'a>(r: &'a Value, key: &str) -> Option<&'a str> {
+    r.get(key).and_then(Value::as_str)
+}
+
+fn opt_string(r: &Value, key: &str) -> Option<String> {
+    opt_str(r, key).map(str::to_owned)
+}
+
+/// A boolean option that defaults to `false`.
+fn flag(r: &Value, key: &str) -> bool {
+    bool_or(r, key, false)
+}
+
+fn bool_or(r: &Value, key: &str, default: bool) -> bool {
+    r.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
+/// Destructive operations require an explicit `"confirmed": true`.
+fn confirmed(r: &Value) -> bool {
+    r.get("confirmed") == Some(&Value::Bool(true))
+}
+
 fn id(r: &Value) -> Result<usize, String> {
     r.get("id")
         .and_then(Value::as_u64)
@@ -618,6 +878,7 @@ fn id(r: &Value) -> Result<usize, String> {
         .map(|n| n as usize)
         .ok_or_else(|| "Invalid item ID".into())
 }
+
 fn wipe_json(v: &mut Value) {
     match v {
         Value::String(s) => s.zeroize(),
@@ -626,26 +887,23 @@ fn wipe_json(v: &mut Value) {
         _ => {}
     }
 }
+
 pub fn wipe_response(value: &mut Value) {
     wipe_json(value);
 }
 
-#[cfg(test)]
-#[path = "mobile_sync_tests.rs"]
-mod sync_tests;
-
-fn cancelled(flag: Option<&std::sync::atomic::AtomicBool>) -> bool {
-    flag.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+fn cancelled(flag: Option<&AtomicBool>) -> bool {
+    flag.is_some_and(|flag| flag.load(Ordering::SeqCst))
 }
+
 async fn interruptible<T>(
-    flag: Option<&std::sync::atomic::AtomicBool>,
+    flag: Option<&AtomicBool>,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, &'static str> {
     tokio::select! {
-        result=future => Ok(result),
-        _=async {
-            loop {
-                if cancelled(flag) { break; }
+        result = future => Ok(result),
+        _ = async {
+            while !cancelled(flag) {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         } => Err("Operation interrupted; inspect any remote change before retrying"),
@@ -655,12 +913,12 @@ async fn interruptible<T>(
 fn recovery_copy(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            ["rekey-recovery-", "conflict-", "comparison-"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-        })
+        .is_some_and(|name| RECOVERY_PREFIXES.iter().any(|p| name.starts_with(p)))
 }
+
+#[cfg(test)]
+#[path = "mobile_sync_tests.rs"]
+mod sync_tests;
 
 #[cfg(test)]
 mod tests {

@@ -2,6 +2,8 @@
 use super::*;
 use serde::de::DeserializeOwned;
 
+const SETTINGS_FILE: &str = "mobile-settings.json";
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct MobileSettings {
@@ -26,7 +28,7 @@ impl Default for MobileSettings {
 }
 impl MobileSettings {
     pub fn load(directory: &Path) -> Result<Self, String> {
-        let path = directory.join("mobile-settings.json");
+        let path = directory.join(SETTINGS_FILE);
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -82,7 +84,12 @@ fn file_credentials(r: &Value, encrypted: &[u8]) -> Result<VaultCredentials, Vau
         Ok(PasswordType::Password(string(r, "password")?.into()).into())
     }
 }
+/// Largest plaintext export, import, or backup exchanged with the app.
+const MAX_TRANSFER_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_SYMBOLS: &str = "!@#$%^&*-_=+";
+
 impl MobileVault {
+    /// Tools that work whether or not a vault is open.
     pub(super) fn local_tool(&mut self, op: &str, r: &Value) -> Result<Option<Value>, VaultError> {
         Ok(Some(match op {
             "settings_get" => json!(self.settings),
@@ -92,16 +99,13 @@ impl MobileVault {
                 settings.validate()?;
                 let bytes =
                     serde_json::to_vec(&settings).map_err(|_| "Could not encode settings")?;
-                crate::cloud::write_private(
-                    &self.directory.join("mobile-settings.json"),
-                    &bytes,
-                    true,
-                )?;
+                crate::cloud::write_private(&self.directory.join(SETTINGS_FILE), &bytes, true)?;
                 self.settings = settings;
                 json!(self.settings)
             }
             "new_key_file" => {
-                json!({"data": passkey::encode(&Zeroizing::new(rand::random::<[u8;32]>())[..])})
+                let key = Zeroizing::new(rand::random::<[u8; 32]>());
+                json!({ "data": passkey::encode(&key[..]) })
             }
             "create_key" => {
                 require(
@@ -119,316 +123,151 @@ impl MobileVault {
                 let name = vault.metadata.filename.clone();
                 write_vault_with_key(&vault, &mut key)?;
                 self.lock();
-                json!({"vault":name})
+                json!({ "vault": name })
             }
             "generate" => {
-                let value = if r
-                    .get("passphrase")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    let words = r
-                        .get("words")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(self.settings.passphrase_words.into());
-                    require((1..=64).contains(&words), "Use 1 to 64 words")?;
-                    let separator = r.get("separator").and_then(Value::as_str).unwrap_or("-");
-                    require(separator.len() <= 32, "Separator too long")?;
-                    crate::password::generate_passphrase(words as u8, separator)?
-                } else {
-                    let length = r
-                        .get("length")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(self.settings.generator_length.into());
-                    require((1..=255).contains(&length), "Use a length from 1 to 255")?;
-                    crate::password::generate_password_with_options(
-                        length as u8,
-                        &crate::password::PasswordOptions {
-                            uppercase: r.get("uppercase").and_then(Value::as_bool).unwrap_or(true),
-                            lowercase: r.get("lowercase").and_then(Value::as_bool).unwrap_or(true),
-                            digits: r.get("digits").and_then(Value::as_bool).unwrap_or(true),
-                            symbols: if r
-                                .get("symbols_enabled")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(true)
-                            {
-                                Some(
-                                    r.get("symbols")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("!@#$%^&*-_=+"),
-                                )
-                            } else {
-                                None
-                            },
-                            exclude_ambiguous: r
-                                .get("exclude_ambiguous")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
-                        },
-                    )?
-                };
-                let value = SecretString::from(value);
-                json!({"password":value, "assessment": crate::password::password_strength_output(&value)})
+                let value = SecretString::from(self.generate(r)?);
+                json!({
+                    "password": value,
+                    "assessment": crate::password::password_strength_output(&value),
+                })
             }
-            "passcheck" => {
-                json!({"assessment":crate::password::password_strength_output(string(r,"password")?)})
-            }
+            "passcheck" => json!({
+                "assessment": crate::password::password_strength_output(string(r, "password")?),
+            }),
             _ => return Ok(None),
         }))
     }
-    fn create_with_key(&mut self, mut key: VaultCredentials) -> Result<Value, VaultError> {
-        let mut vault = Vault::memory();
-        let name = format!("{}.enc", hex::encode(vault.vault_id()));
-        vault.store = VaultStore::File {
-            directory: self.directory.clone(),
-            filename: name.clone(),
+
+    fn generate(&self, r: &Value) -> Result<String, VaultError> {
+        if flag(r, "passphrase") {
+            let words = u64_or(r, "words", self.settings.passphrase_words.into());
+            require((1..=64).contains(&words), "Use 1 to 64 words")?;
+            let separator = opt_str(r, "separator").unwrap_or("-");
+            require(separator.len() <= 32, "Separator too long")?;
+            return Ok(crate::password::generate_passphrase(
+                words as u8,
+                separator,
+            )?);
+        }
+        let length = u64_or(r, "length", self.settings.generator_length.into());
+        require((1..=255).contains(&length), "Use a length from 1 to 255")?;
+        let symbols = bool_or(r, "symbols_enabled", true)
+            .then(|| opt_str(r, "symbols").unwrap_or(DEFAULT_SYMBOLS));
+        let options = crate::password::PasswordOptions {
+            uppercase: bool_or(r, "uppercase", true),
+            lowercase: bool_or(r, "lowercase", true),
+            digits: bool_or(r, "digits", true),
+            symbols,
+            exclude_ambiguous: flag(r, "exclude_ambiguous"),
         };
-        vault.metadata.filename = name.clone();
-        write_vault_with_key(&vault, &mut key)?;
-        self.lock();
-        self.vault = Some(vault);
-        self.credentials = key;
-        self.primary_unlock = true;
-        self.touched = Instant::now();
-        Ok(json!({"vault":name}))
+        Ok(crate::password::generate_password_with_options(
+            length as u8,
+            &options,
+        )?)
     }
+
+    /// Tools that require an open vault and match desktop behavior.
     pub(super) fn parity_tool(&mut self, op: &str, r: &Value) -> Result<Option<Value>, VaultError> {
         let cancellation = self.cancellation;
+        let history_limit = self.settings.history_limit;
         let vault = self.vault.as_mut().ok_or(VaultError::Locked)?;
+        let credentials = &mut self.credentials;
         Ok(Some(match op {
-            "search" => {
-                let mut filter = SearchFilter::default();
-                filter.query = r
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
-                filter.name = r
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
-                filter.username = r
-                    .get("username")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
-                filter.url = r
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
-                filter.notes = r
-                    .get("notes")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(SecretString::from);
-                filter.list = ListOptions {
-                    kind: r
-                        .get("kind")
-                        .filter(|v| !v.is_null())
-                        .map(|v| decode(v.clone()))
-                        .transpose()?,
-                    has_totp: r.get("has_totp").and_then(Value::as_bool),
-                    weak: r.get("weak").and_then(Value::as_bool).unwrap_or(false),
-                    stale_days: r.get("stale_days").and_then(Value::as_u64),
-                    sort: r
-                        .get("sort")
-                        .map(|v| decode(v.clone()))
-                        .transpose()?
-                        .unwrap_or_default(),
-                    descending: r
-                        .get("descending")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                };
-                json!(vault.management_list(filter)?)
-            }
-            "save_item" => {
-                let name = string(r, "name")?;
-                require(
-                    !name.trim().is_empty() && name.len() <= 4096,
-                    "Name is required (maximum 4096 bytes)",
-                )?;
-                let kind: ItemKind = decode(r.get("kind").cloned().unwrap_or(json!("login")))?;
-                let urls: Vec<String> = decode(r.get("urls").cloned().unwrap_or(json!([])))?;
-                require(
-                    urls.len() <= 128 && urls.iter().all(|s| s.len() <= 8192),
-                    "Too many or oversized websites",
-                )?;
-                let mut fields: Vec<CustomField> =
-                    decode(r.get("fields").cloned().unwrap_or(json!([])))?;
-                for field in &mut fields {
-                    field.name = field.name.trim().to_owned();
-                }
-                let mut names = HashSet::new();
-                require(
-                    fields.len() <= 128
-                        && fields.iter().all(|f| {
-                            !f.name.trim().is_empty()
-                                && f.name.len() <= 128
-                                && f.value.len() <= 1024 * 1024
-                                && !f.name.trim().eq_ignore_ascii_case(passkey::FIELD)
-                                && names.insert(f.name.trim().to_lowercase())
-                        }),
-                    "Invalid, duplicate, or reserved custom field",
-                )?;
-                let username = r.get("username").and_then(Value::as_str).map(str::to_owned);
-                let notes = r
-                    .get("notes")
-                    .and_then(Value::as_str)
-                    .map(SecretString::from);
-                let password = string(r, "password")?;
-                if r.get("id").is_some() {
-                    let id = id(r)?;
-                    let existing = vault
-                        .item(id)
-                        .filter(|i| i.active())
-                        .ok_or("Item not found")?;
-                    require(
-                        !existing
-                            .metadata
-                            .custom_fields
-                            .iter()
-                            .any(|f| f.name == passkey::FIELD),
-                        "Passkey records cannot be edited as ordinary items",
-                    )?;
-                    require(
-                        r.get("revision").and_then(Value::as_u64) == Some(existing.revision),
-                        "Item changed; reopen the editor before saving",
-                    )?;
-                    let changed = vault.update_typed_entry_with_limit(
-                        TypedUpdate {
-                            entry: EntryUpdate {
-                                target: Target::Id(id),
-                                update: EntryChanges {
-                                    name: Some(name.into()),
-                                    username,
-                                    url: urls.first().cloned(),
-                                    notes,
-                                },
-                                password: Some(password.into()),
-                            },
-                            kind: Some(kind),
-                            add_url: urls.iter().skip(1).cloned().collect(),
-                            remove_url: vec![],
-                            clear_urls: true,
-                            set_fields: fields,
-                            remove_fields: vec![],
-                            clear_fields: true,
-                        },
-                        &mut self.credentials,
-                        self.settings.history_limit,
-                    )?;
-                    json!({"changed":changed})
-                } else {
-                    require(
-                        vault.add_typed_entry(
-                            TypedEntry {
-                                entry: crate::types::PasswordEntry {
-                                    name: name.into(),
-                                    username,
-                                    password: password.into(),
-                                    url: urls.first().cloned(),
-                                    notes,
-                                    copy: false,
-                                },
-                                kind,
-                                additional_urls: urls.into_iter().skip(1).collect(),
-                                custom_fields: fields,
-                            },
-                            &mut self.credentials,
-                        )?,
-                        "An item with this name and username already exists",
-                    )?;
-                    json!({"changed":true})
-                }
-            }
-            "history" => json!({"history":vault.view_password_history(Target::Id(id(r)?))?}),
+            "search" => json!(vault.management_list(search_filter(r)?)?),
+            "save_item" => json!({ "changed": save_item(vault, credentials, history_limit, r)? }),
+            "history" => json!({ "history": vault.view_password_history(Target::Id(id(r)?))? }),
             "restore_password" => {
-                json!({"changed":vault.restore_password(Target::Id(id(r)?),r.get("revision").and_then(Value::as_u64).ok_or("Revision required")? as usize,&mut self.credentials)?})
+                let revision = r
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .ok_or("Revision required")?;
+                let changed =
+                    vault.restore_password(Target::Id(id(r)?), revision as usize, credentials)?;
+                json!({ "changed": changed })
             }
             "trash" => {
-                json!({"trash":vault.view_trash().iter().map(|v|json!({"id":v.entry.entry.id,"name":v.entry.entry.name,"username":v.entry.entry.username,"deleted":v.deleted})).collect::<Vec<_>>()})
+                let trash: Vec<_> = vault
+                    .view_trash()
+                    .iter()
+                    .map(|v| {
+                        json!({
+                            "id": v.entry.entry.id,
+                            "name": v.entry.entry.name,
+                            "username": v.entry.entry.username,
+                            "deleted": v.deleted,
+                        })
+                    })
+                    .collect();
+                json!({ "trash": trash })
             }
-            "restore_trash" => {
-                json!({"changed":vault.restore_trashed(id(r)?,&mut self.credentials)?})
-            }
+            "restore_trash" => json!({ "changed": vault.restore_trashed(id(r)?, credentials)? }),
             "purge_trash" => {
-                require(
-                    r.get("confirmed") == Some(&Value::Bool(true)),
-                    "Confirm permanent deletion",
-                )?;
-                json!({"changed":vault.purge_trash(if r.get("id").is_some(){Some(id(r)?)}else{None},&mut self.credentials)?})
+                require(confirmed(r), "Confirm permanent deletion")?;
+                let target = r.get("id").is_some().then(|| id(r)).transpose()?;
+                json!({ "changed": vault.purge_trash(target, credentials)? })
             }
             "purge_expired" => {
-                json!({"removed":vault.purge_expired_trash(self.settings.trash_days,&mut self.credentials)?})
+                let removed = vault.purge_expired_trash(self.settings.trash_days, credentials)?;
+                json!({ "removed": removed })
             }
             "set_otp" => {
-                json!({"bits":vault.set_totp(Target::Id(id(r)?),string(r,"configuration")?,&mut self.credentials)?})
+                let bits =
+                    vault.set_totp(Target::Id(id(r)?), string(r, "configuration")?, credentials)?;
+                json!({ "bits": bits })
             }
             "remove_otp" => {
-                json!({"changed":vault.remove_totp(Target::Id(id(r)?),&mut self.credentials)?})
+                json!({ "changed": vault.remove_totp(Target::Id(id(r)?), credentials)? })
             }
             "next_otp" => {
                 require(
-                    r.get("confirmed") == Some(&Value::Bool(true)),
+                    confirmed(r),
                     "Confirm generation; HOTP advances its counter",
                 )?;
-                let code = vault.current_otp(Target::Id(id(r)?), &mut self.credentials)?;
-                json!({"code":&*code.code,"expires_in":code.expires_in,"counter":code.counter})
+                let code = vault.current_otp(Target::Id(id(r)?), credentials)?;
+                json!({ "code": &*code.code, "expires_in": code.expires_in, "counter": code.counter })
             }
             "authenticator_info" => {
                 let item = vault
                     .item(id(r)?)
                     .filter(|i| i.active())
                     .ok_or("Item not found")?;
-                json!({"mode":item.authenticator.as_ref().map(|a|match a.state {AuthenticatorState::Totp(_)=>"totp",AuthenticatorState::Hotp{..}=>"hotp"}),"has_duo":item.duo.is_some()})
+                let mode = item.authenticator.as_ref().map(|a| match a.state {
+                    AuthenticatorState::Totp(_) => "totp",
+                    AuthenticatorState::Hotp { .. } => "hotp",
+                });
+                json!({ "mode": mode, "has_duo": item.duo.is_some() })
             }
             "audit" => {
                 let snapshot = vault
                     .prepare_audit(&AuditOptions {
                         stale_days: r.get("stale_days").and_then(Value::as_u64),
-                        require_totp: r
-                            .get("require_totp")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
+                        require_totp: flag(r, "require_totp"),
                         check_breaches: false,
                     })
                     .finish(|| cancelled(cancellation))?;
-                let outcome = mobile_runtime()?.block_on(interruptible(
-                    self.cancellation,
-                    snapshot.audit(
-                        r.get("check_breaches")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    ),
-                ))?;
+                let outcome = block_on(cancellation, snapshot.audit(flag(r, "check_breaches")))?;
                 json!(outcome.report)
             }
             "export_items" => {
+                require(confirmed(r), "Confirm plaintext export")?;
+                let bytes = vault.export_bytes(opt_str(r, "format") != Some("csv"))?;
                 require(
-                    r.get("confirmed") == Some(&Value::Bool(true)),
-                    "Confirm plaintext export",
-                )?;
-                let bytes =
-                    vault.export_bytes(r.get("format").and_then(Value::as_str) != Some("csv"))?;
-                require(
-                    bytes.len() <= 16 * 1024 * 1024,
+                    bytes.len() <= MAX_TRANSFER_BYTES,
                     "File exceeds the 16 MiB mobile transfer limit",
                 )?;
-                json!({"data":passkey::encode(&bytes)})
+                json!({ "data": passkey::encode(&bytes) })
             }
             "import_items" => {
                 let bytes = Zeroizing::new(passkey::decode(string(r, "data")?)?);
                 require(
-                    bytes.len() <= 16 * 1024 * 1024,
+                    bytes.len() <= MAX_TRANSFER_BYTES,
                     "Import exceeds the 16 MiB mobile transfer limit",
                 )?;
                 let contents = std::str::from_utf8(&bytes).map_err(|_| "Import must be UTF-8")?;
                 let conflicts: ConflictPolicy =
                     decode(r.get("conflicts").cloned().unwrap_or(json!("skip")))?;
-                let preview = r.get("preview").and_then(Value::as_bool).unwrap_or(true);
+                let preview = bool_or(r, "preview", true);
                 let digest = crate::cloud::digest(&bytes);
                 if !preview {
                     let review = self
@@ -436,10 +275,10 @@ impl MobileVault {
                         .take()
                         .ok_or("Preview this import first")?;
                     require(
-                        r.get("review_token").and_then(Value::as_str) == Some(review.0.as_str())
-                            && review.1 == vault.data.revision
-                            && review.2 == digest
-                            && review.3 == conflicts,
+                        opt_str(r, "review_token") == Some(review.token.as_str())
+                            && review.revision == vault.data.revision
+                            && review.digest == digest
+                            && review.conflicts == conflicts,
                         "Import or vault changed; preview again",
                     )?;
                 }
@@ -447,26 +286,30 @@ impl MobileVault {
                     contents,
                     conflicts,
                     preview,
-                    self.settings.history_limit,
-                    &mut self.credentials,
+                    history_limit,
+                    credentials,
                 )?;
                 if preview {
                     let token = hex::encode(rand::random::<[u8; 32]>());
-                    self.import_review =
-                        Some((token.clone(), vault.data.revision, digest, conflicts));
-                    json!({"report":report,"review_token":token})
+                    self.import_review = Some(ImportReview {
+                        token: token.clone(),
+                        revision: vault.data.revision,
+                        digest,
+                        conflicts,
+                    });
+                    json!({ "report": report, "review_token": token })
                 } else {
-                    json!({"report":report})
+                    json!({ "report": report })
                 }
             }
             "backup_create" => {
                 let mut key = new_credentials(r)?;
                 let bytes = vault.backup_bytes(&mut key, MAX_BACKUP_BYTES)?;
                 require(
-                    bytes.len() <= 16 * 1024 * 1024,
+                    bytes.len() <= MAX_TRANSFER_BYTES,
                     "File exceeds the 16 MiB mobile transfer limit",
                 )?;
-                json!({"data":passkey::encode(&bytes)})
+                json!({ "data": passkey::encode(&bytes) })
             }
             "rekey" => {
                 require(
@@ -482,118 +325,260 @@ impl MobileVault {
                     hex::encode(rand::random::<[u8; 16]>())
                 ));
                 crate::cloud::write_private(&recovery, &original, false)?;
-                let result = vault.rekey_credentials(&mut self.credentials, candidate);
+                let result = vault.rekey_credentials(credentials, candidate);
                 self.lock();
                 result?;
-                json!({"locked":true})
+                json!({ "locked": true })
             }
             "delete_vault" => {
                 require(
-                    self.primary_unlock && r.get("confirmed") == Some(&Value::Bool(true)),
+                    self.primary_unlock && confirmed(r),
                     "Original credential and confirmation required",
                 )?;
-                let path = vault.sync_path()?;
-                fs::remove_file(&path).map_err(|_| "Could not remove vault")?;
+                fs::remove_file(vault.sync_path()?).map_err(|_| "Could not remove vault")?;
                 self.lock();
-                json!({"deleted":true})
+                json!({ "deleted": true })
             }
             "sync_status" | "sync_check" | "sync_enabled" => {
-                let path = vault.sync_path()?;
-                let mut binding = crate::cloud::binding(&path)?;
-                if op == "sync_enabled" {
-                    let enabled = r
-                        .get("enabled")
-                        .and_then(Value::as_bool)
-                        .ok_or("Sync state required")?;
-                    let client = client(r)?;
-                    let mut value = binding.unwrap_or(crate::cloud::Binding {
-                        server_url: client.url.clone(),
-                        vault_id: hex::encode(vault.vault_id()),
-                        version: None,
-                        digest: None,
-                        enabled,
-                    });
-                    require(
-                        value.server_url == client.url,
-                        "Sync server differs from this vault's binding",
-                    )?;
-                    value.enabled = enabled;
-                    crate::cloud::save_binding(&path, &value)?;
-                    binding = Some(value);
-                }
-                let local = crate::cloud::digest(
-                    &fs::read(&path).map_err(|_| "Could not read sync snapshot")?,
-                );
-                let remote = if op == "sync_check" {
-                    mobile_runtime()?.block_on(interruptible(
-                        self.cancellation,
-                        client(r)?.head(&hex::encode(vault.vault_id())),
-                    ))??
-                } else {
-                    None
-                };
-                json!({"enabled":binding.as_ref().map_or(!recovery_copy(&path), |b|b.enabled),"configured":binding.is_some(),
-                    "local_changed":binding.as_ref().and_then(|b|b.digest.as_ref())!=Some(&local),
-                    "remote":remote,"binding":binding})
+                sync_state(vault, op, r, cancellation)?
             }
             "duo_enroll" | "duo_requests" | "duo_respond" | "duo_remove" => {
-                use crate::types::{DuoCommand, OtpMode};
-                let target = Target::Id(id(r)?);
-                let command = match op {
-                    "duo_enroll" => DuoCommand::Enroll {
-                        target,
-                        activation: string(r, "activation")?.into(),
-                        mode: Some(if r.get("mode").and_then(Value::as_str) == Some("totp") {
-                            OtpMode::Totp
-                        } else {
-                            OtpMode::Hotp
-                        }),
-                        replace: r.get("replace").and_then(Value::as_bool).unwrap_or(false),
-                    },
-                    "duo_requests" => DuoCommand::Requests { target },
-                    "duo_respond" => DuoCommand::Respond {
-                        target,
-                        request_id: string(r, "request_id")?.into(),
-                        fingerprint: string(r, "fingerprint")?.into(),
-                        approve: r
-                            .get("approve")
-                            .and_then(Value::as_bool)
-                            .ok_or("Explicit decision required")?,
-                        code: r.get("code").and_then(Value::as_str).unwrap_or("").into(),
-                    },
-                    _ => DuoCommand::Remove { target },
-                };
-                let rt = mobile_runtime()?;
-                if op == "duo_enroll" {
-                    let prepared = vault.prepare_duo_enrollment(
-                        command,
-                        r.get("push").and_then(Value::as_bool).unwrap_or(true),
-                        &mut self.credentials,
-                    )?;
-                    let material =
-                        rt.block_on(interruptible(self.cancellation, prepared.enroll()))??;
-                    json!({"message":vault.finish_duo_enrollment(&prepared,material,&mut self.credentials)?})
-                } else if op == "duo_remove" {
-                    json!({"message":vault.duo_command(&command,&mut self.credentials)?})
-                } else {
-                    let prepared = vault.prepare_duo_poll(command, &self.credentials)?;
-                    let bytes =
-                        rt.block_on(interruptible(self.cancellation, prepared.request.execute()))??;
-                    match vault.finish_duo_poll(&prepared.review, &bytes, &self.credentials)? {
-                        DuoPollResult::Requests(requests) => json!({"requests":requests}),
-                        DuoPollResult::Decision(request) => {
-                            let body = rt.block_on(interruptible(
-                                self.cancellation,
-                                (*request).execute(),
-                            ))??;
-                            crate::duo::acknowledge(&body)?;
-                            json!({"message":"Duo decision accepted"})
-                        }
-                    }
-                }
+                duo(vault, credentials, op, r, cancellation)?
             }
             _ => return Ok(None),
         }))
+    }
+}
+
+fn non_empty(r: &Value, key: &str) -> Option<String> {
+    opt_str(r, key).filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+fn u64_or(r: &Value, key: &str, default: u64) -> u64 {
+    r.get(key).and_then(Value::as_u64).unwrap_or(default)
+}
+
+fn search_filter(r: &Value) -> Result<SearchFilter, VaultError> {
+    let mut filter = SearchFilter::default();
+    filter.query = non_empty(r, "query");
+    filter.name = non_empty(r, "name");
+    filter.username = non_empty(r, "username");
+    filter.url = non_empty(r, "url");
+    filter.notes = opt_str(r, "notes")
+        .filter(|s| !s.is_empty())
+        .map(SecretString::from);
+    filter.list = ListOptions {
+        kind: r
+            .get("kind")
+            .filter(|v| !v.is_null())
+            .map(|v| decode(v.clone()))
+            .transpose()?,
+        has_totp: r.get("has_totp").and_then(Value::as_bool),
+        weak: flag(r, "weak"),
+        stale_days: r.get("stale_days").and_then(Value::as_u64),
+        sort: r
+            .get("sort")
+            .map(|v| decode(v.clone()))
+            .transpose()?
+            .unwrap_or_default(),
+        descending: flag(r, "descending"),
+    };
+    Ok(filter)
+}
+
+/// Adds or replaces a typed item. Returns whether anything changed.
+fn save_item(
+    vault: &mut Vault,
+    credentials: &mut VaultCredentials,
+    history_limit: usize,
+    r: &Value,
+) -> Result<bool, VaultError> {
+    let name = string(r, "name")?;
+    require(
+        !name.trim().is_empty() && name.len() <= 4096,
+        "Name is required (maximum 4096 bytes)",
+    )?;
+    let kind: ItemKind = decode(r.get("kind").cloned().unwrap_or(json!("login")))?;
+    let urls: Vec<String> = decode(r.get("urls").cloned().unwrap_or(json!([])))?;
+    require(
+        urls.len() <= 128 && urls.iter().all(|s| s.len() <= 8192),
+        "Too many or oversized websites",
+    )?;
+    let mut fields: Vec<CustomField> = decode(r.get("fields").cloned().unwrap_or(json!([])))?;
+    for field in &mut fields {
+        field.name = field.name.trim().to_owned();
+    }
+    let mut names = HashSet::new();
+    require(
+        fields.len() <= 128
+            && fields.iter().all(|f| {
+                !f.name.is_empty()
+                    && f.name.len() <= 128
+                    && f.value.len() <= 1024 * 1024
+                    && !f.name.eq_ignore_ascii_case(passkey::FIELD)
+                    && names.insert(f.name.to_lowercase())
+            }),
+        "Invalid, duplicate, or reserved custom field",
+    )?;
+    let username = opt_string(r, "username");
+    let notes = opt_str(r, "notes").map(SecretString::from);
+    let password = string(r, "password")?;
+    if r.get("id").is_none() {
+        let entry = TypedEntry {
+            entry: crate::types::PasswordEntry {
+                name: name.into(),
+                username,
+                password: password.into(),
+                url: urls.first().cloned(),
+                notes,
+                copy: false,
+            },
+            kind,
+            additional_urls: urls.into_iter().skip(1).collect(),
+            custom_fields: fields,
+        };
+        require(
+            vault.add_typed_entry(entry, credentials)?,
+            "An item with this name and username already exists",
+        )?;
+        return Ok(true);
+    }
+    let id = id(r)?;
+    let existing = vault
+        .item(id)
+        .filter(|i| i.active())
+        .ok_or("Item not found")?;
+    require(
+        passkey_field(existing).is_none(),
+        "Passkey records cannot be edited as ordinary items",
+    )?;
+    require(
+        r.get("revision").and_then(Value::as_u64) == Some(existing.revision),
+        "Item changed; reopen the editor before saving",
+    )?;
+    let update = TypedUpdate {
+        entry: EntryUpdate {
+            target: Target::Id(id),
+            update: EntryChanges {
+                name: Some(name.into()),
+                username,
+                url: urls.first().cloned(),
+                notes,
+            },
+            password: Some(password.into()),
+        },
+        kind: Some(kind),
+        add_url: urls.iter().skip(1).cloned().collect(),
+        remove_url: vec![],
+        clear_urls: true,
+        set_fields: fields,
+        remove_fields: vec![],
+        clear_fields: true,
+    };
+    vault.update_typed_entry_with_limit(update, credentials, history_limit)
+}
+
+/// Reports, checks, or toggles the vault's cloud binding.
+fn sync_state(
+    vault: &Vault,
+    op: &str,
+    r: &Value,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Value, VaultError> {
+    let path = vault.sync_path()?;
+    let vault_id = hex::encode(vault.vault_id());
+    let mut binding = crate::cloud::binding(&path)?;
+    if op == "sync_enabled" {
+        let enabled = r
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or("Sync state required")?;
+        let client = client(r)?;
+        let mut value = binding.unwrap_or(Binding {
+            server_url: client.url.clone(),
+            vault_id: vault_id.clone(),
+            version: None,
+            digest: None,
+            enabled,
+        });
+        require(
+            value.server_url == client.url,
+            "Sync server differs from this vault's binding",
+        )?;
+        value.enabled = enabled;
+        crate::cloud::save_binding(&path, &value)?;
+        binding = Some(value);
+    }
+    let local = crate::cloud::digest(&fs::read(&path).map_err(|_| "Could not read sync snapshot")?);
+    let remote = if op == "sync_check" {
+        block_on(cancellation, client(r)?.head(&vault_id))??
+    } else {
+        None
+    };
+    Ok(json!({
+        "enabled": binding.as_ref().map_or(!recovery_copy(&path), |b| b.enabled),
+        "configured": binding.is_some(),
+        "local_changed": binding.as_ref().and_then(|b| b.digest.as_ref()) != Some(&local),
+        "remote": remote,
+        "binding": binding,
+    }))
+}
+
+/// Duo Push enrollment, request review, decisions, and removal.
+fn duo(
+    vault: &mut Vault,
+    credentials: &mut VaultCredentials,
+    op: &str,
+    r: &Value,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Value, VaultError> {
+    use crate::types::{DuoCommand, OtpMode};
+    let target = Target::Id(id(r)?);
+    let command = match op {
+        "duo_enroll" => DuoCommand::Enroll {
+            target,
+            activation: string(r, "activation")?.into(),
+            mode: Some(if opt_str(r, "mode") == Some("totp") {
+                OtpMode::Totp
+            } else {
+                OtpMode::Hotp
+            }),
+            replace: flag(r, "replace"),
+        },
+        "duo_requests" => DuoCommand::Requests { target },
+        "duo_respond" => DuoCommand::Respond {
+            target,
+            request_id: string(r, "request_id")?.into(),
+            fingerprint: string(r, "fingerprint")?.into(),
+            approve: r
+                .get("approve")
+                .and_then(Value::as_bool)
+                .ok_or("Explicit decision required")?,
+            code: opt_str(r, "code").unwrap_or("").into(),
+        },
+        _ => DuoCommand::Remove { target },
+    };
+    match op {
+        "duo_enroll" => {
+            let prepared =
+                vault.prepare_duo_enrollment(command, bool_or(r, "push", true), credentials)?;
+            let material = block_on(cancellation, prepared.enroll())??;
+            let message = vault.finish_duo_enrollment(&prepared, material, credentials)?;
+            Ok(json!({ "message": message }))
+        }
+        "duo_remove" => Ok(json!({ "message": vault.duo_command(&command, credentials)? })),
+        _ => {
+            let prepared = vault.prepare_duo_poll(command, credentials)?;
+            let bytes = block_on(cancellation, prepared.request.execute())??;
+            match vault.finish_duo_poll(&prepared.review, &bytes, credentials)? {
+                DuoPollResult::Requests(requests) => Ok(json!({ "requests": requests })),
+                DuoPollResult::Decision(request) => {
+                    let body = block_on(cancellation, (*request).execute())??;
+                    crate::duo::acknowledge(&body)?;
+                    Ok(json!({ "message": "Duo decision accepted" }))
+                }
+            }
+        }
     }
 }
 
