@@ -87,6 +87,16 @@ object Vault {
 
     fun json(op: String, vararg args: Pair<String, Any?>) = request(op, *args) as JSONObject
 
+    /**
+     * Runs a shared vault command built by [VaultCommands]. With [expectedRevision], the command is
+     * refused if the item changed since it was read.
+     */
+    fun command(command: JSONObject, expectedRevision: Long? = null): Any =
+        request("vault", "command" to command, "expected_revision" to expectedRevision)
+
+    fun commandJson(command: JSONObject, expectedRevision: Long? = null) =
+        command(command, expectedRevision) as JSONObject
+
     fun lock() {
         runCatching { NativeBridge.invalidate() }
         autofillSession.clear()

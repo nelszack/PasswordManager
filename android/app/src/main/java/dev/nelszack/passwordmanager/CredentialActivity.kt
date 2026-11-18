@@ -120,12 +120,13 @@ class CredentialActivity : VaultActivity() {
                     button("Save login") {
                         val title = name.text.toString()
                         task({
-                            Vault.request(
-                                "save",
-                                "name" to title,
-                                "username" to request.id,
-                                "password" to request.password,
-                                "url" to origin,
+                            Vault.command(
+                                VaultCommands.add(
+                                    title,
+                                    request.id,
+                                    request.password,
+                                    listOf(origin),
+                                )
                             )
                             syncAfterChange()
                         }) {

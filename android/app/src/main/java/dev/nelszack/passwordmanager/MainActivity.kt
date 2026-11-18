@@ -336,8 +336,15 @@ open class MainActivity : ManagementActivity() {
             searchText = needle
             val kind = selectedKind
             val version = ++queryVersion
-            task({ Vault.json("search", "query" to needle, "kind" to kind, "sort" to "name") }) {
-                result ->
+            task({
+                Vault.commandJson(
+                    VaultCommands.search(
+                        query = needle.ifBlank { null },
+                        kind = kind,
+                        sort = "name",
+                    )
+                )
+            }) { result ->
                 if (version != queryVersion || rows.parent !== layout) return@task
                 val entries = result.getJSONArray("items")
                 rows.removeAllViews()
@@ -514,7 +521,8 @@ open class MainActivity : ManagementActivity() {
                         "choices" to selected,
                     )
                 }) { resolved ->
-                    // The resolution and recovery copies are saved even if the follow-up sync is pending.
+                    // The resolution and recovery copies are saved even if the follow-up sync is
+                    // pending.
                     items(message = resolved.getString("message"))
                 }
             }
@@ -523,9 +531,7 @@ open class MainActivity : ManagementActivity() {
     }
 
     private fun detail(id: Long) {
-        task({
-            Pair(Vault.json("item", "id" to id), Vault.json("authenticator_info", "id" to id))
-        }) { (entry, auth) ->
+        task({ Vault.commandJson(VaultCommands.item(id)) }) { entry ->
             page("Item details")
             pageBack = { items() }
             label(entry.getString("name"), 28f)
@@ -551,21 +557,25 @@ open class MainActivity : ManagementActivity() {
                                 visible = false
                                 reveal.text = "Show password"
                             } else
-                                task({ Vault.json("item", "id" to id).getString("password") }) {
+                                task({
+                                    Vault.commandJson(VaultCommands.item(id)).getString("password")
+                                }) {
                                     value.text = it
                                     visible = true
                                     reveal.text = "Hide password"
                                 }
                         },
                         {
-                            task({ Vault.json("item", "id" to id).getString("password") }) {
+                            task({
+                                Vault.commandJson(VaultCommands.item(id)).getString("password")
+                            }) {
                                 SecretClipboard.copy(this, it)
                             }
                         },
                     )
                 reveal = actions.first
             }
-            if (auth.opt("mode") == "totp") {
+            if (VaultCommands.authenticatorMode(entry) == "totp") {
                 section("Verification code")
                 val codeView = label("••• •••", 28f)
                 val lifetime = label("Tap to show a fresh code.", 13f)
@@ -573,7 +583,7 @@ open class MainActivity : ManagementActivity() {
                     "Show authenticator code",
                     "Copy verification code",
                     {
-                        task({ Vault.json("otp", "id" to id) }) { code ->
+                        task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) { code ->
                             val expires =
                                 android.os.SystemClock.elapsedRealtime() +
                                     code.getInt("expires_in") * 1000L
@@ -596,7 +606,7 @@ open class MainActivity : ManagementActivity() {
                         }
                     },
                     {
-                        task({ Vault.json("otp", "id" to id) }) {
+                        task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) {
                             SecretClipboard.copy(
                                 this,
                                 it.getString("code"),
@@ -662,7 +672,7 @@ open class MainActivity : ManagementActivity() {
                     "Move this item to encrypted trash? You can restore it from Deleted items."
                 ) {
                     task({
-                        Vault.request("delete", "id" to id)
+                        Vault.command(VaultCommands.delete(id))
                         syncAfterChange()
                     }) {
                         items(message = it)

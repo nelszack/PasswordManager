@@ -56,6 +56,9 @@ pub struct ItemDetail {
     pub fields: Vec<ItemField>,
     pub has_totp: bool,
     pub has_duo: bool,
+    /// Whether the authenticator is time-based or counter-based, without reading a code.
+    #[serde(default)]
+    pub otp_mode: Option<crate::types::OtpMode>,
     /// Passkey records hide their key material and cannot be edited as ordinary items.
     #[serde(default)]
     pub is_passkey: bool,

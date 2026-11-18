@@ -47,6 +47,10 @@ impl Vault {
                 .collect(),
             has_totp: item.authenticator.is_some(),
             has_duo: item.duo.is_some(),
+            otp_mode: item.authenticator.as_ref().map(|a| match a.state {
+                AuthenticatorState::Totp(_) => crate::types::OtpMode::Totp,
+                AuthenticatorState::Hotp { .. } => crate::types::OtpMode::Hotp,
+            }),
             is_passkey: item.is_passkey(),
             created: e.created.to_string(),
             modified: e.modified.to_string(),

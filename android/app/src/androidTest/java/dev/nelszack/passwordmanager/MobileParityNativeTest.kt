@@ -22,46 +22,47 @@ class MobileParityNativeTest {
         val key = Vault.json("new_key_file").getString("data")
         val created = Vault.json("create_key", "key_file" to key)
         val vault = created.getString("vault")
-        Vault.request(
-            "save_item",
-            "name" to "Synthetic account",
-            "kind" to "login",
-            "password" to "original-secret",
-            "username" to "synthetic-user",
-            "urls" to JSONArray(listOf("https://example.com", "https://alt.example.com")),
-            "fields" to
-                JSONArray()
-                    .put(
-                        JSONObject()
-                            .put("name", "secret field")
-                            .put("value", "synthetic-value")
-                            .put("secret", true)
-                    ),
+        Vault.command(
+            VaultCommands.add(
+                "Synthetic account",
+                "synthetic-user",
+                "original-secret",
+                listOf("https://example.com", "https://alt.example.com"),
+                fields = listOf(VaultCommands.Field("secret field", "synthetic-value", true)),
+            )
         )
-        Vault.request(
-            "set_otp",
-            "id" to 1,
-            "configuration" to
+        Vault.command(
+            VaultCommands.setAuthenticator(
+                1,
                 "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+            )
         )
         assertEquals(
             "755224",
-            Vault.json("next_otp", "id" to 1, "confirmed" to true).getString("code"),
+            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code"),
         )
-        val original = Vault.json("item", "id" to 1)
-        val update =
-            original.keys().asSequence().map { it to original.get(it) }.toList().toTypedArray()
-        Vault.request(
-            "save_item",
-            *update.filter { it.first != "password" }.toTypedArray(),
-            "password" to "changed-secret",
+        val original = Vault.commandJson(VaultCommands.item(1))
+        Vault.command(
+            VaultCommands.update(
+                1,
+                original.getString("name"),
+                original.optString("username"),
+                "changed-secret",
+            ),
+            original.getLong("revision"),
         )
-        assertEquals(1, Vault.json("history", "id" to 1).getJSONArray("history").length())
-        Vault.request("restore_password", "id" to 1, "revision" to 1)
-        assertEquals("original-secret", Vault.json("item", "id" to 1).getString("password"))
-        Vault.request("delete", "id" to 1)
-        assertEquals(1, Vault.json("trash").getJSONArray("trash").length())
-        Vault.request("restore_trash", "id" to 1)
+        assertEquals(
+            1,
+            Vault.commandJson(VaultCommands.history(1)).getJSONArray("history").length(),
+        )
+        Vault.command(VaultCommands.restorePassword(1, 1))
+        assertEquals(
+            "original-secret",
+            Vault.commandJson(VaultCommands.item(1)).getString("password"),
+        )
+        Vault.command(VaultCommands.delete(1))
+        assertEquals(1, Vault.commandJson(VaultCommands.trash()).getJSONArray("trash").length())
+        Vault.command(VaultCommands.restoreTrash(1))
         val options =
             JSONObject(
                 """{"rp":{"id":"example.com","name":"Example"},"user":{"id":"dXNlcg","name":"synthetic","displayName":"Synthetic"},"challenge":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk","pubKeyCredParams":[{"type":"public-key","alg":-7}]}"""
@@ -97,31 +98,41 @@ class MobileParityNativeTest {
         Vault.request("rekey", "password" to password)
         assertFalse(Vault.json("status").getBoolean("unlocked"))
         Vault.request("unlock", "vault" to vault, "password" to password)
-        assertEquals(2, Vault.json("item", "id" to 1).getJSONArray("urls").length())
+        assertEquals(2, Vault.commandJson(VaultCommands.item(1)).getJSONArray("urls").length())
         val restored =
             Vault.json("restore_backup", "data" to backup, "key_file" to key).getString("vault")
         assertNotEquals(vault, restored)
         Vault.request("unlock", "vault" to restored, "key_file" to key)
         assertEquals(
             "287082",
-            Vault.json("next_otp", "id" to 1, "confirmed" to true).getString("code"),
+            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code"),
         )
         assertEquals(1, (Vault.request("passkeys") as JSONArray).length())
-        assertEquals(1, Vault.json("item", "id" to 1).getJSONArray("fields").length())
+        assertEquals(1, Vault.commandJson(VaultCommands.item(1)).getJSONArray("fields").length())
         assertEquals(
             1,
-            Vault.json("search", "kind" to "login", "query" to "Synthetic account").getInt("total"),
+            Vault.commandJson(VaultCommands.search(query = "Synthetic account", kind = "login"))
+                .getInt("total"),
         )
-        val audit = Vault.json("audit", "check_breaches" to false)
+        val audit =
+            Vault.commandJson(
+                VaultCommands.audit(staleDays = null, requireTotp = false, checkBreaches = false)
+            )
         assertTrue(audit.has("score"))
         assertFalse(audit.toString().contains("original-secret"))
-        Vault.request("set_otp", "id" to 1, "configuration" to "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
-        assertEquals("totp", Vault.json("authenticator_info", "id" to 1).getString("mode"))
-        assertEquals(6, Vault.json("otp", "id" to 1).getString("code").length)
-        Vault.request("remove_otp", "id" to 1)
-        assertTrue(Vault.json("authenticator_info", "id" to 1).isNull("mode"))
-        Vault.request("delete", "id" to 1)
-        Vault.request("purge_trash", "id" to 1, "confirmed" to true)
-        assertEquals(0, Vault.json("trash").getJSONArray("trash").length())
+        Vault.command(VaultCommands.setAuthenticator(1, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"))
+        assertEquals(
+            "totp",
+            VaultCommands.authenticatorMode(Vault.commandJson(VaultCommands.item(1))),
+        )
+        assertEquals(
+            6,
+            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code").length,
+        )
+        Vault.command(VaultCommands.removeAuthenticator(1))
+        assertNull(VaultCommands.authenticatorMode(Vault.commandJson(VaultCommands.item(1))))
+        Vault.command(VaultCommands.delete(1))
+        Vault.command(VaultCommands.purgeTrash(1))
+        assertEquals(0, Vault.commandJson(VaultCommands.trash()).getJSONArray("trash").length())
     }
 }

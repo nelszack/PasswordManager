@@ -77,12 +77,13 @@ class AutofillDirectFillTest {
             val scope = AutofillScope(client, origin, false)
             val username = "synthetic-inline-user"
             Vault.request("create", "password" to "Synthetic-Inline-Vault-9274!")
-            Vault.request(
-                "save",
-                "name" to "Synthetic account",
-                "username" to username,
-                "password" to "synthetic-password",
-                "url" to origin,
+            Vault.command(
+                VaultCommands.add(
+                    "Synthetic account",
+                    username,
+                    "synthetic-password",
+                    listOf(origin),
+                )
             )
             Vault.autofillSession.grant(scope)
             context.startActivity(

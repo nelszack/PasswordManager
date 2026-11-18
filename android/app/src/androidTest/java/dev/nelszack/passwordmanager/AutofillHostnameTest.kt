@@ -26,11 +26,14 @@ class AutofillHostnameTest {
             assertTrue(
                 vault
                     .reply(
-                        "save",
-                        "name" to "Synthetic account$port",
-                        "username" to "synthetic-user",
-                        "password" to "synthetic-secret",
-                        "url" to "https://accounts.example.com$port",
+                        "vault",
+                        "command" to
+                            VaultCommands.add(
+                                "Synthetic account$port",
+                                "synthetic-user",
+                                "synthetic-secret",
+                                listOf("https://accounts.example.com$port"),
+                            ),
                     )
                     .getBoolean("ok")
             )

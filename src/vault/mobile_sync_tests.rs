@@ -1,4 +1,5 @@
 //! An isolated protocol peer exercises mobile synchronization and retry policy.
+use super::test_support::*;
 use super::*;
 use std::{
     io::{Read, Write},
@@ -139,7 +140,14 @@ fn offline_conflicts_stale_reviews_and_lost_ack_preserve_data() {
     let created = a
         .call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
         .unwrap();
-    a.call(r#"{"op":"save","name":"Example","username":"alice","password":"original","url":"https://example.com"}"#).unwrap();
+    save(
+        &mut a,
+        "Example",
+        "alice",
+        "original",
+        "https://example.com",
+    )
+    .unwrap();
     peer.call(&mut a, "sync", json!({})).unwrap();
     let id = created["vault"].as_str().unwrap().trim_end_matches(".enc");
     let downloaded = peer
@@ -150,9 +158,9 @@ fn offline_conflicts_stale_reviews_and_lost_ack_preserve_data() {
             .to_string(),
     )
     .unwrap();
-    a.call(r#"{"op":"save","id":1,"name":"Example","username":"alice","password":"remote-password","url":"https://example.com"}"#).unwrap();
+    update(&mut a, 1, "Example", "remote-password").unwrap();
     peer.call(&mut a, "sync", json!({})).unwrap();
-    b.call(r#"{"op":"save","id":1,"name":"Example","username":"alice","password":"local-password","url":"https://example.com"}"#).unwrap();
+    update(&mut b, 1, "Example", "local-password").unwrap();
     assert!(
         peer.call(&mut b, "sync", json!({}))
             .unwrap_err()
@@ -191,7 +199,7 @@ fn offline_conflicts_stale_reviews_and_lost_ack_preserve_data() {
             .starts_with("recovery-local-")
     }));
     let review = peer.call(&mut b, "cloud_conflicts", json!({})).unwrap();
-    b.call(r#"{"op":"save","id":1,"name":"Changed","username":"alice","password":"local-new","url":"https://example.com"}"#).unwrap();
+    update(&mut b, 1, "Changed", "local-new").unwrap();
     assert!(
         peer.call(
             &mut b,
@@ -202,7 +210,7 @@ fn offline_conflicts_stale_reviews_and_lost_ack_preserve_data() {
         .contains("changed since review")
     );
     peer.call(&mut a, "sync", json!({})).unwrap();
-    a.call(r#"{"op":"save","id":1,"name":"Example","username":"alice","password":"acknowledgement-lost","url":"https://example.com"}"#).unwrap();
+    update(&mut a, 1, "Example", "acknowledgement-lost").unwrap();
     peer.state.lock().unwrap().lose_ack = true;
     assert!(peer.call(&mut a, "sync", json!({})).is_err());
     peer.call(&mut a, "sync", json!({})).unwrap();

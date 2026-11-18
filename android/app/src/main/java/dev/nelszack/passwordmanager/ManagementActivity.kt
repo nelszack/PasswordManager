@@ -201,9 +201,20 @@ abstract class ManagementActivity : VaultActivity() {
         dialog.setOnDismissListener { dialogs.remove(dialog) }
     }
 
-    private fun change(op: String, vararg args: Pair<String, Any?>, done: () -> Unit) {
+    /** Runs a shared vault command that changes the vault, then syncs. */
+    private fun change(command: org.json.JSONObject, done: () -> Unit) {
         task({
-            Vault.request(op, *args)
+            Vault.command(command)
+            afterToolChange()
+        }) {
+            done()
+        }
+    }
+
+    /** Runs a mobile-only operation that changes the vault, then syncs. */
+    private fun changeLocal(op: String, done: () -> Unit) {
+        task({
+            Vault.request(op)
             afterToolChange()
         }) {
             done()
@@ -320,43 +331,49 @@ abstract class ManagementActivity : VaultActivity() {
         lateinit var cancel: Button
         save =
             primary("Save item") {
-                val savedFields = JSONArray()
-                rows
-                    .filter { !it.removed.isChecked }
-                    .forEach {
-                        savedFields.put(
-                            JSONObject()
-                                .put("name", it.name.text.toString().trim())
-                                .put("value", it.value.text.toString())
-                                .put("secret", it.secret.isChecked)
+                val savedFields =
+                    rows
+                        .filter { !it.removed.isChecked }
+                        .map {
+                            VaultCommands.Field(
+                                it.name.text.toString().trim(),
+                                it.value.text.toString(),
+                                it.secret.isChecked,
+                            )
+                        }
+                val urls =
+                    websites.text.toString().lines().map(String::trim).filter(String::isNotEmpty)
+                val itemKind = kinds[kind.selectedItemPosition]
+                val command =
+                    if (entry == null)
+                        VaultCommands.add(
+                            name.text.toString(),
+                            username.text.toString(),
+                            password.text.toString(),
+                            urls,
+                            notes.text.toString(),
+                            itemKind,
+                            savedFields,
                         )
-                    }
-                val args =
-                    arrayOf(
-                        "id" to entry?.getLong("id"),
-                        "revision" to entry?.getLong("revision"),
-                        "name" to name.text.toString(),
-                        "kind" to kinds[kind.selectedItemPosition],
-                        "username" to username.text.toString(),
-                        "password" to password.text.toString(),
-                        "urls" to
-                            JSONArray(
-                                websites.text
-                                    .toString()
-                                    .lines()
-                                    .map(String::trim)
-                                    .filter(String::isNotEmpty)
-                            ),
-                        "notes" to notes.text.toString(),
-                        "fields" to savedFields,
-                    )
+                    else
+                        VaultCommands.update(
+                            entry.getLong("id"),
+                            name.text.toString(),
+                            username.text.toString(),
+                            password.text.toString(),
+                            urls,
+                            notes.text.toString(),
+                            itemKind,
+                            savedFields,
+                            replaceDetails = true,
+                        )
                 saving = true
                 save.isEnabled = false
                 cancel.isEnabled = false
                 save.text = "Saving…"
                 task({
                     runCatching {
-                        Vault.request("save_item", *args)
+                        Vault.command(command, entry?.getLong("revision"))
                         afterToolChange()
                     }
                 }) { result ->
@@ -382,7 +399,8 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     protected fun history(id: Long) {
-        task({ Vault.json("history", "id" to id).getJSONArray("history") }) { revisions ->
+        task({ Vault.commandJson(VaultCommands.history(id)).getJSONArray("history") }) { revisions
+            ->
             page("Password history")
             pageBack = { showDetail(id) }
             if (revisions.length() == 0) label("No saved password revisions")
@@ -392,7 +410,7 @@ abstract class ManagementActivity : VaultActivity() {
                 confirm(
                     "Replace the current password with revision ${i + 1}? The current password will remain in history."
                 ) {
-                    change("restore_password", "id" to id, "revision" to i + 1) { showDetail(id) }
+                    change(VaultCommands.restorePassword(id, i + 1)) { showDetail(id) }
                 }
             }
             button("Back to item") { showDetail(id) }
@@ -400,7 +418,7 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     private fun trash() {
-        task({ Vault.json("trash").getJSONArray("trash") }) { entries ->
+        task({ Vault.commandJson(VaultCommands.trash()).getJSONArray("trash") }) { entries ->
             page("Deleted items")
             if (entries.length() == 0) label("Trash is empty")
             for (i in 0 until entries.length()) {
@@ -412,25 +430,25 @@ abstract class ManagementActivity : VaultActivity() {
                         MobileUi.date(item.getString("deleted"))
                 )
                 button("Restore ${item.getString("name")}") {
-                    change("restore_trash", "id" to id) { trash() }
+                    change(VaultCommands.restoreTrash(id)) { trash() }
                 }
                 button("Permanently delete ${item.getString("name")}") {
                     confirm("Permanently erase this deleted item? This cannot be undone.") {
-                        change("purge_trash", "id" to id, "confirmed" to true) { trash() }
+                        change(VaultCommands.purgeTrash(id)) { trash() }
                     }
                 }
             }
             if (entries.length() > 0)
                 button("Empty trash") {
                     confirm("Permanently erase every item in trash?") {
-                        change("purge_trash", "confirmed" to true) { trash() }
+                        change(VaultCommands.purgeTrash(null)) { trash() }
                     }
                 }
             button("Apply configured trash retention") {
                 confirm(
                     "Permanently purge entries older than the configured retention? Zero days disables automatic age-based purging."
                 ) {
-                    change("purge_expired") { trash() }
+                    changeLocal("purge_expired") { trash() }
                 }
             }
             button("Back to tools") { tools() }
@@ -438,21 +456,24 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     protected fun authenticator(id: Long) {
-        task({ Vault.json("authenticator_info", "id" to id) }) { info ->
+        task({ Vault.commandJson(VaultCommands.item(id)) }) { item ->
+            val mode = VaultCommands.authenticatorMode(item)
             page("Authenticator")
             pageBack = { showDetail(id) }
-            label("Current mode: " + (info.opt("mode") as? String ?: "None"))
-            if (info.opt("mode") == "totp")
+            label("Current mode: " + (mode ?: "None"))
+            if (mode == "totp")
                 button("Show current verification code") {
-                    task({ Vault.json("otp", "id" to id) }) { result -> codeResult(result, id) }
+                    task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) { result ->
+                        codeResult(result, id)
+                    }
                 }
-            if (info.opt("mode") == "hotp")
+            if (mode == "hotp")
                 button("Generate next HOTP code") {
                     confirm(
                         "Generate the next code and permanently advance its counter? Use one device at a time for this counter-based authenticator."
                     ) {
                         task({
-                            Vault.json("next_otp", "id" to id, "confirmed" to true).also {
+                            Vault.commandJson(VaultCommands.authenticatorCode(id)).also {
                                 afterToolChange()
                             }
                         }) { result ->
@@ -465,15 +486,15 @@ abstract class ManagementActivity : VaultActivity() {
                 val supplied = config.text.toString().trim()
                 config.text.clear()
                 confirm("Replace this item's authenticator configuration?") {
-                    change("set_otp", "id" to id, "configuration" to supplied) { authenticator(id) }
+                    change(VaultCommands.setAuthenticator(id, supplied)) { authenticator(id) }
                 }
             }
-            if (info.opt("mode") is String)
+            if (mode != null)
                 button("Remove authenticator") {
                     confirm(
                         "Remove the authenticator from this item? Disable it at the website separately if required."
                     ) {
-                        change("remove_otp", "id" to id) { authenticator(id) }
+                        change(VaultCommands.removeAuthenticator(id)) { authenticator(id) }
                     }
                 }
             button("Duo enrollment & push") { duo(id) }
@@ -494,7 +515,7 @@ abstract class ManagementActivity : VaultActivity() {
             if (result.opt("counter") is Number)
                 SecretClipboard.copy(this, result.getString("code"), 30)
             else
-                task({ Vault.json("otp", "id" to id) }) { fresh ->
+                task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) { fresh ->
                     SecretClipboard.copy(this, fresh.getString("code"), fresh.getInt("expires_in"))
                 }
         }
@@ -516,17 +537,17 @@ abstract class ManagementActivity : VaultActivity() {
             activation.text.clear()
             confirm("Consume this activation link and enroll this item?") {
                 task({
-                    Vault.json(
-                            "duo_enroll",
-                            "id" to id,
-                            "activation" to link,
-                            "mode" to mode.selectedItem.toString(),
-                            "push" to push.isChecked,
-                            "replace" to replace.isChecked,
+                    val enrollment =
+                        VaultCommands.duoEnroll(
+                            id,
+                            link,
+                            mode.selectedItem.toString(),
+                            push.isChecked,
+                            replace.isChecked,
                         )
-                        .also { afterToolChange() }
+                    (Vault.command(enrollment) as String).also { afterToolChange() }
                 }) {
-                    label(it.getString("message"))
+                    label(it)
                 }
             }
         }
@@ -535,14 +556,14 @@ abstract class ManagementActivity : VaultActivity() {
             confirm(
                 "Remove this item's local push credentials? Passcodes remain; remove the device in Duo separately."
             ) {
-                change("duo_remove", "id" to id) { duo(id) }
+                change(VaultCommands.duoRemove(id)) { duo(id) }
             }
         }
         button("Back to authenticator") { authenticator(id) }
     }
 
     private fun duoRequests(id: Long) {
-        task({ Vault.json("duo_requests", "id" to id).getJSONArray("requests") }) { requests ->
+        task({ Vault.command(VaultCommands.duoRequests(id)) as JSONArray }) { requests ->
             page("Review Duo requests")
             pageBack = { duo(id) }
             if (requests.length() == 0) label("No pending requests")
@@ -567,16 +588,17 @@ abstract class ManagementActivity : VaultActivity() {
                         else "Deny this exact reviewed login request?"
                     ) {
                         task({
-                            Vault.json(
-                                "duo_respond",
-                                "id" to id,
-                                "request_id" to request.getString("id"),
-                                "fingerprint" to request.getString("fingerprint"),
-                                "approve" to approve,
-                                "code" to supplied,
-                            )
+                            Vault.command(
+                                VaultCommands.duoRespond(
+                                    id,
+                                    request.getString("id"),
+                                    request.getString("fingerprint"),
+                                    approve,
+                                    supplied,
+                                )
+                            ) as String
                         }) {
-                            label(it.getString("message"))
+                            label(it)
                         }
                     }
                 }
@@ -655,26 +677,27 @@ abstract class ManagementActivity : VaultActivity() {
         val sort = choice("Sort by", listOf("id", "name", "created", "modified", "password-age"))
         val descending = toggle("Descending")
         button("Search items") {
-            val args =
-                arrayOf(
-                    "query" to query.text.toString(),
-                    "name" to name.text.toString(),
-                    "username" to user.text.toString(),
-                    "url" to url.text.toString(),
-                    "notes" to notes.text.toString(),
-                    "kind" to kind.selectedItem.toString().takeUnless { it == "all" },
-                    "has_totp" to
+            fun text(field: EditText) = field.text.toString().takeIf(String::isNotEmpty)
+            val filter =
+                VaultCommands.search(
+                    query = text(query),
+                    name = text(name),
+                    username = text(user),
+                    url = text(url),
+                    notes = text(notes),
+                    kind = kind.selectedItem.toString().takeUnless { it == "all" },
+                    hasTotp =
                         when (otp.selectedItemPosition) {
                             1 -> true
                             2 -> false
                             else -> null
                         },
-                    "weak" to weak.isChecked,
-                    "stale_days" to days.text.toString().takeIf(String::isNotBlank)?.toLong(),
-                    "sort" to sort.selectedItem.toString(),
-                    "descending" to descending.isChecked,
+                    weak = weak.isChecked,
+                    staleDays = days.text.toString().takeIf(String::isNotBlank)?.toLong(),
+                    sort = sort.selectedItem.toString(),
+                    descending = descending.isChecked,
                 )
-            task({ Vault.json("search", *args).getJSONArray("items") }) { entries ->
+            task({ Vault.commandJson(filter).getJSONArray("items") }) { entries ->
                 page("Search results")
                 label("${entries.length()} matching items")
                 for (i in 0 until entries.length()) {
@@ -695,12 +718,12 @@ abstract class ManagementActivity : VaultActivity() {
         val breaches = toggle("Check breaches online (sends password hash prefixes)")
         button("Run health check") {
             val options =
-                arrayOf(
-                    "stale_days" to days.text.toString().toLong(),
-                    "require_totp" to otp.isChecked,
-                    "check_breaches" to breaches.isChecked,
+                VaultCommands.audit(
+                    staleDays = days.text.toString().toLong(),
+                    requireTotp = otp.isChecked,
+                    checkBreaches = breaches.isChecked,
                 )
-            task({ Vault.json("audit", *options) }) { report ->
+            task({ Vault.commandJson(options) }) { report ->
                 page("Vault health results")
                 label(
                     "${report.getInt("healthy")} healthy of ${report.getInt("total")} · score ${report.getInt("score")}"

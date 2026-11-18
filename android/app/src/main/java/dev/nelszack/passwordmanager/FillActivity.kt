@@ -257,13 +257,11 @@ class FillActivity : VaultActivity() {
                     "Set the saved website address to match this login before updating it"
                 }
                 task({
-                    Vault.request(
-                        "save",
-                        "id" to id,
-                        "name" to title,
-                        "username" to username,
-                        "password" to password,
-                        "url" to savedOrigin,
+                    Vault.command(
+                        if (id == null)
+                            VaultCommands.add(title, username, password, listOf(savedOrigin))
+                        else
+                            VaultCommands.update(id, title, username, password, listOf(savedOrigin))
                     )
                     syncAfterChange()
                 }) {

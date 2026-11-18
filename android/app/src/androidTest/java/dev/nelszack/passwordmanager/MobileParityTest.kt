@@ -7,7 +7,6 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.widget.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -45,36 +44,37 @@ class MobileParityTest {
         screen.input("Field value", "synthetic-field-secret")
         screen.click("Save item")
         screen.waitFor("Synthetic items")
-        val saved = Vault.json("item", "id" to 1)
+        val saved = Vault.commandJson(VaultCommands.item(1))
         assertEquals("wifi", saved.getString("kind"))
         assertEquals(2, saved.getJSONArray("urls").length())
         assertEquals(1, saved.getJSONArray("fields").length())
-        val edit =
-            JSONObject(saved.toString())
-                .put("op", "save_item")
-                .put("password", "replacement-secret")
-        Vault.request(
-            "save_item",
-            *edit
-                .keys()
-                .asSequence()
-                .filter { it != "op" }
-                .map { it to edit.get(it) }
-                .toList()
-                .toTypedArray(),
+        Vault.command(
+            VaultCommands.update(
+                1,
+                saved.getString("name"),
+                saved.optString("username"),
+                "replacement-secret",
+            ),
+            saved.getLong("revision"),
         )
-        assertEquals(1, Vault.json("history", "id" to 1).getJSONArray("history").length())
-        Vault.request("delete", "id" to 1)
+        assertEquals(
+            1,
+            Vault.commandJson(VaultCommands.history(1)).getJSONArray("history").length(),
+        )
+        Vault.command(VaultCommands.delete(1))
         scenario.onActivity { it.openTools() }
         screen.click("Deleted items")
         screen.click("Restore Synthetic Wi-Fi")
         screen.waitFor("Trash is empty")
-        assertEquals("replacement-secret", Vault.json("item", "id" to 1).getString("password"))
-        Vault.request(
-            "set_otp",
-            "id" to 1,
-            "configuration" to
+        assertEquals(
+            "replacement-secret",
+            Vault.commandJson(VaultCommands.item(1)).getString("password"),
+        )
+        Vault.command(
+            VaultCommands.setAuthenticator(
+                1,
                 "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+            )
         )
         scenario.onActivity { it.openItem(1) }
         screen.click("Authenticator & Duo")
@@ -82,7 +82,7 @@ class MobileParityTest {
         screen.waitFor("Generate next HOTP code")
         assertEquals(
             "755224",
-            Vault.json("next_otp", "id" to 1, "confirmed" to true).getString("code"),
+            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code"),
         )
         scenario.onActivity { it.openTools() }
         screen.click("Password generator")
@@ -144,8 +144,14 @@ class MobileParityTest {
                 "vault" to restored.getString("vault"),
                 "password" to "Synthetic-Backup-Key-5842!",
             )
-            assertEquals(2, Vault.json("item", "id" to 1).getJSONArray("urls").length())
-            assertEquals(1, Vault.json("history", "id" to 1).getJSONArray("history").length())
+            assertEquals(
+                2,
+                Vault.commandJson(VaultCommands.item(1)).getJSONArray("urls").length(),
+            )
+            assertEquals(
+                1,
+                Vault.commandJson(VaultCommands.history(1)).getJSONArray("history").length(),
+            )
         } finally {
             instrumentation.removeMonitor(monitor)
             context.contentResolver.delete(uri, null, null)

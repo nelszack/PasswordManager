@@ -16,12 +16,17 @@ import org.json.JSONObject
 
 internal object AutofillSuggestions {
     fun entries(form: LoginForm): JSONArray =
-        Vault.request(
-            if (form.codeOnly) "otp_logins"
-            else if (form.hostnameOnly) "hostname_logins" else "logins",
-            "origin" to form.origin,
-            "hostname_only" to form.hostnameOnly,
-        ) as JSONArray
+        when {
+            form.codeOnly ->
+                Vault.request(
+                    "otp_logins",
+                    "origin" to form.origin,
+                    "hostname_only" to form.hostnameOnly,
+                )
+            form.hostnameOnly -> Vault.request("hostname_logins", "origin" to form.origin)
+            else -> Vault.request("logins", "origin" to form.origin)
+        }
+            as JSONArray
 
     fun origin(form: LoginForm, entry: JSONObject): String {
         if (!form.hostnameOnly) return form.origin

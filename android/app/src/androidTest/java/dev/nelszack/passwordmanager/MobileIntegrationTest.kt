@@ -81,12 +81,13 @@ class MobileIntegrationTest {
         Vault.request("lock")
         val created = Vault.json("create", "password" to "Cedar-Lantern-Quartz-9274!")
         try {
-            Vault.request(
-                "save",
-                "name" to "Synthetic login",
-                "username" to "alice",
-                "password" to "synthetic-secret",
-                "url" to "https://example.com",
+            Vault.command(
+                VaultCommands.add(
+                    "Synthetic login",
+                    "alice",
+                    "synthetic-secret",
+                    listOf("https://example.com"),
+                )
             )
             val options =
                 JSONObject(
@@ -124,7 +125,9 @@ class MobileIntegrationTest {
                 KeyFactory.getInstance("EC")
                     .generatePublic(ECPublicKeySpec(ECPoint(x, y), parameters))
             Vault.request("lock")
-            assertThrows(IllegalStateException::class.java) { Vault.request("list") }
+            assertThrows(IllegalStateException::class.java) {
+                Vault.command(VaultCommands.search())
+            }
             Vault.request(
                 "unlock",
                 "vault" to created.getString("vault"),
@@ -134,7 +137,7 @@ class MobileIntegrationTest {
             assertEquals(1, keys.length())
             val id = keys.getJSONObject(0).getLong("id")
             assertFalse(
-                Vault.json("item", "id" to id)
+                Vault.commandJson(VaultCommands.item(id))
                     .getJSONArray("fields")
                     .toString()
                     .contains("private_key")

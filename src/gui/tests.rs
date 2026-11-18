@@ -31,6 +31,7 @@ fn item() -> ItemDetail {
         fields: vec![],
         has_totp: false,
         has_duo: false,
+        otp_mode: None,
         is_passkey: false,
         created: String::new(),
         modified: String::new(),

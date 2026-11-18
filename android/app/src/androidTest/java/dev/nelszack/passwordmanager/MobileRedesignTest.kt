@@ -6,7 +6,6 @@ import android.view.*
 import android.widget.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -39,14 +38,15 @@ class MobileRedesignTest {
                 "Maple Mail" to "login",
                 "Code Garden" to "login",
                 "Recovery note" to "secure-note",
-            )) Vault.request(
-            "save_item",
-            "name" to name,
-            "kind" to kind,
-            "username" to "synthetic@example.test",
-            "password" to "synthetic-only-password",
-            "urls" to JSONArray(listOf("https://example.test")),
-            "notes" to "Synthetic notes",
+            )) Vault.command(
+            VaultCommands.add(
+                name,
+                "synthetic@example.test",
+                "synthetic-only-password",
+                listOf("https://example.test"),
+                "Synthetic notes",
+                kind,
+            )
         )
         val args = InstrumentationRegistry.getArguments()
         MobileRedesignFixtureActivity.previewNight =
@@ -203,6 +203,6 @@ class MobileRedesignTest {
             confirmDiscard.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
         }
         screen.waitFor("3 items in your vault")
-        assertEquals(3, Vault.json("list").getInt("total"))
+        assertEquals(3, Vault.commandJson(VaultCommands.search()).getInt("total"))
     }
 }

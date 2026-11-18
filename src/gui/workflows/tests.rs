@@ -162,6 +162,7 @@ fn history_does_not_follow_an_account_selected_on_the_vault_tab() {
             fields: vec![],
             has_totp: true,
             has_duo: false,
+            otp_mode: None,
             is_passkey: false,
             created: String::new(),
             modified: String::new(),
