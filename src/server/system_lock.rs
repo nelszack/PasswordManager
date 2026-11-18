@@ -13,6 +13,8 @@ pub(super) struct Monitor {
     warnings: Arc<Mutex<BTreeMap<&'static str, String>>>,
 }
 
+/// Handed to a platform backend; platforms without one only record a warning.
+#[cfg(any(test, target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[derive(Clone)]
 struct Watch {
     stopped: Arc<AtomicBool>,
@@ -20,6 +22,7 @@ struct Watch {
     lock: Lock,
 }
 
+#[cfg(any(test, target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl Watch {
     fn lock(&self) {
         if !self.stopped.load(Ordering::Acquire) {
@@ -29,13 +32,7 @@ impl Watch {
     // Cocoa observer registration has no fallible setup result to report.
     #[cfg(any(test, not(target_os = "macos")))]
     fn warning(&self, source: &'static str, error: impl std::fmt::Display) {
-        self.warnings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                source,
-                format!("System lock monitoring ({source}): {error}"),
-            );
+        record_warning(&self.warnings, source, error);
     }
     fn ready(&self, source: &'static str) {
         self.warnings
@@ -54,12 +51,21 @@ impl Monitor {
             stopped: Arc::new(AtomicBool::new(false)),
             warnings: Arc::new(Mutex::new(BTreeMap::new())),
         });
-        let watch = Watch {
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        platform_start(Watch {
             stopped: monitor.stopped.clone(),
             warnings: monitor.warnings.clone(),
             lock,
-        };
-        platform_start(watch);
+        });
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            drop(lock);
+            record_warning(
+                &monitor.warnings,
+                "platform",
+                "screen-lock/suspend notifications are unsupported on this OS",
+            );
+        }
         monitor
     }
     pub(super) fn warning(&self) -> Option<String> {
@@ -84,6 +90,7 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn platform_start(watch: Watch) {
     #[cfg(target_os = "linux")]
     linux::start(watch);
@@ -91,10 +98,17 @@ fn platform_start(watch: Watch) {
     windows::start(watch);
     #[cfg(target_os = "macos")]
     macos::start(watch);
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    watch.warning(
-        "platform",
-        "screen-lock/suspend notifications are unsupported on this OS",
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+fn record_warning(
+    warnings: &Mutex<BTreeMap<&'static str, String>>,
+    source: &'static str,
+    error: impl std::fmt::Display,
+) {
+    warnings.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        source,
+        format!("System lock monitoring ({source}): {error}"),
     );
 }
 
