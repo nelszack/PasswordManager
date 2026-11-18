@@ -1179,6 +1179,15 @@ mod tests {
         assert!(api.call(r#"{"op":"list"}"#).is_err());
         api.call(&json!({"op":"biometric_unlock","vault":created["vault"],"material":material["material"]}).to_string()).unwrap();
         assert_eq!(api.call(r#"{"op":"list"}"#).unwrap()["total"], 1);
+        // Biometric sessions cannot re-export the key or replace/delete the vault.
+        for request in [
+            json!({"op":"biometric_material"}),
+            json!({"op":"rekey","password":"Replacement-Lantern-Quartz-9274!"}),
+            json!({"op":"delete_vault","confirmed":true}),
+        ] {
+            assert!(api.call(&request.to_string()).is_err(), "{request}");
+        }
+        assert_eq!(api.call(r#"{"op":"list"}"#).unwrap()["total"], 1);
         api.lock();
         let mut bad = passkey::decode(material["material"].as_str().unwrap()).unwrap();
         bad[0] ^= 1;

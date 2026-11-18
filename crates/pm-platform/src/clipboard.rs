@@ -326,7 +326,7 @@ mod test {
     }
 
     #[test]
-    fn test_zero_timeout_does_not_panic() {
+    fn zero_timeout_disables_copying_without_starting_an_owner() {
         assert!(copy_with_timeout("secret", 0).is_ok());
     }
 
