@@ -1,23 +1,29 @@
 // Serialize operations per tab so consumption, replacement and expiry cannot race.
 const PasswordManagerBackgroundPending = {
     create({ chrome, security, records, setTimeout }) {
-        const memory = new Map(), operations = new Map();
+        const memory = new Map(),
+            operations = new Map();
         const prefix = "pmPopupPending:";
         // This context bridges top-level login steps. An embedded document must
         // never replace or consume the containing page's username.
-        const keyFor = sender => sender?.frameId === 0 && security.senderOrigin(sender)
-            ? security.pendingStorageKey(sender) : null;
+        const keyFor = sender =>
+            sender?.frameId === 0 && security.senderOrigin(sender) ? security.pendingStorageKey(sender) : null;
         function storage(method, value) {
-            return new Promise((resolve, reject) => chrome.storage.session[method](value, result => {
-                const error = chrome.runtime.lastError?.message;
-                if (error) reject(new Error(error)); else resolve(result);
-            }));
+            return new Promise((resolve, reject) =>
+                chrome.storage.session[method](value, result => {
+                    const error = chrome.runtime.lastError?.message;
+                    if (error) reject(new Error(error));
+                    else resolve(result);
+                })
+            );
         }
         function ordered(key, operation) {
             const previous = operations.get(key) || Promise.resolve();
             const next = previous.catch(() => {}).then(operation);
             operations.set(key, next);
-            next.finally(() => { if (operations.get(key) === next) operations.delete(key); }).catch(() => {});
+            next.finally(() => {
+                if (operations.get(key) === next) operations.delete(key);
+            }).catch(() => {});
             return next;
         }
         function respond(operation, sendResponse) {
@@ -33,19 +39,35 @@ const PasswordManagerBackgroundPending = {
             });
         }
         function set(request, sender, sendResponse) {
-            const key = keyFor(sender), domain = security.senderOrigin(sender);
+            const key = keyFor(sender),
+                domain = security.senderOrigin(sender);
             const pending = request?.pending;
-            if (!key || !domain || !pending || typeof pending !== "object" || Array.isArray(pending) || "password" in pending
-                || typeof pending.username !== "string" || !pending.username || pending.username.length > 4096) {
-                sendResponse({ success: false, error: "Invalid pending credentials" }); return;
+            if (
+                !key ||
+                !domain ||
+                !pending ||
+                typeof pending !== "object" ||
+                Array.isArray(pending) ||
+                "password" in pending ||
+                typeof pending.username !== "string" ||
+                !pending.username ||
+                pending.username.length > 4096
+            ) {
+                sendResponse({ success: false, error: "Invalid pending credentials" });
+                return;
             }
             const record = records.create(pending, domain);
-            respond(ordered(key, async () => {
-                await storage("set", { [key]: record });
-                memory.set(key, record);
-                setTimeout(() => { expire(key).catch(() => {}); }, records.MAX_AGE_MS);
-                return { success: true };
-            }), sendResponse);
+            respond(
+                ordered(key, async () => {
+                    await storage("set", { [key]: record });
+                    memory.set(key, record);
+                    setTimeout(() => {
+                        expire(key).catch(() => {});
+                    }, records.MAX_AGE_MS);
+                    return { success: true };
+                }),
+                sendResponse
+            );
         }
         function take(key, domain) {
             return ordered(key, async () => {
@@ -58,9 +80,16 @@ const PasswordManagerBackgroundPending = {
             });
         }
         function consume(sender, sendResponse) {
-            const key = keyFor(sender), domain = security.senderOrigin(sender);
-            if (!key || !domain) { sendResponse({ success: false, error: "Invalid page origin" }); return; }
-            respond(take(key, domain).then(pending => ({ success: true, pending })), sendResponse);
+            const key = keyFor(sender),
+                domain = security.senderOrigin(sender);
+            if (!key || !domain) {
+                sendResponse({ success: false, error: "Invalid page origin" });
+                return;
+            }
+            respond(
+                take(key, domain).then(pending => ({ success: true, pending })),
+                sendResponse
+            );
         }
         function clearKey(key) {
             return ordered(key, async () => {
@@ -70,15 +99,22 @@ const PasswordManagerBackgroundPending = {
             });
         }
         function takeRemembered(sender) {
-            const key = keyFor(sender), domain = security.senderOrigin(sender);
+            const key = keyFor(sender),
+                domain = security.senderOrigin(sender);
             return key ? take(key, domain) : Promise.resolve(null);
         }
         async function cleanup() {
             const stored = await storage("get", null);
-            await Promise.all(Object.keys(stored || {}).filter(key => key.startsWith(prefix)).map(expire));
+            await Promise.all(
+                Object.keys(stored || {})
+                    .filter(key => key.startsWith(prefix))
+                    .map(expire)
+            );
         }
-        chrome.tabs.onRemoved?.addListener(tabId => { clearKey(`${prefix}${tabId}`).catch(() => {}); });
+        chrome.tabs.onRemoved?.addListener(tabId => {
+            clearKey(`${prefix}${tabId}`).catch(() => {});
+        });
         return { set, consume, takeRemembered, cleanup };
-    }
+    },
 };
 if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPending;

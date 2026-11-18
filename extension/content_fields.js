@@ -32,13 +32,15 @@ var PasswordManagerContentFields = (() => {
     }
 
     function normalize(value) {
-        return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        return String(value || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "");
     }
 
     function customValue(fields, aliases) {
         const accepted = new Set(aliases.map(normalize));
-        const field = (Array.isArray(fields) ? fields : []).find(candidate =>
-            candidate && accepted.has(normalize(candidate.name))
+        const field = (Array.isArray(fields) ? fields : []).find(
+            candidate => candidate && accepted.has(normalize(candidate.name))
         );
         return field ? String(field.value ?? "") : "";
     }

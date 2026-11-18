@@ -7,11 +7,19 @@ const modules = {
 const { create } = require("content.js");
 let controller;
 function mount() {
-    controller?.dispose(); controller = create();
+    controller?.dispose();
+    controller = create();
     controller.start().catch(error => console.log("Password Manager error:", error));
 }
-window.addEventListener("pagehide", () => queueMicrotask(() => { controller?.dispose(); controller = null; }));
-window.addEventListener("pageshow", event => { if (event.persisted) mount(); });
+window.addEventListener("pagehide", () =>
+    queueMicrotask(() => {
+        controller?.dispose();
+        controller = null;
+    })
+);
+window.addEventListener("pageshow", event => {
+    if (event.persisted) mount();
+});
 mount();
 
 },
@@ -34,27 +42,48 @@ module.exports.create = function create() {
     let disposed = false;
     const bridge = bridgeModule.create();
     const credentials = credentialsModule.create({ roots: () => rootControllers.keys() });
-    const { restoreUsernameFromPreviousStep, storeUsernameForLater, rememberUsernameAcrossNavigation,
-        findLoginCredentials, usernameFromScope, credentialsFromScope, resolveUsername } = credentials;
+    const {
+        restoreUsernameFromPreviousStep,
+        storeUsernameForLater,
+        rememberUsernameAcrossNavigation,
+        findLoginCredentials,
+        usernameFromScope,
+        credentialsFromScope,
+        resolveUsername,
+    } = credentials;
     const { openCredentialPrompt } = bridge;
     const autofill = autofillModule.create({ bridge });
     const controls = controlsModule.create({ bridge, credentials, autofill });
     const generator = generatorModule.create({ controls, bridge, credentials });
-    const observer = observerModule.create({ controls, generator, autofill, onRoot: registerRoot, onRemoveRoot: unregisterRoot });
+    const observer = observerModule.create({
+        controls,
+        generator,
+        autofill,
+        onRoot: registerRoot,
+        onRemoveRoot: unregisterRoot,
+    });
     const duo = duoModule.create();
     function listen(root, type, handler) {
-        root.addEventListener(type, event => {
-            if (handledEvents.has(event)) return;
-            handledEvents.add(event); handler(event);
-        }, { capture: true, signal: rootControllers.get(root).signal });
+        root.addEventListener(
+            type,
+            event => {
+                if (handledEvents.has(event)) return;
+                handledEvents.add(event);
+                handler(event);
+            },
+            { capture: true, signal: rootControllers.get(root).signal }
+        );
     }
-    function unregisterRoot(root) { rootControllers.get(root)?.abort(); rootControllers.delete(root); }
+    function unregisterRoot(root) {
+        rootControllers.get(root)?.abort();
+        rootControllers.delete(root);
+    }
     function registerRoot(root) {
         if (disposed || rootControllers.has(root)) return;
         rootControllers.set(root, new AbortController());
         // Remember the last username typed on this domain so password-only
         // login steps (and the save prompt) know which account is logging in.
-        listen(root, "input", (e) => {
+        listen(root, "input", e => {
             const t = e.composedPath?.()[0] || e.target;
             if (!e.isTrusted || !(t instanceof HTMLInputElement) || !isCredentialInput(t)) return;
             credentialUserIntent = true;
@@ -64,7 +93,7 @@ module.exports.create = function create() {
             }
         });
 
-        listen(root, "focusin", (e) => {
+        listen(root, "focusin", e => {
             const target = e.composedPath?.()[0] || e.target;
             const targetRoot = target.getRootNode?.();
             if (targetRoot?.host && !rootControllers.has(targetRoot)) observer.scan(targetRoot);
@@ -78,11 +107,14 @@ module.exports.create = function create() {
             credentialsFor: form => findLoginCredentials(form),
             shouldIgnore: () => disposed || !credentialAttempt.idle,
             userActivated: () => navigator.userActivation?.isActive === true,
-            handle: ({ credentials }) => attemptCredentials(credentials)
+            handle: ({ credentials }) => attemptCredentials(credentials),
         });
         listen(root, "submit", event => {
-            if (event.isTrusted && navigator.userActivation?.isActive === true
-                && event.target instanceof HTMLFormElement) {
+            if (
+                event.isTrusted &&
+                navigator.userActivation?.isActive === true &&
+                event.target instanceof HTMLFormElement
+            ) {
                 const username = usernameFromScope(event.target);
                 if (username) rememberUsernameAcrossNavigation(username);
             }
@@ -97,26 +129,31 @@ module.exports.create = function create() {
         // or removes the password input, then defer just long enough for a normal
         // submit event to take ownership when one exists.
         const handlePossibleAdvance = source => {
-            const input = source instanceof HTMLInputElement && isCredentialInput(source)
-                ? source
-                : credentials.lastInput;
-            const scope = source?.form
-                || source?.closest?.("form, [role='form'], dialog")
-                || (input ? credentialScope(input) : null);
+            const input =
+                source instanceof HTMLInputElement && isCredentialInput(source) ? source : credentials.lastInput;
+            const scope =
+                source?.form ||
+                source?.closest?.("form, [role='form'], dialog") ||
+                (input ? credentialScope(input) : null);
             if (!scope) return;
             credentialUserIntent = true;
             const username = usernameFromScope(scope);
             const snapshot = credentialsFromScope(scope);
-            PasswordManagerFormSubmission.scheduleCredentialAdvance({
-                username: username || snapshot.username,
-                password: snapshot.password
-            }, {
-                remember: rememberUsernameAcrossNavigation,
-                shouldIgnore: () => disposed || !credentialAttempt.idle,
-                prompt: captured => {
-                    attemptCredentials(captured).catch(error => console.log("Password Manager credential prompt error:", error));
+            PasswordManagerFormSubmission.scheduleCredentialAdvance(
+                {
+                    username: username || snapshot.username,
+                    password: snapshot.password,
+                },
+                {
+                    remember: rememberUsernameAcrossNavigation,
+                    shouldIgnore: () => disposed || !credentialAttempt.idle,
+                    prompt: captured => {
+                        attemptCredentials(captured).catch(error =>
+                            console.log("Password Manager credential prompt error:", error)
+                        );
+                    },
                 }
-            });
+            );
         };
 
         listen(root, "click", event => {
@@ -135,7 +172,6 @@ module.exports.create = function create() {
             if (!(target instanceof HTMLInputElement) || !isCredentialInput(target)) return;
             handlePossibleAdvance(target);
         });
-
     }
     const credentialAttempt = PasswordManagerFormSubmission.createCredentialAttempt(captured => {
         if (captured.username) rememberUsernameAcrossNavigation(captured.username);
@@ -160,34 +196,44 @@ module.exports.create = function create() {
         // Catch logins that navigate/redirect without a form submit event
         // (e.g. fetch + window.location, or form.submit() in JS). The extension
         // window and background-owned operation survive the page being destroyed.
-        window.addEventListener("pagehide", event => {
-            if (!event.isTrusted || !credentialUserIntent) return;
-            if (!credentialAttempt.idle) return;
+        window.addEventListener(
+            "pagehide",
+            event => {
+                if (!event.isTrusted || !credentialUserIntent) return;
+                if (!credentialAttempt.idle) return;
 
-            const { username: rawUsername, password } = findLoginCredentials();
-            if (!password) {
-                const username = credentials.lastInput
-                    ? usernameFromScope(credentialScope(credentials.lastInput))
-                    : "";
-                if (username) rememberUsernameAcrossNavigation(username);
-                return;
-            }
-            const username = resolveUsername(rawUsername);
-            if (rawUsername) storeUsernameForLater(rawUsername);
+                const { username: rawUsername, password } = findLoginCredentials();
+                if (!password) {
+                    const username = credentials.lastInput
+                        ? usernameFromScope(credentialScope(credentials.lastInput))
+                        : "";
+                    if (username) rememberUsernameAcrossNavigation(username);
+                    return;
+                }
+                const username = resolveUsername(rawUsername);
+                if (rawUsername) storeUsernameForLater(rawUsername);
 
-            if (!credentialAttempt.reserve()) return;
-            chrome.runtime.sendMessage(
-                { action: "openCredentialPrompt", username, password },
-                () => void chrome.runtime.lastError
-            );
-        }, { signal: lifecycle.signal });
+                if (!credentialAttempt.reserve()) return;
+                chrome.runtime.sendMessage(
+                    { action: "openCredentialPrompt", username, password },
+                    () => void chrome.runtime.lastError
+                );
+            },
+            { signal: lifecycle.signal }
+        );
     }
-
 
     function dispose() {
         if (disposed) return;
-        disposed = true; credentialAttempt.dispose(); lifecycle.abort(); observer.dispose();
-        generator.dispose(); controls.dispose(); bridge.dispose(); duo.dispose(); credentials.dispose();
+        disposed = true;
+        credentialAttempt.dispose();
+        lifecycle.abort();
+        observer.dispose();
+        generator.dispose();
+        controls.dispose();
+        bridge.dispose();
+        duo.dispose();
+        credentials.dispose();
     }
     return { start, dispose, roots: () => [...rootControllers.keys()] };
 };
@@ -203,16 +249,24 @@ module.exports.create = function create() {
 
     const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth/i;
     const SEARCH_HINT_RE = /search|query|lookup|find/i;
-    const TOTP_HINT_RE = /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
+    const TOTP_HINT_RE =
+        /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
     const USERNAME_INPUT_TYPES = new Set(["text", "email", "tel"]);
 
     function inputDescriptors(input) {
         return [
-            input.name, input.id, input.className, input.autocomplete,
-            input.getAttribute("type"), input.getAttribute("placeholder"),
-            input.getAttribute("aria-label"), input.getAttribute("role"),
-            ...Array.from(input.labels || [], label => label.textContent)
-        ].filter(Boolean).map(String);
+            input.name,
+            input.id,
+            input.className,
+            input.autocomplete,
+            input.getAttribute("type"),
+            input.getAttribute("placeholder"),
+            input.getAttribute("aria-label"),
+            input.getAttribute("role"),
+            ...Array.from(input.labels || [], label => label.textContent),
+        ]
+            .filter(Boolean)
+            .map(String);
     }
 
     function autocompleteTokens(input) {
@@ -224,19 +278,26 @@ module.exports.create = function create() {
     function withVisibilityCache(action) {
         const previous = scanVisibility;
         scanVisibility = new WeakMap();
-        try { return action(); } finally { scanVisibility = previous; }
+        try {
+            return action();
+        } finally {
+            scanVisibility = previous;
+        }
     }
     function isElementVisible(element) {
         if (!element || !element.isConnected) return false;
         const visited = [];
         let visible = true;
-        for (let node = element; node && node.nodeType === 1;
-            node = node.parentElement || node.getRootNode?.().host) {
-            if (scanVisibility?.has(node)) { visible = scanVisibility.get(node); break; }
+        for (let node = element; node && node.nodeType === 1; node = node.parentElement || node.getRootNode?.().host) {
+            if (scanVisibility?.has(node)) {
+                visible = scanVisibility.get(node);
+                break;
+            }
             visited.push(node);
             const style = getComputedStyle(node);
             if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-                visible = false; break;
+                visible = false;
+                break;
             }
         }
         for (const node of visited) scanVisibility?.set(node, visible);
@@ -259,13 +320,18 @@ module.exports.create = function create() {
     }
 
     function hasSearchHint(input) {
-        return input.type === "search" || input.getAttribute("role") === "searchbox"
-            || inputDescriptors(input).some(value => SEARCH_HINT_RE.test(value));
+        return (
+            input.type === "search" ||
+            input.getAttribute("role") === "searchbox" ||
+            inputDescriptors(input).some(value => SEARCH_HINT_RE.test(value))
+        );
     }
 
     function isNewPasswordInput(input) {
-        return autocompleteTokens(input).includes("new-password")
-            || inputDescriptors(input).some(value => /confirm|repeat|retype|new[-_ ]?pass|create[-_ ]?pass/i.test(value));
+        return (
+            autocompleteTokens(input).includes("new-password") ||
+            inputDescriptors(input).some(value => /confirm|repeat|retype|new[-_ ]?pass|create[-_ ]?pass/i.test(value))
+        );
     }
 
     function isLoginPasswordInput(input) {
@@ -274,10 +340,17 @@ module.exports.create = function create() {
 
     function usernameCandidates(fields) {
         return fields.filter(field => {
-            if (!isUsableInput(field) || !USERNAME_INPUT_TYPES.has(field.type)
-                || hasSearchHint(field) || isTotpInput(field)) return false;
-            const tokens = autocompleteTokens(field).filter(token =>
-                !token.startsWith("section-") && !["shipping", "billing", "on", "off", "webauthn"].includes(token));
+            if (
+                !isUsableInput(field) ||
+                !USERNAME_INPUT_TYPES.has(field.type) ||
+                hasSearchHint(field) ||
+                isTotpInput(field)
+            )
+                return false;
+            const tokens = autocompleteTokens(field).filter(
+                token =>
+                    !token.startsWith("section-") && !["shipping", "billing", "on", "off", "webauthn"].includes(token)
+            );
             return !tokens.length || tokens.some(token => ["username", "email", "tel"].includes(token));
         });
     }
@@ -289,8 +362,10 @@ module.exports.create = function create() {
         let candidate = input.parentElement;
         while (candidate && candidate !== document.body) {
             const fields = Array.from(candidate.querySelectorAll("input")).filter(isUsableInput);
-            if (fields.some(field => field.type === "password")
-                && fields.some(field => USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))) {
+            if (
+                fields.some(field => field.type === "password") &&
+                fields.some(field => USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))
+            ) {
                 return candidate;
             }
             candidate = candidate.parentElement;
@@ -300,34 +375,45 @@ module.exports.create = function create() {
 
     function chooseUsernameField(fields, anchor) {
         const candidates = usernameCandidates(fields);
-        const preceding = anchor ? candidates.filter(field => fields.indexOf(field) < fields.indexOf(anchor)) : candidates;
+        const preceding = anchor
+            ? candidates.filter(field => fields.indexOf(field) < fields.indexOf(anchor))
+            : candidates;
         const pool = preceding.length ? preceding.toReversed() : candidates;
-        return pool.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email"))
-            || pool.find(hasUsernameHint) || (preceding.length ? pool[0] : pool.at(-1)) || null;
+        return (
+            pool.find(field => autocompleteTokens(field).some(token => token === "username" || token === "email")) ||
+            pool.find(hasUsernameHint) ||
+            (preceding.length ? pool[0] : pool.at(-1)) ||
+            null
+        );
     }
 
     function choosePasswordField(fields, anchor) {
         const candidates = fields.filter(isLoginPasswordInput);
-        return (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor)))
-            || candidates.find(field => autocompleteTokens(field).includes("current-password"))
-            || candidates[0] || null;
+        return (
+            (anchor && candidates.find(field => fields.indexOf(field) > fields.indexOf(anchor))) ||
+            candidates.find(field => autocompleteTokens(field).includes("current-password")) ||
+            candidates[0] ||
+            null
+        );
     }
 
     function credentialFields(input, scope = credentialScope(input)) {
         const fields = scopeInputs(scope);
         return {
             scope,
-            usernameField: usernameCandidates(fields).includes(input)
-                ? input : chooseUsernameField(fields, input),
-            passwordField: fields.includes(input) && isLoginPasswordInput(input) ? input : choosePasswordField(fields, input)
+            usernameField: usernameCandidates(fields).includes(input) ? input : chooseUsernameField(fields, input),
+            passwordField:
+                fields.includes(input) && isLoginPasswordInput(input) ? input : choosePasswordField(fields, input),
         };
     }
 
     function isTotpInput(input) {
         if (!isUsableInput(input)) return false;
         if (autocompleteTokens(input).includes("one-time-code")) return true;
-        return ["text", "tel", "number"].includes(input.type)
-            && inputDescriptors(input).some(value => TOTP_HINT_RE.test(value));
+        return (
+            ["text", "tel", "number"].includes(input.type) &&
+            inputDescriptors(input).some(value => TOTP_HINT_RE.test(value))
+        );
     }
 
     function isUsernameBeforePassword(input, formUsernames) {
@@ -348,10 +434,22 @@ module.exports.create = function create() {
     }
 
     return {
-        USERNAME_INPUT_TYPES, autocompleteTokens, credentialFields, credentialScope,
-        hasSearchHint, hasUsernameHint, inputDescriptors, isCredentialInput,
-        isElementVisible, isLoginPasswordInput, isNewPasswordInput, isTotpInput,
-        isUsableInput, scopeInputs, usernameCandidates, withVisibilityCache
+        USERNAME_INPUT_TYPES,
+        autocompleteTokens,
+        credentialFields,
+        credentialScope,
+        hasSearchHint,
+        hasUsernameHint,
+        inputDescriptors,
+        isCredentialInput,
+        isElementVisible,
+        isLoginPasswordInput,
+        isNewPasswordInput,
+        isTotpInput,
+        isUsableInput,
+        scopeInputs,
+        usernameCandidates,
+        withVisibilityCache,
     };
 });
 
@@ -381,7 +479,16 @@ module.exports.create = function create() {
                 if (phase === "pending") phase = "idle";
             }
         }
-        return { run, reserve, get idle() { return phase === "idle"; }, dispose() { phase = "disposed"; } };
+        return {
+            run,
+            reserve,
+            get idle() {
+                return phase === "idle";
+            },
+            dispose() {
+                phase = "disposed";
+            },
+        };
     }
 
     function createSubmissionCoordinator(options) {
@@ -443,15 +550,21 @@ module.exports.create = function create({} = {}) {
         function open(fields) {
             if (disposed) return Promise.resolve(cancelled);
             return new Promise((resolve, reject) => {
-                const request = { token: null, timer: null, finish(value, error) {
-                    if (!active.delete(request)) return;
-                    opening.delete(request);
-                    if (request.token) resolvers.delete(request.token);
-                    clearTimeout(request.timer);
-                    if (!opening.size) early.clear();
-                    if (error) reject(error); else resolve(value);
-                } };
-                opening.add(request); active.add(request);
+                const request = {
+                    token: null,
+                    timer: null,
+                    finish(value, error) {
+                        if (!active.delete(request)) return;
+                        opening.delete(request);
+                        if (request.token) resolvers.delete(request.token);
+                        clearTimeout(request.timer);
+                        if (!opening.size) early.clear();
+                        if (error) reject(error);
+                        else resolve(value);
+                    },
+                };
+                opening.add(request);
+                active.add(request);
                 try {
                     chrome.runtime.sendMessage({ action, ...fields }, response => {
                         if (!active.has(request)) return;
@@ -459,7 +572,10 @@ module.exports.create = function create({} = {}) {
                             request.finish(null, new Error(chrome.runtime.lastError.message));
                             return;
                         }
-                        if (response?.skipped) { request.finish({ action: "skipped" }); return; }
+                        if (response?.skipped) {
+                            request.finish({ action: "skipped" });
+                            return;
+                        }
                         if (!response?.success || !response.token) {
                             request.finish(null, new Error(response?.error || "Could not open secure window"));
                             return;
@@ -476,7 +592,9 @@ module.exports.create = function create({} = {}) {
                         }
                         if (!opening.size) early.clear();
                     });
-                } catch (error) { request.finish(null, error); }
+                } catch (error) {
+                    request.finish(null, error);
+                }
             });
         }
         function receive(message) {
@@ -497,16 +615,24 @@ module.exports.create = function create({} = {}) {
 
     const pickers = windowRequests("openSecurePicker", "securePickerResult", 65_000, null);
     const prompts = windowRequests("openCredentialPrompt", "credentialPromptResult", 125_000, { action: "cancel" });
-    const listener = message => { pickers.receive(message); prompts.receive(message); };
+    const listener = message => {
+        pickers.receive(message);
+        prompts.receive(message);
+    };
     chrome.runtime.onMessage.addListener(listener);
     function dispose() {
         disposed = true;
         chrome.runtime.onMessage.removeListener(listener);
-        pickers.dispose(); prompts.dispose();
+        pickers.dispose();
+        prompts.dispose();
     }
 
-    return { fillInput, openSecurePicker: kind => pickers.open({ kind }),
-        openCredentialPrompt: (username, password) => prompts.open({ username, password }), dispose };
+    return {
+        fillInput,
+        openSecurePicker: kind => pickers.open({ kind }),
+        openCredentialPrompt: (username, password) => prompts.open({ username, password }),
+        dispose,
+    };
 };
 
 },
@@ -514,8 +640,12 @@ module.exports.create = function create({} = {}) {
 "use strict";
 // Callers validate eligibility and resolve select options before setting a value.
 function setControlValue(control, value) {
-    const prototype = control instanceof HTMLInputElement ? HTMLInputElement.prototype
-        : control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLSelectElement.prototype;
+    const prototype =
+        control instanceof HTMLInputElement
+            ? HTMLInputElement.prototype
+            : control instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype
+              : HTMLSelectElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
     if (setter) setter.call(control, value);
     else control.value = value;
@@ -526,32 +656,45 @@ module.exports = { setControlValue };
 
 },
 "content_credentials.js": (module, exports, require) => {
-const { scopeInputs, isUsableInput, isNewPasswordInput, autocompleteTokens, inputDescriptors,
-    usernameCandidates, hasUsernameHint, credentialScope, credentialFields } = require("content_detection.js");
+const {
+    scopeInputs,
+    isUsableInput,
+    isNewPasswordInput,
+    autocompleteTokens,
+    inputDescriptors,
+    usernameCandidates,
+    hasUsernameHint,
+    credentialScope,
+    credentialFields,
+} = require("content_detection.js");
 module.exports.create = function create({ roots = () => [document] } = {}) {
-    function getDomainFromUrl(url) { return new URL(url).origin.toLowerCase(); }
+    function getDomainFromUrl(url) {
+        return new URL(url).origin.toLowerCase();
+    }
     let storedUsername = "";
     let storedDomain = "";
     let lastCredentialInput = null;
 
     function credentialsFromScope(scope) {
         const fields = scopeInputs(scope);
-        const filledPasswords = fields.filter(field =>
-            isUsableInput(field) && field.type === "password" && field.value
+        const filledPasswords = fields.filter(
+            field => isUsableInput(field) && field.type === "password" && field.value
         );
         const newPasswords = filledPasswords.filter(isNewPasswordInput);
         const currentPasswords = filledPasswords.filter(field => !isNewPasswordInput(field));
         const selectedPassword = fields.includes(lastCredentialInput)
-            ? credentialFields(lastCredentialInput, scope).passwordField : null;
+            ? credentialFields(lastCredentialInput, scope).passwordField
+            : null;
         // Capture a newly chosen password on registration/change-password forms,
         // but never autofill these fields (credentialFields excludes them).
-        const passwordField = newPasswords.find(field => autocompleteTokens(field).includes("new-password"))
-            || newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value)))
-            || newPasswords[0]
-            || (currentPasswords.includes(selectedPassword) ? selectedPassword : null)
-            || currentPasswords.find(field => autocompleteTokens(field).includes("current-password"))
-            || currentPasswords[0]
-            || null;
+        const passwordField =
+            newPasswords.find(field => autocompleteTokens(field).includes("new-password")) ||
+            newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value))) ||
+            newPasswords[0] ||
+            (currentPasswords.includes(selectedPassword) ? selectedPassword : null) ||
+            currentPasswords.find(field => autocompleteTokens(field).includes("current-password")) ||
+            currentPasswords[0] ||
+            null;
         if (!passwordField) return { username: "", password: "", scope };
 
         const usernameField = credentialFields(passwordField, scope).usernameField;
@@ -559,16 +702,20 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         return {
             username: usernameField ? usernameField.value.trim() : "",
             password: passwordField.value,
-            scope
+            scope,
         };
     }
 
     function usernameFromScope(scope) {
         const fields = scopeInputs(scope);
         const candidates = usernameCandidates(fields).filter(field => field.value.trim());
-        const usernameField = candidates.find(field =>
-            autocompleteTokens(field).some(token => token === "username" || token === "email")
-        ) || candidates.find(hasUsernameHint) || candidates.at(-1) || null;
+        const usernameField =
+            candidates.find(field =>
+                autocompleteTokens(field).some(token => token === "username" || token === "email")
+            ) ||
+            candidates.find(hasUsernameHint) ||
+            candidates.at(-1) ||
+            null;
         return usernameField ? usernameField.value.trim() : "";
     }
 
@@ -586,7 +733,9 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         }
 
         const seen = new Set();
-        for (const passwordField of [...roots()].flatMap(root => [...root.querySelectorAll("input[type='password']")])) {
+        for (const passwordField of [...roots()].flatMap(root => [
+            ...root.querySelectorAll("input[type='password']"),
+        ])) {
             if (!isUsableInput(passwordField) || !passwordField.value) continue;
             const scope = credentialScope(passwordField);
             if (seen.has(scope)) continue;
@@ -611,10 +760,13 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
     function rememberUsernameAcrossNavigation(username) {
         storeUsernameForLater(username);
         if (!username || window !== window.top) return;
-        chrome.runtime.sendMessage({
-            action: "setPendingCredentials",
-            pending: { username }
-        }, () => void chrome.runtime.lastError);
+        chrome.runtime.sendMessage(
+            {
+                action: "setPendingCredentials",
+                pending: { username },
+            },
+            () => void chrome.runtime.lastError
+        );
     }
 
     function restoreUsernameFromPreviousStep() {
@@ -642,10 +794,25 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
     // The add/update prompt is an extension-owned window so it survives page
     // navigation. The background retains the password and performs the operation.
 
-    return { credentialsFromScope, usernameFromScope, findLoginCredentials, storeUsernameForLater,
-        rememberUsernameAcrossNavigation, restoreUsernameFromPreviousStep, resolveUsername,
-        get lastInput() { return lastCredentialInput; }, set lastInput(input) { lastCredentialInput = input; },
-        dispose() { storedUsername = storedDomain = ""; lastCredentialInput = null; } };
+    return {
+        credentialsFromScope,
+        usernameFromScope,
+        findLoginCredentials,
+        storeUsernameForLater,
+        rememberUsernameAcrossNavigation,
+        restoreUsernameFromPreviousStep,
+        resolveUsername,
+        get lastInput() {
+            return lastCredentialInput;
+        },
+        set lastInput(input) {
+            lastCredentialInput = input;
+        },
+        dispose() {
+            storedUsername = storedDomain = "";
+            lastCredentialInput = null;
+        },
+    };
 };
 
 },
@@ -656,21 +823,59 @@ const { setControlValue } = require("content_value.js");
 const PasswordManagerContentFields = require("content_fields.js");
 module.exports.create = function create({ bridge }) {
     const CARD_AUTOCOMPLETE_FIELDS = new Set([
-        "cc-name", "cc-given-name", "cc-additional-name", "cc-family-name",
-        "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "cc-type"
+        "cc-name",
+        "cc-given-name",
+        "cc-additional-name",
+        "cc-family-name",
+        "cc-number",
+        "cc-exp",
+        "cc-exp-month",
+        "cc-exp-year",
+        "cc-csc",
+        "cc-type",
     ]);
     const IDENTITY_AUTOCOMPLETE_FIELDS = new Set([
-        "name", "given-name", "additional-name", "family-name", "honorific-prefix",
-        "honorific-suffix", "nickname", "email", "tel", "organization",
-        "street-address", "address-line1", "address-line2", "address-line3",
-        "address-level1", "address-level2", "address-level3", "address-level4",
-        "country", "country-name", "postal-code"
+        "name",
+        "given-name",
+        "additional-name",
+        "family-name",
+        "honorific-prefix",
+        "honorific-suffix",
+        "nickname",
+        "email",
+        "tel",
+        "organization",
+        "street-address",
+        "address-line1",
+        "address-line2",
+        "address-line3",
+        "address-level1",
+        "address-level2",
+        "address-level3",
+        "address-level4",
+        "country",
+        "country-name",
+        "postal-code",
     ]);
     const IDENTITY_CONTEXT_FIELDS = new Set([
-        "name", "given-name", "additional-name", "family-name", "honorific-prefix",
-        "honorific-suffix", "organization", "street-address", "address-line1",
-        "address-line2", "address-line3", "address-level1", "address-level2",
-        "address-level3", "address-level4", "country", "country-name", "postal-code"
+        "name",
+        "given-name",
+        "additional-name",
+        "family-name",
+        "honorific-prefix",
+        "honorific-suffix",
+        "organization",
+        "street-address",
+        "address-line1",
+        "address-line2",
+        "address-line3",
+        "address-level1",
+        "address-level2",
+        "address-level3",
+        "address-level4",
+        "country",
+        "country-name",
+        "postal-code",
     ]);
 
     function formScope(input) {
@@ -678,13 +883,15 @@ module.exports.create = function create({ bridge }) {
     }
 
     function formControls(scope) {
-        const controls = scope instanceof HTMLFormElement
-            ? Array.from(scope.elements)
-            : Array.from(scope.querySelectorAll("input, select, textarea"));
-        return controls.filter(control =>
-            control instanceof HTMLInputElement
-            || control instanceof HTMLSelectElement
-            || control instanceof HTMLTextAreaElement
+        const controls =
+            scope instanceof HTMLFormElement
+                ? Array.from(scope.elements)
+                : Array.from(scope.querySelectorAll("input, select, textarea"));
+        return controls.filter(
+            control =>
+                control instanceof HTMLInputElement ||
+                control instanceof HTMLSelectElement ||
+                control instanceof HTMLTextAreaElement
         );
     }
 
@@ -697,12 +904,15 @@ module.exports.create = function create({ bridge }) {
     }
 
     function autofillField(control, kind) {
-        if (control instanceof HTMLInputElement
-            && !["text", "email", "tel", "number", "month"].includes(control.type)) return null;
+        if (control instanceof HTMLInputElement && !["text", "email", "tel", "number", "month"].includes(control.type))
+            return null;
         const tokens = autocompleteTokens(control);
-        const explicit = tokens.find(token => CARD_AUTOCOMPLETE_FIELDS.has(token)
-            || IDENTITY_AUTOCOMPLETE_FIELDS.has(token)
-            || ["username", "current-password", "new-password", "one-time-code"].includes(token));
+        const explicit = tokens.find(
+            token =>
+                CARD_AUTOCOMPLETE_FIELDS.has(token) ||
+                IDENTITY_AUTOCOMPLETE_FIELDS.has(token) ||
+                ["username", "current-password", "new-password", "one-time-code"].includes(token)
+        );
         const fields = kind === "payment-card" ? CARD_AUTOCOMPLETE_FIELDS : IDENTITY_AUTOCOMPLETE_FIELDS;
         // Explicit field roles override guesses from names, labels and classes.
         if (explicit) return fields.has(explicit) ? explicit : null;
@@ -713,7 +923,7 @@ module.exports.create = function create({ bridge }) {
         const tokens = autocompleteTokens(control);
         return JSON.stringify([
             tokens.find(token => token.startsWith("section-")) || "",
-            tokens.find(token => token === "shipping" || token === "billing") || ""
+            tokens.find(token => token === "shipping" || token === "billing") || "",
         ]);
     }
 
@@ -754,16 +964,16 @@ module.exports.create = function create({ bridge }) {
         "cc-exp-year": ["expiration year", "expiry year", "exp year", "cc exp year"],
         "cc-csc": ["cvv", "cvc", "csc", "security code", "card security code"],
         "cc-type": ["card type", "network", "brand"],
-        "name": ["name", "full name", "legal name"],
+        name: ["name", "full name", "legal name"],
         "given-name": ["first name", "given name"],
         "additional-name": ["middle name", "additional name"],
         "family-name": ["last name", "family name", "surname"],
         "honorific-prefix": ["title", "prefix", "honorific prefix"],
         "honorific-suffix": ["suffix", "honorific suffix"],
-        "nickname": ["nickname", "preferred name"],
-        "email": ["email", "email address"],
-        "tel": ["phone", "telephone", "mobile", "phone number"],
-        "organization": ["organization", "company", "business"],
+        nickname: ["nickname", "preferred name"],
+        email: ["email", "email address"],
+        tel: ["phone", "telephone", "mobile", "phone number"],
+        organization: ["organization", "company", "business"],
         "street-address": ["street address", "full address", "address"],
         "address-line1": ["address line 1", "address1", "street"],
         "address-line2": ["address line 2", "address2", "apartment", "suite", "unit"],
@@ -772,9 +982,9 @@ module.exports.create = function create({ bridge }) {
         "address-level2": ["city", "town"],
         "address-level3": ["district", "county"],
         "address-level4": ["suburb", "neighborhood"],
-        "country": ["country code", "country"],
+        country: ["country code", "country"],
         "country-name": ["country name", "country"],
-        "postal-code": ["postal code", "zip", "zip code"]
+        "postal-code": ["postal code", "zip", "zip code"],
     };
 
     function autofillValue(item, field) {
@@ -789,9 +999,9 @@ module.exports.create = function create({ bridge }) {
         if (!control || control.disabled || control.readOnly || !isElementVisible(control)) return;
         if (control instanceof HTMLSelectElement) {
             const wanted = String(value).trim().toLowerCase();
-            const option = Array.from(control.options).find(candidate =>
-                candidate.value.trim().toLowerCase() === wanted
-                || candidate.text.trim().toLowerCase() === wanted
+            const option = Array.from(control.options).find(
+                candidate =>
+                    candidate.value.trim().toLowerCase() === wanted || candidate.text.trim().toLowerCase() === wanted
             );
             if (!option) return;
             setControlValue(control, option.value);
@@ -809,8 +1019,11 @@ module.exports.create = function create({ bridge }) {
         if (!scope.isConnected) return;
         const kind = item.kind;
         const targets = formControls(scope).map((control, index) => ({
-            control, index, id: control.id, name: control.name,
-            field: fieldGroup(control) === group ? autofillField(control, kind) : null
+            control,
+            index,
+            id: control.id,
+            name: control.name,
+            field: fieldGroup(control) === group ? autofillField(control, kind) : null,
         }));
         for (const target of targets) {
             const { index, field, id, name } = target;
@@ -819,10 +1032,19 @@ module.exports.create = function create({ bridge }) {
             // Prefer the original control or a unique stable identifier when a
             // page replaces/reorders fields; use position only for unnamed fields.
             const current = formControls(scope);
-            const matches = current.filter(control => (id ? control.id === id : name && control.name === name)
-                && fieldGroup(control) === group && autofillField(control, kind) === field);
-            const control = current.includes(target.control) ? target.control
-                : matches.length === 1 ? matches[0] : !id && !name ? current[index] : null;
+            const matches = current.filter(
+                control =>
+                    (id ? control.id === id : name && control.name === name) &&
+                    fieldGroup(control) === group &&
+                    autofillField(control, kind) === field
+            );
+            const control = current.includes(target.control)
+                ? target.control
+                : matches.length === 1
+                  ? matches[0]
+                  : !id && !name
+                    ? current[index]
+                    : null;
             if (!control || fieldGroup(control) !== group || autofillField(control, kind) !== field) continue;
             const value = autofillValue(item, field);
             if (value) fillFormControl(control, value);
@@ -869,13 +1091,15 @@ var PasswordManagerContentFields = (() => {
     }
 
     function normalize(value) {
-        return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        return String(value || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "");
     }
 
     function customValue(fields, aliases) {
         const accepted = new Set(aliases.map(normalize));
-        const field = (Array.isArray(fields) ? fields : []).find(candidate =>
-            candidate && accepted.has(normalize(candidate.name))
+        const field = (Array.isArray(fields) ? fields : []).find(
+            candidate => candidate && accepted.has(normalize(candidate.name))
         );
         return field ? String(field.value ?? "") : "";
     }
@@ -888,7 +1112,12 @@ if (typeof module !== "undefined") module.exports = PasswordManagerContentFields
 },
 "content_controls.js": (module, exports, require) => {
 "use strict";
-const { isUsableInput, credentialFields, credentialScope, withVisibilityCache = action => action() } = require("content_detection.js");
+const {
+    isUsableInput,
+    credentialFields,
+    credentialScope,
+    withVisibilityCache = action => action(),
+} = require("content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
     const { fillInput, openSecurePicker } = bridge;
     const { storeUsernameForLater } = credentials;
@@ -904,14 +1133,19 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     let controlResizeObserver = null;
 
     function registerPositionedControl(input, button, position, onRemove = () => {}) {
-        const record = { input, button, position, remove() {
-            positionedControls.delete(record);
-            button.remove();
-            if (![...positionedControls].some(control => control.input === input)) {
-                controlResizeObserver?.unobserve(input);
-            }
-            onRemove();
-        } };
+        const record = {
+            input,
+            button,
+            position,
+            remove() {
+                positionedControls.delete(record);
+                button.remove();
+                if (![...positionedControls].some(control => control.input === input)) {
+                    controlResizeObserver?.unobserve(input);
+                }
+                onRemove();
+            },
+        };
         positionedControls.add(record);
         startLayoutObserver();
         controlResizeObserver?.observe(input);
@@ -956,14 +1190,19 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         // changing the inputs themselves. Ignore our own style writes to avoid
         // scheduling another layout frame after every reposition.
         layoutObserver = new MutationObserver(mutations => {
-            if (mutations.some(mutation => mutation.type !== "attributes"
-                || !mutation.target.classList?.contains("my-extension-ui"))) reposition();
+            if (
+                mutations.some(
+                    mutation =>
+                        mutation.type !== "attributes" || !mutation.target.classList?.contains("my-extension-ui")
+                )
+            )
+                reposition();
         });
         layoutObserver.observe(document.body, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open"]
+            attributeFilter: ["class", "style", "hidden", "open"],
         });
     }
 
@@ -988,9 +1227,20 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         button.title = title;
         button.setAttribute("aria-label", title);
         Object.assign(button.style, {
-            position: "fixed", border: "none", background: "transparent", cursor: "pointer",
-            fontSize: "16px", zIndex: "2147483647", padding: "0", margin: "0", display: "none",
-            width: "28px", height: "28px", minWidth: "28px", minHeight: "28px", boxSizing: "border-box"
+            position: "fixed",
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            fontSize: "16px",
+            zIndex: "2147483647",
+            padding: "0",
+            margin: "0",
+            display: "none",
+            width: "28px",
+            height: "28px",
+            minWidth: "28px",
+            minHeight: "28px",
+            boxSizing: "border-box",
         });
         // Keep keyboard traversal beside the field the control belongs to.
         if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
@@ -1025,18 +1275,25 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function createSecureCredentialButton(input) {
-        createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", (account, scope) => {
-            if (!scope.isConnected) return;
-            let fields = credentialFields(input, scope);
-            storeUsernameForLater(accountUsername(account).trim());
-            fillInput(fields.usernameField, accountUsername(account));
-            // Site input handlers may replace fields synchronously. Stay within
-            // the original scope and resolve the live password after those run.
-            if (!scope.isConnected) return;
-            fields = credentialFields(input, scope);
-            fillInput(fields.passwordField, account.password);
-            (fields.passwordField || fields.usernameField)?.focus();
-        }, () => credentialScope(input));
+        createSecurePickerButton(
+            input,
+            "login",
+            "🔑",
+            "Choose saved credentials",
+            (account, scope) => {
+                if (!scope.isConnected) return;
+                let fields = credentialFields(input, scope);
+                storeUsernameForLater(accountUsername(account).trim());
+                fillInput(fields.usernameField, accountUsername(account));
+                // Site input handlers may replace fields synchronously. Stay within
+                // the original scope and resolve the live password after those run.
+                if (!scope.isConnected) return;
+                fields = credentialFields(input, scope);
+                fillInput(fields.passwordField, account.password);
+                (fields.passwordField || fields.usernameField)?.focus();
+            },
+            () => credentialScope(input)
+        );
     }
 
     function createSecureTotpButton(input) {
@@ -1062,11 +1319,23 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function dispose() {
-        disposed = true; lifecycle.abort(); layoutObserver?.disconnect(); controlResizeObserver?.disconnect();
+        disposed = true;
+        lifecycle.abort();
+        layoutObserver?.disconnect();
+        controlResizeObserver?.disconnect();
         for (const control of positionedControls) control.remove();
     }
 
-    return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, schedulePosition: () => schedulePosition(), accountUsername, dispose };
+    return {
+        createSecureCredentialButton,
+        createSecureTotpButton,
+        createSecureTypedButton,
+        removeSecurePickerButton,
+        registerPositionedControl,
+        schedulePosition: () => schedulePosition(),
+        accountUsername,
+        dispose,
+    };
 };
 
 // Return deferred writes so callers can finish all style/geometry reads first.
@@ -1074,9 +1343,10 @@ function positionedButton(input, button, offset) {
     const { isElementVisible } = require("content_detection.js");
     const measure = () => {
         const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
-        const values = rect?.width && rect?.height
-            ? { display: "", left: rect.right - offset + "px", top: rect.top + rect.height / 2 - 14 + "px" }
-            : { display: "none" };
+        const values =
+            rect?.width && rect?.height
+                ? { display: "", left: rect.right - offset + "px", top: rect.top + rect.height / 2 - 14 + "px" }
+                : { display: "none" };
         return () => {
             for (const [key, value] of Object.entries(values)) {
                 if (button.style[key] !== value) button.style[key] = value;
@@ -1106,12 +1376,15 @@ module.exports.create = function create({ controls, bridge, credentials }) {
     });
     const storageChanged = (changes, area) => {
         if (area !== "local") return;
-        for (const key of ["pmGenerator", "pmGeneratorsByOrigin"]) if (changes[key]) pageGeneratorStorage[key] = changes[key].newValue;
+        for (const key of ["pmGenerator", "pmGeneratorsByOrigin"])
+            if (changes[key]) pageGeneratorStorage[key] = changes[key].newValue;
         pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
     };
     chrome.storage.onChanged.addListener(storageChanged);
     function generatePagePassword(length) {
-        return PasswordManagerGenerator.generate(length === undefined ? pageGeneratorSettings : { ...pageGeneratorSettings, length });
+        return PasswordManagerGenerator.generate(
+            length === undefined ? pageGeneratorSettings : { ...pageGeneratorSettings, length }
+        );
     }
 
     const generatorControls = new WeakMap();
@@ -1142,7 +1415,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             zIndex: "2147483647",
             padding: "0",
             margin: "0",
-            display: "none"
+            display: "none",
         });
         document.body.appendChild(button);
 
@@ -1168,7 +1441,9 @@ module.exports.create = function create({ controls, bridge, credentials }) {
         generatorControls.set(input, control);
     }
 
-    function dispose() { chrome.storage.onChanged.removeListener(storageChanged); }
+    function dispose() {
+        chrome.storage.onChanged.removeListener(storageChanged);
+    }
 
     return { createGeneratorButton, removeGeneratorButton, dispose };
 };
@@ -1176,51 +1451,112 @@ module.exports.create = function create({ controls, bridge, credentials }) {
 },
 "password_generator.js": (module, exports, require) => {
 const PasswordManagerGenerator = (() => {
-    const defaults = Object.freeze({ mode: "password", length: 20, uppercase: true, lowercase: true, digits: true,
-        symbols: true, symbolSet: "!@#$%^&*-_=+", excludeAmbiguous: true, words: 6, separator: "-" });
-    const left = "amber ancient autumn bold bright calm cedar cinder clear cloud cobalt coral crisp dawn deep ember fable fair fern frost gentle gold grand green harbor hidden indigo iron ivory jade keen lively lunar maple merry misty noble north ocean olive opal quiet rapid red river royal sage silver solar solid spring stone swift tender tidal true velvet vivid warm wild winter wise young zenith".split(" ");
-    const right = "acorn badger beacon birch brook canyon castle comet crane creek dolphin eagle falcon field finch forest fox garden glade grove heron hill island lake lantern lark leaf meadow moon oak otter owl panda peak pine planet quartz raven reef ridge robin sail shore sparrow star summit sun tiger trail tree valley violet wave willow wind wolf wren yard zephyr harvest isle orchard prairie rain".split(" ");
+    const defaults = Object.freeze({
+        mode: "password",
+        length: 20,
+        uppercase: true,
+        lowercase: true,
+        digits: true,
+        symbols: true,
+        symbolSet: "!@#$%^&*-_=+",
+        excludeAmbiguous: true,
+        words: 6,
+        separator: "-",
+    });
+    const left =
+        "amber ancient autumn bold bright calm cedar cinder clear cloud cobalt coral crisp dawn deep ember fable fair fern frost gentle gold grand green harbor hidden indigo iron ivory jade keen lively lunar maple merry misty noble north ocean olive opal quiet rapid red river royal sage silver solar solid spring stone swift tender tidal true velvet vivid warm wild winter wise young zenith".split(
+            " "
+        );
+    const right =
+        "acorn badger beacon birch brook canyon castle comet crane creek dolphin eagle falcon field finch forest fox garden glade grove heron hill island lake lantern lark leaf meadow moon oak otter owl panda peak pine planet quartz raven reef ridge robin sail shore sparrow star summit sun tiger trail tree valley violet wave willow wind wolf wren yard zephyr harvest isle orchard prairie rain".split(
+            " "
+        );
     function groups(settings) {
         const ambiguous = new Set("Il1O0o|`'\"");
-        return [[settings.uppercase, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"], [settings.lowercase, "abcdefghijklmnopqrstuvwxyz"],
-            [settings.digits, "0123456789"], [settings.symbols, settings.symbolSet]]
-            .filter(([enabled]) => enabled).map(([, value]) => [...new Set(value)].filter(c => !settings.excludeAmbiguous || !ambiguous.has(c)).join(""))
+        return [
+            [settings.uppercase, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"],
+            [settings.lowercase, "abcdefghijklmnopqrstuvwxyz"],
+            [settings.digits, "0123456789"],
+            [settings.symbols, settings.symbolSet],
+        ]
+            .filter(([enabled]) => enabled)
+            .map(([, value]) =>
+                [...new Set(value)].filter(c => !settings.excludeAmbiguous || !ambiguous.has(c)).join("")
+            )
             .filter(Boolean);
     }
     function validate(input = {}) {
         const settings = { ...defaults, ...input };
-        if (!["password", "passphrase"].includes(settings.mode) || !Number.isInteger(settings.length) || settings.length < 1 || settings.length > 255
-            || !Number.isInteger(settings.words) || settings.words < 1 || settings.words > 32
-            || typeof settings.separator !== "string" || settings.separator.length > 16 || /[\x00-\x1f\x7f]/.test(settings.separator)
-            || typeof settings.symbolSet !== "string" || settings.symbolSet.length > 128 || /[^\x21-\x7e]/.test(settings.symbolSet)
-            || ["uppercase", "lowercase", "digits", "symbols", "excludeAmbiguous"].some(key => typeof settings[key] !== "boolean")) {
+        if (
+            !["password", "passphrase"].includes(settings.mode) ||
+            !Number.isInteger(settings.length) ||
+            settings.length < 1 ||
+            settings.length > 255 ||
+            !Number.isInteger(settings.words) ||
+            settings.words < 1 ||
+            settings.words > 32 ||
+            typeof settings.separator !== "string" ||
+            settings.separator.length > 16 ||
+            /[\x00-\x1f\x7f]/.test(settings.separator) ||
+            typeof settings.symbolSet !== "string" ||
+            settings.symbolSet.length > 128 ||
+            /[^\x21-\x7e]/.test(settings.symbolSet) ||
+            ["uppercase", "lowercase", "digits", "symbols", "excludeAmbiguous"].some(
+                key => typeof settings[key] !== "boolean"
+            )
+        ) {
             throw new Error("Invalid generator settings");
         }
-        if (settings.mode === "password" && groups(settings).length === 0) throw new Error("Enable at least one non-empty character set");
+        if (settings.mode === "password" && groups(settings).length === 0)
+            throw new Error("Enable at least one non-empty character set");
         return settings;
     }
     function randomIndex(limit) {
         const ceiling = Math.floor(0x100000000 / limit) * limit;
         const value = new Uint32Array(1);
-        do { crypto.getRandomValues(value); } while (value[0] >= ceiling);
+        do {
+            crypto.getRandomValues(value);
+        } while (value[0] >= ceiling);
         return value[0] % limit;
     }
     function generate(input = {}) {
         const settings = validate(input);
         if (settings.mode === "passphrase") {
-            return Array.from({ length: settings.words }, () => left[randomIndex(left.length)] + right[randomIndex(right.length)]).join(settings.separator);
+            return Array.from(
+                { length: settings.words },
+                () => left[randomIndex(left.length)] + right[randomIndex(right.length)]
+            ).join(settings.separator);
         }
-        const classes = groups(settings), all = classes.join("");
-        const characters = settings.length >= classes.length ? classes.map(group => group[randomIndex(group.length)]) : [];
+        const classes = groups(settings),
+            all = classes.join("");
+        const characters =
+            settings.length >= classes.length ? classes.map(group => group[randomIndex(group.length)]) : [];
         while (characters.length < settings.length) characters.push(all[randomIndex(all.length)]);
-        for (let i = characters.length - 1; i > 0; i--) { const j = randomIndex(i + 1); [characters[i], characters[j]] = [characters[j], characters[i]]; }
+        for (let i = characters.length - 1; i > 0; i--) {
+            const j = randomIndex(i + 1);
+            [characters[i], characters[j]] = [characters[j], characters[i]];
+        }
         return characters.join("");
     }
     function settingsForSite(storage, url) {
-        let origin; try { origin = new URL(url).origin; } catch (_) { origin = ""; }
-        const override = Object.hasOwn(storage.pmGeneratorsByOrigin || {}, origin) ? storage.pmGeneratorsByOrigin[origin] : undefined;
-        try { return validate(override || storage.pmGenerator || {}); }
-        catch (_) { try { return validate(storage.pmGenerator || {}); } catch (_) { return defaults; } }
+        let origin;
+        try {
+            origin = new URL(url).origin;
+        } catch (_) {
+            origin = "";
+        }
+        const override = Object.hasOwn(storage.pmGeneratorsByOrigin || {}, origin)
+            ? storage.pmGeneratorsByOrigin[origin]
+            : undefined;
+        try {
+            return validate(override || storage.pmGenerator || {});
+        } catch (_) {
+            try {
+                return validate(storage.pmGenerator || {});
+            } catch (_) {
+                return defaults;
+            }
+        }
     }
     return { defaults, validate, generate, settingsForSite };
 })();
@@ -1229,9 +1565,16 @@ if (typeof module !== "undefined") module.exports = PasswordManagerGenerator;
 },
 "content_observer.js": (module, exports, require) => {
 "use strict";
-const { isTotpInput, isCredentialInput, isUsableInput, isNewPasswordInput, withVisibilityCache = action => action() } = require("content_detection.js");
+const {
+    isTotpInput,
+    isCredentialInput,
+    isUsableInput,
+    isNewPasswordInput,
+    withVisibilityCache = action => action(),
+} = require("content_detection.js");
 module.exports.create = function create({ controls, generator, autofill, onRoot = () => {}, onRemoveRoot = () => {} }) {
-    const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } = controls;
+    const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } =
+        controls;
     const { createGeneratorButton, removeGeneratorButton } = generator;
     const { typedAutofillKind } = autofill;
     let observer;
@@ -1252,10 +1595,19 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         if (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value);
         return result;
     }
-    function dispose() { disposed = true; observer?.disconnect(); for (const root of registeredRoots) onRemoveRoot(root); registeredRoots.clear(); snapshots.clear(); }
+    function dispose() {
+        disposed = true;
+        observer?.disconnect();
+        for (const root of registeredRoots) onRemoveRoot(root);
+        registeredRoots.clear();
+        snapshots.clear();
+    }
     function isFormControl(element) {
-        return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
-            || element instanceof HTMLTextAreaElement;
+        return (
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLSelectElement ||
+            element instanceof HTMLTextAreaElement
+        );
     }
     function attachInput(input, formUsernames, typedContext) {
         // Ignore extension UI elements
@@ -1316,7 +1668,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     function observeInputs() {
         const pendingRoots = new Set();
         let attachScheduled = false;
-        observer = new MutationObserver((mutations) => {
+        observer = new MutationObserver(mutations => {
             const ownUI = node => node?.nodeType === 1 && node.classList?.contains("my-extension-ui");
             mutations = mutations.filter(mutation => {
                 if (mutation.type !== "childList") return true;
@@ -1326,7 +1678,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             for (const mutation of mutations) {
                 if (mutation.type !== "childList") continue;
                 // Mutation targets invalidate ancestor snapshots, including across shadow hosts.
-                if (!mutation.target) { snapshots.clear(); continue; }
+                if (!mutation.target) {
+                    snapshots.clear();
+                    continue;
+                }
                 for (let node = mutation.target; node; node = node.parentNode || node.host) snapshots.delete(node);
                 // Detached trees may change outside observation. Invalidate cached
                 // descendants too when they leave or reenter an observed tree.
@@ -1337,7 +1692,11 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             }
             let removedRoot = false;
             for (const root of registeredRoots) {
-                if (root.host && !root.host.isConnected) { onRemoveRoot(root); registeredRoots.delete(root); removedRoot = true; }
+                if (root.host && !root.host.isConnected) {
+                    onRemoveRoot(root);
+                    registeredRoots.delete(root);
+                    removedRoot = true;
+                }
             }
             if (removedRoot) {
                 observer.disconnect();
@@ -1346,8 +1705,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             for (const mutation of mutations) {
                 if (mutation.type === "attributes") {
                     if (mutation.target.classList?.contains("my-extension-ui")) continue;
-                    if (isFormControl(mutation.target)
-                        || ["class", "style", "hidden", "open"].includes(mutation.attributeName)) {
+                    if (
+                        isFormControl(mutation.target) ||
+                        ["class", "style", "hidden", "open"].includes(mutation.attributeName)
+                    ) {
                         scheduleAttach(mutation.target);
                     }
                 }
@@ -1357,12 +1718,29 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             }
         });
         const observationOptions = {
-            childList: true, subtree: true, attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly", "id", "name", "placeholder", "aria-label", "role"]
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: [
+                "class",
+                "style",
+                "hidden",
+                "open",
+                "type",
+                "autocomplete",
+                "disabled",
+                "readonly",
+                "id",
+                "name",
+                "placeholder",
+                "aria-label",
+                "role",
+            ],
         };
         const observeRoot = root => {
             if (disposed || (root !== document && !root.host) || registeredRoots.has(root)) return;
-            registeredRoots.add(root); onRoot(root);
+            registeredRoots.add(root);
+            onRoot(root);
             observer.observe(root, observationOptions);
         };
         const scheduleAttach = root => {
@@ -1372,7 +1750,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             attachScheduled = true;
             requestAnimationFrame(() => {
                 attachScheduled = false;
-                if (disposed) { pendingRoots.clear(); return; }
+                if (disposed) {
+                    pendingRoots.clear();
+                    return;
+                }
                 for (const pending of pendingRoots) {
                     if (!pending.isConnected || coveredByPendingRoot(pending, pendingRoots)) continue;
                     attachToInputs(pending, observeRoot);
@@ -1381,7 +1762,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             });
         };
 
-        scan = root => { snapshots.clear(); attachToInputs(root, observeRoot); };
+        scan = root => {
+            snapshots.clear();
+            attachToInputs(root, observeRoot);
+        };
         scan(document);
     }
 
@@ -1394,11 +1778,18 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
 // stay in extension pages; verification numbers are never extracted from this page.
 const PasswordManagerDuoDetection = require("duo_detection.js");
 module.exports.create = function create() {
-    let activeSince = 0, checking = false, timer, disposed = false;
-    let dirty = true, cached = false, scannedUrl;
+    let activeSince = 0,
+        checking = false,
+        timer,
+        disposed = false;
+    let dirty = true,
+        cached = false,
+        scannedUrl;
     // Mutation bursts only invalidate; the existing poll interval coalesces reads.
     // Authorization requests always inspect the live rendered page instead.
-    const observer = new MutationObserver(() => { dirty = true; });
+    const observer = new MutationObserver(() => {
+        dirty = true;
+    });
     observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
     function active(fresh = false) {
         if (disposed || document.visibilityState === "hidden") return false;
@@ -1432,16 +1823,24 @@ module.exports.create = function create() {
         if (message.action === "getDuoChallengeState") respond({ active: active(true) });
     };
     chrome.runtime.onMessage.addListener(listener);
-    const visibilityChanged = () => { dirty = true; check(); };
+    const visibilityChanged = () => {
+        dirty = true;
+        check();
+    };
     document.addEventListener("visibilitychange", visibilityChanged);
     const pagehide = () => clearTimeout(timer);
     window.addEventListener("pagehide", pagehide);
     check();
-    return { dispose() {
-        disposed = true; observer.disconnect(); clearTimeout(timer); document.removeEventListener("visibilitychange", visibilityChanged);
-        window.removeEventListener("pagehide", pagehide);
-        chrome.runtime.onMessage.removeListener(listener);
-    } };
+    return {
+        dispose() {
+            disposed = true;
+            observer.disconnect();
+            clearTimeout(timer);
+            document.removeEventListener("visibilitychange", visibilityChanged);
+            window.removeEventListener("pagehide", pagehide);
+            chrome.runtime.onMessage.removeListener(listener);
+        },
+    };
 };
 
 },
@@ -1454,14 +1853,19 @@ module.exports.create = function create() {
     function duoOrigin(value) {
         try {
             const url = new URL(value);
-            return url.protocol === "https:" && !url.port
-                && url.hostname.toLowerCase().endsWith(".duosecurity.com");
-        } catch (_) { return false; }
+            return url.protocol === "https:" && !url.port && url.hostname.toLowerCase().endsWith(".duosecurity.com");
+        } catch (_) {
+            return false;
+        }
     }
     function challenge(text, url) {
-        const words = String(text || "").slice(0, 32_000).replace(/\s+/g, " ");
+        const words = String(text || "")
+            .slice(0, 32_000)
+            .replace(/\s+/g, " ");
         if (/\bduo\s+push\b/i.test(words)) {
-            return /check for (?:a )?duo push|send (?:me )?a push|push (?:sent|notification)|check (?:your |the )?(?:phone|device)|open duo mobile|approve (?:the |this )?(?:request|login)|waiting for|verify (?:your |the )?identity/i.test(words);
+            return /check for (?:a )?duo push|send (?:me )?a push|push (?:sent|notification)|check (?:your |the )?(?:phone|device)|open duo mobile|approve (?:the |this )?(?:request|login)|waiting for|verify (?:your |the )?identity/i.test(
+                words
+            );
         }
         return duoOrigin(url) && /push sent|check (?:your |the )?(?:phone|device)|open duo mobile/i.test(words);
     }

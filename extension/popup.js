@@ -14,12 +14,14 @@ function renderStatus(status) {
         recovery.hidden = operations.length === 0;
         const select = document.getElementById("operation");
         const previous = select.value;
-        select.replaceChildren(...operations.map(record => {
-            const option = document.createElement("option");
-            option.value = record.operationId;
-            option.textContent = `${record.action}: ${record.operationId}`;
-            return option;
-        }));
+        select.replaceChildren(
+            ...operations.map(record => {
+                const option = document.createElement("option");
+                option.value = record.operationId;
+                option.textContent = `${record.action}: ${record.operationId}`;
+                return option;
+            })
+        );
         if (operations.some(record => record.operationId === previous)) select.value = previous;
         if (select.value !== previous) resetReview();
     }
@@ -28,11 +30,14 @@ function renderStatus(status) {
     text.innerText = presentation.text;
     lockButton.disabled = !presentation.canLock;
     const hint = document.getElementById("nativeHint");
-    if (hint) hint.textContent = !status.native
-        ? "Open the desktop app and check browser integration settings."
-        : !status.running ? "Open the desktop app to start the server and unlock your vault."
-        : status.locked ? "Open the desktop app to unlock your vault."
-        : "Use the key button beside a website’s login field to choose an account.";
+    if (hint)
+        hint.textContent = !status.native
+            ? "Open the desktop app and check browser integration settings."
+            : !status.running
+              ? "Open the desktop app to start the server and unlock your vault."
+              : status.locked
+                ? "Open the desktop app to unlock your vault."
+                : "Use the key button beside a website’s login field to choose an account.";
 }
 
 async function refreshStatus() {
@@ -40,7 +45,7 @@ async function refreshStatus() {
     if (status) renderStatus(status);
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener(message => {
     if (message.action === "statusChanged" && message.status) {
         renderStatus(message.status);
     }
@@ -75,17 +80,25 @@ document.getElementById("reviewOperation").addEventListener("click", async () =>
     resetReview();
     const operationId = document.getElementById("operation").value;
     const result = await sendMessage({ action: "reconcileOperation", operationId });
-    document.getElementById("output").innerText = result?.success ? `Operation: ${result.data.state}` : result?.error || "Outcome unavailable";
+    document.getElementById("output").innerText = result?.success
+        ? `Operation: ${result.data.state}`
+        : result?.error || "Outcome unavailable";
     if (operationId !== document.getElementById("operation").value) return;
     reviewedOperationId = result?.success && result.data.state === "unknown" ? operationId : null;
     document.getElementById("unknownReview").hidden = reviewedOperationId === null;
     await refreshStatus();
 });
 document.getElementById("acknowledgeOperation").addEventListener("click", async () => {
-    if (!document.getElementById("inspected").checked || reviewedOperationId !== document.getElementById("operation").value) return;
+    if (
+        !document.getElementById("inspected").checked ||
+        reviewedOperationId !== document.getElementById("operation").value
+    )
+        return;
     const operationId = document.getElementById("operation").value;
     const result = await sendMessage({ action: "acknowledgeUnknownOperation", operationId, inspected: true });
-    document.getElementById("output").innerText = result?.success ? "Reviewed outcome acknowledged" : result?.error || "Acknowledgement failed";
+    document.getElementById("output").innerText = result?.success
+        ? "Reviewed outcome acknowledged"
+        : result?.error || "Acknowledgement failed";
     resetReview();
     await refreshStatus();
 });

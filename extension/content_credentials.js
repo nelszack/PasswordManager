@@ -1,29 +1,42 @@
-const { scopeInputs, isUsableInput, isNewPasswordInput, autocompleteTokens, inputDescriptors,
-    usernameCandidates, hasUsernameHint, credentialScope, credentialFields } = require("./content_detection.js");
+const {
+    scopeInputs,
+    isUsableInput,
+    isNewPasswordInput,
+    autocompleteTokens,
+    inputDescriptors,
+    usernameCandidates,
+    hasUsernameHint,
+    credentialScope,
+    credentialFields,
+} = require("./content_detection.js");
 module.exports.create = function create({ roots = () => [document] } = {}) {
-    function getDomainFromUrl(url) { return new URL(url).origin.toLowerCase(); }
+    function getDomainFromUrl(url) {
+        return new URL(url).origin.toLowerCase();
+    }
     let storedUsername = "";
     let storedDomain = "";
     let lastCredentialInput = null;
 
     function credentialsFromScope(scope) {
         const fields = scopeInputs(scope);
-        const filledPasswords = fields.filter(field =>
-            isUsableInput(field) && field.type === "password" && field.value
+        const filledPasswords = fields.filter(
+            field => isUsableInput(field) && field.type === "password" && field.value
         );
         const newPasswords = filledPasswords.filter(isNewPasswordInput);
         const currentPasswords = filledPasswords.filter(field => !isNewPasswordInput(field));
         const selectedPassword = fields.includes(lastCredentialInput)
-            ? credentialFields(lastCredentialInput, scope).passwordField : null;
+            ? credentialFields(lastCredentialInput, scope).passwordField
+            : null;
         // Capture a newly chosen password on registration/change-password forms,
         // but never autofill these fields (credentialFields excludes them).
-        const passwordField = newPasswords.find(field => autocompleteTokens(field).includes("new-password"))
-            || newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value)))
-            || newPasswords[0]
-            || (currentPasswords.includes(selectedPassword) ? selectedPassword : null)
-            || currentPasswords.find(field => autocompleteTokens(field).includes("current-password"))
-            || currentPasswords[0]
-            || null;
+        const passwordField =
+            newPasswords.find(field => autocompleteTokens(field).includes("new-password")) ||
+            newPasswords.find(field => !inputDescriptors(field).some(value => /confirm|repeat|retype/i.test(value))) ||
+            newPasswords[0] ||
+            (currentPasswords.includes(selectedPassword) ? selectedPassword : null) ||
+            currentPasswords.find(field => autocompleteTokens(field).includes("current-password")) ||
+            currentPasswords[0] ||
+            null;
         if (!passwordField) return { username: "", password: "", scope };
 
         const usernameField = credentialFields(passwordField, scope).usernameField;
@@ -31,16 +44,20 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         return {
             username: usernameField ? usernameField.value.trim() : "",
             password: passwordField.value,
-            scope
+            scope,
         };
     }
 
     function usernameFromScope(scope) {
         const fields = scopeInputs(scope);
         const candidates = usernameCandidates(fields).filter(field => field.value.trim());
-        const usernameField = candidates.find(field =>
-            autocompleteTokens(field).some(token => token === "username" || token === "email")
-        ) || candidates.find(hasUsernameHint) || candidates.at(-1) || null;
+        const usernameField =
+            candidates.find(field =>
+                autocompleteTokens(field).some(token => token === "username" || token === "email")
+            ) ||
+            candidates.find(hasUsernameHint) ||
+            candidates.at(-1) ||
+            null;
         return usernameField ? usernameField.value.trim() : "";
     }
 
@@ -58,7 +75,9 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         }
 
         const seen = new Set();
-        for (const passwordField of [...roots()].flatMap(root => [...root.querySelectorAll("input[type='password']")])) {
+        for (const passwordField of [...roots()].flatMap(root => [
+            ...root.querySelectorAll("input[type='password']"),
+        ])) {
             if (!isUsableInput(passwordField) || !passwordField.value) continue;
             const scope = credentialScope(passwordField);
             if (seen.has(scope)) continue;
@@ -83,10 +102,13 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
     function rememberUsernameAcrossNavigation(username) {
         storeUsernameForLater(username);
         if (!username || window !== window.top) return;
-        chrome.runtime.sendMessage({
-            action: "setPendingCredentials",
-            pending: { username }
-        }, () => void chrome.runtime.lastError);
+        chrome.runtime.sendMessage(
+            {
+                action: "setPendingCredentials",
+                pending: { username },
+            },
+            () => void chrome.runtime.lastError
+        );
     }
 
     function restoreUsernameFromPreviousStep() {
@@ -114,8 +136,23 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
     // The add/update prompt is an extension-owned window so it survives page
     // navigation. The background retains the password and performs the operation.
 
-    return { credentialsFromScope, usernameFromScope, findLoginCredentials, storeUsernameForLater,
-        rememberUsernameAcrossNavigation, restoreUsernameFromPreviousStep, resolveUsername,
-        get lastInput() { return lastCredentialInput; }, set lastInput(input) { lastCredentialInput = input; },
-        dispose() { storedUsername = storedDomain = ""; lastCredentialInput = null; } };
+    return {
+        credentialsFromScope,
+        usernameFromScope,
+        findLoginCredentials,
+        storeUsernameForLater,
+        rememberUsernameAcrossNavigation,
+        restoreUsernameFromPreviousStep,
+        resolveUsername,
+        get lastInput() {
+            return lastCredentialInput;
+        },
+        set lastInput(input) {
+            lastCredentialInput = input;
+        },
+        dispose() {
+            storedUsername = storedDomain = "";
+            lastCredentialInput = null;
+        },
+    };
 };

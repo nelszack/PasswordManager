@@ -1,19 +1,23 @@
 const { spawnSync } = require("node:child_process");
 
-const result = spawnSync(process.execPath, [
-    "--experimental-test-coverage",
-    "--test",
-    "--test-coverage-include=extension/*.js",
-    "--test-coverage-include-all",
-    "--test-coverage-exclude=extension/content_runtime.js",
-    "--test-coverage-lines=58",
-    "--test-coverage-branches=78",
-    "extension/*.test.js"
-], {
-    cwd: require("node:path").resolve(__dirname, ".."),
-    encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" }
-});
+const result = spawnSync(
+    process.execPath,
+    [
+        "--experimental-test-coverage",
+        "--test",
+        "--test-coverage-include=extension/*.js",
+        "--test-coverage-include-all",
+        "--test-coverage-exclude=extension/content_runtime.js",
+        "--test-coverage-lines=58",
+        "--test-coverage-branches=78",
+        "extension/*.test.js",
+    ],
+    {
+        cwd: require("node:path").resolve(__dirname, ".."),
+        encoding: "utf8",
+        env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+    }
+);
 
 process.stdout.write(result.stdout);
 process.stderr.write(result.stderr);
@@ -40,7 +44,7 @@ const thresholds = {
     "picker.js": [75, 50],
     "picker_state.js": [95, 90],
     "popup.js": [95, 80],
-    "popup_state.js": [95, 90]
+    "popup_state.js": [95, 90],
 };
 
 for (const [file, [minimumLines, minimumBranches]] of Object.entries(thresholds)) {
@@ -51,8 +55,7 @@ for (const [file, [minimumLines, minimumBranches]] of Object.entries(thresholds)
     const branches = Number(match[2]);
     if (lines < minimumLines || branches < minimumBranches) {
         throw new Error(
-            `${file} coverage ${lines}% lines/${branches}% branches is below `
-            + `${minimumLines}%/${minimumBranches}%`
+            `${file} coverage ${lines}% lines/${branches}% branches is below ` + `${minimumLines}%/${minimumBranches}%`
         );
     }
 }

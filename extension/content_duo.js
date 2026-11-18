@@ -2,11 +2,18 @@
 // stay in extension pages; verification numbers are never extracted from this page.
 const PasswordManagerDuoDetection = require("./duo_detection.js");
 module.exports.create = function create() {
-    let activeSince = 0, checking = false, timer, disposed = false;
-    let dirty = true, cached = false, scannedUrl;
+    let activeSince = 0,
+        checking = false,
+        timer,
+        disposed = false;
+    let dirty = true,
+        cached = false,
+        scannedUrl;
     // Mutation bursts only invalidate; the existing poll interval coalesces reads.
     // Authorization requests always inspect the live rendered page instead.
-    const observer = new MutationObserver(() => { dirty = true; });
+    const observer = new MutationObserver(() => {
+        dirty = true;
+    });
     observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
     function active(fresh = false) {
         if (disposed || document.visibilityState === "hidden") return false;
@@ -40,14 +47,22 @@ module.exports.create = function create() {
         if (message.action === "getDuoChallengeState") respond({ active: active(true) });
     };
     chrome.runtime.onMessage.addListener(listener);
-    const visibilityChanged = () => { dirty = true; check(); };
+    const visibilityChanged = () => {
+        dirty = true;
+        check();
+    };
     document.addEventListener("visibilitychange", visibilityChanged);
     const pagehide = () => clearTimeout(timer);
     window.addEventListener("pagehide", pagehide);
     check();
-    return { dispose() {
-        disposed = true; observer.disconnect(); clearTimeout(timer); document.removeEventListener("visibilitychange", visibilityChanged);
-        window.removeEventListener("pagehide", pagehide);
-        chrome.runtime.onMessage.removeListener(listener);
-    } };
+    return {
+        dispose() {
+            disposed = true;
+            observer.disconnect();
+            clearTimeout(timer);
+            document.removeEventListener("visibilitychange", visibilityChanged);
+            window.removeEventListener("pagehide", pagehide);
+            chrome.runtime.onMessage.removeListener(listener);
+        },
+    };
 };

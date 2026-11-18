@@ -185,6 +185,35 @@ test("credential prompt disables writes after an uncertain save and still allows
     assert.equal(env.context.closed, true);
 });
 
+test("credential prompt outcome review reports each save state without retrying", async () => {
+    const responses = {};
+    const env = await credentialPromptEnvironment(responses);
+    const review = async () => {
+        env.elements.reviewOutcome.dispatch("click", { isTrusted: true });
+        await settle();
+    };
+    env.elements.reviewOutcome.dispatch("click", { isTrusted: false });
+    assert.equal(env.messages.some(message => message.action === "reviewCredentialPrompt"), false);
+    for (const [state, expected] of [
+        ["pending", /still running/],
+        ["unknown", /outcome is unknown/],
+        ["committed_durability_unknown", /durability is uncertain/],
+    ]) {
+        responses.reviewCredentialPrompt = { success: true, data: { state } };
+        await review();
+        assert.match(env.elements.status.textContent, expected, state);
+        assert.notEqual(env.context.closed, true, state);
+    }
+    assert.equal(env.elements.reviewOutcome.hidden, true);
+    responses.reviewCredentialPrompt = { success: false, error: "Review unavailable" };
+    await review();
+    assert.match(env.elements.status.textContent, /Review unavailable/);
+    responses.reviewCredentialPrompt = { success: true, data: { state: "committed" } };
+    await review();
+    assert.equal(env.context.closed, true);
+    assert.equal(env.messages.some(message => message.action === "completeCredentialPrompt"), false);
+});
+
 test("popup requires a reviewed unknown outcome and explicit inspection without replaying a save", async () => {
     const responses = {
         getStatus: { native: true, running: true, locked: false, pendingOperations: [{ operationId: "save-one", action: "saveCredentials" }] },

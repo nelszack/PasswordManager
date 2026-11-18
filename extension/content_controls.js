@@ -1,5 +1,10 @@
 "use strict";
-const { isUsableInput, credentialFields, credentialScope, withVisibilityCache = action => action() } = require("./content_detection.js");
+const {
+    isUsableInput,
+    credentialFields,
+    credentialScope,
+    withVisibilityCache = action => action(),
+} = require("./content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
     const { fillInput, openSecurePicker } = bridge;
     const { storeUsernameForLater } = credentials;
@@ -15,14 +20,19 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     let controlResizeObserver = null;
 
     function registerPositionedControl(input, button, position, onRemove = () => {}) {
-        const record = { input, button, position, remove() {
-            positionedControls.delete(record);
-            button.remove();
-            if (![...positionedControls].some(control => control.input === input)) {
-                controlResizeObserver?.unobserve(input);
-            }
-            onRemove();
-        } };
+        const record = {
+            input,
+            button,
+            position,
+            remove() {
+                positionedControls.delete(record);
+                button.remove();
+                if (![...positionedControls].some(control => control.input === input)) {
+                    controlResizeObserver?.unobserve(input);
+                }
+                onRemove();
+            },
+        };
         positionedControls.add(record);
         startLayoutObserver();
         controlResizeObserver?.observe(input);
@@ -67,14 +77,19 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         // changing the inputs themselves. Ignore our own style writes to avoid
         // scheduling another layout frame after every reposition.
         layoutObserver = new MutationObserver(mutations => {
-            if (mutations.some(mutation => mutation.type !== "attributes"
-                || !mutation.target.classList?.contains("my-extension-ui"))) reposition();
+            if (
+                mutations.some(
+                    mutation =>
+                        mutation.type !== "attributes" || !mutation.target.classList?.contains("my-extension-ui")
+                )
+            )
+                reposition();
         });
         layoutObserver.observe(document.body, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open"]
+            attributeFilter: ["class", "style", "hidden", "open"],
         });
     }
 
@@ -99,9 +114,20 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         button.title = title;
         button.setAttribute("aria-label", title);
         Object.assign(button.style, {
-            position: "fixed", border: "none", background: "transparent", cursor: "pointer",
-            fontSize: "16px", zIndex: "2147483647", padding: "0", margin: "0", display: "none",
-            width: "28px", height: "28px", minWidth: "28px", minHeight: "28px", boxSizing: "border-box"
+            position: "fixed",
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            fontSize: "16px",
+            zIndex: "2147483647",
+            padding: "0",
+            margin: "0",
+            display: "none",
+            width: "28px",
+            height: "28px",
+            minWidth: "28px",
+            minHeight: "28px",
+            boxSizing: "border-box",
         });
         // Keep keyboard traversal beside the field the control belongs to.
         if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
@@ -136,18 +162,25 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function createSecureCredentialButton(input) {
-        createSecurePickerButton(input, "login", "🔑", "Choose saved credentials", (account, scope) => {
-            if (!scope.isConnected) return;
-            let fields = credentialFields(input, scope);
-            storeUsernameForLater(accountUsername(account).trim());
-            fillInput(fields.usernameField, accountUsername(account));
-            // Site input handlers may replace fields synchronously. Stay within
-            // the original scope and resolve the live password after those run.
-            if (!scope.isConnected) return;
-            fields = credentialFields(input, scope);
-            fillInput(fields.passwordField, account.password);
-            (fields.passwordField || fields.usernameField)?.focus();
-        }, () => credentialScope(input));
+        createSecurePickerButton(
+            input,
+            "login",
+            "🔑",
+            "Choose saved credentials",
+            (account, scope) => {
+                if (!scope.isConnected) return;
+                let fields = credentialFields(input, scope);
+                storeUsernameForLater(accountUsername(account).trim());
+                fillInput(fields.usernameField, accountUsername(account));
+                // Site input handlers may replace fields synchronously. Stay within
+                // the original scope and resolve the live password after those run.
+                if (!scope.isConnected) return;
+                fields = credentialFields(input, scope);
+                fillInput(fields.passwordField, account.password);
+                (fields.passwordField || fields.usernameField)?.focus();
+            },
+            () => credentialScope(input)
+        );
     }
 
     function createSecureTotpButton(input) {
@@ -173,11 +206,23 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function dispose() {
-        disposed = true; lifecycle.abort(); layoutObserver?.disconnect(); controlResizeObserver?.disconnect();
+        disposed = true;
+        lifecycle.abort();
+        layoutObserver?.disconnect();
+        controlResizeObserver?.disconnect();
         for (const control of positionedControls) control.remove();
     }
 
-    return { createSecureCredentialButton, createSecureTotpButton, createSecureTypedButton, removeSecurePickerButton, registerPositionedControl, schedulePosition: () => schedulePosition(), accountUsername, dispose };
+    return {
+        createSecureCredentialButton,
+        createSecureTotpButton,
+        createSecureTypedButton,
+        removeSecurePickerButton,
+        registerPositionedControl,
+        schedulePosition: () => schedulePosition(),
+        accountUsername,
+        dispose,
+    };
 };
 
 // Return deferred writes so callers can finish all style/geometry reads first.
@@ -185,9 +230,10 @@ function positionedButton(input, button, offset) {
     const { isElementVisible } = require("./content_detection.js");
     const measure = () => {
         const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
-        const values = rect?.width && rect?.height
-            ? { display: "", left: rect.right - offset + "px", top: rect.top + rect.height / 2 - 14 + "px" }
-            : { display: "none" };
+        const values =
+            rect?.width && rect?.height
+                ? { display: "", left: rect.right - offset + "px", top: rect.top + rect.height / 2 - 14 + "px" }
+                : { display: "none" };
         return () => {
             for (const [key, value] of Object.entries(values)) {
                 if (button.style[key] !== value) button.style[key] = value;

@@ -27,8 +27,8 @@ async function complete(action) {
         selection: {
             action,
             name: nameInput.value,
-            username: usernameInput.value
-        }
+            username: usernameInput.value,
+        },
     });
     if (response?.success) window.close();
     else {
@@ -81,13 +81,22 @@ document.getElementById("cancel").addEventListener("click", event => {
 document.getElementById("reviewOutcome").addEventListener("click", event => {
     if (!event.isTrusted || completing) return;
     completing = true;
-    send({ action: "reviewCredentialPrompt", token }).then(response => {
-        completing = false;
-        if (!response?.success) throw new Error(response?.error || "Could not check save outcome");
-        const state = response.data.state;
-        if (["committed", "failed"].includes(state)) window.close();
-        else if (state === "committed_durability_unknown") { status.textContent = "Saved, but storage durability is uncertain. Inspect your storage before closing the vault."; document.getElementById("reviewOutcome").hidden = true; }
-        else status.textContent = state === "pending" ? "The save is still running. Check again shortly." : "The save outcome is unknown. Inspect the vault in the desktop app, then acknowledge the unknown operation in the extension popup.";
-    }).catch(showError);
+    send({ action: "reviewCredentialPrompt", token })
+        .then(response => {
+            completing = false;
+            if (!response?.success) throw new Error(response?.error || "Could not check save outcome");
+            const state = response.data.state;
+            if (["committed", "failed"].includes(state)) window.close();
+            else if (state === "committed_durability_unknown") {
+                status.textContent =
+                    "Saved, but storage durability is uncertain. Inspect your storage before closing the vault.";
+                document.getElementById("reviewOutcome").hidden = true;
+            } else
+                status.textContent =
+                    state === "pending"
+                        ? "The save is still running. Check again shortly."
+                        : "The save outcome is unknown. Inspect the vault in the desktop app, then acknowledge the unknown operation in the extension popup.";
+        })
+        .catch(showError);
 });
 load().catch(showError);

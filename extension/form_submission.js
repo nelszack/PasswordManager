@@ -22,7 +22,16 @@
                 if (phase === "pending") phase = "idle";
             }
         }
-        return { run, reserve, get idle() { return phase === "idle"; }, dispose() { phase = "disposed"; } };
+        return {
+            run,
+            reserve,
+            get idle() {
+                return phase === "idle";
+            },
+            dispose() {
+                phase = "disposed";
+            },
+        };
     }
 
     function createSubmissionCoordinator(options) {

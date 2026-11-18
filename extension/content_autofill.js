@@ -4,21 +4,59 @@ const { setControlValue } = require("./content_value.js");
 const PasswordManagerContentFields = require("./content_fields.js");
 module.exports.create = function create({ bridge }) {
     const CARD_AUTOCOMPLETE_FIELDS = new Set([
-        "cc-name", "cc-given-name", "cc-additional-name", "cc-family-name",
-        "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "cc-type"
+        "cc-name",
+        "cc-given-name",
+        "cc-additional-name",
+        "cc-family-name",
+        "cc-number",
+        "cc-exp",
+        "cc-exp-month",
+        "cc-exp-year",
+        "cc-csc",
+        "cc-type",
     ]);
     const IDENTITY_AUTOCOMPLETE_FIELDS = new Set([
-        "name", "given-name", "additional-name", "family-name", "honorific-prefix",
-        "honorific-suffix", "nickname", "email", "tel", "organization",
-        "street-address", "address-line1", "address-line2", "address-line3",
-        "address-level1", "address-level2", "address-level3", "address-level4",
-        "country", "country-name", "postal-code"
+        "name",
+        "given-name",
+        "additional-name",
+        "family-name",
+        "honorific-prefix",
+        "honorific-suffix",
+        "nickname",
+        "email",
+        "tel",
+        "organization",
+        "street-address",
+        "address-line1",
+        "address-line2",
+        "address-line3",
+        "address-level1",
+        "address-level2",
+        "address-level3",
+        "address-level4",
+        "country",
+        "country-name",
+        "postal-code",
     ]);
     const IDENTITY_CONTEXT_FIELDS = new Set([
-        "name", "given-name", "additional-name", "family-name", "honorific-prefix",
-        "honorific-suffix", "organization", "street-address", "address-line1",
-        "address-line2", "address-line3", "address-level1", "address-level2",
-        "address-level3", "address-level4", "country", "country-name", "postal-code"
+        "name",
+        "given-name",
+        "additional-name",
+        "family-name",
+        "honorific-prefix",
+        "honorific-suffix",
+        "organization",
+        "street-address",
+        "address-line1",
+        "address-line2",
+        "address-line3",
+        "address-level1",
+        "address-level2",
+        "address-level3",
+        "address-level4",
+        "country",
+        "country-name",
+        "postal-code",
     ]);
 
     function formScope(input) {
@@ -26,13 +64,15 @@ module.exports.create = function create({ bridge }) {
     }
 
     function formControls(scope) {
-        const controls = scope instanceof HTMLFormElement
-            ? Array.from(scope.elements)
-            : Array.from(scope.querySelectorAll("input, select, textarea"));
-        return controls.filter(control =>
-            control instanceof HTMLInputElement
-            || control instanceof HTMLSelectElement
-            || control instanceof HTMLTextAreaElement
+        const controls =
+            scope instanceof HTMLFormElement
+                ? Array.from(scope.elements)
+                : Array.from(scope.querySelectorAll("input, select, textarea"));
+        return controls.filter(
+            control =>
+                control instanceof HTMLInputElement ||
+                control instanceof HTMLSelectElement ||
+                control instanceof HTMLTextAreaElement
         );
     }
 
@@ -45,12 +85,15 @@ module.exports.create = function create({ bridge }) {
     }
 
     function autofillField(control, kind) {
-        if (control instanceof HTMLInputElement
-            && !["text", "email", "tel", "number", "month"].includes(control.type)) return null;
+        if (control instanceof HTMLInputElement && !["text", "email", "tel", "number", "month"].includes(control.type))
+            return null;
         const tokens = autocompleteTokens(control);
-        const explicit = tokens.find(token => CARD_AUTOCOMPLETE_FIELDS.has(token)
-            || IDENTITY_AUTOCOMPLETE_FIELDS.has(token)
-            || ["username", "current-password", "new-password", "one-time-code"].includes(token));
+        const explicit = tokens.find(
+            token =>
+                CARD_AUTOCOMPLETE_FIELDS.has(token) ||
+                IDENTITY_AUTOCOMPLETE_FIELDS.has(token) ||
+                ["username", "current-password", "new-password", "one-time-code"].includes(token)
+        );
         const fields = kind === "payment-card" ? CARD_AUTOCOMPLETE_FIELDS : IDENTITY_AUTOCOMPLETE_FIELDS;
         // Explicit field roles override guesses from names, labels and classes.
         if (explicit) return fields.has(explicit) ? explicit : null;
@@ -61,7 +104,7 @@ module.exports.create = function create({ bridge }) {
         const tokens = autocompleteTokens(control);
         return JSON.stringify([
             tokens.find(token => token.startsWith("section-")) || "",
-            tokens.find(token => token === "shipping" || token === "billing") || ""
+            tokens.find(token => token === "shipping" || token === "billing") || "",
         ]);
     }
 
@@ -102,16 +145,16 @@ module.exports.create = function create({ bridge }) {
         "cc-exp-year": ["expiration year", "expiry year", "exp year", "cc exp year"],
         "cc-csc": ["cvv", "cvc", "csc", "security code", "card security code"],
         "cc-type": ["card type", "network", "brand"],
-        "name": ["name", "full name", "legal name"],
+        name: ["name", "full name", "legal name"],
         "given-name": ["first name", "given name"],
         "additional-name": ["middle name", "additional name"],
         "family-name": ["last name", "family name", "surname"],
         "honorific-prefix": ["title", "prefix", "honorific prefix"],
         "honorific-suffix": ["suffix", "honorific suffix"],
-        "nickname": ["nickname", "preferred name"],
-        "email": ["email", "email address"],
-        "tel": ["phone", "telephone", "mobile", "phone number"],
-        "organization": ["organization", "company", "business"],
+        nickname: ["nickname", "preferred name"],
+        email: ["email", "email address"],
+        tel: ["phone", "telephone", "mobile", "phone number"],
+        organization: ["organization", "company", "business"],
         "street-address": ["street address", "full address", "address"],
         "address-line1": ["address line 1", "address1", "street"],
         "address-line2": ["address line 2", "address2", "apartment", "suite", "unit"],
@@ -120,9 +163,9 @@ module.exports.create = function create({ bridge }) {
         "address-level2": ["city", "town"],
         "address-level3": ["district", "county"],
         "address-level4": ["suburb", "neighborhood"],
-        "country": ["country code", "country"],
+        country: ["country code", "country"],
         "country-name": ["country name", "country"],
-        "postal-code": ["postal code", "zip", "zip code"]
+        "postal-code": ["postal code", "zip", "zip code"],
     };
 
     function autofillValue(item, field) {
@@ -137,9 +180,9 @@ module.exports.create = function create({ bridge }) {
         if (!control || control.disabled || control.readOnly || !isElementVisible(control)) return;
         if (control instanceof HTMLSelectElement) {
             const wanted = String(value).trim().toLowerCase();
-            const option = Array.from(control.options).find(candidate =>
-                candidate.value.trim().toLowerCase() === wanted
-                || candidate.text.trim().toLowerCase() === wanted
+            const option = Array.from(control.options).find(
+                candidate =>
+                    candidate.value.trim().toLowerCase() === wanted || candidate.text.trim().toLowerCase() === wanted
             );
             if (!option) return;
             setControlValue(control, option.value);
@@ -157,8 +200,11 @@ module.exports.create = function create({ bridge }) {
         if (!scope.isConnected) return;
         const kind = item.kind;
         const targets = formControls(scope).map((control, index) => ({
-            control, index, id: control.id, name: control.name,
-            field: fieldGroup(control) === group ? autofillField(control, kind) : null
+            control,
+            index,
+            id: control.id,
+            name: control.name,
+            field: fieldGroup(control) === group ? autofillField(control, kind) : null,
         }));
         for (const target of targets) {
             const { index, field, id, name } = target;
@@ -167,10 +213,19 @@ module.exports.create = function create({ bridge }) {
             // Prefer the original control or a unique stable identifier when a
             // page replaces/reorders fields; use position only for unnamed fields.
             const current = formControls(scope);
-            const matches = current.filter(control => (id ? control.id === id : name && control.name === name)
-                && fieldGroup(control) === group && autofillField(control, kind) === field);
-            const control = current.includes(target.control) ? target.control
-                : matches.length === 1 ? matches[0] : !id && !name ? current[index] : null;
+            const matches = current.filter(
+                control =>
+                    (id ? control.id === id : name && control.name === name) &&
+                    fieldGroup(control) === group &&
+                    autofillField(control, kind) === field
+            );
+            const control = current.includes(target.control)
+                ? target.control
+                : matches.length === 1
+                  ? matches[0]
+                  : !id && !name
+                    ? current[index]
+                    : null;
             if (!control || fieldGroup(control) !== group || autofillField(control, kind) !== field) continue;
             const value = autofillValue(item, field);
             if (value) fillFormControl(control, value);

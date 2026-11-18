@@ -16,27 +16,48 @@ module.exports.create = function create() {
     let disposed = false;
     const bridge = bridgeModule.create();
     const credentials = credentialsModule.create({ roots: () => rootControllers.keys() });
-    const { restoreUsernameFromPreviousStep, storeUsernameForLater, rememberUsernameAcrossNavigation,
-        findLoginCredentials, usernameFromScope, credentialsFromScope, resolveUsername } = credentials;
+    const {
+        restoreUsernameFromPreviousStep,
+        storeUsernameForLater,
+        rememberUsernameAcrossNavigation,
+        findLoginCredentials,
+        usernameFromScope,
+        credentialsFromScope,
+        resolveUsername,
+    } = credentials;
     const { openCredentialPrompt } = bridge;
     const autofill = autofillModule.create({ bridge });
     const controls = controlsModule.create({ bridge, credentials, autofill });
     const generator = generatorModule.create({ controls, bridge, credentials });
-    const observer = observerModule.create({ controls, generator, autofill, onRoot: registerRoot, onRemoveRoot: unregisterRoot });
+    const observer = observerModule.create({
+        controls,
+        generator,
+        autofill,
+        onRoot: registerRoot,
+        onRemoveRoot: unregisterRoot,
+    });
     const duo = duoModule.create();
     function listen(root, type, handler) {
-        root.addEventListener(type, event => {
-            if (handledEvents.has(event)) return;
-            handledEvents.add(event); handler(event);
-        }, { capture: true, signal: rootControllers.get(root).signal });
+        root.addEventListener(
+            type,
+            event => {
+                if (handledEvents.has(event)) return;
+                handledEvents.add(event);
+                handler(event);
+            },
+            { capture: true, signal: rootControllers.get(root).signal }
+        );
     }
-    function unregisterRoot(root) { rootControllers.get(root)?.abort(); rootControllers.delete(root); }
+    function unregisterRoot(root) {
+        rootControllers.get(root)?.abort();
+        rootControllers.delete(root);
+    }
     function registerRoot(root) {
         if (disposed || rootControllers.has(root)) return;
         rootControllers.set(root, new AbortController());
         // Remember the last username typed on this domain so password-only
         // login steps (and the save prompt) know which account is logging in.
-        listen(root, "input", (e) => {
+        listen(root, "input", e => {
             const t = e.composedPath?.()[0] || e.target;
             if (!e.isTrusted || !(t instanceof HTMLInputElement) || !isCredentialInput(t)) return;
             credentialUserIntent = true;
@@ -46,7 +67,7 @@ module.exports.create = function create() {
             }
         });
 
-        listen(root, "focusin", (e) => {
+        listen(root, "focusin", e => {
             const target = e.composedPath?.()[0] || e.target;
             const targetRoot = target.getRootNode?.();
             if (targetRoot?.host && !rootControllers.has(targetRoot)) observer.scan(targetRoot);
@@ -60,11 +81,14 @@ module.exports.create = function create() {
             credentialsFor: form => findLoginCredentials(form),
             shouldIgnore: () => disposed || !credentialAttempt.idle,
             userActivated: () => navigator.userActivation?.isActive === true,
-            handle: ({ credentials }) => attemptCredentials(credentials)
+            handle: ({ credentials }) => attemptCredentials(credentials),
         });
         listen(root, "submit", event => {
-            if (event.isTrusted && navigator.userActivation?.isActive === true
-                && event.target instanceof HTMLFormElement) {
+            if (
+                event.isTrusted &&
+                navigator.userActivation?.isActive === true &&
+                event.target instanceof HTMLFormElement
+            ) {
                 const username = usernameFromScope(event.target);
                 if (username) rememberUsernameAcrossNavigation(username);
             }
@@ -79,26 +103,31 @@ module.exports.create = function create() {
         // or removes the password input, then defer just long enough for a normal
         // submit event to take ownership when one exists.
         const handlePossibleAdvance = source => {
-            const input = source instanceof HTMLInputElement && isCredentialInput(source)
-                ? source
-                : credentials.lastInput;
-            const scope = source?.form
-                || source?.closest?.("form, [role='form'], dialog")
-                || (input ? credentialScope(input) : null);
+            const input =
+                source instanceof HTMLInputElement && isCredentialInput(source) ? source : credentials.lastInput;
+            const scope =
+                source?.form ||
+                source?.closest?.("form, [role='form'], dialog") ||
+                (input ? credentialScope(input) : null);
             if (!scope) return;
             credentialUserIntent = true;
             const username = usernameFromScope(scope);
             const snapshot = credentialsFromScope(scope);
-            PasswordManagerFormSubmission.scheduleCredentialAdvance({
-                username: username || snapshot.username,
-                password: snapshot.password
-            }, {
-                remember: rememberUsernameAcrossNavigation,
-                shouldIgnore: () => disposed || !credentialAttempt.idle,
-                prompt: captured => {
-                    attemptCredentials(captured).catch(error => console.log("Password Manager credential prompt error:", error));
+            PasswordManagerFormSubmission.scheduleCredentialAdvance(
+                {
+                    username: username || snapshot.username,
+                    password: snapshot.password,
+                },
+                {
+                    remember: rememberUsernameAcrossNavigation,
+                    shouldIgnore: () => disposed || !credentialAttempt.idle,
+                    prompt: captured => {
+                        attemptCredentials(captured).catch(error =>
+                            console.log("Password Manager credential prompt error:", error)
+                        );
+                    },
                 }
-            });
+            );
         };
 
         listen(root, "click", event => {
@@ -117,7 +146,6 @@ module.exports.create = function create() {
             if (!(target instanceof HTMLInputElement) || !isCredentialInput(target)) return;
             handlePossibleAdvance(target);
         });
-
     }
     const credentialAttempt = PasswordManagerFormSubmission.createCredentialAttempt(captured => {
         if (captured.username) rememberUsernameAcrossNavigation(captured.username);
@@ -142,34 +170,44 @@ module.exports.create = function create() {
         // Catch logins that navigate/redirect without a form submit event
         // (e.g. fetch + window.location, or form.submit() in JS). The extension
         // window and background-owned operation survive the page being destroyed.
-        window.addEventListener("pagehide", event => {
-            if (!event.isTrusted || !credentialUserIntent) return;
-            if (!credentialAttempt.idle) return;
+        window.addEventListener(
+            "pagehide",
+            event => {
+                if (!event.isTrusted || !credentialUserIntent) return;
+                if (!credentialAttempt.idle) return;
 
-            const { username: rawUsername, password } = findLoginCredentials();
-            if (!password) {
-                const username = credentials.lastInput
-                    ? usernameFromScope(credentialScope(credentials.lastInput))
-                    : "";
-                if (username) rememberUsernameAcrossNavigation(username);
-                return;
-            }
-            const username = resolveUsername(rawUsername);
-            if (rawUsername) storeUsernameForLater(rawUsername);
+                const { username: rawUsername, password } = findLoginCredentials();
+                if (!password) {
+                    const username = credentials.lastInput
+                        ? usernameFromScope(credentialScope(credentials.lastInput))
+                        : "";
+                    if (username) rememberUsernameAcrossNavigation(username);
+                    return;
+                }
+                const username = resolveUsername(rawUsername);
+                if (rawUsername) storeUsernameForLater(rawUsername);
 
-            if (!credentialAttempt.reserve()) return;
-            chrome.runtime.sendMessage(
-                { action: "openCredentialPrompt", username, password },
-                () => void chrome.runtime.lastError
-            );
-        }, { signal: lifecycle.signal });
+                if (!credentialAttempt.reserve()) return;
+                chrome.runtime.sendMessage(
+                    { action: "openCredentialPrompt", username, password },
+                    () => void chrome.runtime.lastError
+                );
+            },
+            { signal: lifecycle.signal }
+        );
     }
-
 
     function dispose() {
         if (disposed) return;
-        disposed = true; credentialAttempt.dispose(); lifecycle.abort(); observer.dispose();
-        generator.dispose(); controls.dispose(); bridge.dispose(); duo.dispose(); credentials.dispose();
+        disposed = true;
+        credentialAttempt.dispose();
+        lifecycle.abort();
+        observer.dispose();
+        generator.dispose();
+        controls.dispose();
+        bridge.dispose();
+        duo.dispose();
+        credentials.dispose();
     }
     return { start, dispose, roots: () => [...rootControllers.keys()] };
 };
