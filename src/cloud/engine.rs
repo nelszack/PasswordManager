@@ -48,7 +48,8 @@ pub(crate) enum Bind {
 }
 
 /// Local copies that must not start syncing until the user enables them.
-const RECOVERY_PREFIXES: [&str; 3] = ["rekey-recovery-", "recovery-", "comparison-"];
+/// `conflict-` copies were written by earlier mobile builds.
+const RECOVERY_PREFIXES: [&str; 4] = ["rekey-recovery-", "recovery-", "comparison-", "conflict-"];
 
 pub(crate) fn recovery_copy(path: &Path) -> bool {
     path.file_name()
@@ -148,9 +149,12 @@ pub(crate) async fn sync<H: SyncHost>(
             "Sync binding belongs to a different server or vault; local copy preserved".into(),
         );
     }
-    if bind == Bind::Enable {
+    // The checkpoint a download must find unchanged on disk.
+    let mut checkpoint = snap.state.clone();
+    if bind == Bind::Enable && checkpoint.as_ref() != Some(&enabled(&state)) {
         state.enabled = true;
         save_binding(&snap.path, &state)?;
+        checkpoint = Some(state.clone());
     }
     if !state.enabled {
         return Err("Sync is disabled for this vault".into());
@@ -205,7 +209,6 @@ pub(crate) async fn sync<H: SyncHost>(
     state.version = Some(version);
     state.digest = Some(digest(&bytes));
     let path = snap.path;
-    let checkpoint = snap.state;
     host.with_unlocked(snap.session, move |vault, key| {
         unchanged_since(&path, &local_digest, checkpoint.as_ref())
             .map_err(|_| "Local vault changed during download; both copies preserved")?;
@@ -241,14 +244,24 @@ pub(crate) async fn status<H: SyncHost>(host: &H, check_remote: bool) -> Result<
     })
 }
 
-/// Turns sync on or off for this vault without transferring anything.
+fn enabled(state: &Binding) -> Binding {
+    Binding {
+        enabled: true,
+        ..state.clone()
+    }
+}
+
+/// Turns sync on or off for this vault without transferring anything. A vault
+/// without a checkpoint is refused for [`Bind::Existing`]; otherwise it gets a
+/// new checkpoint (so a recovery copy can be marked disabled before any sync).
 pub(crate) async fn set_enabled<H: SyncHost>(
     host: &H,
     expected: Option<&str>,
     enabled: bool,
+    bind: Bind,
 ) -> Result<Binding, String> {
     let snap = current(host, expected).await?;
-    let state = match snap.state {
+    let state = match snap.state.clone() {
         Some(mut state) => {
             if enabled && state.server_url != host.client().await?.url {
                 return Err("Sync server differs from this vault's binding".into());
@@ -256,30 +269,68 @@ pub(crate) async fn set_enabled<H: SyncHost>(
             state.enabled = enabled;
             state
         }
+        None if bind == Bind::Existing => {
+            return Err("This vault is not connected to sync".into());
+        }
         None => new_binding(&host.client().await?.url, &snap.id, enabled),
     };
-    save_binding(&snap.path, &state)?;
+    let saved = state.clone();
+    host.with_unlocked(
+        snap.session,
+        move |_: &mut Vault, _: &mut VaultCredentials| {
+            unchanged_since(&snap.path, &digest(&snap.bytes), snap.state.as_ref())?;
+            save_binding(&snap.path, &saved)
+        },
+    )
+    .await?;
     Ok(state)
 }
 
-/// Installs a cloud vault as a new local file and returns its filename.
+/// A cloud vault fetched for installation as a new local file.
+pub(crate) struct Download {
+    url: String,
+    id: String,
+    version: String,
+    bytes: Vec<u8>,
+    independent_copy: bool,
+}
+
+impl Download {
+    /// Installs into `directory` and returns the new filename. An independent
+    /// copy is a `comparison-` file that never syncs until enabled.
+    pub(crate) fn install(self, directory: &Path) -> Result<String, String> {
+        let prefix = if self.independent_copy {
+            "comparison-"
+        } else {
+            ""
+        };
+        install_download(
+            directory,
+            prefix,
+            &self.url,
+            &self.id,
+            Some(self.version),
+            self.bytes,
+            self.independent_copy,
+        )
+    }
+}
+
+/// Downloads a cloud vault. The host installs it while it can still accept files.
 pub(crate) async fn download<H: SyncHost>(
     host: &H,
     id: &str,
     independent_copy: bool,
-) -> Result<String, String> {
+) -> Result<Download, String> {
     let client = host.client().await?;
     let (version, bytes) = client.download(id).await?;
-    let prefix = if independent_copy { "comparison-" } else { "" };
-    install_download(
-        &host.directory(),
-        prefix,
-        &client.url,
-        id,
-        Some(version),
+    Ok(Download {
+        url: client.url,
+        id: id.to_owned(),
+        version,
         bytes,
         independent_copy,
-    )
+    })
 }
 
 /// Binds consent to the exact two ciphertexts, connection, and unlock session.
@@ -408,6 +459,19 @@ async fn fetch_for_review<H: SyncHost>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_and_comparison_copies_never_sync_implicitly() {
+        for name in [
+            "rekey-recovery-1.enc",
+            "recovery-local-1.enc",
+            "comparison-1-2.enc",
+            "conflict-1-2.enc",
+        ] {
+            assert!(recovery_copy(Path::new(name)), "{name}");
+        }
+        assert!(!recovery_copy(Path::new("vault-1.enc")));
+    }
 
     #[test]
     fn reconciliation_preserves_both_copies_until_a_comparison_is_known() {

@@ -37,9 +37,13 @@ class MobileParityNativeTest {
                 "otpauth://hotp/Test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
             )
         )
+        assertThrows(IllegalStateException::class.java) {
+            Vault.command(VaultCommands.authenticatorCode(1))
+        }
         assertEquals(
             "755224",
-            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code"),
+            Vault.commandJson(VaultCommands.authenticatorCode(1), confirmed = true)
+                .getString("code"),
         )
         val original = Vault.commandJson(VaultCommands.item(1))
         Vault.command(
@@ -105,7 +109,8 @@ class MobileParityNativeTest {
         Vault.request("unlock", "vault" to restored, "key_file" to key)
         assertEquals(
             "287082",
-            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code"),
+            Vault.commandJson(VaultCommands.authenticatorCode(1), confirmed = true)
+                .getString("code"),
         )
         assertEquals(1, (Vault.request("passkeys") as JSONArray).length())
         assertEquals(1, Vault.commandJson(VaultCommands.item(1)).getJSONArray("fields").length())
@@ -132,7 +137,10 @@ class MobileParityNativeTest {
         Vault.command(VaultCommands.removeAuthenticator(1))
         assertNull(VaultCommands.authenticatorMode(Vault.commandJson(VaultCommands.item(1))))
         Vault.command(VaultCommands.delete(1))
-        Vault.command(VaultCommands.purgeTrash(1))
+        assertThrows(IllegalStateException::class.java) {
+            Vault.command(VaultCommands.purgeTrash(1))
+        }
+        Vault.command(VaultCommands.purgeTrash(1), confirmed = true)
         assertEquals(0, Vault.commandJson(VaultCommands.trash()).getJSONArray("trash").length())
     }
 }

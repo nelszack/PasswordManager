@@ -580,6 +580,53 @@ mod tests {
         }
     }
     #[test]
+    fn purging_trash_needs_confirmation_and_unchanged_saves_succeed() {
+        let (_directory, mut api, _) = fixture();
+        let id = add(&mut api, "Unchanged", ItemKind::Login);
+        let detail = item(&mut api, id).unwrap();
+        let unchanged = |name: &str| {
+            ServerCommand::Update(TypedUpdate {
+                entry: EntryUpdate {
+                    target: Target::Id(id),
+                    update: EntryChanges {
+                        name: Some(name.into()),
+                        ..Default::default()
+                    },
+                    password: None,
+                },
+                kind: None,
+                add_url: vec![],
+                remove_url: vec![],
+                clear_urls: false,
+                set_fields: vec![],
+                remove_fields: vec![],
+                clear_fields: false,
+            })
+        };
+        let name = detail["name"].as_str().unwrap().to_owned();
+        assert_eq!(command(&mut api, unchanged(&name))["changed"], false);
+        delete(&mut api, id).unwrap();
+        assert!(
+            vault_command(&mut api, unchanged(&name)).is_err(),
+            "a trashed item is not found"
+        );
+        assert!(vault_command(&mut api, ServerCommand::PurgeTrash(None)).is_err());
+        assert_eq!(
+            command(&mut api, ServerCommand::Trash)["trash"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        confirmed_command(&mut api, ServerCommand::PurgeTrash(None)).unwrap();
+        assert!(
+            command(&mut api, ServerCommand::Trash)["trash"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
     fn encrypted_backup_restore_and_keyfile_rekey_survive_process_restart() {
         let (directory, mut api, name) = fixture();
         let id = add(&mut api, "Backup", ItemKind::Login);
@@ -596,8 +643,13 @@ mod tests {
             "Hotp",
             "the mode is readable without consuming a code"
         );
+        let next = || ServerCommand::AuthenticatorData(Target::Id(id));
+        assert!(
+            vault_command(&mut api, next()).is_err(),
+            "HOTP advances its counter only when confirmed"
+        );
         assert_eq!(
-            command(&mut api, ServerCommand::AuthenticatorData(Target::Id(id)))["code"],
+            confirmed_command(&mut api, next()).unwrap()["code"],
             "755224"
         );
         delete(&mut api, id).unwrap();
@@ -623,7 +675,7 @@ mod tests {
         );
         command(&mut api, ServerCommand::RestoreTrash(id));
         assert_eq!(
-            command(&mut api, ServerCommand::AuthenticatorData(Target::Id(id)))["code"],
+            confirmed_command(&mut api, next()).unwrap()["code"],
             "287082"
         );
         let key = request(&mut api, json!({"op":"new_key_file"}))["data"]

@@ -202,9 +202,13 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     /** Runs a shared vault command that changes the vault, then syncs. */
-    private fun change(command: org.json.JSONObject, done: () -> Unit) {
+    private fun change(
+        command: org.json.JSONObject,
+        confirmed: Boolean = false,
+        done: () -> Unit,
+    ) {
         task({
-            Vault.command(command)
+            Vault.command(command, confirmed = confirmed)
             afterToolChange()
         }) {
             done()
@@ -434,14 +438,14 @@ abstract class ManagementActivity : VaultActivity() {
                 }
                 button("Permanently delete ${item.getString("name")}") {
                     confirm("Permanently erase this deleted item? This cannot be undone.") {
-                        change(VaultCommands.purgeTrash(id)) { trash() }
+                        change(VaultCommands.purgeTrash(id), confirmed = true) { trash() }
                     }
                 }
             }
             if (entries.length() > 0)
                 button("Empty trash") {
                     confirm("Permanently erase every item in trash?") {
-                        change(VaultCommands.purgeTrash(null)) { trash() }
+                        change(VaultCommands.purgeTrash(null), confirmed = true) { trash() }
                     }
                 }
             button("Apply configured trash retention") {
@@ -473,9 +477,10 @@ abstract class ManagementActivity : VaultActivity() {
                         "Generate the next code and permanently advance its counter? Use one device at a time for this counter-based authenticator."
                     ) {
                         task({
-                            Vault.commandJson(VaultCommands.authenticatorCode(id)).also {
-                                afterToolChange()
-                            }
+                            Vault.commandJson(VaultCommands.authenticatorCode(id), confirmed = true)
+                                .also {
+                                    afterToolChange()
+                                }
                         }) { result ->
                             codeResult(result, id)
                         }

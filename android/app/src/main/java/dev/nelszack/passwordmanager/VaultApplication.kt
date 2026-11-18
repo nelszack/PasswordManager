@@ -89,13 +89,26 @@ object Vault {
 
     /**
      * Runs a shared vault command built by [VaultCommands]. With [expectedRevision], the command is
-     * refused if the item changed since it was read.
+     * refused if the item changed since it was read. Irreversible commands (purging trash,
+     * advancing an HOTP counter) also need [confirmed], set only after the user confirms.
      */
-    fun command(command: JSONObject, expectedRevision: Long? = null): Any =
-        request("vault", "command" to command, "expected_revision" to expectedRevision)
+    fun command(
+        command: JSONObject,
+        expectedRevision: Long? = null,
+        confirmed: Boolean = false,
+    ): Any =
+        request(
+            "vault",
+            "command" to command,
+            "expected_revision" to expectedRevision,
+            "confirmed" to confirmed.takeIf { it },
+        )
 
-    fun commandJson(command: JSONObject, expectedRevision: Long? = null) =
-        command(command, expectedRevision) as JSONObject
+    fun commandJson(
+        command: JSONObject,
+        expectedRevision: Long? = null,
+        confirmed: Boolean = false,
+    ) = command(command, expectedRevision, confirmed) as JSONObject
 
     fun lock() {
         runCatching { NativeBridge.invalidate() }

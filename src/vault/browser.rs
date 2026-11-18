@@ -140,12 +140,7 @@ impl PartialEq for CachedSites {
 }
 fn item_matches_site(item: &Item, requested: &Site) -> bool {
     item.metadata.kind == ItemKind::Login
-        && !(item.entry.password.is_empty()
-            && item
-                .metadata
-                .custom_fields
-                .iter()
-                .any(|f| f.name == crate::passkey::FIELD))
+        && !(item.entry.password.is_empty() && item.is_passkey())
         && item
             .sites
             .0

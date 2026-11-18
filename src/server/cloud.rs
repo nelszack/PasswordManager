@@ -67,6 +67,19 @@ impl SyncHost for DesktopHost<'_> {
     }
 }
 
+/// Installs on the owner queue, so shutdown, lock, and unlock cannot interleave.
+async fn install(host: &DesktopHost<'_>, download: engine::Download) -> Result<String, String> {
+    let stopping = host.stopping.clone();
+    host.worker
+        .with_session(move |_| {
+            if stopping.load(Ordering::Acquire) {
+                return Err("Server is stopping; download was not installed".into());
+            }
+            download.install(&data_dir())
+        })
+        .await?
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Probe {
     session: String,
@@ -135,8 +148,12 @@ pub(super) async fn command(
         Action::Pull(id) | Action::PullCopy(id) if !crate::cloud::valid_id(&id) => {
             return Err("Invalid cloud vault ID".into());
         }
-        Action::Pull(id) => downloaded(engine::download(&host, &id, false).await?),
-        Action::PullCopy(id) => downloaded(engine::download(&host, &id, true).await?),
+        Action::Pull(id) => {
+            downloaded(install(&host, engine::download(&host, &id, false).await?).await?)
+        }
+        Action::PullCopy(id) => {
+            downloaded(install(&host, engine::download(&host, &id, true).await?).await?)
+        }
         Action::Conflicts => {
             let expected = expected.ok_or("Unlock session changed before conflict review")?;
             return Ok(ResponsePayload::CloudConflicts(
@@ -152,7 +169,7 @@ pub(super) async fn command(
             resolved.message
         }
         Action::Disable => {
-            engine::set_enabled(&host, expected, false).await?;
+            engine::set_enabled(&host, expected, false, Bind::Existing).await?;
             "Sync disabled for this vault".to_owned()
         }
         Action::Status => {

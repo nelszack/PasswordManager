@@ -82,7 +82,8 @@ class MobileParityTest {
         screen.waitFor("Generate next HOTP code")
         assertEquals(
             "755224",
-            Vault.commandJson(VaultCommands.authenticatorCode(1)).getString("code"),
+            Vault.commandJson(VaultCommands.authenticatorCode(1), confirmed = true)
+                .getString("code"),
         )
         scenario.onActivity { it.openTools() }
         screen.click("Password generator")

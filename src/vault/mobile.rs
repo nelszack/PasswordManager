@@ -93,6 +93,9 @@ enum Request {
     Vault {
         command: Box<ServerCommand>,
         expected_revision: Option<u64>,
+        /// The user confirmed an irreversible command (see `confirmation`).
+        #[serde(default)]
+        confirmed: bool,
     },
     Logins {
         origin: String,
@@ -464,15 +467,17 @@ impl MobileVault {
                 id,
                 copy,
             } => {
-                let name = self.run_sync(Some(client(&server, token)?), async |host| {
+                let download = self.run_sync(Some(client(&server, token)?), async |host| {
                     engine::download(host, &id, copy).await
                 })?;
+                let name = download.install(&self.directory)?;
                 Ok(json!({ "vault": name }))
             }
             Request::Vault {
                 command,
                 expected_revision,
-            } => self.run_command(*command, expected_revision),
+                confirmed,
+            } => self.run_command(*command, expected_revision, confirmed),
             Request::Logins { origin } => {
                 let vault = self.vault()?;
                 let logins: Vec<_> = self
@@ -557,7 +562,7 @@ impl MobileVault {
             } => {
                 let client = client(&server, token)?;
                 self.run_sync(Some(client.clone()), async |host| {
-                    engine::set_enabled(host, None, enabled).await
+                    engine::set_enabled(host, None, enabled, Bind::Enable).await
                 })?;
                 self.sync_status(Some(client), false)
             }
@@ -620,6 +625,7 @@ impl MobileVault {
         &mut self,
         mut command: ServerCommand,
         expected_revision: Option<u64>,
+        confirmed: bool,
     ) -> Result<Value, String> {
         if let Err(error) = mobile_command(&command) {
             command.zeroize();
@@ -628,6 +634,14 @@ impl MobileVault {
         let history_limit = self.settings.history_limit;
         let cancellation = self.cancellation;
         let (vault, credentials) = self.unlocked()?;
+        if let Some(required) = confirmation(vault, &command)
+            && !confirmed
+        {
+            command.zeroize();
+            return Err(required.into());
+        }
+        // Saving an item without changes succeeds, as the app has always shown.
+        let existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).is_some());
         if let Some(expected) = expected_revision
             && !operations::expected_revision_matches(Some(vault), &command, expected)
         {
@@ -676,7 +690,7 @@ impl MobileVault {
                 )?;
             }
         }
-        response_value(responses)
+        response_value(responses, existing_update)
     }
 
     fn vault_names(&self) -> Result<Vec<String>, String> {
@@ -936,13 +950,34 @@ fn mobile_command(command: &ServerCommand) -> Result<(), &'static str> {
     }
 }
 
+/// Irreversible commands the app must confirm with the user first, and why.
+fn confirmation(vault: &Vault, command: &ServerCommand) -> Option<&'static str> {
+    match command {
+        ServerCommand::PurgeTrash(_) => Some("Confirm permanent deletion"),
+        ServerCommand::AuthenticatorData(target)
+            if vault
+                .entry_id(target)
+                .and_then(|id| vault.item(id))
+                .and_then(|item| item.authenticator.as_ref())
+                .is_some_and(|a| matches!(a.state, AuthenticatorState::Hotp { .. })) =>
+        {
+            Some("Confirm generation; HOTP advances its counter")
+        }
+        _ => None,
+    }
+}
+
 /// Converts the shared command responses into the app's reply. Failures are
-/// plain messages; an incomplete audit still returns its partial report.
-fn response_value(responses: Vec<RpcResponse>) -> Result<Value, String> {
+/// plain messages; an incomplete audit still returns its partial report. With
+/// `existing_update`, "not found or unchanged" means the item was unchanged.
+fn response_value(responses: Vec<RpcResponse>, existing_update: bool) -> Result<Value, String> {
     let response = responses
         .into_iter()
         .next()
         .ok_or("Vault command produced no response")?;
+    if existing_update && response.code == ResponseCode::NotFound as i32 {
+        return Ok(json!({ "changed": false }));
+    }
     match response.payload {
         ResponsePayload::Message(message) if response.code != ResponseCode::Success as i32 => {
             Err(message)
@@ -1097,6 +1132,14 @@ pub(super) mod test_support {
 
     pub fn vault_command(api: &mut MobileVault, command: ServerCommand) -> Result<Value, String> {
         api.call(&json!({ "op": "vault", "command": command }).to_string())
+    }
+
+    /// A command the user confirmed in the app (see `confirmation`).
+    pub fn confirmed_command(
+        api: &mut MobileVault,
+        command: ServerCommand,
+    ) -> Result<Value, String> {
+        api.call(&json!({ "op": "vault", "command": command, "confirmed": true }).to_string())
     }
 
     pub fn vault_command_at(

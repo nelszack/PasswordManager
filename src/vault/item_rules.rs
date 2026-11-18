@@ -17,14 +17,21 @@ pub(crate) fn is_reserved_field(name: &str) -> bool {
 }
 
 impl Item {
+    /// The passkey record itself, stored under the exact reserved name.
     pub(crate) fn passkey_field(&self) -> Option<&CustomField> {
         self.metadata
             .custom_fields
             .iter()
             .find(|f| f.name == crate::passkey::FIELD)
     }
+    /// Whether ordinary edits must leave this item alone. Any spelling of the
+    /// reserved name counts, because every such field is hidden from views
+    /// and would be silently dropped by an edit that replaces fields.
     pub(crate) fn is_passkey(&self) -> bool {
-        self.passkey_field().is_some()
+        self.metadata
+            .custom_fields
+            .iter()
+            .any(|f| is_reserved_field(&f.name))
     }
 }
 
@@ -76,29 +83,43 @@ pub(super) fn normalize_new_fields(fields: &mut [CustomField]) -> Result<(), Vau
     Ok(())
 }
 
-/// Count and uniqueness limits for a complete item. `before` is the item prior
-/// to an edit, so records imported before these limits stay editable as long
-/// as an edit does not make them larger.
-pub(super) fn check_item_limits(item: &Item, before: Option<&Item>) -> Result<(), VaultError> {
-    let urls = |item: &Item| item.urls().count();
-    let fields = |item: &Item| item.metadata.custom_fields.len();
-    if urls(item) > MAX_URLS && before.is_none_or(|b| urls(item) > urls(b)) {
+/// The parts of an item that count and uniqueness limits look at.
+#[derive(Clone, Copy)]
+pub(super) struct Shape {
+    urls: usize,
+    fields: usize,
+    duplicate_fields: bool,
+}
+
+impl Shape {
+    pub(super) fn of(item: &Item) -> Self {
+        let mut names = HashSet::new();
+        Self {
+            urls: item.urls().count(),
+            fields: item.metadata.custom_fields.len(),
+            duplicate_fields: !item
+                .metadata
+                .custom_fields
+                .iter()
+                .all(|f| names.insert(f.name.to_lowercase())),
+        }
+    }
+}
+
+/// Count and uniqueness limits for a complete item. `before` is the item's
+/// shape prior to an edit, so records imported before these limits stay
+/// editable as long as an edit does not make them larger.
+pub(super) fn check_item_limits(item: &Item, before: Option<Shape>) -> Result<(), VaultError> {
+    let after = Shape::of(item);
+    if after.urls > MAX_URLS && before.is_none_or(|b| after.urls > b.urls) {
         return Err(invalid(format!("Items are limited to {MAX_URLS} websites")));
     }
-    if fields(item) > MAX_CUSTOM_FIELDS && before.is_none_or(|b| fields(item) > fields(b)) {
+    if after.fields > MAX_CUSTOM_FIELDS && before.is_none_or(|b| after.fields > b.fields) {
         return Err(invalid(format!(
             "Items are limited to {MAX_CUSTOM_FIELDS} custom fields"
         )));
     }
-    let duplicates = |item: &Item| {
-        let mut names = HashSet::new();
-        !item
-            .metadata
-            .custom_fields
-            .iter()
-            .all(|f| names.insert(f.name.to_lowercase()))
-    };
-    if duplicates(item) && before.is_none_or(|b| !duplicates(b)) {
+    if after.duplicate_fields && before.is_none_or(|b| !b.duplicate_fields) {
         return Err(invalid("Custom field names must be unique"));
     }
     Ok(())
@@ -275,6 +296,30 @@ mod tests {
         assert_eq!(vault, before);
         // The record itself can still be trashed like any other item.
         assert!(vault.delete_entry(Target::Id(1), &mut key).unwrap());
+    }
+
+    #[test]
+    fn any_spelling_of_the_reserved_field_keeps_an_imported_item_read_only() {
+        let mut vault = Vault::memory();
+        let mut key = VaultCredentials::default();
+        assert!(
+            vault
+                .add_typed_entry(entry("Imported", vec![]), &mut key)
+                .unwrap()
+        );
+        // Imports bypass item rules, so simulate one carrying a variant name.
+        let variant = format!(" {} ", crate::passkey::FIELD.to_uppercase());
+        vault.item_mut(1).unwrap().metadata.custom_fields = vec![field(&variant, "key")];
+        assert!(vault.management_item(1, true).unwrap().fields.is_empty());
+        let mut strip = edit(1);
+        strip.clear_fields = true;
+        assert!(
+            vault
+                .update_typed_entry_with_limit(strip, &mut key, 10)
+                .is_err(),
+            "a hidden field must not be dropped by an edit"
+        );
+        assert_eq!(vault.item(1).unwrap().metadata.custom_fields.len(), 1);
     }
 
     #[test]

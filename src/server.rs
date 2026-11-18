@@ -70,24 +70,27 @@ enum CommandEffect {
     #[default]
     None,
     StopServer,
-    Audit(crate::vault::PendingAudit, bool),
-    Duo(Box<crate::vault::PreparedDuoPoll>),
-    DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
+    /// Network or CPU work finished outside the vault queue (never `Deferred::None`).
+    Deferred(crate::operations::Deferred),
 }
 
 impl From<crate::operations::Deferred> for CommandEffect {
     fn from(deferred: crate::operations::Deferred) -> Self {
-        use crate::operations::Deferred;
         match deferred {
-            Deferred::None => Self::None,
-            Deferred::Audit(snapshot, breaches) => Self::Audit(snapshot, breaches),
-            Deferred::Duo(prepared) => Self::Duo(prepared),
-            Deferred::DuoEnrollment(prepared) => Self::DuoEnrollment(prepared),
+            crate::operations::Deferred::None => Self::None,
+            work => Self::Deferred(work),
         }
     }
 }
 
-impl crate::operations::SessionAccess for VaultWorker {
+/// The desktop session that started deferred work. Completion is refused if
+/// that session was locked or replaced while the work ran.
+struct StartedSession<'a> {
+    worker: &'a VaultWorker,
+    session: Option<String>,
+}
+
+impl crate::operations::SessionAccess for StartedSession<'_> {
     fn with_unlocked<T: Send + 'static>(
         &self,
         apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, crate::vault::VaultError>
@@ -95,7 +98,13 @@ impl crate::operations::SessionAccess for VaultWorker {
         + 'static,
     ) -> impl std::future::Future<Output = Result<Result<T, crate::vault::VaultError>, String>> + Send
     {
-        self.with_session(move |session| session.with_unlocked(apply))
+        let expected = self.session.clone();
+        self.worker.with_session(move |session| {
+            if expected.is_none() || session.session_id() != expected {
+                return Err(crate::vault::VaultError::Locked);
+            }
+            session.with_unlocked(apply)
+        })
     }
 }
 
@@ -404,16 +413,23 @@ async fn finish_external_effect(
     worker: VaultWorker,
     operation_id: Option<String>,
 ) -> outcome::CommandOutcome {
-    let effect = std::mem::take(&mut result.effect);
-    match effect {
-        CommandEffect::Duo(prepared) => {
-            crate::operations::finish_duo(*prepared, &worker, &mut result.responses).await
+    use crate::operations::Deferred;
+    let CommandEffect::Deferred(work) = std::mem::take(&mut result.effect) else {
+        return worker.finish_external(result, operation_id).await;
+    };
+    let started = StartedSession {
+        worker: &worker,
+        session: result.session_id.clone(),
+    };
+    match work {
+        Deferred::Duo(prepared) => {
+            crate::operations::finish_duo(*prepared, &started, &mut result.responses).await
         }
-        CommandEffect::DuoEnrollment(prepared) => {
-            crate::operations::finish_duo_enrollment(*prepared, &worker, &mut result.responses)
+        Deferred::DuoEnrollment(prepared) => {
+            crate::operations::finish_duo_enrollment(*prepared, &started, &mut result.responses)
                 .await
         }
-        CommandEffect::Audit(snapshot, check_breaches) => {
+        Deferred::Audit(snapshot, check_breaches) => {
             // One CPU audit at a time, outside the vault queue. Check the captured
             // session/revision between scores so locking and edits remain responsive.
             static AUDIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
@@ -451,7 +467,7 @@ async fn finish_external_effect(
                 &mut result.responses,
             );
         }
-        _ => {}
+        Deferred::None => {}
     }
     worker.finish_external(result, operation_id).await
 }

@@ -985,7 +985,8 @@ async fn duo_poll_preserves_session_through_async_completion_and_encrypted_deliv
     }));
     request.expected_session = expected_session.clone();
     let mut result = worker.execute(state, request).await;
-    let CommandEffect::Duo(prepared) = &mut result.effect else {
+    let CommandEffect::Deferred(crate::operations::Deferred::Duo(prepared)) = &mut result.effect
+    else {
         panic!("Duo polling must defer its network response");
     };
     assert!(result.responses.is_empty());
@@ -1029,7 +1030,10 @@ async fn asynchronous_results_cannot_survive_a_lock_or_be_relabelled_with_a_new_
                 RequestEnvelope::new(ServerCommand::Audit(Default::default())),
             )
             .await;
-        assert!(matches!(result.effect, CommandEffect::Audit(..)));
+        assert!(matches!(
+            result.effect,
+            CommandEffect::Deferred(crate::operations::Deferred::Audit(..))
+        ));
         worker
             .with_session(move |live| {
                 live.lock();
@@ -1110,7 +1114,11 @@ async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let handle = worker.clone();
     let pending = tokio::spawn(async move {
         let mut responses = vec![];
-        crate::operations::finish_duo(prepared, &handle, &mut responses).await;
+        let started = StartedSession {
+            session: handle.session_id(),
+            worker: &handle,
+        };
+        crate::operations::finish_duo(prepared, &started, &mut responses).await;
         responses
     });
     tokio::time::timeout(Duration::from_secs(2), ready)

@@ -192,9 +192,9 @@ impl Vault {
             change.zeroize();
             return Err(error);
         }
-        let before = before.clone();
+        let before = item_rules::Shape::of(before);
         let changed = self.apply_validated_update(id, change, limit);
-        item_rules::check_item_limits(self.item(id).expect("updated item"), Some(&before))?;
+        item_rules::check_item_limits(self.item(id).expect("updated item"), Some(before))?;
         Ok(changed)
     }
     fn apply_validated_update(&mut self, id: usize, change: TypedUpdate, limit: usize) -> bool {
