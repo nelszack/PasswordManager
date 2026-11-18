@@ -1157,7 +1157,7 @@ impl App {
         {
             return Task::none();
         }
-        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let now = u64::try_from(jiff::Timestamp::now().as_second()).unwrap_or(0);
         if self
             .workspace
             .duo_requests_for(self)

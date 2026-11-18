@@ -1505,11 +1505,11 @@ pub(super) fn audit_summary(report: &password_manager::vault::AuditReport) -> (S
 fn expiry(seconds: u64) -> String {
     i64::try_from(seconds)
         .ok()
-        .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+        .and_then(|value| jiff::Timestamp::from_second(value).ok())
         .map(|value| {
             value
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M:%S %Z")
+                .to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S %Z")
                 .to_string()
         })
         .unwrap_or_else(|| "unknown".into())

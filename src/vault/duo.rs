@@ -311,7 +311,7 @@ mod tests {
         (vault, key)
     }
     fn body() -> Vec<u8> {
-        serde_json::to_vec(&json!({"stat":"OK","response":{"transactions":[{"urgid":"test-id","type":"Login","expiration":chrono::Utc::now().timestamp()+120,"step_up_code_info":{"num_digits":3}}]}})).unwrap()
+        serde_json::to_vec(&json!({"stat":"OK","response":{"transactions":[{"urgid":"test-id","type":"Login","expiration":crate::clock::unix_seconds()+120,"step_up_code_info":{"num_digits":3}}]}})).unwrap()
     }
     fn enroll() -> DuoCommand {
         DuoCommand::Enroll {

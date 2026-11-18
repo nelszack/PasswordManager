@@ -86,7 +86,7 @@ impl<'a> SignedHttp<'a> {
         mut params: BTreeMap<String, String>,
         txid: Option<&str>,
     ) -> Result<PreparedRequest, VaultError> {
-        let date = chrono::Utc::now().to_rfc2822();
+        let date = crate::clock::rfc2822(crate::clock::now());
         let form = Zeroizing::new(encoded(&params));
         for value in params.values_mut() {
             value.zeroize();
@@ -224,7 +224,7 @@ fn envelope(body: &[u8]) -> Result<Zeroizing<SensitiveJson>, VaultError> {
     Ok(Zeroizing::new(SensitiveJson(response)))
 }
 fn now() -> u64 {
-    chrono::Utc::now().timestamp().max(0) as u64
+    crate::clock::unix_seconds()
 }
 fn text(value: Option<&Value>) -> String {
     crate::terminal::metadata(

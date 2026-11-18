@@ -781,7 +781,7 @@ fn pending_account_request() -> password_manager::types::DuoPushRequest {
         username: "alice".into(),
         location: "Test location".into(),
         summary: "Test login".into(),
-        expires_at: (chrono::Utc::now().timestamp() + 300) as u64,
+        expires_at: jiff::Timestamp::now().as_second() as u64 + 300,
         code_digits: Some(3),
         unsupported: None,
         fingerprint: "synthetic-review".into(),

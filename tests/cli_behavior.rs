@@ -1401,7 +1401,10 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert_eq!(history["ok"], true);
     assert_eq!(history["data"]["history"].as_array().unwrap().len(), 1);
     assert!(
-        chrono::DateTime::parse_from_rfc3339(history["data"]["history"][0].as_str().unwrap())
+        history["data"]["history"][0]
+            .as_str()
+            .unwrap()
+            .parse::<jiff::Timestamp>()
             .is_ok()
     );
 

@@ -5,7 +5,7 @@ impl Vault {
         mut items: Vec<&'a Item>,
         options: &ListOptions,
     ) -> Vec<&'a Item> {
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         items.retain(|item| {
             options.kind.is_none_or(|kind| item.metadata.kind == kind)
                 && options

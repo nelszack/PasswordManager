@@ -142,11 +142,11 @@ impl ItemId {
 pub struct Timestamp(String);
 impl Timestamp {
     pub fn now() -> Self {
-        Self(chrono::Utc::now().to_rfc3339())
+        Self(crate::clock::rfc3339(crate::clock::now()))
     }
     pub fn parse(value: &str) -> Result<Self, VaultError> {
         parse_entry_timestamp(value)
-            .map(|v| Self(v.to_rfc3339()))
+            .map(|v| Self(crate::clock::rfc3339(v)))
             .ok_or_else(|| VaultError::Validation("invalid item timestamp".into()))
     }
     pub fn as_str(&self) -> &str {
@@ -662,25 +662,19 @@ fn run_blocking_io<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
-fn parse_entry_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f %:z"))
-        .ok()
-        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+fn parse_entry_timestamp(value: &str) -> Option<jiff::Timestamp> {
+    crate::clock::parse(value)
 }
 
-fn password_is_stale_at(changed: &str, days: u64, now: chrono::DateTime<chrono::Utc>) -> bool {
+fn password_is_stale_at(changed: &str, days: u64, now: jiff::Timestamp) -> bool {
     let Some(changed) = parse_entry_timestamp(changed) else {
         return false;
     };
-    let Some(threshold) = i64::try_from(days)
-        .ok()
-        .and_then(chrono::Duration::try_days)
-    else {
+    let Some(threshold) = crate::clock::days(days) else {
         // Such a threshold exceeds every representable timestamp's age.
         return false;
     };
-    now.signed_duration_since(changed) >= threshold
+    now.duration_since(changed) >= threshold
 }
 
 impl Zeroize for VaultEntry {

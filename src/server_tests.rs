@@ -131,7 +131,7 @@ async fn history_and_trash_use_typed_records_without_exposing_secrets() {
         panic!("history must use its typed response");
     };
     assert_eq!(history.history.len(), 1);
-    assert!(chrono::DateTime::parse_from_rfc3339(&history.history[0]).is_ok());
+    assert!(crate::clock::parse(&history.history[0]).is_some());
     let json = response.payload.into_json();
     assert!(json["history"].is_array());
     assert!(!json.to_string().contains("secret"));
@@ -945,7 +945,7 @@ async fn duo_poll_preserves_session_through_async_completion_and_encrypted_deliv
         let body = serde_json::to_vec(&serde_json::json!({
             "stat": "OK", "response": { "transactions": [{
                 "urgid": "synthetic-request", "type": "Login",
-                "expiration": chrono::Utc::now().timestamp() + 120,
+                "expiration": crate::clock::unix_seconds() + 120,
                 "step_up_code_info": { "num_digits": 3 }
             }] }
         }))

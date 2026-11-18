@@ -75,7 +75,7 @@ impl Vault {
             let export = PortableExportRef {
                 format: PORTABLE_FORMAT,
                 version: PORTABLE_VERSION,
-                exported_at: chrono::Utc::now().to_rfc3339(),
+                exported_at: crate::clock::rfc3339(crate::clock::now()),
                 items: ExportItems(self),
             };
             return serde_json::to_writer_pretty(destination, &export)

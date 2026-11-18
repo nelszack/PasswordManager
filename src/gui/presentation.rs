@@ -407,10 +407,11 @@ pub(super) fn blend(background: Color, foreground: Color, amount: f32) -> Color 
 }
 
 pub(super) fn display_date(value: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(value)
+    value
+        .parse::<jiff::Timestamp>()
         .map(|date| {
-            date.with_timezone(&chrono::Local)
-                .format("%b %d, %Y · %H:%M")
+            date.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%b %d, %Y · %H:%M")
                 .to_string()
         })
         .unwrap_or_else(|_| value.to_owned())

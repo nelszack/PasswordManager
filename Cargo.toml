@@ -32,7 +32,7 @@ blake3 = { version = "1.5", features = ["zeroize"] }
 hex = "0.4"
 psl = "2"
 url = "2"
-chrono = "0.4"
+jiff = "0.2.39"
 csv = "1"
 serde_json = "1"
 sha1 = "0.11"

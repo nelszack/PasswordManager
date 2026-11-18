@@ -128,10 +128,8 @@ impl Vault {
         if days == 0 {
             return Ok(0);
         };
-        let Some(cutoff) = i64::try_from(days)
-            .ok()
-            .and_then(chrono::Duration::try_days)
-            .and_then(|d| chrono::Utc::now().checked_sub_signed(d))
+        let Some(cutoff) =
+            crate::clock::days(days).and_then(|d| crate::clock::now().checked_sub(d).ok())
         else {
             return Ok(0);
         };
