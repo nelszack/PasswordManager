@@ -1194,13 +1194,7 @@ impl App {
         } else {
             return Task::none();
         };
-        if !target.current(self)
-            || action == Action::Requests
-                && !self
-                    .items
-                    .iter()
-                    .any(|item| item.id == target.choice.id && item.has_duo)
-        {
+        if !target.current(self) || action == Action::Requests && !self.has_duo(target.choice.id) {
             self.stop_tool_watches();
             self.notice = "The watched item changed. Select it and start watching again.".into();
             return Task::none();
@@ -1211,7 +1205,11 @@ impl App {
         if now.saturating_duration_since(self.workspace.last_watch) < Duration::from_secs(seconds) {
             return Task::none();
         }
-        match self.workspace.prepare_for(action, self, Some(&target)) {
+        self.run_watch(action, &target)
+    }
+    /// Fetch one watch tick; a request that cannot be prepared ends every watch.
+    fn run_watch(&mut self, action: Action, target: &WatchTarget) -> Task<super::Message> {
+        match self.workspace.prepare_for(action, self, Some(target)) {
             Ok(prepared) => self.execute_workflow(prepared),
             Err(error) => {
                 self.stop_tool_watches();
@@ -1219,6 +1217,9 @@ impl App {
                 Task::none()
             }
         }
+    }
+    pub(super) fn has_duo(&self, id: usize) -> bool {
+        self.items.iter().any(|item| item.id == id && item.has_duo)
     }
     /// Complete both WatchOtp and CopyWatchedOtp here. Every tick starts with a
     /// passive fetch; only a newly observed code schedules the copy fetch.
@@ -1444,11 +1445,7 @@ impl App {
                             self.report_error(error);
                             return Task::none();
                         }
-                        if !self
-                            .items
-                            .iter()
-                            .any(|item| item.id == target.choice.id && item.has_duo)
-                        {
+                        if !self.has_duo(target.choice.id) {
                             self.workspace.reset_duo();
                             self.notice = "Select a Push-enrolled item to watch requests.".into();
                             return Task::none();
@@ -1459,14 +1456,7 @@ impl App {
                         self.workspace.duo.watch = Some(target.clone());
                         Action::Requests
                     };
-                    return match self.workspace.prepare_for(action, self, Some(&target)) {
-                        Ok(prepared) => self.execute_workflow(prepared),
-                        Err(error) => {
-                            self.stop_tool_watches();
-                            self.report_error(error);
-                            Task::none()
-                        }
-                    };
+                    return self.run_watch(action, &target);
                 }
                 if matches!(toggle, Toggle::WatchDuo) && !value {
                     self.workspace.reset_duo();

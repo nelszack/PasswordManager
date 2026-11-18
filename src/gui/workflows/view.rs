@@ -205,11 +205,10 @@ fn duo_options<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
 }
 
 fn duo_requests<'a>(state: &'a State, app: &'a App) -> Column<'a, AppMessage> {
-    let enrolled = state.selected.as_ref().is_some_and(|choice| {
-        app.items
-            .iter()
-            .any(|item| item.id == choice.id && item.has_duo)
-    });
+    let enrolled = state
+        .selected
+        .as_ref()
+        .is_some_and(|choice| app.has_duo(choice.id));
     let unlocked =
         !app.busy() && app.connection.running && app.connection.session.is_some() && enrolled;
     let writes = unlocked && app.recovery.id().is_none() && state.prepared.is_none();

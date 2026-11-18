@@ -339,7 +339,7 @@ fn summaries_and_search_never_include_secret_fields_or_passwords() {
         ["https://example.com", "https://accounts.example.com"]
     );
     assert_eq!(page.items[0].urls, detail.urls);
-    assert_eq!(vault.view_id(1).unwrap().urls, detail.urls);
+    assert_eq!(vault.item(1).unwrap().view().urls, detail.urls);
     assert!(detail.password.is_none());
     assert!(detail.fields[0].value.is_none());
     assert_eq!(

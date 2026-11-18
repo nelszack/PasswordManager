@@ -154,22 +154,15 @@ fn performance_benchmarks() {
             write_vault(&value, &mut key).unwrap();
             (dir, value, key)
         };
-        let change = |id| TypedUpdate {
-            entry: EntryUpdate {
+        let change = |id| {
+            TypedUpdate::from(EntryUpdate {
                 target: Target::Id(id),
                 update: EntryChanges {
                     name: Some("Changed synthetic account".into()),
                     ..Default::default()
                 },
                 password: None,
-            },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
+            })
         };
         config.measure(
             "core",

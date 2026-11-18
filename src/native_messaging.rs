@@ -786,8 +786,8 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             let entry_id = request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?;
-            Ok(ServerCommand::Update(crate::types::TypedUpdate {
-                entry: EntryUpdate {
+            Ok(ServerCommand::Update(crate::types::TypedUpdate::from(
+                EntryUpdate {
                     target: Target::Id(entry_id),
                     update: EntryChanges {
                         name: None,
@@ -804,14 +804,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                         .into(),
                     ),
                 },
-                kind: None,
-                add_url: vec![],
-                remove_url: vec![],
-                clear_urls: false,
-                set_fields: vec![],
-                remove_fields: vec![],
-                clear_fields: false,
-            }))
+            )))
         }
         "lock" => Ok(ServerCommand::Lock(true)),
         _ => Err("unsupported native messaging action".to_string()),

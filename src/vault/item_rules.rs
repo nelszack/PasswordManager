@@ -154,20 +154,11 @@ mod tests {
     }
 
     fn edit(id: usize) -> TypedUpdate {
-        TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(id),
-                update: EntryChanges::default(),
-                password: None,
-            },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-        }
+        TypedUpdate::from(EntryUpdate {
+            target: Target::Id(id),
+            update: EntryChanges::default(),
+            password: None,
+        })
     }
 
     #[test]

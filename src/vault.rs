@@ -1,15 +1,14 @@
 use crate::secret::SecretString;
 #[cfg(test)]
-use crate::types::PasswordEntry;
+use crate::types::{EntryUpdate, PasswordEntry};
 use crate::{
     encryption::{
         decrypt_file, try_encrypt_file_in_place, try_gen_master_key, validate_new_password,
     },
     file::{data_dir, key_file_path, new_key_file_path, set_private_perms, sync_parent},
     types::{
-        AuditOptions, ConflictPolicy, CustomField, DuoCredentials, EntryChanges, EntryUpdate,
-        ItemKind, ListOptions, PasswordType, SearchFilter, SortField, Target, TypedEntry,
-        TypedUpdate,
+        AuditOptions, ConflictPolicy, CustomField, DuoCredentials, EntryChanges, ItemKind,
+        ListOptions, PasswordType, SearchFilter, SortField, Target, TypedEntry, TypedUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -145,7 +144,7 @@ impl Timestamp {
         Self(crate::clock::rfc3339(crate::clock::now()))
     }
     pub fn parse(value: &str) -> Result<Self, VaultError> {
-        parse_entry_timestamp(value)
+        crate::clock::parse(value)
             .map(|v| Self(crate::clock::rfc3339(v)))
             .ok_or_else(|| VaultError::Validation("invalid item timestamp".into()))
     }
@@ -192,7 +191,7 @@ impl Zeroize for Timestamp {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Default, PartialEq, Clone, zeroize::Zeroize)]
 pub struct VaultEntry {
     pub id: usize,
     pub name: String,
@@ -221,19 +220,13 @@ pub struct PasswordRevision {
     pub password: SecretString,
     pub changed: Timestamp,
 }
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone, zeroize::Zeroize)]
 pub struct EntryMetadata {
+    #[zeroize(skip)]
     pub kind: ItemKind,
     pub additional_urls: Vec<String>,
     pub password_changed: Option<Timestamp>,
     pub custom_fields: Vec<CustomField>,
-}
-impl Zeroize for EntryMetadata {
-    fn zeroize(&mut self) {
-        self.additional_urls.zeroize();
-        self.password_changed.zeroize();
-        self.custom_fields.zeroize();
-    }
 }
 #[derive(
     Serialize, Deserialize, Default, PartialEq, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
@@ -315,6 +308,21 @@ impl Item {
             .strength
             .0
             .get_or_init(|| run_blocking_io(|| zxcvbn::zxcvbn(&self.entry.password, &[]).score()))
+    }
+    fn view(&self) -> EntryView<'_> {
+        EntryView {
+            entry: &self.entry,
+            metadata: Some(&self.metadata),
+            has_totp: self.authenticator.is_some(),
+            urls: self.urls().collect(),
+        }
+    }
+    /// Only time-based codes can be produced without advancing a counter.
+    fn has_time_otp(&self) -> bool {
+        matches!(
+            self.authenticator.as_ref().map(|a| &a.state),
+            Some(AuthenticatorState::Totp(_))
+        )
     }
     fn active(&self) -> bool {
         matches!(self.lifecycle, Lifecycle::Active)
@@ -413,6 +421,20 @@ impl Vault {
             ..Self::default()
         }
     }
+    fn file(data: VaultData, directory: std::path::PathBuf, filename: String) -> Self {
+        Self {
+            data,
+            store: VaultStore::File {
+                directory,
+                filename: filename.clone(),
+            },
+            metadata: VaultMetadata {
+                filename,
+                duo_session: None,
+                changes: None,
+            },
+        }
+    }
     fn item(&self, id: usize) -> Option<&Item> {
         self.data.items.get(&ItemId::from_public(id).ok()?)
     }
@@ -429,22 +451,23 @@ impl Vault {
     fn active_entries(&self) -> impl Iterator<Item = &VaultEntry> {
         self.active_items().map(|i| &i.entry)
     }
-    fn entry_id(&self, target: &Target) -> Option<usize> {
+    fn target_item(&self, target: &Target) -> Option<&Item> {
         match target {
-            Target::Id(id) => self.item(*id).filter(|i| i.active()).map(|i| i.entry.id),
-            Target::Name(name) => self
-                .active_entries()
-                .find(|e| e.name == *name)
-                .map(|e| e.id),
+            Target::Id(id) => self.item(*id).filter(|i| i.active()),
+            Target::Name(name) => self.active_items().find(|i| i.entry.name == *name),
             _ => None,
         }
     }
+    fn require_target(&self, target: &Target) -> Result<&Item, VaultError> {
+        self.target_item(target)
+            .ok_or_else(|| VaultError::NotFound("entry not found".into()))
+    }
+    fn entry_id(&self, target: &Target) -> Option<usize> {
+        self.target_item(target).map(|i| i.entry.id)
+    }
+    #[cfg(test)]
     fn metadata(&self, id: usize) -> Option<&EntryMetadata> {
         self.item(id).map(|i| &i.metadata)
-    }
-    fn custom_fields(&self, id: usize) -> &[CustomField] {
-        self.metadata(id)
-            .map_or(&[], |m| m.custom_fields.as_slice())
     }
     pub fn revision(&self, id: usize) -> Option<u64> {
         self.item(id).map(|i| i.revision)
@@ -472,18 +495,6 @@ impl Vault {
             Ok(())
         }
     }
-    fn view(&self, item: &Item) -> EntryView<'_> {
-        self.view_id(item.entry.id).expect("item is part of vault")
-    }
-    fn view_id(&self, id: usize) -> Option<EntryView<'_>> {
-        let item = self.item(id)?;
-        Some(EntryView {
-            entry: &item.entry,
-            metadata: Some(&item.metadata),
-            has_totp: item.authenticator.is_some(),
-            urls: item.urls().collect(),
-        })
-    }
 }
 struct MetadataUpdate<'a> {
     kind: Option<ItemKind>,
@@ -501,6 +512,7 @@ pub(crate) struct AuditSnapshot {
     entries: Vec<AuditEntrySnapshot>,
 }
 
+#[derive(zeroize::Zeroize)]
 struct AuditEntrySnapshot {
     id: usize,
     name: String,
@@ -515,21 +527,14 @@ struct AuditEntrySnapshot {
 
 impl Drop for AuditSnapshot {
     fn drop(&mut self) {
-        for entry in &mut self.entries {
-            entry.name.zeroize();
-            entry.username.zeroize();
-            entry.password_hash.zeroize();
-            entry.password_changed.zeroize();
-            entry.identity.0.zeroize();
-            entry.identity.1.zeroize();
-        }
+        self.entries.zeroize();
     }
 }
 
 const PORTABLE_FORMAT: &str = "password-manager-portable";
 const PORTABLE_VERSION: u8 = 1;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, zeroize::Zeroize)]
 struct PortableExport {
     format: String,
     version: u8,
@@ -537,7 +542,7 @@ struct PortableExport {
     items: Vec<PortableItem>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, zeroize::Zeroize)]
 struct PortableItem {
     id: usize,
     name: String,
@@ -548,6 +553,7 @@ struct PortableItem {
     created: Timestamp,
     modified: Timestamp,
     #[serde(rename = "type")]
+    #[zeroize(skip)]
     kind: ItemKind,
     additional_urls: Vec<String>,
     custom_fields: Vec<CustomField>,
@@ -558,50 +564,17 @@ struct PortableItem {
     duo: Option<DuoCredentials>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, zeroize::Zeroize)]
 struct PortableRevision {
     password: SecretString,
     changed: Timestamp,
 }
 
-impl Zeroize for PortableRevision {
-    fn zeroize(&mut self) {
-        self.password.zeroize();
-        self.changed.zeroize();
-    }
-}
-
-impl Zeroize for PortableItem {
-    fn zeroize(&mut self) {
-        self.id.zeroize();
-        self.name.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.url.zeroize();
-        self.notes.zeroize();
-        self.created.zeroize();
-        self.modified.zeroize();
-        self.additional_urls.zeroize();
-        self.custom_fields.zeroize();
-        self.password_changed.zeroize();
-        self.password_history.zeroize();
-        self.totp.zeroize();
-        self.duo.zeroize();
-    }
-}
-
-impl Zeroize for PortableExport {
-    fn zeroize(&mut self) {
-        self.format.zeroize();
-        self.version.zeroize();
-        self.exported_at.zeroize();
-        self.items.zeroize();
-    }
-}
-
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct ImportedItem {
     portable: bool,
     entry: VaultEntry,
+    #[zeroize(skip)]
     kind: ItemKind,
     additional_urls: Vec<String>,
     custom_fields: Vec<CustomField>,
@@ -609,25 +582,6 @@ struct ImportedItem {
     password_history: Vec<PortableRevision>,
     totp: Option<SecretString>,
     duo: Option<DuoCredentials>,
-}
-
-impl Zeroize for ImportedItem {
-    fn zeroize(&mut self) {
-        self.portable.zeroize();
-        self.entry.zeroize();
-        self.additional_urls.zeroize();
-        self.custom_fields.zeroize();
-        self.password_changed.zeroize();
-        self.password_history.zeroize();
-        self.totp.zeroize();
-        self.duo.zeroize();
-    }
-}
-
-impl Drop for ImportedItem {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
 }
 
 impl ImportedItem {
@@ -652,6 +606,14 @@ const MAX_VAULT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_ITEMS: usize = 100_000;
 
+/// The next vault or item revision, kept within the safe-integer range that
+/// every client can represent.
+fn next_revision(revision: u64) -> Option<u64> {
+    revision
+        .checked_add(1)
+        .filter(|value| *value <= MAX_ITEM_ID)
+}
+
 fn run_blocking_io<T>(operation: impl FnOnce() -> T) -> T {
     if tokio::runtime::Handle::try_current()
         .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
@@ -662,12 +624,8 @@ fn run_blocking_io<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
-fn parse_entry_timestamp(value: &str) -> Option<jiff::Timestamp> {
-    crate::clock::parse(value)
-}
-
 fn password_is_stale_at(changed: &str, days: u64, now: jiff::Timestamp) -> bool {
-    let Some(changed) = parse_entry_timestamp(changed) else {
+    let Some(changed) = crate::clock::parse(changed) else {
         return false;
     };
     let Some(threshold) = crate::clock::days(days) else {
@@ -677,18 +635,6 @@ fn password_is_stale_at(changed: &str, days: u64, now: jiff::Timestamp) -> bool 
     now.duration_since(changed) >= threshold
 }
 
-impl Zeroize for VaultEntry {
-    fn zeroize(&mut self) {
-        self.name.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.url.zeroize();
-        self.notes.zeroize();
-        self.created.zeroize();
-        self.modified.zeroize();
-        self.id.zeroize();
-    }
-}
 impl Zeroize for Vault {
     fn zeroize(&mut self) {
         self.data.items.clear();

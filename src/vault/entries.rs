@@ -126,26 +126,14 @@ impl Vault {
             Ok((true, true))
         })
     }
+    #[cfg(test)]
     pub fn update_entry_with_limit(
         &mut self,
         entry: EntryUpdate,
         key: &mut VaultCredentials,
         limit: usize,
     ) -> Result<bool, VaultError> {
-        self.update_typed_entry_with_limit(
-            TypedUpdate {
-                entry,
-                kind: None,
-                add_url: vec![],
-                remove_url: vec![],
-                clear_urls: false,
-                set_fields: vec![],
-                remove_fields: vec![],
-                clear_fields: false,
-            },
-            key,
-            limit,
-        )
+        self.update_typed_entry_with_limit(entry.into(), key, limit)
     }
     pub fn update_typed_entry_with_limit(
         &mut self,
@@ -373,20 +361,11 @@ mod tests {
     }
 
     fn change(id: usize) -> TypedUpdate {
-        TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(id),
-                update: EntryChanges::default(),
-                password: None,
-            },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-        }
+        TypedUpdate::from(EntryUpdate {
+            target: Target::Id(id),
+            update: EntryChanges::default(),
+            password: None,
+        })
     }
 
     #[test]

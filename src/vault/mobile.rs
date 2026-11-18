@@ -956,8 +956,7 @@ fn confirmation(vault: &Vault, command: &ServerCommand) -> Option<&'static str> 
         ServerCommand::PurgeTrash(_) => Some("Confirm permanent deletion"),
         ServerCommand::AuthenticatorData(target)
             if vault
-                .entry_id(target)
-                .and_then(|id| vault.item(id))
+                .target_item(target)
                 .and_then(|item| item.authenticator.as_ref())
                 .is_some_and(|a| matches!(a.state, AuthenticatorState::Hotp { .. })) =>
         {
@@ -1192,23 +1191,14 @@ pub(super) mod test_support {
     }
 
     pub fn change(id: usize, name: &str, password: &str) -> TypedUpdate {
-        TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(id),
-                update: EntryChanges {
-                    name: Some(name.into()),
-                    ..Default::default()
-                },
-                password: Some(password.into()),
+        TypedUpdate::from(EntryUpdate {
+            target: Target::Id(id),
+            update: EntryChanges {
+                name: Some(name.into()),
+                ..Default::default()
             },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-        }
+            password: Some(password.into()),
+        })
     }
 
     pub fn list(api: &mut MobileVault) -> Result<Value, String> {

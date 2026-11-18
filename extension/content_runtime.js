@@ -834,29 +834,7 @@ module.exports.create = function create({ bridge }) {
         "cc-csc",
         "cc-type",
     ]);
-    const IDENTITY_AUTOCOMPLETE_FIELDS = new Set([
-        "name",
-        "given-name",
-        "additional-name",
-        "family-name",
-        "honorific-prefix",
-        "honorific-suffix",
-        "nickname",
-        "email",
-        "tel",
-        "organization",
-        "street-address",
-        "address-line1",
-        "address-line2",
-        "address-line3",
-        "address-level1",
-        "address-level2",
-        "address-level3",
-        "address-level4",
-        "country",
-        "country-name",
-        "postal-code",
-    ]);
+    // Name and address fields establish identity context for email/phone fields.
     const IDENTITY_CONTEXT_FIELDS = new Set([
         "name",
         "given-name",
@@ -877,6 +855,7 @@ module.exports.create = function create({ bridge }) {
         "country-name",
         "postal-code",
     ]);
+    const IDENTITY_AUTOCOMPLETE_FIELDS = new Set([...IDENTITY_CONTEXT_FIELDS, "nickname", "email", "tel"]);
 
     function formScope(input) {
         return input.form || input.closest("[role='form'], dialog, form") || input.parentElement || document;

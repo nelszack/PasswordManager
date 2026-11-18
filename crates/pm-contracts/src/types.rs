@@ -717,6 +717,22 @@ pub struct TypedUpdate {
     pub clear_fields: bool,
 }
 
+/// An entry edit that leaves the item's kind, websites, and custom fields alone.
+impl From<EntryUpdate> for TypedUpdate {
+    fn from(entry: EntryUpdate) -> Self {
+        Self {
+            entry,
+            kind: None,
+            add_url: vec![],
+            remove_url: vec![],
+            clear_urls: false,
+            set_fields: vec![],
+            remove_fields: vec![],
+            clear_fields: false,
+        }
+    }
+}
+
 impl std::fmt::Debug for TypedUpdate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -825,23 +841,14 @@ mod contract_tests {
     }
     #[test]
     fn metadata_secret_updates_have_one_canonical_named_representation() {
-        let command = ServerCommand::Update(TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(7),
-                update: EntryChanges {
-                    notes: Some("private note".into()),
-                    ..Default::default()
-                },
-                password: Some("".into()),
+        let command = ServerCommand::Update(TypedUpdate::from(EntryUpdate {
+            target: Target::Id(7),
+            update: EntryChanges {
+                notes: Some("private note".into()),
+                ..Default::default()
             },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-        });
+            password: Some("".into()),
+        }));
         let wire = serde_json::to_value(&command).unwrap();
         assert_eq!(wire["operation"], "update");
         assert_eq!(wire["arguments"]["entry"]["password"], "");

@@ -35,11 +35,7 @@ impl Vault {
         if !changed {
             return Ok(result);
         }
-        staged.data.revision = self
-            .data
-            .revision
-            .checked_add(1)
-            .filter(|value| *value <= MAX_ITEM_ID)
+        staged.data.revision = next_revision(self.data.revision)
             .ok_or_else(|| VaultError::Conflict("vault revision exhausted".into()))?;
         for (id, item) in &mut staged.data.items {
             let old = self.data.items.get(id);
@@ -54,12 +50,9 @@ impl Vault {
                 }
             }
             if old != Some(item) {
-                item.revision = old.map_or(Ok(1), |i| {
-                    i.revision
-                        .checked_add(1)
-                        .filter(|value| *value <= MAX_ITEM_ID)
-                        .ok_or_else(|| VaultError::Conflict("item revision exhausted".into()))
-                })?;
+                item.revision = old
+                    .map_or(Some(1), |i| next_revision(i.revision))
+                    .ok_or_else(|| VaultError::Conflict("item revision exhausted".into()))?;
             }
         }
         let write = self

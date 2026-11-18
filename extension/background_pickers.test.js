@@ -8,7 +8,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function environment(username = "alice", kind = "login") {
     const deliveries = [], removed = [], timers = [], calls = [], logins = [], requests = [];
     let sessionId = "a".repeat(64), revision = 1, omitSession = false;
-    let heldTab, releaseTab, heldWindow, releaseWindow, heldDelivery, releaseDelivery, heldNative, releaseNative;
+    let heldTab, releaseTab, heldWindow, releaseWindow, heldDelivery, releaseDelivery, heldNative, releaseNative, heldList, releaseList;
     let topUrl = "https://example.com", closed = false, destinationRead = 0, invalidateAtRead;
     let delivered;
     const delivery = new Promise(resolve => { delivered = resolve; });
@@ -46,6 +46,7 @@ function environment(username = "alice", kind = "login") {
                 if (fields.expectedRevision !== revision) return { success: false, error: "Item changed" };
                 return { success: true, sessionId, data: action === "getTotp" ? { code: "123456" } : { username, password: "synthetic-secret" } };
             }
+            if (heldList) await new Promise(resolve => { releaseList = resolve; });
             return { success: true, sessionId: omitSession ? undefined : sessionId, data: [{id:1,revision,name:"Example",kind,has_totp:true}] };
         }
     });
@@ -60,7 +61,8 @@ function environment(username = "alice", kind = "login") {
         navigate(url) { topUrl = url; },
         closeTab() { closed = true; },
         invalidateAtDestinationRead(number) { invalidateAtRead = number; },
-        holdNative() { heldNative = true; }, releaseNative() { releaseNative(); }
+        holdNative() { heldNative = true; }, releaseNative() { releaseNative(); },
+        holdList() { heldList = true; }, releaseList() { releaseList(); }
     };
 }
 
@@ -71,7 +73,8 @@ test("invalidation while opening a picker cancels tab lookup and delayed window 
             const opening = env.open();
             const rejected = assert.rejects(opening, /expired/);
             await flush(); env.service.invalidate(); env[`release${stage}`](); await rejected;
-            assert.equal(env.calls.length, 0);
+            // Account summaries load alongside window creation; no secret is requested.
+            assert.deepEqual(env.calls, stage === "Window" ? ["getLoginItems"] : []);
             assert.equal(env.timers.length, 0);
             assert.deepEqual(env.removed, stage === "Window" ? [42] : []);
         });
@@ -189,6 +192,28 @@ test("a lookup without a valid unlock session cannot authorize a picker", async 
     assert.deepEqual(env.calls, ["getLoginItems"]);
 });
 
+
+test("summaries load while the picker window opens and the view gets them in one response", async () => {
+    const env = environment(); env.holdWindow();
+    const opening = env.open(); await flush();
+    assert.deepEqual(env.calls, ["getLoginItems"], "the lookup does not wait for the window");
+    env.releaseWindow();
+    const { token } = await opening;
+    assert.equal(env.calls.length, 1);
+    const data = await env.service.dataWhenLoaded({ token }, env.popup);
+    assert.equal(data.loading, false);
+    assert.deepEqual(data.items.map(item => item.name), ["Example"]);
+    assert.equal((await env.service.dataWhenLoaded({ token }, env.sender)).success, false);
+});
+
+test("a picker view waiting for summaries sees expiry instead of stale items", async () => {
+    const env = environment(); env.holdList();
+    const { token } = await env.open(); await flush();
+    const waiting = env.service.dataWhenLoaded({ token }, env.popup);
+    await flush();
+    env.service.invalidate(); env.releaseList();
+    assert.equal((await waiting).success, false);
+});
 
 test("picker retry reloads summaries only and rejects untrusted requests", async () => {
     const env = environment(); const {token} = await env.open(); await flush();

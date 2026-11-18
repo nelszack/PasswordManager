@@ -60,6 +60,27 @@ const PasswordManagerBackgroundPickers = {
             return { items: summaries, sessionId: protocol.sessionId(response) };
         }
 
+        // Fetch account metadata into the pending picker. The returned promise
+        // always settles without rejecting, and a result for a picker that was
+        // discarded or replaced in the meantime is ignored.
+        function startLoading(token, pending, before = Promise.resolve()) {
+            Object.assign(pending, { loading: true, error: null, items: [], sessionId: null });
+            const current = () => pendingPickers.get(token) === pending && pending.expiresAt > Date.now();
+            pending.load = before
+                .then(() => loadSecurePickerItems(pending.kind, pending.domain))
+                .then(
+                    result => {
+                        if (current()) Object.assign(pending, result, { loading: false });
+                    },
+                    error => {
+                        if (pendingPickers.get(token) !== pending) return;
+                        pending.loading = false;
+                        pending.error = error.message || "Vault items unavailable";
+                    }
+                );
+            return pending.load;
+        }
+
         function discardPicker(token, closeWindow = true) {
             const pending = pendingPickers.get(token);
             if (!pending) return;
@@ -138,13 +159,12 @@ const PasswordManagerBackgroundPickers = {
                 domain,
                 topOrigin,
                 crossOrigin: domain !== topOrigin,
-                items: [],
-                loading: true,
-                error: null,
                 expiresAt: Date.now() + 60_000,
                 windowId: null,
             };
             pendingPickers.set(token, pending);
+            // Load accounts while the browser opens the window rather than after.
+            startLoading(token, pending);
 
             return new Promise((resolve, reject) => {
                 chrome.windows.create(
@@ -170,20 +190,6 @@ const PasswordManagerBackgroundPickers = {
                         }
                         pending.windowId = window.id;
                         pickerWindows.set(window.id, token);
-                        loadSecurePickerItems(kind, domain)
-                            .then(({ items, sessionId }) => {
-                                const pending = pendingPickers.get(token);
-                                if (!pending) return;
-                                pending.sessionId = sessionId;
-                                pending.items = items;
-                                pending.loading = false;
-                            })
-                            .catch(loadError => {
-                                const pending = pendingPickers.get(token);
-                                if (!pending) return;
-                                pending.loading = false;
-                                pending.error = loadError.message || "Vault items unavailable";
-                            });
                         setTimeout(() => discardPicker(token), Math.max(0, pending.expiresAt - Date.now()));
                         resolve({ success: true, token });
                     }
@@ -298,22 +304,7 @@ const PasswordManagerBackgroundPickers = {
                 !pending.loading &&
                 !pending.completing
             ) {
-                pending.loading = true;
-                pending.error = null;
-                pending.items = [];
-                pending.sessionId = null;
-                requireCurrentDestination(request.token, pending)
-                    .then(() => loadSecurePickerItems(pending.kind, pending.domain))
-                    .then(result => {
-                        if (pendingPickers.get(request.token) !== pending || pending.expiresAt <= Date.now()) return;
-                        Object.assign(pending, result, { loading: false });
-                    })
-                    .catch(error => {
-                        if (pendingPickers.get(request.token) === pending) {
-                            pending.loading = false;
-                            pending.error = error.message || "Vault items unavailable";
-                        }
-                    });
+                startLoading(request.token, pending, requireCurrentDestination(request.token, pending));
             }
             return pending && pending.expiresAt > Date.now()
                 ? {
@@ -328,6 +319,14 @@ const PasswordManagerBackgroundPickers = {
                   }
                 : { success: false, error: "Secure picker expired" };
         }
+        // Answer once the accounts are available instead of making the picker poll.
+        async function dataWhenLoaded(request, sender) {
+            const response = data(request, sender);
+            const pending = pendingPickers.get(request?.token);
+            if (!response.loading || !pending?.load) return response;
+            await pending.load;
+            return data({ token: request.token }, sender);
+        }
         function windowRemoved(windowId) {
             const token = pickerWindows.get(windowId);
             if (!token) return;
@@ -339,6 +338,7 @@ const PasswordManagerBackgroundPickers = {
             complete: completeSecurePicker,
             invalidate: invalidateSecurePickers,
             data,
+            dataWhenLoaded,
             windowRemoved,
             matchesFilledLogin,
         };

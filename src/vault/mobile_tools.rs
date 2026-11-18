@@ -585,23 +585,14 @@ mod tests {
         let id = add(&mut api, "Unchanged", ItemKind::Login);
         let detail = item(&mut api, id).unwrap();
         let unchanged = |name: &str| {
-            ServerCommand::Update(TypedUpdate {
-                entry: EntryUpdate {
-                    target: Target::Id(id),
-                    update: EntryChanges {
-                        name: Some(name.into()),
-                        ..Default::default()
-                    },
-                    password: None,
+            ServerCommand::Update(TypedUpdate::from(EntryUpdate {
+                target: Target::Id(id),
+                update: EntryChanges {
+                    name: Some(name.into()),
+                    ..Default::default()
                 },
-                kind: None,
-                add_url: vec![],
-                remove_url: vec![],
-                clear_urls: false,
-                set_fields: vec![],
-                remove_fields: vec![],
-                clear_fields: false,
-            })
+                password: None,
+            }))
         };
         let name = detail["name"].as_str().unwrap().to_owned();
         assert_eq!(command(&mut api, unchanged(&name))["changed"], false);

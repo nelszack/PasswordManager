@@ -136,7 +136,10 @@ const PasswordManagerBackgroundRouter = {
                 return true;
             }
             if (request.action === "getSecurePickerData") {
-                sendResponse(pickers.data(request, sender));
+                pickers
+                    .dataWhenLoaded(request, sender)
+                    .then(sendResponse)
+                    .catch(error => sendResponse({ success: false, error: error.message }));
                 return true;
             }
             if (request.action === "completeSecurePicker") {

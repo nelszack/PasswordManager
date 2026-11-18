@@ -17,12 +17,8 @@ impl Vault {
         item.history.drain(..excess);
     }
     pub fn view_password_history(&self, target: Target) -> Result<Vec<&str>, VaultError> {
-        let id = self
-            .entry_id(&target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
         Ok(self
-            .item(id)
-            .unwrap()
+            .require_target(&target)?
             .history
             .iter()
             .rev()
@@ -35,12 +31,11 @@ impl Vault {
         revision: usize,
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
-        let Some(id) = self.entry_id(&target) else {
+        let Some(item) = self.target_item(&target) else {
             return Ok(false);
         };
-        let index = self
-            .item(id)
-            .unwrap()
+        let id = item.entry.id;
+        let index = item
             .history
             .len()
             .checked_sub(revision)
@@ -63,7 +58,7 @@ impl Vault {
             .values()
             .filter_map(|item| match &item.lifecycle {
                 Lifecycle::Trashed { deleted_at } => Some(TrashView {
-                    entry: self.view(item),
+                    entry: item.view(),
                     deleted: deleted_at.as_str(),
                 }),
                 _ => None,
@@ -106,19 +101,7 @@ impl Vault {
             .filter(|(_, item)| !item.active() && id.is_none_or(|id| item.entry.id == id))
             .map(|(id, _)| *id)
             .collect();
-        if ids.is_empty() {
-            return Ok(false);
-        }
-        self.transaction(
-            TransactionScope::Items(ids.iter().copied().collect()),
-            key,
-            |v| {
-                for id in ids {
-                    v.data.items.remove(&id);
-                }
-                Ok((true, true))
-            },
-        )
+        Ok(self.purge_items(ids, key)? > 0)
     }
     pub fn purge_expired_trash(
         &mut self,
@@ -139,25 +122,32 @@ impl Vault {
             .iter()
             .filter_map(|(id, item)| match &item.lifecycle {
                 Lifecycle::Trashed { deleted_at }
-                    if parse_entry_timestamp(deleted_at).is_some_and(|t| t <= cutoff) =>
+                    if crate::clock::parse(deleted_at).is_some_and(|t| t <= cutoff) =>
                 {
                     Some(*id)
                 }
                 _ => None,
             })
             .collect();
+        self.purge_items(ids, key)
+    }
+    /// Permanently remove the given items in one transaction.
+    fn purge_items(
+        &mut self,
+        ids: Vec<ItemId>,
+        key: &mut VaultCredentials,
+    ) -> Result<usize, VaultError> {
         if ids.is_empty() {
             return Ok(0);
-        };
+        }
         self.transaction(
             TransactionScope::Items(ids.iter().copied().collect()),
             key,
             |v| {
-                let count = ids.len();
-                for id in ids {
-                    v.data.items.remove(&id);
+                for id in &ids {
+                    v.data.items.remove(id);
                 }
-                Ok((true, count))
+                Ok((true, ids.len()))
             },
         )
     }

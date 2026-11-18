@@ -161,12 +161,8 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
     if selected.len() != review.iter().map(|i| i.fields.len()).sum::<usize>() {
         return Err("Choose a side for every differing field".into());
     }
-    let revision = local
-        .revision
-        .max(remote.revision)
-        .checked_add(1)
-        .filter(|r| *r <= MAX_ITEM_ID)
-        .ok_or("Vault revision exhausted")?;
+    let revision =
+        next_revision(local.revision.max(remote.revision)).ok_or("Vault revision exhausted")?;
     let mut data = VaultData {
         items: local.items.clone(),
         vault_id: local.vault_id,
@@ -218,14 +214,14 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
             }
         }
         if let Some(item) = data.items.get_mut(&id) {
-            item.revision = local
-                .items
-                .get(&id)
-                .map_or(0, |i| i.revision)
-                .max(remote.items.get(&id).map_or(0, |i| i.revision))
-                .checked_add(1)
-                .filter(|r| *r <= MAX_ITEM_ID)
-                .ok_or("Item revision exhausted")?;
+            item.revision = next_revision(
+                local
+                    .items
+                    .get(&id)
+                    .map_or(0, |i| i.revision)
+                    .max(remote.items.get(&id).map_or(0, |i| i.revision)),
+            )
+            .ok_or("Item revision exhausted")?;
             item.entry.modified = Timestamp::now();
             item.strength = CachedStrength::default();
             item.sites = browser::CachedSites::default();

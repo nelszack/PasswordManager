@@ -50,16 +50,13 @@ impl Vault {
                 "invalid Duo enrollment operation".into(),
             ));
         };
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let item = self.item(id).unwrap();
+        let item = self.require_target(target)?;
         if !replace && (item.authenticator.is_some() || (push && item.duo.is_some())) {
             return Err(VaultError::Conflict(
                 "item already has an authenticator; use --replace".into(),
             ));
         }
-        let revision = item.revision;
+        let (id, revision) = (item.entry.id, item.revision);
         write_vault(self, key)?;
         let review_key = self.metadata.duo_session.get_or_insert_with(rand::random);
         let session = *blake3::hash(review_key).as_bytes();
@@ -111,9 +108,7 @@ impl Vault {
         }
     }
     fn duo_record(&mut self, target: &Target) -> Result<&mut DuoRecord, VaultError> {
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
+        let id = self.require_target(target)?.entry.id;
         self.item_mut(id).unwrap().duo.as_mut().ok_or_else(|| {
             VaultError::NotFound(
                 "item has no push credentials; enroll a fresh link using pm duo enroll".into(),
@@ -151,10 +146,20 @@ impl Vault {
         }
         match command {
             DuoCommand::Remove { target } => {
-                let id = self
-                    .entry_id(target)
-                    .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-                self.transaction(TransactionScope::Entry(id),key,|v| {let item=v.item_mut(id).unwrap();let changed=item.duo.take().is_some();if changed {item.entry.modified=Timestamp::now();}Ok((changed,"Local push credentials removed. Remove the device separately in Duo; passcodes are retained.".into()))})
+                let id = self.require_target(target)?.entry.id;
+                self.transaction(TransactionScope::Entry(id), key, |v| {
+                    let item = v.item_mut(id).unwrap();
+                    let changed = item.duo.take().is_some();
+                    if changed {
+                        item.entry.modified = Timestamp::now();
+                    }
+                    Ok((
+                        changed,
+                        "Local push credentials removed. Remove the device separately in Duo; \
+                         passcodes are retained."
+                            .into(),
+                    ))
+                })
             }
             _ => Err(VaultError::InvalidInput(
                 "Duo I/O must run outside the live vault owner".into(),
@@ -194,10 +199,8 @@ impl Vault {
                 ));
             }
         };
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let revision = self.revision(id).unwrap();
+        let item = self.require_target(target)?;
+        let (id, revision) = (item.entry.id, item.revision);
         *target = Target::Id(id);
         let record = self.duo_record(target)?;
         if poll && record.review_key.is_none() {

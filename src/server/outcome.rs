@@ -10,5 +10,5 @@ pub(super) struct CommandOutcome {
 }
 pub(super) use crate::operations::{
     respond, respond_conflict, respond_domain_error, respond_domain_error_with_context,
-    respond_failure, respond_payload,
+    respond_failed, respond_failure, respond_ok, respond_payload,
 };

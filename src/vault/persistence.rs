@@ -211,19 +211,18 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
             .map(|a| Authenticator::parse(a))
             .transpose()?;
         let e = item.entry;
+        let entry = VaultEntry {
+            id,
+            name: e.name,
+            username: e.username,
+            password: e.password,
+            url: e.url,
+            notes: e.notes,
+            created: e.created,
+            modified: e.modified,
+        };
         let value = Item {
-            entry: VaultEntry {
-                id,
-                name: e.name,
-                username: e.username,
-                password: e.password,
-                url: e.url,
-                notes: e.notes,
-                created: e.created,
-                modified: e.modified,
-            },
             revision: item.revision,
-            metadata: item.metadata,
             history: item.history,
             authenticator,
             duo: item.duo.map(|credentials| DuoRecord {
@@ -231,9 +230,7 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
                 review_key: None,
             }),
             lifecycle: item.lifecycle,
-            strength: CachedStrength::default(),
-            sites: browser::CachedSites::default(),
-            search: query::CachedSearch::default(),
+            ..Item::new(entry, item.metadata)
         };
         if data.items.insert(item.id, value).is_some() {
             return Err(VaultError::Validation(
@@ -258,28 +255,32 @@ impl VaultStore {
         selected: &HashSet<ItemId>,
         credentials: &mut VaultCredentials,
     ) -> Result<(), VaultError> {
-        if matches!(self, Self::Memory) {
-            return Ok(());
-        }
-        if credentials.is_locked() {
+        if !matches!(self, Self::Memory) && credentials.is_locked() {
             return Err(VaultError::Locked);
         }
-        let key = &mut *credentials;
-        let Self::File {
-            directory,
-            filename,
-        } = self
-        else {
-            return Err(VaultError::Persistence("vault has no durable store".into()));
-        };
-        persist_document(
-            directory,
-            filename,
+        self.persist(
             live,
             Some((staged, selected)),
-            key,
+            credentials,
             active_vault_limit(),
         )
+    }
+    /// Memory stores keep nothing durable; a detached handle cannot be written.
+    fn persist(
+        &self,
+        data: &VaultData,
+        overlay: Option<(&VaultData, &HashSet<ItemId>)>,
+        credentials: &mut VaultCredentials,
+        max_bytes: u64,
+    ) -> Result<(), VaultError> {
+        match self {
+            Self::Memory => Ok(()),
+            Self::Detached => Err(VaultError::Persistence("vault has no durable store".into())),
+            Self::File {
+                directory,
+                filename,
+            } => persist_document(directory, filename, data, overlay, credentials, max_bytes),
+        }
     }
 }
 fn active_vault_limit() -> u64 {
@@ -331,11 +332,7 @@ impl Vault {
         if !matches!(self.store, VaultStore::Memory) && credentials.is_locked() {
             return Err(VaultError::Locked);
         }
-        let next_revision = self
-            .data
-            .revision
-            .checked_add(1)
-            .filter(|value| *value <= MAX_ITEM_ID)
+        let next_revision = next_revision(self.data.revision)
             .ok_or_else(|| VaultError::Conflict("vault revision exhausted".into()))?;
         let staged = VaultData {
             items: BTreeMap::new(),
@@ -436,21 +433,8 @@ pub(super) fn lookup_vault_in(
     let data = decode_document(&plaintext)?;
     crate::cloud::verify_identity(&path, data.vault_id).map_err(VaultError::Validation)?;
     *key_pass = candidate;
-    Ok(Some((
-        filename.clone(),
-        Vault {
-            data,
-            store: VaultStore::File {
-                directory: directory.to_owned(),
-                filename: filename.clone(),
-            },
-            metadata: VaultMetadata {
-                filename,
-                duo_session: None,
-                changes: None,
-            },
-        },
-    )))
+    let vault = Vault::file(data, directory.to_owned(), filename.clone());
+    Ok(Some((filename, vault)))
 }
 
 #[cfg(test)]
@@ -504,16 +488,15 @@ pub(crate) fn create_vault(
     if credentials.is_locked() {
         return Err(VaultError::Locked);
     }
-    let key = &mut *credentials;
-    if let VaultCredentials::Unlock(PasswordType::Password(password)) = key {
+    if let VaultCredentials::Unlock(PasswordType::Password(password)) = credentials {
         validate_new_password(password).map_err(|e| VaultError::Validation(e.into()))?;
     }
-    let generated = match key {
+    let generated = match credentials {
         VaultCredentials::Unlock(PasswordType::Key(path)) => Some(new_key_file_path(path)?),
         _ => None,
     };
     if generated.is_some() {
-        let mut material = try_gen_master_key(key.supplied()?, true)?;
+        let mut material = try_gen_master_key(credentials.supplied()?, true)?;
         material.zeroize();
     }
     let mut data = VaultData {
@@ -527,18 +510,7 @@ pub(crate) fn create_vault(
         }
         data.vault_id = rand::random();
     };
-    let created = Vault {
-        data,
-        store: VaultStore::File {
-            directory: data_dir(),
-            filename: filename.clone(),
-        },
-        metadata: VaultMetadata {
-            filename,
-            duo_session: None,
-            changes: None,
-        },
-    };
+    let created = Vault::file(data, data_dir(), filename);
     let result = write_vault(&created, credentials);
     if let Err(error) = result {
         if !error.committed()
@@ -560,10 +532,7 @@ pub(super) fn write_vault(
     vault: &Vault,
     credentials: &mut VaultCredentials,
 ) -> Result<(), VaultError> {
-    if matches!(vault.store, VaultStore::Memory) {
-        return Ok(());
-    }
-    if credentials.is_locked() {
+    if !matches!(vault.store, VaultStore::Memory) && credentials.is_locked() {
         return Err(VaultError::Locked);
     }
     write_vault_with_key(vault, credentials)
@@ -572,26 +541,19 @@ pub(super) fn write_vault_with_key(
     vault: &Vault,
     key: &mut VaultCredentials,
 ) -> Result<(), VaultError> {
-    write_vault_with_limit(vault, key, active_vault_limit())
+    vault
+        .store
+        .persist(&vault.data, None, key, active_vault_limit())
 }
 #[cfg(test)]
 thread_local! {static TEST_MAX_VAULT_BYTES:std::cell::Cell<u64>=const {std::cell::Cell::new(MAX_VAULT_BYTES)};}
+#[cfg(test)]
 fn write_vault_with_limit(
-    vlt: &Vault,
-    key_pass: &mut VaultCredentials,
+    vault: &Vault,
+    key: &mut VaultCredentials,
     max_bytes: u64,
 ) -> Result<(), VaultError> {
-    let VaultStore::File {
-        directory,
-        filename,
-    } = &vlt.store
-    else {
-        return match vlt.store {
-            VaultStore::Memory => Ok(()),
-            _ => Err(VaultError::Persistence("vault has no durable store".into())),
-        };
-    };
-    persist_document(directory, filename, &vlt.data, None, key_pass, max_bytes)
+    vault.store.persist(&vault.data, None, key, max_bytes)
 }
 
 /// Encrypt a candidate without advancing credentials until replacement commits.
@@ -762,8 +724,7 @@ pub(crate) fn unlock_selected_vault(
     if key_pass.is_locked() {
         return Err(VaultError::Locked);
     }
-    let kp = key_pass;
-    let (_, vault) = lookup_vault(kp, selected)?.ok_or_else(|| VaultError::Validation(
+    let (_, vault) = lookup_vault(key_pass, selected)?.ok_or_else(|| VaultError::Validation(
         "no matching vault: incorrect password/key, no vault exists, or encrypted contents were modified; use `pm vaults` and `pm unlock --vault-file ID` to inspect a specific vault".into()
     ))?;
 

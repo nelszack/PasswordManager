@@ -23,7 +23,7 @@ impl Vault {
             // Search traverses the ID-ordered item map and retain preserves order.
             SortField::Id => {}
             _ => items.sort_by_cached_key(|item| {
-                parse_entry_timestamp(match options.sort {
+                crate::clock::parse(match options.sort {
                     SortField::Created => &item.entry.created,
                     SortField::Modified => &item.entry.modified,
                     _ => item.password_changed(),
@@ -36,16 +36,12 @@ impl Vault {
         items
     }
     pub(super) fn search_items(&self, filter: &SearchFilter) -> Vec<&Item> {
-        let lower =
-            |value: &Option<String>| value.as_ref().map(|v| Zeroizing::new(v.to_lowercase()));
-        let query = lower(&filter.query);
-        let name = lower(&filter.name);
-        let username = lower(&filter.username);
-        let url = lower(&filter.url);
-        let notes = filter
-            .notes
-            .as_ref()
-            .map(|v| Zeroizing::new(v.to_lowercase()));
+        let lower = |value: Option<&str>| value.map(|v| Zeroizing::new(v.to_lowercase()));
+        let query = lower(filter.query.as_deref());
+        let name = lower(filter.name.as_deref());
+        let username = lower(filter.username.as_deref());
+        let url = lower(filter.url.as_deref());
+        let notes = lower(filter.notes.as_ref().map(SecretString::expose));
         // An unfiltered list needs neither an index nor copies of metadata.
         let metadata_needed =
             query.is_some() || name.is_some() || username.is_some() || url.is_some();
@@ -61,12 +57,7 @@ impl Vault {
                 let normalized_notes = std::cell::OnceCell::new();
                 let notes_match = |needle: &str| {
                     normalized_notes
-                        .get_or_init(|| {
-                            item.entry
-                                .notes
-                                .as_ref()
-                                .map(|value| Zeroizing::new(value.to_lowercase()))
-                        })
+                        .get_or_init(|| lower(item.entry.notes.as_ref().map(SecretString::expose)))
                         .as_ref()
                         .is_some_and(|value| value.contains(needle))
                 };
@@ -90,11 +81,12 @@ impl Vault {
             .collect()
     }
     pub fn get_secret(&self, target: &Target) -> Result<Zeroizing<String>, VaultError> {
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
         Ok(Zeroizing::new(
-            self.item(id).unwrap().entry.password.expose().to_owned(),
+            self.require_target(target)?
+                .entry
+                .password
+                .expose()
+                .to_owned(),
         ))
     }
     pub fn get_custom_field(
@@ -102,10 +94,9 @@ impl Vault {
         target: &Target,
         name: &str,
     ) -> Result<Zeroizing<String>, VaultError> {
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        self.custom_fields(id)
+        self.require_target(target)?
+            .metadata
+            .custom_fields
             .iter()
             .filter(|f| !item_rules::is_reserved_field(&f.name))
             .find(|f| f.name.eq_ignore_ascii_case(name))
@@ -113,7 +104,7 @@ impl Vault {
             .ok_or_else(|| VaultError::NotFound("custom field not found".into()))
     }
     pub fn target_revision(&self, target: &Target) -> Option<u64> {
-        self.entry_id(target).and_then(|id| self.revision(id))
+        self.target_item(target).map(|item| item.revision)
     }
 }
 
@@ -150,14 +141,7 @@ impl SearchMetadata {
         Self {
             name: lower(&item.entry.name),
             username: item.entry.username.as_deref().map(lower),
-            urls: item
-                .entry
-                .url
-                .as_deref()
-                .into_iter()
-                .chain(item.metadata.additional_urls.iter().map(String::as_str))
-                .map(lower)
-                .collect(),
+            urls: item.urls().map(lower).collect(),
             fields: item
                 .metadata
                 .custom_fields

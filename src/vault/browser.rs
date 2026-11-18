@@ -18,10 +18,7 @@ impl Vault {
             .filter(|item| {
                 item.metadata.kind == ItemKind::Login
                     && if otp_only {
-                        matches!(
-                            item.authenticator.as_ref().map(|auth| &auth.state),
-                            Some(AuthenticatorState::Totp(_))
-                        )
+                        item.has_time_otp()
                     } else {
                         !item.entry.password.is_empty()
                     }
@@ -46,10 +43,7 @@ impl Vault {
                     .collect();
                 origins.into_iter().map(move |origin| {
                     let mut summary = self.summary(item);
-                    summary.has_totp = matches!(
-                        item.authenticator.as_ref().map(|auth| &auth.state),
-                        Some(AuthenticatorState::Totp(_))
-                    );
+                    summary.has_totp = item.has_time_otp();
                     (summary, origin)
                 })
             })
@@ -89,17 +83,17 @@ impl Vault {
             .map(|i| self.summary(i))
             .collect()
     }
-    pub(crate) fn browser_login_revision(&self, origin: &str, id: usize) -> Option<u64> {
+    /// An active login with this ID whose saved sites match the origin.
+    fn site_login(&self, origin: &str, id: usize) -> Option<&Item> {
         let requested = parse_site(origin, false)?;
-        let item = self.item(id).filter(|item| item.active())?;
-        item_matches_site(item, &requested).then_some(item.revision)
+        self.item(id)
+            .filter(|item| item.active() && item_matches_site(item, &requested))
+    }
+    pub(crate) fn browser_login_revision(&self, origin: &str, id: usize) -> Option<u64> {
+        self.site_login(origin, id).map(|item| item.revision)
     }
     pub fn browser_login(&self, domain: &str, id: usize) -> Option<BrowserLogin> {
-        let requested = parse_site(domain, false)?;
-        let item = self.item(id).filter(|i| i.active())?;
-        if !item_matches_site(item, &requested) {
-            return None;
-        }
+        let item = self.site_login(domain, id)?;
         Some(BrowserLogin {
             id,
             revision: item.revision,
@@ -145,11 +139,7 @@ fn item_matches_site(item: &Item, requested: &Site) -> bool {
             .sites
             .0
             .get_or_init(|| {
-                item.entry
-                    .url
-                    .as_deref()
-                    .into_iter()
-                    .chain(item.metadata.additional_urls.iter().map(String::as_str))
+                item.urls()
                     .filter_map(|value| parse_site(value, true))
                     .collect()
             })

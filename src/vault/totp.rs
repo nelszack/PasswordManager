@@ -11,15 +11,16 @@ impl Vault {
         configuration: &str,
         key: &mut VaultCredentials,
     ) -> Result<Option<usize>, VaultError> {
-        let Some(id) = self.entry_id(&target) else {
+        let Some(item) = self.target_item(&target) else {
             return Ok(None);
         };
+        let id = item.entry.id;
         let (configuration, state, bits) = parse_authenticator_configuration(configuration)?;
         let authenticator = Authenticator {
             configuration: configuration.into(),
             state,
         };
-        if self.item(id).unwrap().authenticator.as_ref() == Some(&authenticator) {
+        if item.authenticator.as_ref() == Some(&authenticator) {
             return Ok(Some(bits));
         }
         self.transaction(TransactionScope::Entry(id), key, |v| {
@@ -34,10 +35,11 @@ impl Vault {
         target: Target,
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
-        let Some(id) = self.entry_id(&target) else {
-            return Ok(false);
-        };
-        if self.item(id).unwrap().authenticator.is_none() {
+        let Some(id) = self
+            .target_item(&target)
+            .filter(|item| item.authenticator.is_some())
+            .map(|item| item.entry.id)
+        else {
             return Ok(false);
         };
         self.transaction(TransactionScope::Entry(id), key, |v| {
@@ -47,20 +49,20 @@ impl Vault {
             Ok((true, true))
         })
     }
+    fn authenticator(&self, target: &Target) -> Result<(usize, &Authenticator), VaultError> {
+        let item = self.require_target(target)?;
+        let authenticator = item
+            .authenticator
+            .as_ref()
+            .ok_or_else(|| VaultError::NotFound("item has no authenticator".into()))?;
+        Ok((item.entry.id, authenticator))
+    }
     pub(super) fn totp_at(
         &self,
         target: &Target,
         timestamp: u64,
     ) -> Result<(String, u64), VaultError> {
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let authenticator = self
-            .item(id)
-            .unwrap()
-            .authenticator
-            .as_ref()
-            .ok_or_else(|| VaultError::NotFound("item has no authenticator".into()))?;
+        let (_, authenticator) = self.authenticator(target)?;
         let AuthenticatorState::Totp(totp) = &authenticator.state else {
             return Err(VaultError::InvalidInput(
                 "HOTP requires consuming its persistent counter".into(),
@@ -83,31 +85,18 @@ impl Vault {
         target: Target,
         key: &mut VaultCredentials,
     ) -> Result<AuthenticatorCode, VaultError> {
-        let id = self
-            .entry_id(&target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
-        let a = self
-            .item(id)
-            .unwrap()
-            .authenticator
-            .as_ref()
-            .ok_or_else(|| VaultError::NotFound("item has no authenticator".into()))?;
-        if matches!(&a.state, AuthenticatorState::Totp(_)) {
-            let (code, ttl) = self.current_totp(target)?;
-            return Ok(AuthenticatorCode {
-                code: Zeroizing::new(code),
-                expires_in: Some(ttl),
-                counter: None,
-            });
-        }
-        let AuthenticatorState::Hotp {
-            generator: hotp,
-            counter,
-        } = &a.state
-        else {
-            unreachable!()
+        let (id, a) = self.authenticator(&target)?;
+        let (hotp, counter) = match &a.state {
+            AuthenticatorState::Totp(_) => {
+                let (code, ttl) = self.current_totp(target)?;
+                return Ok(AuthenticatorCode {
+                    code: Zeroizing::new(code),
+                    expires_in: Some(ttl),
+                    counter: None,
+                });
+            }
+            AuthenticatorState::Hotp { generator, counter } => (generator, *counter),
         };
-        let counter = *counter;
         let next = counter
             .checked_add(1)
             .ok_or_else(|| VaultError::InvalidInput("HOTP counter exhausted".into()))?;

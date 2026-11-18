@@ -1,6 +1,6 @@
 use super::outcome::{
-    respond, respond_domain_error, respond_domain_error_with_context, respond_failure,
-    respond_payload,
+    respond, respond_domain_error, respond_domain_error_with_context, respond_failed,
+    respond_failure, respond_ok,
 };
 use super::*;
 use crate::vault::unlock_selected_vault;
@@ -37,11 +37,7 @@ fn handle_command(
             if !session.is_locked()
                 && let Err(error) = lock_session(session)
             {
-                respond_domain_error_with_context(
-                    &error,
-                    &format!("Could not stop server safely: {error}"),
-                    responses,
-                );
+                respond_failed("Could not stop server safely", &error, responses);
                 return;
             }
             state.stopping.store(true, Ordering::Release);
@@ -99,18 +95,13 @@ fn handle_command(
                     *state.background_error.blocking_lock() = None;
                     respond("Vault unlocked.", responses);
                 }
-                Err(error) => respond_domain_error_with_context(
-                    &error,
-                    &format!("Unlock failed: {error}"),
-                    responses,
-                ),
+                Err(error) => respond_failed("Unlock failed", &error, responses),
             }
         }
         ServerCommand::Status => {
             let warning =
                 combined_lock_warning(&state.background_error, state.system_lock.as_deref());
-            respond_payload(
-                ResponseCode::Success,
+            respond_ok(
                 ResponsePayload::Status(crate::protocol::ServerStatus::new(
                     session.is_locked(),
                     warning,
@@ -161,18 +152,13 @@ fn handle_command(
                 );
             } else {
                 match restore_encrypted_backup(&request.path, &mut request.key_pass) {
-                    Ok(filename) => respond_payload(
-                        ResponseCode::Success,
+                    Ok(filename) => respond_ok(
                         ResponsePayload::Vault(crate::protocol::VaultReference {
                             vault_file: filename,
                         }),
                         responses,
                     ),
-                    Err(error) => respond_domain_error_with_context(
-                        &error,
-                        &format!("Backup restore failed: {error}"),
-                        responses,
-                    ),
+                    Err(error) => respond_failed("Backup restore failed", &error, responses),
                 }
             }
             request.zeroize();
@@ -216,16 +202,8 @@ fn handle_command(
                 })
             };
             match result {
-                Ok(report) => respond_payload(
-                    ResponseCode::Success,
-                    ResponsePayload::ImportReport(report),
-                    responses,
-                ),
-                Err(error) => respond_domain_error_with_context(
-                    &error,
-                    &format!("Import failed: {error}"),
-                    responses,
-                ),
+                Ok(report) => respond_ok(ResponsePayload::ImportReport(report), responses),
+                Err(error) => respond_failed("Import failed", &error, responses),
             }
         }
         mut msg => {
