@@ -507,14 +507,15 @@ open class MainActivity : ManagementActivity() {
             button("Apply choices and sync") {
                 val selected = JSONArray().apply { choices.forEach { put(it()) } }
                 task({
-                    Vault.request(
+                    Vault.json(
                         "cloud_resolve",
                         *syncArgs(),
                         "review_token" to review.getString("token"),
                         "choices" to selected,
                     )
-                }) {
-                    items(message = "Conflicts resolved; encrypted recovery copies saved")
+                }) { resolved ->
+                    // The resolution and recovery copies are saved even if the follow-up sync is pending.
+                    items(message = resolved.getString("message"))
                 }
             }
             button("Cancel") { items() }

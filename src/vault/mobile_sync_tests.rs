@@ -199,7 +199,7 @@ fn offline_conflicts_stale_reviews_and_lost_ack_preserve_data() {
             json!({"review_token":review["token"],"choices":[]})
         )
         .unwrap_err()
-        .contains("stale")
+        .contains("changed since review")
     );
     peer.call(&mut a, "sync", json!({})).unwrap();
     a.call(r#"{"op":"save","id":1,"name":"Example","username":"alice","password":"acknowledgement-lost","url":"https://example.com"}"#).unwrap();

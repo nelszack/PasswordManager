@@ -343,9 +343,6 @@ impl MobileVault {
                 self.lock();
                 json!({ "deleted": true })
             }
-            "sync_status" | "sync_check" | "sync_enabled" => {
-                sync_state(vault, op, r, cancellation)?
-            }
             "duo_enroll" | "duo_requests" | "duo_respond" | "duo_remove" => {
                 duo(vault, credentials, op, r, cancellation)?
             }
@@ -480,52 +477,6 @@ fn save_item(
         clear_fields: true,
     };
     vault.update_typed_entry_with_limit(update, credentials, history_limit)
-}
-
-/// Reports, checks, or toggles the vault's cloud binding.
-fn sync_state(
-    vault: &Vault,
-    op: &str,
-    r: &Value,
-    cancellation: Option<&AtomicBool>,
-) -> Result<Value, VaultError> {
-    let path = vault.sync_path()?;
-    let vault_id = hex::encode(vault.vault_id());
-    let mut binding = crate::cloud::binding(&path)?;
-    if op == "sync_enabled" {
-        let enabled = r
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .ok_or("Sync state required")?;
-        let client = client(r)?;
-        let mut value = binding.unwrap_or(Binding {
-            server_url: client.url.clone(),
-            vault_id: vault_id.clone(),
-            version: None,
-            digest: None,
-            enabled,
-        });
-        require(
-            value.server_url == client.url,
-            "Sync server differs from this vault's binding",
-        )?;
-        value.enabled = enabled;
-        crate::cloud::save_binding(&path, &value)?;
-        binding = Some(value);
-    }
-    let local = crate::cloud::digest(&fs::read(&path).map_err(|_| "Could not read sync snapshot")?);
-    let remote = if op == "sync_check" {
-        block_on(cancellation, client(r)?.head(&vault_id))??
-    } else {
-        None
-    };
-    Ok(json!({
-        "enabled": binding.as_ref().map_or(!recovery_copy(&path), |b| b.enabled),
-        "configured": binding.is_some(),
-        "local_changed": binding.as_ref().and_then(|b| b.digest.as_ref()) != Some(&local),
-        "remote": remote,
-        "binding": binding,
-    }))
 }
 
 /// Duo Push enrollment, request review, decisions, and removal.

@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    cloud::{Binding, CloudClient},
+    cloud::{
+        CloudClient, Resolution,
+        engine::{self, Bind, Snapshot, SyncHost},
+    },
     passkey::{self, Passkey},
 };
 use serde_json::{Value, json};
@@ -25,8 +28,6 @@ const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 /// 38-byte format/KDF/salt prefix, so a re-keyed vault invalidates it.
 const KEY_BYTES: usize = 32;
 const HEADER_PREFIX_BYTES: usize = 38;
-/// Encrypted copies that must never sync until the user enables it explicitly.
-const RECOVERY_PREFIXES: [&str; 3] = ["rekey-recovery-", "conflict-", "comparison-"];
 
 /// One vault per app process. The native bridge serializes all access, including
 /// file replacement and sync. Adapters must also lock on background/screen lock.
@@ -35,21 +36,13 @@ pub struct MobileVault {
     vault: Option<Vault>,
     credentials: VaultCredentials,
     touched: Instant,
-    review: Option<MobileReview>,
+    /// Identifies one unlock so sync reviews cannot cross sessions.
+    session: Option<String>,
     /// True only when unlocked with the original password or key file, not biometrics.
     primary_unlock: bool,
     settings: tools::MobileSettings,
     import_review: Option<ImportReview>,
     cancellation: Option<&'static AtomicBool>,
-}
-
-/// A conflict review the user must confirm against unchanged local and cloud state.
-struct MobileReview {
-    token: String,
-    revision: u64,
-    server: String,
-    version: String,
-    bytes: Vec<u8>,
 }
 
 /// An import preview the user must confirm against unchanged input and vault state.
@@ -80,7 +73,7 @@ impl MobileVault {
             vault: None,
             credentials: VaultCredentials::Locked,
             touched: Instant::now(),
-            review: None,
+            session: None,
             primary_unlock: false,
             settings,
             import_review: None,
@@ -96,7 +89,7 @@ impl MobileVault {
     pub fn lock(&mut self) {
         self.vault = None;
         self.credentials.zeroize();
-        self.review = None;
+        self.session = None;
         self.import_review = None;
         self.primary_unlock = false;
     }
@@ -152,6 +145,7 @@ impl MobileVault {
         self.vault = Some(vault);
         self.credentials = key;
         self.primary_unlock = primary;
+        self.session = Some(hex::encode(rand::random::<[u8; 16]>()));
         self.touched = Instant::now();
     }
 
@@ -364,7 +358,14 @@ impl MobileVault {
                 let client = client(r)?;
                 json!(self.block_on(client.list())??)
             }
-            "cloud_download" => self.cloud_download(r)?,
+            "cloud_download" => {
+                let id = string(r, "id")?.to_owned();
+                let copy = flag(r, "copy");
+                let name = self.run_sync(r, true, async |host| {
+                    engine::download(host, &id, copy).await
+                })?;
+                json!({ "vault": name })
+            }
             _ => return Ok(None),
         }))
     }
@@ -528,9 +529,29 @@ impl MobileVault {
                     client_hash(r)?.as_deref(),
                 )
             }
-            "sync" => self.sync(r),
-            "cloud_conflicts" => self.conflicts(r),
-            "cloud_resolve" => self.resolve(r),
+            "sync" => {
+                let message = self.run_sync(r, true, async |host| {
+                    engine::sync(host, None, Bind::CreateIfMissing).await
+                })?;
+                Ok(json!({ "synced": true, "message": message }))
+            }
+            "sync_status" | "sync_check" | "sync_enabled" => self.sync_state(op, r),
+            "cloud_conflicts" => {
+                let review =
+                    self.run_sync(r, true, async |host| engine::review(host, None).await)?;
+                Ok(json!(review))
+            }
+            "cloud_resolve" => {
+                let resolution = Resolution {
+                    token: string(r, "review_token")?.to_owned(),
+                    choices: serde_json::from_value(r["choices"].clone())
+                        .map_err(|_| "Invalid conflict choices")?,
+                };
+                let resolved = self.run_sync(r, true, async |host| {
+                    engine::resolve(host, None, resolution).await
+                })?;
+                Ok(json!({ "synced": resolved.synced, "message": resolved.message }))
+            }
             _ => Err("Unsupported mobile operation".into()),
         }
     }
@@ -623,175 +644,48 @@ impl MobileVault {
         }))
     }
 
-    fn cloud_download(&self, r: &Value) -> Result<Value, String> {
-        let id = string(r, "id")?;
-        let client = client(r)?;
-        let (version, bytes) = self.block_on(client.download(id))??;
-        let comparison = flag(r, "copy");
-        let name = if comparison {
-            let nonce = hex::encode(rand::random::<[u8; 8]>());
-            format!("comparison-{id}-{nonce}.enc")
-        } else {
-            format!("{id}.enc")
-        };
-        let path = self.path(&name)?;
-        crate::cloud::write_private(&path, &bytes, false)?;
-        let binding = Binding {
-            server_url: client.url.clone(),
-            vault_id: id.into(),
-            version: Some(version),
-            digest: Some(crate::cloud::digest(&bytes)),
-            enabled: !comparison,
-        };
-        crate::cloud::save_binding(&path, &binding)?;
-        Ok(json!({ "vault": name }))
+    /// Borrows this owner as the shared sync engine's host for one request.
+    fn sync_host(&mut self, r: &Value, needs_client: bool) -> Result<MobileSync<'_>, String> {
+        let client = if needs_client { Some(client(r)?) } else { None };
+        let directory = self.directory.clone();
+        Ok(MobileSync {
+            owner: std::sync::Mutex::new(self),
+            client,
+            directory,
+        })
     }
 
-    fn conflicts(&mut self, r: &Value) -> Result<Value, String> {
-        let client = client(r)?;
-        let vault = self.vault()?;
-        let path = vault.sync_path()?;
-        let binding = crate::cloud::binding(&path)?.ok_or("Synchronize this vault first")?;
-        if binding.server_url != client.url {
-            return Err("Sync connection does not match this vault".into());
-        }
-        let (version, bytes) = self.block_on(client.download(&hex::encode(vault.vault_id())))??;
-        let items = vault.cloud_conflicts(&self.credentials, &bytes)?;
-        let token = hex::encode(rand::random::<[u8; 32]>());
-        self.review = Some(MobileReview {
-            token: token.clone(),
-            revision: vault.vault_revision(),
-            server: client.url.clone(),
-            version,
-            bytes,
-        });
-        Ok(json!({ "token": token, "items": items }))
+    /// Runs one engine operation; the app's lock signal aborts its network work.
+    fn run_sync<T>(
+        &mut self,
+        r: &Value,
+        needs_client: bool,
+        operation: impl AsyncFnOnce(&MobileSync<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let cancellation = self.cancellation;
+        let host = self.sync_host(r, needs_client)?;
+        block_on(cancellation, operation(&host))?
     }
 
-    fn resolve(&mut self, r: &Value) -> Result<Value, String> {
-        let client = client(r)?;
-        let review = self
-            .review
-            .take()
-            .ok_or("Review the current conflicts first")?;
-        let vault = self.vault()?;
-        if review.token != string(r, "review_token")?
-            || review.revision != vault.vault_revision()
-            || review.server != client.url
-        {
-            return Err("Conflict review is stale; review again".into());
+    fn sync_state(&mut self, op: &str, r: &Value) -> Result<Value, String> {
+        if op == "sync_enabled" {
+            let enabled = r
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("Sync state required")?;
+            self.run_sync(r, true, async |host| {
+                engine::set_enabled(host, None, enabled).await
+            })?;
         }
-        let id = hex::encode(vault.vault_id());
-        let path = vault.sync_path()?;
-        let head = self.block_on(client.head(&id))??;
-        if head.map(|v| v.version).as_ref() != Some(&review.version) {
-            return Err("Cloud changed; review conflicts again".into());
-        }
-        let choices: Vec<crate::cloud::Choice> =
-            serde_json::from_value(r["choices"].clone()).map_err(|_| "Invalid conflict choices")?;
-        let prepared = vault.merge_cloud(&self.credentials, &review.bytes, &choices)?;
-        // Save both original encrypted snapshots before any replacement.
-        let nonce = hex::encode(rand::random::<[u8; 8]>());
-        let local = fs::read(&path).map_err(|_| "Could not read local snapshot")?;
-        crate::cloud::write_private(
-            &self.directory.join(format!("recovery-local-{nonce}.enc")),
-            &local,
-            false,
-        )?;
-        crate::cloud::write_private(
-            &self.directory.join(format!("recovery-cloud-{nonce}.enc")),
-            &review.bytes,
-            false,
-        )?;
-        let (vault, credentials) = self.unlocked()?;
-        vault
-            .apply_prepared_cloud(credentials, prepared)
-            .map_err(|e| e.to_string())?;
-        let binding = Binding {
-            server_url: client.url.clone(),
-            vault_id: id,
-            version: Some(review.version),
-            digest: Some(crate::cloud::digest(&review.bytes)),
-            enabled: true,
-        };
-        crate::cloud::save_binding(&path, &binding)?;
-        self.sync(r)
-    }
-
-    fn sync(&mut self, r: &Value) -> Result<Value, String> {
-        let client = client(r)?;
-        let vault = self.vault()?;
-        let path = vault.sync_path()?;
-        let vault_id = hex::encode(vault.vault_id());
-        let existing = crate::cloud::binding(&path)?;
-        if existing.is_none() && recovery_copy(&path) {
-            return Err(
-                "Recovery/comparison copy: enable sync explicitly before synchronizing".into(),
-            );
-        }
-        let mut binding = existing.unwrap_or(Binding {
-            server_url: client.url.clone(),
-            vault_id: vault_id.clone(),
-            version: None,
-            digest: None,
-            enabled: true,
-        });
-        if binding.server_url != client.url || binding.vault_id != vault_id {
-            return Err("Sync connection does not match this vault".into());
-        }
-        if !binding.enabled {
-            return Err("Sync is disabled for this vault".into());
-        }
-        let local = fs::read(&path).map_err(|_| "Could not read local snapshot")?;
-        let digest = crate::cloud::digest(&local);
-        let remote = self.block_on(client.head(&vault_id))??;
-        let remote_version = remote.map(|v| v.version);
-        if remote_version.is_none() && binding.version.is_some() {
-            return Err("Cloud vault is missing; local copy preserved".into());
-        }
-        if remote_version.is_some() && remote_version != binding.version {
-            let (version, bytes) = self.block_on(client.download(&vault_id))??;
-            // Verify before storing or adopting remote ciphertext.
-            let mut key = self.credentials.clone();
-            let plain = Zeroizing::new(
-                decrypt_file(&mut key, &bytes)
-                    .ok_or("Cloud vault credentials changed; local copy preserved")?,
-            );
-            let data = persistence::decode_document(&plain).map_err(|e| e.to_string())?;
-            if hex::encode(data.vault_id) != vault_id {
-                return Err("Cloud vault identity mismatch".into());
-            }
-            if crate::cloud::digest(&bytes) == digest {
-                binding.version = Some(version);
-                binding.digest = Some(digest);
-                crate::cloud::save_binding(&path, &binding)?;
-                return Ok(json!({ "synced": true }));
-            }
-            if binding.digest.as_ref() != Some(&digest) {
-                // Preserve a comparison snapshot without overwriting either side.
-                let comparison = self
-                    .directory
-                    .join(format!("conflict-{vault_id}-{version}.enc"));
-                if !comparison.exists() {
-                    crate::cloud::write_private(&comparison, &bytes, false)?;
-                }
-                return Err(
-                    "Sync conflict: both copies preserved. Review the encrypted comparison copy \
-                     before retrying"
-                        .into(),
-                );
-            }
-            let (vault, credentials) = self.unlocked()?;
-            vault.apply_cloud(credentials, &bytes)?;
-            binding.version = Some(version);
-            binding.digest = Some(crate::cloud::digest(&bytes));
-        } else if binding.digest.as_ref() != Some(&digest) {
-            let upload = client.upload(&vault_id, binding.version.as_deref(), local);
-            binding.version = Some(self.block_on(upload)??);
-            binding.digest = Some(digest);
-        }
-        crate::cloud::save_binding(&path, &binding)?;
-        Ok(json!({ "synced": true }))
+        let check = op == "sync_check";
+        let status = self.run_sync(r, check, async |host| engine::status(host, check).await)?;
+        Ok(json!({
+            "enabled": status.binding.as_ref().map_or(!status.recovery_copy, |b| b.enabled),
+            "configured": status.binding.is_some(),
+            "local_changed": status.local_changed,
+            "remote": status.remote,
+            "binding": status.binding,
+        }))
     }
 
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> Result<T, String> {
@@ -805,6 +699,67 @@ fn block_on<T>(
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, String> {
     Ok(mobile_runtime()?.block_on(interruptible(cancellation, future))?)
+}
+
+/// Mobile host for the shared sync engine. The JNI mutex already serializes
+/// access; this lock only lets the engine borrow the owner from async code.
+struct MobileSync<'a> {
+    owner: std::sync::Mutex<&'a mut MobileVault>,
+    client: Option<CloudClient>,
+    directory: PathBuf,
+}
+
+impl<'a> MobileSync<'a> {
+    fn owner(&self) -> Result<std::sync::MutexGuard<'_, &'a mut MobileVault>, String> {
+        self.owner
+            .lock()
+            .map_err(|_| "Mobile session failed".into())
+    }
+}
+
+impl SyncHost for MobileSync<'_> {
+    fn client(&self) -> impl std::future::Future<Output = Result<CloudClient, String>> + Send {
+        let client = self
+            .client
+            .clone()
+            .ok_or_else(|| "Missing server".to_owned());
+        async move { client }
+    }
+    fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot, String>> + Send {
+        let snapshot = (|| {
+            let owner = self.owner()?;
+            let vault = owner.vault()?;
+            let path = vault.sync_path()?;
+            let bytes = crate::file::read_bounded_file(&path, crate::cloud::MAX_BYTES)
+                .map_err(|_| "Could not read local snapshot")?;
+            Ok(Snapshot {
+                id: hex::encode(vault.vault_id()),
+                session: owner.session.clone().ok_or(LOCKED)?,
+                state: crate::cloud::binding(&path)?,
+                bytes: bytes.to_vec(),
+                path,
+            })
+        })();
+        async move { snapshot }
+    }
+    fn with_unlocked<T: Send + 'static>(
+        &self,
+        session: String,
+        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
+    ) -> impl std::future::Future<Output = Result<T, String>> + Send {
+        let result = (|| {
+            let mut owner = self.owner()?;
+            if owner.session.as_ref() != Some(&session) {
+                return Err("Vault locked or switched during sync; nothing was applied".into());
+            }
+            let (vault, credentials) = owner.unlocked()?;
+            apply(vault, credentials)
+        })();
+        async move { result }
+    }
+    fn directory(&self) -> PathBuf {
+        self.directory.clone()
+    }
 }
 
 fn mobile_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
@@ -897,12 +852,6 @@ async fn interruptible<T>(
             }
         } => Err("Operation interrupted; inspect any remote change before retrying"),
     }
-}
-
-fn recovery_copy(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| RECOVERY_PREFIXES.iter().any(|p| name.starts_with(p)))
 }
 
 #[cfg(test)]
