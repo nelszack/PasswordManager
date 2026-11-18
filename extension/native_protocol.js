@@ -8,12 +8,17 @@
     function validateResponse(response, expectedProtocolVersion, expectedOperationId) {
         if (expectedProtocolVersion !== undefined && response?.protocolVersion !== expectedProtocolVersion) {
             const error = new Error("Incompatible native protocol. Update the native host and extension together.");
-            error.code = "protocol_mismatch"; throw error;
+            error.code = "protocol_mismatch";
+            throw error;
         }
-        if (!response || !Number.isSafeInteger(response.id) || response.id <= 0
-            || typeof response.success !== "boolean"
-            || ("uncertain" in response && typeof response.uncertain !== "boolean")
-            || (response.success && response.uncertain)) {
+        if (
+            !response ||
+            !Number.isSafeInteger(response.id) ||
+            response.id <= 0 ||
+            typeof response.success !== "boolean" ||
+            ("uncertain" in response && typeof response.uncertain !== "boolean") ||
+            (response.success && response.uncertain)
+        ) {
             throw new Error("Invalid native host response");
         }
         if (response.sessionId != null) sessionId(response);
@@ -24,8 +29,12 @@
         }
         if (expectedOperationId && response.success) {
             const receipt = response.operation;
-            if (!receipt || receipt.operationId !== expectedOperationId || receipt.state !== "committed"
-                || !(receipt.revision === null || Number.isSafeInteger(receipt.revision) && receipt.revision >= 0)) {
+            if (
+                !receipt ||
+                receipt.operationId !== expectedOperationId ||
+                receipt.state !== "committed" ||
+                !(receipt.revision === null || (Number.isSafeInteger(receipt.revision) && receipt.revision >= 0))
+            ) {
                 throw new Error("Invalid native mutation receipt");
             }
         }

@@ -13,12 +13,15 @@ module.exports.create = function create({ controls, bridge, credentials }) {
     });
     const storageChanged = (changes, area) => {
         if (area !== "local") return;
-        for (const key of ["pmGenerator", "pmGeneratorsByOrigin"]) if (changes[key]) pageGeneratorStorage[key] = changes[key].newValue;
+        for (const key of ["pmGenerator", "pmGeneratorsByOrigin"])
+            if (changes[key]) pageGeneratorStorage[key] = changes[key].newValue;
         pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
     };
     chrome.storage.onChanged.addListener(storageChanged);
     function generatePagePassword(length) {
-        return PasswordManagerGenerator.generate(length === undefined ? pageGeneratorSettings : { ...pageGeneratorSettings, length });
+        return PasswordManagerGenerator.generate(
+            length === undefined ? pageGeneratorSettings : { ...pageGeneratorSettings, length }
+        );
     }
 
     const generatorControls = new WeakMap();
@@ -49,7 +52,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             zIndex: "2147483647",
             padding: "0",
             margin: "0",
-            display: "none"
+            display: "none",
         });
         document.body.appendChild(button);
 
@@ -75,7 +78,9 @@ module.exports.create = function create({ controls, bridge, credentials }) {
         generatorControls.set(input, control);
     }
 
-    function dispose() { chrome.storage.onChanged.removeListener(storageChanged); }
+    function dispose() {
+        chrome.storage.onChanged.removeListener(storageChanged);
+    }
 
     return { createGeneratorButton, removeGeneratorButton, dispose };
 };

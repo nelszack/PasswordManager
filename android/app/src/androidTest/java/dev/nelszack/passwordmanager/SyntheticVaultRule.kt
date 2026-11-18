@@ -5,18 +5,22 @@ import android.app.KeyguardManager
 import android.content.Intent
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.rules.ExternalResource
-import java.io.File
-import java.util.UUID
-import java.util.concurrent.TimeUnit
 
 /** Class-scoped cache storage. JNI keeps its first path, so run each class in a fresh process. */
 class SyntheticVaultRule(private val prefix: String) : ExternalResource() {
-    val instrumentation get() = InstrumentationRegistry.getInstrumentation()
-    val context get() = instrumentation.targetContext
+    val instrumentation
+        get() = InstrumentationRegistry.getInstrumentation()
+
+    val context
+        get() = instrumentation.targetContext
+
     private lateinit var directory: File
     private val scenarios = mutableListOf<ActivityScenario<*>>()
 
@@ -43,7 +47,10 @@ class SyntheticVaultRule(private val prefix: String) : ExternalResource() {
     }
 
     fun requireUnlocked() {
-        assertFalse("Unlock the device for synthetic UI checks", context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+        assertFalse(
+            "Unlock the device for synthetic UI checks",
+            context.getSystemService(KeyguardManager::class.java).isKeyguardLocked,
+        )
     }
 
     fun drain() {
@@ -60,12 +67,23 @@ class SyntheticVaultRule(private val prefix: String) : ExternalResource() {
 
     override fun after() {
         val errors = mutableListOf<Throwable>()
-        fun clean(action: () -> Unit) { try { action() } catch (error: Throwable) { errors.add(error) } }
+        fun clean(action: () -> Unit) {
+            try {
+                action()
+            } catch (error: Throwable) {
+                errors.add(error)
+            }
+        }
         scenarios.asReversed().forEach { scenario -> clean { scenario.close() } }
         scenarios.clear()
         clean { drain() }
         clean { Vault.request("lock") }
-        clean { check(directory.deleteRecursively()) { "Could not remove synthetic cache storage" } }
-        errors.firstOrNull()?.let { first -> errors.drop(1).forEach(first::addSuppressed); throw first }
+        clean {
+            check(directory.deleteRecursively()) { "Could not remove synthetic cache storage" }
+        }
+        errors.firstOrNull()?.let { first ->
+            errors.drop(1).forEach(first::addSuppressed)
+            throw first
+        }
     }
 }

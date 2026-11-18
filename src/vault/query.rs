@@ -5,7 +5,7 @@ impl Vault {
         mut items: Vec<&'a Item>,
         options: &ListOptions,
     ) -> Vec<&'a Item> {
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         items.retain(|item| {
             options.kind.is_none_or(|kind| item.metadata.kind == kind)
                 && options
@@ -107,6 +107,7 @@ impl Vault {
             .ok_or_else(|| VaultError::NotFound("entry not found".into()))?;
         self.custom_fields(id)
             .iter()
+            .filter(|f| !item_rules::is_reserved_field(&f.name))
             .find(|f| f.name.eq_ignore_ascii_case(name))
             .map(|f| Zeroizing::new(f.value.expose().to_owned()))
             .ok_or_else(|| VaultError::NotFound("custom field not found".into()))

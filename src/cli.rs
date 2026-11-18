@@ -23,7 +23,9 @@ fn parse_operation_id(value: &str) -> Result<String, String> {
     name = "pm",
     version,
     about = "Local encrypted password manager",
-    long_about = "Open the desktop vault manager with `pm`, or use a subcommand for the CLI. Both connect to the same independent background server. Run `pm <COMMAND> --help` for command-specific examples and details."
+    long_about = "Open the desktop vault manager with `pm`, or use a subcommand for the CLI. Both \
+                  connect to the same independent background server. Run `pm <COMMAND> --help` \
+                  for command-specific examples and details."
 )]
 pub struct Cli {
     /// Override the configured loopback port for this invocation.
@@ -55,8 +57,13 @@ pub fn cli_parse() -> Cli {
             // Parser diagnostics can contain rejected values, including secrets.
             use std::io::Write;
             let mut stdout = std::io::stdout().lock();
-            let result = writeln!(stdout, "{}", serde_json::json!({"ok":false,"error":"Invalid command arguments. Run pm <COMMAND> --help for usage.","code":error.exit_code(),"kind":format!("{:?}", error.kind())}))
-                .and_then(|()| stdout.flush());
+            let report = serde_json::json!({
+                "ok": false,
+                "error": "Invalid command arguments. Run pm <COMMAND> --help for usage.",
+                "code": error.exit_code(),
+                "kind": format!("{:?}", error.kind()),
+            });
+            let result = writeln!(stdout, "{report}").and_then(|()| stdout.flush());
             if let Err(write_error) = result
                 && write_error.kind() != std::io::ErrorKind::BrokenPipe
             {
@@ -80,7 +87,8 @@ pub enum CliCommands {
     },
     /// Generate a random password or passphrase without opening the vault.
     #[command(
-        after_help = "Examples:\n  pm genpass --length 24 --copy\n  pm genpass --passphrase --words 7 --separator .\n  pm genpass --no-symbols --exclude-ambiguous"
+        after_help = "Examples:\n  pm genpass --length 24 --copy\n  pm genpass --passphrase \
+                      --words 7 --separator .\n  pm genpass --no-symbols --exclude-ambiguous"
     )]
     Genpass {
         /// Password length; defaults to the configured generator length.
@@ -147,7 +155,8 @@ pub enum CliCommands {
     },
     /// Estimate password strength without storing it.
     #[command(
-        after_help = "Examples:\n  pm passcheck\n  pm passcheck --password 'correct horse battery staple'"
+        after_help = "Examples:\n  pm passcheck\n  pm passcheck --password 'correct horse battery \
+                      staple'"
     )]
     Passcheck {
         /// Password to evaluate; omit to use a private prompt.
@@ -162,13 +171,13 @@ pub enum CliCommands {
     /// Supplying no options displays the effective configuration. Boolean
     /// settings accept `true` or `false`. `--reset` restores every default and
     /// cannot be combined with setting overrides.
-    #[command(
-        after_help = "Examples:\n  pm config\n  pm config --server-port 8787 --unlock-timeout 30m\n  pm config --reset"
-    )]
+    #[command(after_help = "Examples:\n  pm config\n  pm config --server-port 8787 \
+                            --unlock-timeout 30m\n  pm config --reset")]
     Config(ConfigArgs),
     /// Unlock a vault using a prompted master password or an existing key file.
     #[command(
-        after_help = "Examples:\n  pm unlock\n  pm unlock --timeout 30m\n  pm unlock --key ./keys/vault.key"
+        after_help = "Examples:\n  pm unlock\n  pm unlock --timeout 30m\n  pm unlock --key \
+                      ./keys/vault.key"
     )]
     Unlock {
         /// Open only this .enc filename from `pm vaults`, avoiding a full scan.
@@ -185,7 +194,8 @@ pub enum CliCommands {
     },
     /// Inspect a previous change after a lost response; never retries the change.
     #[command(
-        after_help = "Use the operation ID printed by an uncertain command. If the result is unknown, inspect the vault before deciding whether to make a new change."
+        after_help = "Use the operation ID printed by an uncertain command. If the result is \
+                      unknown, inspect the vault before deciding whether to make a new change."
     )]
     Operation {
         /// Operation identifier reported by the original command.
@@ -196,7 +206,8 @@ pub enum CliCommands {
     Vaults,
     /// Connect, download, and synchronize encrypted cloud vaults.
     #[command(
-        after_help = "Examples:\n  pm sync connect https://server.example --token-file device-token\n  pm sync enable\n  pm sync pull"
+        after_help = "Examples:\n  pm sync connect https://server.example --token-file \
+                      device-token\n  pm sync enable\n  pm sync pull"
     )]
     Sync {
         #[command(subcommand)]
@@ -225,7 +236,9 @@ pub enum CliCommands {
     Kill,
     /// Move an entry to encrypted trash, or permanently delete an entire vault.
     #[command(
-        after_help = "Examples:\n  pm delete --id 12\n  pm delete --entry-name github\n  pm delete --vault\n  pm delete --vault --key ./keys/vault.key\n  pm delete --vault --key ./shared.key --keep-key"
+        after_help = "Examples:\n  pm delete --id 12\n  pm delete --entry-name github\n  pm \
+                      delete --vault\n  pm delete --vault --key ./keys/vault.key\n  pm delete \
+                      --vault --key ./shared.key --keep-key"
     )]
     Delete(DeleteArgs),
     /// List saved password revisions for an entry.
@@ -253,7 +266,8 @@ pub enum CliCommands {
     Purge(PurgeArgs),
     /// Report weak, reused, duplicate, stale, breached, or under-protected logins.
     #[command(
-        after_help = "Examples:\n  pm audit\n  pm audit --stale-days 180 --require-totp\n  pm audit --breaches"
+        after_help = "Examples:\n  pm audit\n  pm audit --stale-days 180 --require-totp\n  pm \
+                      audit --breaches"
     )]
     Audit {
         /// Report passwords at least this many days old.
@@ -276,7 +290,14 @@ pub enum CliCommands {
     /// Requires an unlocked vault. Push decisions do not advance the HOTP
     /// passcode counter. Encrypted backups preserve Duo device credentials.
     #[command(
-        after_help = "Examples:\n  pm duo enroll --entry-name work --replace\n  pm duo watch --entry-name work --interactive\n  pm duo approve --entry-name work\n  pm duo deny --entry-name work --request REQUEST_ID\n\nInteractive watch lets you approve or deny in the same terminal after review.\nWithout --request, approve/deny require exactly one pending request.\nIn the extension, open Vault manager, select the enrolled item, and use Duo Push.\nVerified Push requires the code shown on the login page. Polling does not extend\nthe vault unlock timeout."
+        after_help = "Examples:\n  pm duo enroll --entry-name work --replace\n  pm duo watch \
+                      --entry-name work --interactive\n  pm duo approve --entry-name work\n  pm \
+                      duo deny --entry-name work --request REQUEST_ID\n\nInteractive watch lets \
+                      you approve or deny in the same terminal after review.\nWithout --request, \
+                      approve/deny require exactly one pending request.\nIn the extension, open \
+                      Vault manager, select the enrolled item, and use Duo Push.\nVerified Push \
+                      requires the code shown on the login page. Polling does not extend\nthe \
+                      vault unlock timeout."
     )]
     Duo {
         #[command(subcommand)]
@@ -344,13 +365,15 @@ pub enum CliCommands {
     },
     /// List vault items without displaying their primary secrets.
     #[command(
-        after_help = "Examples:\n  pm view\n  pm view --type login --sort name\n  pm view --weak --descending"
+        after_help = "Examples:\n  pm view\n  pm view --type login --sort name\n  pm view --weak \
+                      --descending"
     )]
     #[command(visible_aliases = ["list", "ls"])]
     View(ListArgs),
     /// Search item metadata and apply optional health/type filters.
     #[command(
-        after_help = "Examples:\n  pm search github\n  pm search --username alice --type login\n  pm search --no-totp --sort modified"
+        after_help = "Examples:\n  pm search github\n  pm search --username alice --type login\n  \
+                      pm search --no-totp --sort modified"
     )]
     Search(SearchArgs),
     /// Modify an existing item selected by stable ID or exact name.
@@ -371,7 +394,8 @@ pub enum CliCommands {
     /// Use --reveal-secrets to display secret custom fields. The default form copies the primary
     /// secret when the configured clipboard timeout is nonzero.
     #[command(
-        after_help = "Examples:\n  pm get --id 4\n  pm get --entry-name github --password-only\n  pm get --id 4 --reveal-secrets\n  pm get --id 4 --field recovery-code --copy"
+        after_help = "Examples:\n  pm get --id 4\n  pm get --entry-name github --password-only\n  \
+                      pm get --id 4 --reveal-secrets\n  pm get --id 4 --field recovery-code --copy"
     )]
     Get {
         #[command(flatten)]
@@ -394,7 +418,9 @@ pub enum CliCommands {
     /// By default imports into the unlocked vault. `--new` creates a separate
     /// locked vault using a prompted password or new key file.
     #[command(
-        after_help = "Examples:\n  pm import --path passwords.csv --preview\n  pm import --path passwords.csv --conflicts keep-both\n  pm import --path export.json --new --key ./keys/imported.key"
+        after_help = "Examples:\n  pm import --path passwords.csv --preview\n  pm import --path \
+                      passwords.csv --conflicts keep-both\n  pm import --path export.json --new \
+                      --key ./keys/imported.key"
     )]
     Import {
         /// Input file to read.
@@ -426,9 +452,12 @@ pub enum CliCommands {
         force: bool,
     },
     /// Generate static shell completion definitions.
-    #[command(
-        after_help = "Examples:\n  pm completions bash --output ~/.local/share/bash-completion/completions/pm\n  pm completions fish --output ~/.config/fish/completions/pm.fish\n  pm completions powershell --output pm.ps1\n\nFor dynamic completion in Bash, add this to ~/.bashrc instead:\n  source <(COMPLETE=bash pm)\nEach Tab completion then queries pm for current commands and options."
-    )]
+    #[command(after_help = "Examples:\n  pm completions bash --output \
+                            ~/.local/share/bash-completion/completions/pm\n  pm completions fish \
+                            --output ~/.config/fish/completions/pm.fish\n  pm completions \
+                            powershell --output pm.ps1\n\nFor dynamic completion in Bash, add \
+                            this to ~/.bashrc instead:\n  source <(COMPLETE=bash pm)\nEach Tab \
+                            completion then queries pm for current commands and options.")]
     Completions {
         /// Shell whose completion syntax should be generated.
         #[arg(value_enum)]
@@ -460,13 +489,15 @@ pub enum NativeHostCommands {
     /// Preserves browser manifests and approved extension IDs. On Windows,
     /// fully close the browser before updating the native-host executable.
     #[command(
-        after_help = "Example:\n  /path/to/new/pm native-host update\n\nRestart the server and reload the extension after upgrading."
+        after_help = "Example:\n  /path/to/new/pm native-host update\n\nRestart the server and \
+                      reload the extension after upgrading."
     )]
     Update,
     /// Register the native host for an unpacked Chrome-family extension.
-    #[command(
-        after_help = "Example:\n  pm native-host install --extension-id abcdefghijklmnopabcdefghijklmnop --browser chrome\n\nReload the extension after installation. On Windows, fully close the browser before reinstalling an upgraded native host."
-    )]
+    #[command(after_help = "Example:\n  pm native-host install --extension-id \
+                            abcdefghijklmnopabcdefghijklmnop --browser chrome\n\nReload the \
+                            extension after installation. On Windows, fully close the browser \
+                            before reinstalling an upgraded native host.")]
     Install {
         /// The 32-character ID shown for the extension on chrome://extensions.
         #[arg(long)]
@@ -486,7 +517,8 @@ pub enum BackupCommands {
     /// Without `--key`, prompts for a dedicated backup password. The backup
     /// includes recovery history, trash, TOTP configuration, and typed items.
     #[command(
-        after_help = "Examples:\n  pm backup create --path vault.pmbackup\n  pm backup create --path vault.pmbackup --key ./backup.key --force"
+        after_help = "Examples:\n  pm backup create --path vault.pmbackup\n  pm backup create \
+                      --path vault.pmbackup --key ./backup.key --force"
     )]
     Create {
         /// Destination backup file.
@@ -503,7 +535,8 @@ pub enum BackupCommands {
     ///
     /// Restore validates the entire backup before writing a vault.
     #[command(
-        after_help = "Examples:\n  pm backup restore --path vault.pmbackup\n  pm backup restore --path vault.pmbackup --key ./backup.key"
+        after_help = "Examples:\n  pm backup restore --path vault.pmbackup\n  pm backup restore \
+                      --path vault.pmbackup --key ./backup.key"
     )]
     Restore {
         /// Encrypted backup file to restore.
@@ -783,7 +816,11 @@ pub enum TotpCommands {
     },
     /// Enroll a Duo activation link for passcodes using a hidden prompt.
     #[command(
-        after_help = "Examples:\n  pm totp duo --id 7\n  pm totp duo --entry-name work --mode totp\n\nUse a fresh enrollment link for a separate device. Enrollment consumes the link.\nHOTP is the default; select TOTP if your organization accepts time-based codes.\nThis command saves passcodes only; use pm duo enroll for Push credentials."
+        after_help = "Examples:\n  pm totp duo --id 7\n  pm totp duo --entry-name work --mode \
+                      totp\n\nUse a fresh enrollment link for a separate device. Enrollment \
+                      consumes the link.\nHOTP is the default; select TOTP if your organization \
+                      accepts time-based codes.\nThis command saves passcodes only; use pm duo \
+                      enroll for Push credentials."
     )]
     Duo {
         #[command(flatten)]
@@ -794,7 +831,10 @@ pub enum TotpCommands {
     },
     /// Generate a TOTP code or consume and persist the next HOTP counter.
     #[command(
-        after_help = "Examples:\n  pm totp show --id 7\n  pm totp show --entry-name github --copy\n  pm totp show --entry-name github --watch\n\nWatch refreshes TOTP codes and their countdown until Ctrl+C or the vault locks.\nWith --copy, each new code is copied once. HOTP cannot be watched."
+        after_help = "Examples:\n  pm totp show --id 7\n  pm totp show --entry-name github \
+                      --copy\n  pm totp show --entry-name github --watch\n\nWatch refreshes TOTP \
+                      codes and their countdown until Ctrl+C or the vault locks.\nWith --copy, \
+                      each new code is copied once. HOTP cannot be watched."
     )]
     Show {
         #[command(flatten)]

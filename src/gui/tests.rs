@@ -31,6 +31,8 @@ fn item() -> ItemDetail {
         fields: vec![],
         has_totp: false,
         has_duo: false,
+        otp_mode: None,
+        is_passkey: false,
         created: String::new(),
         modified: String::new(),
     }
@@ -538,7 +540,7 @@ fn generation_uses_reloaded_defaults_without_overwriting_unsaved_settings() {
     conf.genpass.copy = false;
     conf.genpass.stats = true;
     conf.genpass.length = 24;
-    let _ = app.complete(Job::GenerateDefaults, Reply::Configuration(conf));
+    let _ = app.complete(Job::Reload(Then::Generate), Reply::Configuration(conf));
     assert_eq!(app.generation.value.len(), 24);
     assert!(!app.generation.stats.is_empty());
     assert!(
@@ -714,7 +716,7 @@ fn save_and_continue_editing_preserves_edits_until_saved_and_reopens_the_current
     assert_eq!(app.editor.as_ref().unwrap().name, "Updated credential");
     let _ = app.update(Message::Finished(
         app.serial,
-        Job::SaveEditorDefaults,
+        Job::Reload(Then::SaveEditor),
         Arc::new(Ok(Reply::Configuration(Config::default()))),
     ));
     assert!(app.busy());
@@ -779,7 +781,7 @@ fn pending_account_request() -> password_manager::types::DuoPushRequest {
         username: "alice".into(),
         location: "Test location".into(),
         summary: "Test login".into(),
-        expires_at: (chrono::Utc::now().timestamp() + 300) as u64,
+        expires_at: jiff::Timestamp::now().as_second() as u64 + 300,
         code_digits: Some(3),
         unsupported: None,
         fingerprint: "synthetic-review".into(),
@@ -1103,7 +1105,7 @@ fn custom_field_copy_reloads_timeout_and_never_reveals_the_value() {
     current.clipboard.timeout = 12;
     let _ = app.update(Message::Finished(
         serial,
-        Job::FieldCopyDefaults(target),
+        Job::Reload(Then::CopyField(target)),
         Arc::new(Ok(Reply::Configuration(current))),
     ));
     assert!(app.busy() && app.serial > serial);
@@ -1128,7 +1130,7 @@ fn custom_field_copy_reloads_timeout_and_never_reveals_the_value() {
     disabled.clipboard.timeout = 0;
     let serial = app.serial;
     let _ = app.complete(
-        Job::FieldCopyDefaults(target),
+        Job::Reload(Then::CopyField(target)),
         Reply::Configuration(disabled),
     );
     assert_eq!(
@@ -1162,11 +1164,11 @@ fn review_hiding_secrets_cancels_otp_preflights_before_dispatch() {
     for (event, job) in [
         (
             workflows::Event::Toggle(workflows::Toggle::WatchOtp, true),
-            Job::WatchOtpDefaults,
+            Job::Reload(Then::WatchOtp),
         ),
         (
             workflows::Event::Run(workflows::Action::ShowOtp(true)),
-            Job::WorkflowDefaults(workflows::Action::ShowOtp(true)),
+            Job::Reload(Then::Workflow(workflows::Action::ShowOtp(true))),
         ),
     ] {
         let mut app = account_app(false);

@@ -1,8 +1,9 @@
 //! Encrypted snapshot transport and durable synchronization checkpoints.
 //! No password or decrypted entry is sent to the server.
+pub(crate) mod engine;
 use crate::{
     config::SyncConfig,
-    file::{AtomicWriteMode, atomic_write_private, config_dir, data_dir, read_bounded_file},
+    file::{AtomicWriteMode, atomic_write_private, config_dir, read_bounded_file},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -369,26 +370,35 @@ impl CloudClient {
 
 /// A new download never overwrites an existing local vault. Its encrypted
 /// identity is checked at first unlock before any entries become available.
+/// `prefix` names recovery and comparison copies so people can recognize them.
 pub(crate) fn install_download(
+    directory: &Path,
+    prefix: &str,
     server_url: &str,
     id: &str,
     version: Option<String>,
     bytes: Vec<u8>,
     independent_copy: bool,
 ) -> Result<String, String> {
-    for filename in crate::vault::list_vaults().map_err(|e| e.to_string())? {
-        if let Some(state) = binding(&data_dir().join(&filename))?
-            && state.vault_id == id
-            && state.server_url == server_url
-            && !independent_copy
-        {
-            return Err(format!(
-                "Vault already exists locally as {filename}; unlock it and run pm sync now"
-            ));
+    if !independent_copy {
+        let existing = match crate::file::list_vault_files(directory) {
+            Ok(files) => files,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
+            Err(error) => return Err(format!("could not list vault directory: {error}")),
+        };
+        for filename in existing {
+            if let Some(state) = binding(&directory.join(&filename))?
+                && state.vault_id == id
+                && state.server_url == server_url
+            {
+                return Err(format!(
+                    "Vault already exists locally as {filename}; unlock it and sync it instead"
+                ));
+            }
         }
     }
-    let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
-    let path = data_dir().join(&filename);
+    let filename = format!("{prefix}{}.enc", hex::encode(rand::random::<[u8; 16]>()));
+    let path = directory.join(&filename);
     // Install identity binding first: a crash must never leave an unbound download.
     save_binding(
         &path,

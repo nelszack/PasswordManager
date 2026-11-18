@@ -22,6 +22,42 @@ impl Vault {
         request: TypedEntry,
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
+        let mut request = request;
+        if let Err(error) = item_rules::normalize_new_fields(&mut request.custom_fields) {
+            request.zeroize();
+            return Err(error);
+        }
+        self.insert_item(request, key)
+    }
+    /// Stores a passkey record. Only the passkey workflow may write the reserved
+    /// field; it is validated by the caller before reaching the vault.
+    pub(crate) fn add_passkey_entry(
+        &mut self,
+        request: TypedEntry,
+        key: &mut VaultCredentials,
+    ) -> Result<bool, VaultError> {
+        if !request
+            .custom_fields
+            .iter()
+            .any(|f| f.name == crate::passkey::FIELD)
+        {
+            return Err(VaultError::InvalidInput("Missing passkey record".into()));
+        }
+        self.insert_item(request, key)
+    }
+    fn insert_item(
+        &mut self,
+        mut request: TypedEntry,
+        key: &mut VaultCredentials,
+    ) -> Result<bool, VaultError> {
+        let checked = item_rules::check_name(&request.entry.name).and_then(|()| {
+            let mut urls = request.entry.url.iter().chain(&request.additional_urls);
+            urls.try_for_each(|url| item_rules::check_url(url))
+        });
+        if let Err(error) = checked {
+            request.zeroize();
+            return Err(error);
+        }
         let TypedEntry {
             entry: info,
             kind,
@@ -68,10 +104,9 @@ impl Vault {
                 created: now.clone(),
                 modified: now,
             };
-            vault
-                .data
-                .items
-                .insert(ItemId::from_public(id)?, Item::new(entry, metadata));
+            let item = Item::new(entry, metadata);
+            item_rules::check_item_limits(&item, None)?;
+            vault.data.items.insert(ItemId::from_public(id)?, item);
             Ok((true, true))
         })
     }
@@ -124,17 +159,45 @@ impl Vault {
             return Ok(false);
         };
         self.transaction(TransactionScope::Entry(id), key, |vault| {
-            let changed = vault.apply_typed_update(id, change, limit);
+            let changed = vault.apply_typed_update(id, change, limit)?;
             Ok((changed, changed))
         })
     }
-    /// Apply to already-staged data. The caller owns identity resolution and commit.
+    /// Apply to already-staged data. The caller owns identity resolution and
+    /// commit; an error leaves the staged copy to be discarded.
     pub(super) fn apply_typed_update(
         &mut self,
         id: usize,
-        change: TypedUpdate,
+        mut change: TypedUpdate,
         limit: usize,
-    ) -> bool {
+    ) -> Result<bool, VaultError> {
+        let before = self
+            .item(id)
+            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
+        let checked = (|| {
+            if before.is_passkey() {
+                return Err(VaultError::InvalidInput(
+                    "Passkey records cannot be edited as ordinary items".into(),
+                ));
+            }
+            if let Some(name) = &change.entry.update.name {
+                item_rules::check_name(name)?;
+            }
+            for url in change.entry.update.url.iter().chain(&change.add_url) {
+                item_rules::check_url(url)?;
+            }
+            item_rules::normalize_new_fields(&mut change.set_fields)
+        })();
+        if let Err(error) = checked {
+            change.zeroize();
+            return Err(error);
+        }
+        let before = item_rules::Shape::of(before);
+        let changed = self.apply_validated_update(id, change, limit);
+        item_rules::check_item_limits(self.item(id).expect("updated item"), Some(before))?;
+        Ok(changed)
+    }
+    fn apply_validated_update(&mut self, id: usize, change: TypedUpdate, limit: usize) -> bool {
         let TypedUpdate {
             entry: change,
             kind,

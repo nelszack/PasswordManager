@@ -1,6 +1,17 @@
 // Own state per worker instance; browser services are supplied by background.js.
 const PasswordManagerBackgroundStatus = {
-    create({ chrome, nativeRequest, state, version, invalidate, cleanupExpired, setInterval, clearInterval = globalThis.clearInterval, closeIdle = () => {}, protocolVersion }) {
+    create({
+        chrome,
+        nativeRequest,
+        state,
+        version,
+        invalidate,
+        cleanupExpired,
+        setInterval,
+        clearInterval = globalThis.clearInterval,
+        closeIdle = () => {},
+        protocolVersion,
+    }) {
         const STATUS_POLL_ALARM = "status-poll";
         const LIVE_STATUS_POLL_MS = 2000;
         let cachedStatus = null;
@@ -14,7 +25,11 @@ const PasswordManagerBackgroundStatus = {
             refreshStatus();
             port.onDisconnect.addListener(() => {
                 views.delete(port);
-                if (!views.size) { clearInterval(liveTimer); liveTimer = null; closeIdle(); }
+                if (!views.size) {
+                    clearInterval(liveTimer);
+                    liveTimer = null;
+                    closeIdle();
+                }
             });
         });
         chrome.runtime.onInstalled.addListener(() => {
@@ -30,7 +45,7 @@ const PasswordManagerBackgroundStatus = {
             refreshStatus();
         }
 
-        chrome.alarms.onAlarm.addListener((alarm) => {
+        chrome.alarms.onAlarm.addListener(alarm => {
             if (alarm.name === STATUS_POLL_ALARM) {
                 cleanupExpired();
                 refreshStatus();
@@ -49,8 +64,12 @@ const PasswordManagerBackgroundStatus = {
         }
 
         function publishStatus(status) {
-            if (!status.native || !status.running || status.locked
-                || cachedStatus?.sessionId && cachedStatus.sessionId !== status.sessionId) {
+            if (
+                !status.native ||
+                !status.running ||
+                status.locked ||
+                (cachedStatus?.sessionId && cachedStatus.sessionId !== status.sessionId)
+            ) {
                 invalidate();
             }
             setBadge(status);
@@ -58,10 +77,7 @@ const PasswordManagerBackgroundStatus = {
 
             cachedStatus = status;
             chrome.storage.local.set({ pmStatus: status });
-            chrome.runtime.sendMessage(
-                { action: "statusChanged", status },
-                () => void chrome.runtime.lastError
-            );
+            chrome.runtime.sendMessage({ action: "statusChanged", status }, () => void chrome.runtime.lastError);
         }
 
         async function serverStatus() {
@@ -69,10 +85,14 @@ const PasswordManagerBackgroundStatus = {
                 const response = await nativeRequest("status");
                 if (!response.success) {
                     const status = {
-                        native: true, running: false, locked: false, error: response.error,
+                        native: true,
+                        running: false,
+                        locked: false,
+                        error: response.error,
                         extensionVersion: version,
                         nativeVersion: response.nativeVersion,
-                        protocolVersion: response.protocolVersion, extensionProtocolVersion: protocolVersion
+                        protocolVersion: response.protocolVersion,
+                        extensionProtocolVersion: protocolVersion,
                     };
                     return { ...status, versionError: state.versionError(status) };
                 }
@@ -82,14 +102,18 @@ const PasswordManagerBackgroundStatus = {
                     sessionId: response.sessionId || null,
                     extensionVersion: version,
                     nativeVersion: response.nativeVersion,
-                    protocolVersion: response.protocolVersion, extensionProtocolVersion: protocolVersion,
-                    ...state.parseServerStatus(response.data)
+                    protocolVersion: response.protocolVersion,
+                    extensionProtocolVersion: protocolVersion,
+                    ...state.parseServerStatus(response.data),
                 };
                 return { ...status, versionError: state.versionError(status) };
             } catch (error) {
                 return {
-                    native: false, running: false, locked: false, error: error.message,
-                    extensionVersion: version
+                    native: false,
+                    running: false,
+                    locked: false,
+                    error: error.message,
+                    extensionVersion: version,
                 };
             }
         }
@@ -113,7 +137,7 @@ const PasswordManagerBackgroundStatus = {
         }
 
         return { refresh: refreshStatus, start };
-    }
+    },
 };
 
 if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundStatus;

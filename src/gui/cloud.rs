@@ -56,9 +56,9 @@ impl App {
             }
             Message::ResolveCloud => {
                 if !self.writes_allowed() || self.editor.as_ref().is_some_and(|d| d.dirty) {
-                    self.notice =
-                        "Save or discard pending item edits before resolving sync conflicts."
-                            .into();
+                    self.notice = "Save or discard pending item edits before resolving sync \
+                                   conflicts."
+                        .into();
                     return Task::none();
                 }
                 if let Some(review) = self.cloud.review.take() {

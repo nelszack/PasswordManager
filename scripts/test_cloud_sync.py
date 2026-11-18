@@ -211,6 +211,16 @@ def main():
             desktop.run("unlock", "--vault-file", active_filename, "--key", str(key))
             print("PASS: stale review rejection, mixed-field resolution, convergence and decryptable encrypted recovery copies")
 
+            # Re-enabling a disabled vault downloads the cloud changes made meanwhile.
+            desktop.run("sync", "disable")
+            laptop.run("update", "--id", "1", "--name", "Changed while disabled")
+            laptop.run("sync", "now")
+            desktop.run("sync", "now", ok=False)
+            assert "Changed while disabled" not in str(desktop.names())
+            desktop.run("sync", "enable")
+            assert "Changed while disabled" in str(desktop.names())
+            print("PASS: re-enabling sync downloads changes made while it was disabled")
+
             # Server persistence must survive a restart without changing the version.
             before = json.loads(laptop.run("sync", "vaults").stdout)
             cloud.terminate()

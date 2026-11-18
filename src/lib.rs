@@ -2,6 +2,7 @@
 pub mod cli;
 pub mod client;
 pub mod clipboard;
+mod clock;
 pub mod cloud;
 pub mod config;
 pub mod docs;
@@ -11,6 +12,7 @@ pub mod file;
 pub mod mobile;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod native_messaging;
+mod operations;
 pub mod passkey;
 pub mod password;
 pub mod protocol;

@@ -162,6 +162,8 @@ fn history_does_not_follow_an_account_selected_on_the_vault_tab() {
             fields: vec![],
             has_totp: true,
             has_duo: false,
+            otp_mode: None,
+            is_passkey: false,
             created: String::new(),
             modified: String::new(),
         }),
@@ -1064,7 +1066,7 @@ fn automatic_copy_reloads_defaults_and_honors_external_disable() {
     conf.clipboard.timeout = 0;
     let _ = app.update(super::super::Message::Finished(
         serial,
-        Job::WatchCopyDefaults,
+        Job::Reload(Then::CopyWatchedOtp),
         Arc::new(Ok(Reply::Configuration(conf))),
     ));
     assert_eq!(
@@ -1088,7 +1090,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
     conf.clipboard.timeout = 44;
     let _ = app.update(super::super::Message::Finished(
         app.serial,
-        Job::WatchCopyDefaults,
+        Job::Reload(Then::CopyWatchedOtp),
         Arc::new(Ok(Reply::Configuration(conf.clone()))),
     ));
     assert!(app.busy() && !app.polling());
@@ -1109,7 +1111,7 @@ fn automatic_copy_uses_reloaded_timeout_and_cannot_survive_focus_loss() {
     let _ = app.update(super::super::Message::HideSecrets);
     let _ = app.update(super::super::Message::Finished(
         serial,
-        Job::WatchCopyDefaults,
+        Job::Reload(Then::CopyWatchedOtp),
         Arc::new(Ok(Reply::Configuration(conf))),
     ));
     assert_eq!(app.serial, serial);

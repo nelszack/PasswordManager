@@ -16,8 +16,10 @@ async function complete(id) {
         return;
     }
     const response = await send({
-        action: "completeSecurePicker", token, id,
-        confirmCrossOrigin: crossOrigin && confirmation.checked
+        action: "completeSecurePicker",
+        token,
+        id,
+        confirmCrossOrigin: crossOrigin && confirmation.checked,
     });
     if (response?.success) window.close();
     else showError({ message: response?.error || "Selection failed" });
@@ -48,7 +50,10 @@ function renderItems() {
     items.replaceChildren();
     const query = search.value.trim().toLowerCase();
     const matching = savedItems.filter(item => `${item.name} ${item.username || ""}`.toLowerCase().includes(query));
-    status.textContent = query && !matching.length ? "No accounts match this search. Clear the search to show all accounts." : PasswordManagerPickerState.status(savedItems);
+    status.textContent =
+        query && !matching.length
+            ? "No accounts match this search. Clear the search to show all accounts."
+            : PasswordManagerPickerState.status(savedItems);
     for (const item of matching) {
         const button = document.createElement("button");
         button.type = "button";
@@ -66,7 +71,9 @@ function renderItems() {
 }
 
 function showError(error) {
-    savedItems = []; items.replaceChildren(); recovery.hidden = false;
+    savedItems = [];
+    items.replaceChildren();
+    recovery.hidden = false;
     status.textContent = error?.message || "Picker unavailable";
 }
 
@@ -77,5 +84,7 @@ document.getElementById("cancel").addEventListener("click", async event => {
 });
 
 search.addEventListener("input", renderItems);
-document.getElementById("retry").addEventListener("click", event => { if (event.isTrusted) load(true).catch(showError); });
+document.getElementById("retry").addEventListener("click", event => {
+    if (event.isTrusted) load(true).catch(showError);
+});
 load().catch(showError);

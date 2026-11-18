@@ -1,0 +1,9 @@
+# Reviewed exceptions for `cargo audit --deny warnings` (see .github/workflows/security.yml).
+[advisories]
+ignore = [
+    # chrono is unmaintained. This project uses jiff instead; chrono remains in
+    # the lockfiles only as a wasm32-only dependency of zxcvbn, which no build
+    # target compiles (`cargo tree -i chrono --target <target>` is empty for
+    # Linux, Windows, macOS, and Android). Remove once zxcvbn drops it.
+    "RUSTSEC-2026-0543",
+]

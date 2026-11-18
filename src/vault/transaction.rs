@@ -115,7 +115,7 @@ impl Vault {
         self.transaction(TransactionScope::Items(selected), key, |staged| {
             let mut changed = false;
             for (id, change) in resolved {
-                changed |= staged.apply_typed_update(id, change, history_limit);
+                changed |= staged.apply_typed_update(id, change, history_limit)?;
             }
             Ok((changed, changed))
         })

@@ -3,7 +3,7 @@ var PasswordManagerPickerState = (() => {
         login: "Choose saved credentials",
         totp: "Choose authenticator",
         "payment-card": "Choose payment card",
-        identity: "Choose identity"
+        identity: "Choose identity",
     };
     function title(kind) {
         return TITLES[kind] || "Password Manager";

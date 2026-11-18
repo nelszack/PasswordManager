@@ -759,7 +759,8 @@ impl State {
                     )
                 } else {
                     format!(
-                        "Restore {} as a separate vault? Unlock it with its backup password or key.",
+                        "Restore {} as a separate vault? Unlock it with its backup password or \
+                         key.",
                         request.path
                     )
                 });
@@ -800,7 +801,8 @@ impl State {
             Action::Export => {
                 let path = absolute(&self.files.path)?;
                 confirmation = Some(format!(
-                    "Export plaintext secrets to {path}{}? Anyone who can read this file can read its passwords. JSON preserves richer data than CSV.",
+                    "Export plaintext secrets to {path}{}? Anyone who can read this file can read \
+                     its passwords. JSON preserves richer data than CSV.",
                     if self.files.force {
                         ", replacing any existing file"
                     } else {
@@ -920,7 +922,8 @@ impl State {
                     }
                 }
                 confirmation = Some(format!(
-                    "{} this Duo request?\nApplication: {}\nAccount: {}\nLocation: {}\n{}\nRequest: {}",
+                    "{} this Duo request?\nApplication: {}\nAccount: {}\nLocation: \
+                     {}\n{}\nRequest: {}",
                     if approve { "Approve" } else { "Deny" },
                     request.application,
                     request.username,
@@ -942,16 +945,21 @@ impl State {
             }
             Action::RemoveDuo => {
                 confirmation = Some(format!(
-                    "Remove local Duo Push credentials for {}? Remove the device separately in Duo.",
+                    "Remove local Duo Push credentials for {}? Remove the device separately in \
+                     Duo.",
                     item.unwrap().name
                 ));
                 ServerCommand::Duo(DuoCommand::Remove { target: target() })
             }
             Action::Rekey | Action::NewVault => {
                 confirmation = Some(if action == Action::Rekey {
-                    "Re-encrypt the unlocked vault with these new credentials? Keep a verified backup of the current vault and retain existing external keys.".into()
+                    "Re-encrypt the unlocked vault with these new credentials? Keep a verified \
+                     backup of the current vault and retain existing external keys."
+                        .into()
                 } else {
-                    "Create a new vault using these credentials? A new key path must be outside application data and must not already exist.".into()
+                    "Create a new vault using these credentials? A new key path must be outside \
+                     application data and must not already exist."
+                        .into()
                 });
                 let credentials = self.credentials.value(true)?;
                 if action == Action::Rekey {
@@ -972,7 +980,8 @@ impl State {
                     .as_ref()
                     .ok_or("Select the vault to delete on the Vault tab.")?;
                 confirmation = Some(format!(
-                    "Permanently delete vault {filename}{}? All its entries and recovery data will be lost.",
+                    "Permanently delete vault {filename}{}? All its entries and recovery data \
+                     will be lost.",
                     if self.credentials.use_key && !self.credentials.keep_key {
                         " AND its external key file"
                     } else {
@@ -1015,7 +1024,9 @@ impl State {
         }
         if command.is_mutation() && app.editor.as_ref().is_some_and(|draft| draft.dirty) {
             return Err(
-                "Save or discard the unsaved item edits before changing authenticators or using Tools.".into(),
+                "Save or discard the unsaved item edits before changing authenticators or using \
+                 Tools."
+                    .into(),
             );
         }
         Ok(Prepared {
@@ -1146,7 +1157,7 @@ impl App {
         {
             return Task::none();
         }
-        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let now = u64::try_from(jiff::Timestamp::now().as_second()).unwrap_or(0);
         if self
             .workspace
             .duo_requests_for(self)
@@ -1250,7 +1261,7 @@ impl App {
             && self.recovery.id().is_none()
         {
             return Task::batch([
-                self.launch(Job::WatchCopyDefaults, backend::reload_settings),
+                self.reload_then(super::Then::CopyWatchedOtp),
                 if reveal { show_result() } else { Task::none() },
             ]);
         }
@@ -1324,7 +1335,13 @@ impl App {
                 async {
                     tokio::task::spawn_blocking(notify_duo)
                         .await
-                        .unwrap_or_else(|_| Err("Desktop notification could not be delivered. Review Duo requests on the account.".into()))
+                        .unwrap_or_else(|_| {
+                            Err(
+                                "Desktop notification could not be delivered. Review Duo requests \
+                                 on the account."
+                                    .into(),
+                            )
+                        })
                 },
                 |ok| super::Message::Workflow(Event::NotificationFinished(ok)),
             );
@@ -1412,9 +1429,9 @@ impl App {
                         }
                         if self.workspace.otp.copy && timeout.unwrap().is_none() {
                             self.workspace.hide_secrets();
-                            self.notice =
-                                "Set an OTP copy timeout greater than zero to watch and copy."
-                                    .into();
+                            self.notice = "Set an OTP copy timeout greater than zero to watch and \
+                                           copy."
+                                .into();
                             return Task::none();
                         }
                         self.workspace.reset_duo();
@@ -1579,8 +1596,9 @@ impl App {
             return Task::none();
         }
         if prepared.command.is_mutation() && self.editor.as_ref().is_some_and(|draft| draft.dirty) {
-            self.notice =
-                "Save or discard the unsaved item edits before changing authenticators or using Tools.".into();
+            self.notice = "Save or discard the unsaved item edits before changing authenticators \
+                           or using Tools."
+                .into();
             return Task::none();
         }
         if matches!(
@@ -1737,10 +1755,20 @@ fn notify_duo() -> Result<(), String> {
         #[cfg(target_os = "windows")]
         {
             Err(match status.code() {
-                Some(2) => "Windows notifications need a registered Windows PowerShell Start-menu sender, which is unavailable. Review Duo requests on the account.",
-                Some(4) => "Windows notifications are disabled for the Windows PowerShell sender. Review Duo requests on the account.",
-                _ => "Windows could not send an alert through its registered Windows PowerShell sender. Review Duo requests on the account.",
-            }.into())
+                Some(2) => {
+                    "Windows notifications need a registered Windows PowerShell Start-menu sender, \
+                     which is unavailable. Review Duo requests on the account."
+                }
+                Some(4) => {
+                    "Windows notifications are disabled for the Windows PowerShell sender. Review \
+                     Duo requests on the account."
+                }
+                _ => {
+                    "Windows could not send an alert through its registered Windows PowerShell \
+                     sender. Review Duo requests on the account."
+                }
+            }
+            .into())
         }
         #[cfg(not(target_os = "windows"))]
         Err(
@@ -1751,7 +1779,8 @@ fn notify_duo() -> Result<(), String> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Err(
-            "Desktop notifications are unavailable on this platform. Review Duo requests on the account."
+            "Desktop notifications are unavailable on this platform. Review Duo requests on the \
+             account."
                 .into(),
         )
     }

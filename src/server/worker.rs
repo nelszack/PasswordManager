@@ -213,29 +213,21 @@ impl Owner {
                 return one(RpcResponse::message(ResponseCode::Conflict, error));
             }
         }
-        if let Some(expected) = request.expected_revision {
-            let actual = self.session.vault().and_then(|vault| {
-                request
-                    .command
-                    .revision_target()
-                    .and_then(|target| vault.target_revision(target))
-                    .or_else(|| {
-                        request
-                            .command
-                            .target_id()
-                            .and_then(|id| vault.revision(id))
-                    })
-            });
-            if actual != Some(expected) {
-                let mut rejected = one(RpcResponse::message(
-                    ResponseCode::Conflict,
-                    "Item changed since it was opened; reopen it before continuing",
-                ));
-                if let Some(id) = operation_id.as_ref() {
-                    self.complete(id, &mut rejected.responses, false);
-                }
-                return rejected;
+        if let Some(expected) = request.expected_revision
+            && !crate::operations::expected_revision_matches(
+                self.session.vault(),
+                &request.command,
+                expected,
+            )
+        {
+            let mut rejected = one(RpcResponse::message(
+                ResponseCode::Conflict,
+                "Item changed since it was opened; reopen it before continuing",
+            ));
+            if let Some(id) = operation_id.as_ref() {
+                self.complete(id, &mut rejected.responses, false);
             }
+            return rejected;
         }
         let _ = self.session.with_unlocked(|vault, _| {
             vault.metadata.changes = None;

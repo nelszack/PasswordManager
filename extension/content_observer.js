@@ -1,7 +1,14 @@
 "use strict";
-const { isTotpInput, isCredentialInput, isUsableInput, isNewPasswordInput, withVisibilityCache = action => action() } = require("./content_detection.js");
+const {
+    isTotpInput,
+    isCredentialInput,
+    isUsableInput,
+    isNewPasswordInput,
+    withVisibilityCache = action => action(),
+} = require("./content_detection.js");
 module.exports.create = function create({ controls, generator, autofill, onRoot = () => {}, onRemoveRoot = () => {} }) {
-    const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } = controls;
+    const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } =
+        controls;
     const { createGeneratorButton, removeGeneratorButton } = generator;
     const { typedAutofillKind } = autofill;
     let observer;
@@ -22,10 +29,19 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         if (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value);
         return result;
     }
-    function dispose() { disposed = true; observer?.disconnect(); for (const root of registeredRoots) onRemoveRoot(root); registeredRoots.clear(); snapshots.clear(); }
+    function dispose() {
+        disposed = true;
+        observer?.disconnect();
+        for (const root of registeredRoots) onRemoveRoot(root);
+        registeredRoots.clear();
+        snapshots.clear();
+    }
     function isFormControl(element) {
-        return element instanceof HTMLInputElement || element instanceof HTMLSelectElement
-            || element instanceof HTMLTextAreaElement;
+        return (
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLSelectElement ||
+            element instanceof HTMLTextAreaElement
+        );
     }
     function attachInput(input, formUsernames, typedContext) {
         // Ignore extension UI elements
@@ -86,7 +102,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     function observeInputs() {
         const pendingRoots = new Set();
         let attachScheduled = false;
-        observer = new MutationObserver((mutations) => {
+        observer = new MutationObserver(mutations => {
             const ownUI = node => node?.nodeType === 1 && node.classList?.contains("my-extension-ui");
             mutations = mutations.filter(mutation => {
                 if (mutation.type !== "childList") return true;
@@ -96,7 +112,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             for (const mutation of mutations) {
                 if (mutation.type !== "childList") continue;
                 // Mutation targets invalidate ancestor snapshots, including across shadow hosts.
-                if (!mutation.target) { snapshots.clear(); continue; }
+                if (!mutation.target) {
+                    snapshots.clear();
+                    continue;
+                }
                 for (let node = mutation.target; node; node = node.parentNode || node.host) snapshots.delete(node);
                 // Detached trees may change outside observation. Invalidate cached
                 // descendants too when they leave or reenter an observed tree.
@@ -107,7 +126,11 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             }
             let removedRoot = false;
             for (const root of registeredRoots) {
-                if (root.host && !root.host.isConnected) { onRemoveRoot(root); registeredRoots.delete(root); removedRoot = true; }
+                if (root.host && !root.host.isConnected) {
+                    onRemoveRoot(root);
+                    registeredRoots.delete(root);
+                    removedRoot = true;
+                }
             }
             if (removedRoot) {
                 observer.disconnect();
@@ -116,8 +139,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             for (const mutation of mutations) {
                 if (mutation.type === "attributes") {
                     if (mutation.target.classList?.contains("my-extension-ui")) continue;
-                    if (isFormControl(mutation.target)
-                        || ["class", "style", "hidden", "open"].includes(mutation.attributeName)) {
+                    if (
+                        isFormControl(mutation.target) ||
+                        ["class", "style", "hidden", "open"].includes(mutation.attributeName)
+                    ) {
                         scheduleAttach(mutation.target);
                     }
                 }
@@ -127,12 +152,29 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             }
         });
         const observationOptions = {
-            childList: true, subtree: true, attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open", "type", "autocomplete", "disabled", "readonly", "id", "name", "placeholder", "aria-label", "role"]
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: [
+                "class",
+                "style",
+                "hidden",
+                "open",
+                "type",
+                "autocomplete",
+                "disabled",
+                "readonly",
+                "id",
+                "name",
+                "placeholder",
+                "aria-label",
+                "role",
+            ],
         };
         const observeRoot = root => {
             if (disposed || (root !== document && !root.host) || registeredRoots.has(root)) return;
-            registeredRoots.add(root); onRoot(root);
+            registeredRoots.add(root);
+            onRoot(root);
             observer.observe(root, observationOptions);
         };
         const scheduleAttach = root => {
@@ -142,7 +184,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             attachScheduled = true;
             requestAnimationFrame(() => {
                 attachScheduled = false;
-                if (disposed) { pendingRoots.clear(); return; }
+                if (disposed) {
+                    pendingRoots.clear();
+                    return;
+                }
                 for (const pending of pendingRoots) {
                     if (!pending.isConnected || coveredByPendingRoot(pending, pendingRoots)) continue;
                     attachToInputs(pending, observeRoot);
@@ -151,7 +196,10 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             });
         };
 
-        scan = root => { snapshots.clear(); attachToInputs(root, observeRoot); };
+        scan = root => {
+            snapshots.clear();
+            attachToInputs(root, observeRoot);
+        };
         scan(document);
     }
 

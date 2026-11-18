@@ -187,7 +187,7 @@ impl Vault {
     }
     pub(crate) fn prepare_audit(&self, options: &AuditOptions) -> PendingAudit {
         let mut cold = Vec::new();
-        let now = chrono::Utc::now();
+        let now = crate::clock::now();
         let entries = self
             .active_items()
             .filter(|item| item.metadata.kind == ItemKind::Login)

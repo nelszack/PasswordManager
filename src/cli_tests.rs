@@ -82,19 +82,6 @@ fn test_delete_vault_keep_key_requires_a_key_file() {
 }
 
 #[test]
-fn test_update_by_entry_name_parses() {
-    let cli =
-        Cli::try_parse_from(["pm", "update", "--name", "new", "--entry-name", "foo"]).unwrap();
-    match cli.command {
-        Some(CliCommands::Update { target, .. }) => {
-            assert_eq!(target.id, None);
-            assert_eq!(target.entry_name.as_deref(), Some("foo"));
-        }
-        _ => panic!("expected Update command"),
-    }
-}
-
-#[test]
 fn test_genpass_parses_and_rejects_invalid_option_combinations() {
     let cli = Cli::try_parse_from(["pm", "genpass", "--length", "20", "--copy"]).unwrap();
     match cli.command {

@@ -6,14 +6,24 @@ internal data class AutofillScope(val caller: String, val origin: String, val ho
 internal class AutofillSession(private val clock: () -> Long) {
     private var scope: AutofillScope? = null
     private var deadline = 0L
-    @Synchronized fun grant(value: AutofillScope) {
+
+    @Synchronized
+    fun grant(value: AutofillScope) {
         scope = value
         deadline = clock() + 5 * 60 * 1000L
     }
-    @Synchronized fun allows(value: AutofillScope): Boolean {
+
+    @Synchronized
+    fun allows(value: AutofillScope): Boolean {
         if (clock() >= deadline) clear()
         return scope == value
     }
-    @Synchronized fun clear() { scope = null; deadline = 0 }
+
+    @Synchronized
+    fun clear() {
+        scope = null
+        deadline = 0
+    }
+
     @Synchronized fun hasGrant() = scope != null
 }

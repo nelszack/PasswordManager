@@ -45,8 +45,8 @@
         const message = existing
             ? "An account with this username already exists. Update it or save a new account."
             : validAccounts.length
-                ? "No saved account has this username. Update an existing account or save a new one."
-                : "Would you like to save these credentials?";
+              ? "No saved account has this username. Update an existing account or save a new one."
+              : "Would you like to save these credentials?";
         return {
             message,
             site,
@@ -55,8 +55,12 @@
             username: String(username || ""),
             askForUsername: !username,
             updateTarget: updateTarget
-                ? { id: updateTarget.id, ...(updateTarget.revision === undefined ? {} : { revision: updateTarget.revision }), name: String(updateTarget.name || "") }
-                : null
+                ? {
+                      id: updateTarget.id,
+                      ...(updateTarget.revision === undefined ? {} : { revision: updateTarget.revision }),
+                      name: String(updateTarget.name || ""),
+                  }
+                : null,
         };
     }
 
@@ -66,9 +70,7 @@
         if (action !== "add" && action !== "update") {
             throw new Error("Invalid credential prompt action");
         }
-        const username = typeof request.username === "string"
-            ? request.username.trim()
-            : pending.username;
+        const username = typeof request.username === "string" ? request.username.trim() : pending.username;
         const name = typeof request.name === "string" ? request.name.trim() : "";
         if (!name) throw new Error("Enter a name for these credentials");
         const fields = {
@@ -76,7 +78,7 @@
             expectedSession: pending.sessionId,
             username,
             password: pending.password,
-            name
+            name,
         };
         if (action === "update") {
             const entryId = pending.data?.updateTarget?.id;

@@ -21,15 +21,21 @@ module.exports.create = function create({} = {}) {
         function open(fields) {
             if (disposed) return Promise.resolve(cancelled);
             return new Promise((resolve, reject) => {
-                const request = { token: null, timer: null, finish(value, error) {
-                    if (!active.delete(request)) return;
-                    opening.delete(request);
-                    if (request.token) resolvers.delete(request.token);
-                    clearTimeout(request.timer);
-                    if (!opening.size) early.clear();
-                    if (error) reject(error); else resolve(value);
-                } };
-                opening.add(request); active.add(request);
+                const request = {
+                    token: null,
+                    timer: null,
+                    finish(value, error) {
+                        if (!active.delete(request)) return;
+                        opening.delete(request);
+                        if (request.token) resolvers.delete(request.token);
+                        clearTimeout(request.timer);
+                        if (!opening.size) early.clear();
+                        if (error) reject(error);
+                        else resolve(value);
+                    },
+                };
+                opening.add(request);
+                active.add(request);
                 try {
                     chrome.runtime.sendMessage({ action, ...fields }, response => {
                         if (!active.has(request)) return;
@@ -37,7 +43,10 @@ module.exports.create = function create({} = {}) {
                             request.finish(null, new Error(chrome.runtime.lastError.message));
                             return;
                         }
-                        if (response?.skipped) { request.finish({ action: "skipped" }); return; }
+                        if (response?.skipped) {
+                            request.finish({ action: "skipped" });
+                            return;
+                        }
                         if (!response?.success || !response.token) {
                             request.finish(null, new Error(response?.error || "Could not open secure window"));
                             return;
@@ -54,7 +63,9 @@ module.exports.create = function create({} = {}) {
                         }
                         if (!opening.size) early.clear();
                     });
-                } catch (error) { request.finish(null, error); }
+                } catch (error) {
+                    request.finish(null, error);
+                }
             });
         }
         function receive(message) {
@@ -75,14 +86,22 @@ module.exports.create = function create({} = {}) {
 
     const pickers = windowRequests("openSecurePicker", "securePickerResult", 65_000, null);
     const prompts = windowRequests("openCredentialPrompt", "credentialPromptResult", 125_000, { action: "cancel" });
-    const listener = message => { pickers.receive(message); prompts.receive(message); };
+    const listener = message => {
+        pickers.receive(message);
+        prompts.receive(message);
+    };
     chrome.runtime.onMessage.addListener(listener);
     function dispose() {
         disposed = true;
         chrome.runtime.onMessage.removeListener(listener);
-        pickers.dispose(); prompts.dispose();
+        pickers.dispose();
+        prompts.dispose();
     }
 
-    return { fillInput, openSecurePicker: kind => pickers.open({ kind }),
-        openCredentialPrompt: (username, password) => prompts.open({ username, password }), dispose };
+    return {
+        fillInput,
+        openSecurePicker: kind => pickers.open({ kind }),
+        openCredentialPrompt: (username, password) => prompts.open({ username, password }),
+        dispose,
+    };
 };

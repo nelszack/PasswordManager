@@ -1,5 +1,4 @@
 use crate::{
-    clipboard::copy_in_background,
     file::{TOKEN_FILE, data_dir, sync_parent},
     protocol::{
         RequestEnvelope, ResponseCode, ResponsePayload, RpcResponse, SECURE_PREFACE,
@@ -71,9 +70,42 @@ enum CommandEffect {
     #[default]
     None,
     StopServer,
-    Audit(crate::vault::PendingAudit, bool),
-    Duo(Box<crate::vault::PreparedDuoPoll>),
-    DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
+    /// Network or CPU work finished outside the vault queue (never `Deferred::None`).
+    Deferred(crate::operations::Deferred),
+}
+
+impl From<crate::operations::Deferred> for CommandEffect {
+    fn from(deferred: crate::operations::Deferred) -> Self {
+        match deferred {
+            crate::operations::Deferred::None => Self::None,
+            work => Self::Deferred(work),
+        }
+    }
+}
+
+/// The desktop session that started deferred work. Completion is refused if
+/// that session was locked or replaced while the work ran.
+struct StartedSession<'a> {
+    worker: &'a VaultWorker,
+    session: Option<String>,
+}
+
+impl crate::operations::SessionAccess for StartedSession<'_> {
+    fn with_unlocked<T: Send + 'static>(
+        &self,
+        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, crate::vault::VaultError>
+        + Send
+        + 'static,
+    ) -> impl std::future::Future<Output = Result<Result<T, crate::vault::VaultError>, String>> + Send
+    {
+        let expected = self.session.clone();
+        self.worker.with_session(move |session| {
+            if expected.is_none() || session.session_id() != expected {
+                return Err(crate::vault::VaultError::Locked);
+            }
+            session.with_unlocked(apply)
+        })
+    }
 }
 
 struct AuthenticatedRequest {
@@ -381,15 +413,23 @@ async fn finish_external_effect(
     worker: VaultWorker,
     operation_id: Option<String>,
 ) -> outcome::CommandOutcome {
-    let effect = std::mem::take(&mut result.effect);
-    match effect {
-        CommandEffect::Duo(prepared) => {
-            finish_duo(*prepared, worker.clone(), &mut result.responses).await
+    use crate::operations::Deferred;
+    let CommandEffect::Deferred(work) = std::mem::take(&mut result.effect) else {
+        return worker.finish_external(result, operation_id).await;
+    };
+    let started = StartedSession {
+        worker: &worker,
+        session: result.session_id.clone(),
+    };
+    match work {
+        Deferred::Duo(prepared) => {
+            crate::operations::finish_duo(*prepared, &started, &mut result.responses).await
         }
-        CommandEffect::DuoEnrollment(prepared) => {
-            finish_duo_enrollment(*prepared, worker.clone(), &mut result.responses).await
+        Deferred::DuoEnrollment(prepared) => {
+            crate::operations::finish_duo_enrollment(*prepared, &started, &mut result.responses)
+                .await
         }
-        CommandEffect::Audit(snapshot, check_breaches) => {
+        Deferred::Audit(snapshot, check_breaches) => {
             // One CPU audit at a time, outside the vault queue. Check the captured
             // session/revision between scores so locking and edits remain responsive.
             static AUDIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
@@ -427,81 +467,9 @@ async fn finish_external_effect(
                 &mut result.responses,
             );
         }
-        _ => {}
+        Deferred::None => {}
     }
     worker.finish_external(result, operation_id).await
-}
-
-async fn finish_duo_enrollment(
-    prepared: crate::vault::PreparedDuoEnrollment,
-    worker: VaultWorker,
-    responses: &mut Vec<RpcResponse>,
-) {
-    let material = match prepared.enroll().await {
-        Ok(material) => material,
-        Err(error) => {
-            outcome::respond_domain_error_with_context(
-                &error,
-                &format!("Duo setup failed: {error}"),
-                responses,
-            );
-            return;
-        }
-    };
-    let result = worker
-        .with_session(move |session| {
-            session
-                .with_unlocked(|vault, key| vault.finish_duo_enrollment(&prepared, material, key))
-        })
-        .await;
-    match result {
-        Ok(Ok(output)) => outcome::respond_domain_result(Ok(output), responses),
-        Ok(Err(error)) => outcome::respond_domain_error_with_context(
-            &error,
-            &format!("Duo enrolled but saving failed: {error}. Check enrollment before retrying."),
-            responses,
-        ),
-        Err(error) => outcome::respond_failure(&error, responses),
-    }
-}
-
-async fn finish_duo(
-    prepared: crate::vault::PreparedDuoPoll,
-    worker: VaultWorker,
-    responses: &mut Vec<RpcResponse>,
-) {
-    let crate::vault::PreparedDuoPoll { request, review } = prepared;
-    let body = match request.execute().await {
-        Ok(body) => body,
-        Err(error) => {
-            outcome::respond_domain_error(&error, responses);
-            return;
-        }
-    };
-    let result = worker
-        .with_session(move |session| {
-            session.with_unlocked(|vault, key| vault.finish_duo_poll(&review, &body, key))
-        })
-        .await;
-    match result {
-        Ok(Ok(crate::vault::DuoPollResult::Requests(output))) => outcome::respond_payload(
-            ResponseCode::Success,
-            ResponsePayload::DuoRequests(output),
-            responses,
-        ),
-        Ok(Ok(crate::vault::DuoPollResult::Decision(request))) => {
-            let result = (*request)
-                .execute()
-                .await
-                .and_then(|body| crate::duo::acknowledge(&body));
-            outcome::respond_domain_result(
-                result.map(|_| "Duo decision accepted.".into()),
-                responses,
-            );
-        }
-        Ok(Err(error)) => outcome::respond_domain_error(&error, responses),
-        Err(error) => outcome::respond_failure(&error, responses),
-    }
 }
 
 async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<AuthenticatedRequest> {

@@ -182,10 +182,25 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
         chrome = chrome.push(text("Unsaved item changes · Locking discards this draft.").size(13));
     }
     if app.ui.confirm_close.is_some() {
-        chrome = chrome.push(panel(column![text("Close this window?").size(20),
-            text("Unsaved item and settings changes will be discarded. A running operation may still finish; check its outcome before retrying. The local service stays running.").size(14),
-            row![primary("Keep window open", Message::CancelClose, true).id("keep-window-open"), action("Close and discard changes", Message::ConfirmClose, true).style(quiet_danger)].spacing(8).wrap()
-        ].spacing(10)));
+        chrome = chrome.push(panel(
+            column![
+                text("Close this window?").size(20),
+                text(
+                    "Unsaved item and settings changes will be discarded. A running operation may \
+                     still finish; check its outcome before retrying. The local service stays \
+                     running."
+                )
+                .size(14),
+                row![
+                    primary("Keep window open", Message::CancelClose, true).id("keep-window-open"),
+                    action("Close and discard changes", Message::ConfirmClose, true)
+                        .style(quiet_danger)
+                ]
+                .spacing(8)
+                .wrap()
+            ]
+            .spacing(10),
+        ));
     }
     if app.editor.deferred().is_some() {
         chrome = chrome.push(panel(
@@ -209,10 +224,19 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     if let Some(id) = app.recovery.id() {
         let mut recovery = column![
             text("Review the last change before continuing").size(17),
-            text("The result of a previous change is uncertain. Inspect the vault before allowing new changes.").size(14),
+            text(
+                "The result of a previous change is uncertain. Inspect the vault before allowing \
+                 new changes."
+            )
+            .size(14),
             text(format!("Operation {id}")).size(14),
-            primary("Check last change", Message::Reconcile, !app.busy() && app.connection.running),
-        ].spacing(8);
+            primary(
+                "Check last change",
+                Message::Reconcile,
+                !app.busy() && app.connection.running
+            ),
+        ]
+        .spacing(8);
         if app.recovery.reviewed() {
             recovery = recovery.push(action(
                 "I inspected the vault; allow new changes",
@@ -322,7 +346,14 @@ fn shortcuts() -> Element<'static, Message> {
             .spacing(12),
         );
     }
-    keys = keys.push(text("Focus a message pane and use Up/Down or Page Up/Page Down to scroll it. Enter / Space activates a control. Arrow keys change selections. Escape hides revealed secrets.").size(14));
+    keys = keys.push(
+        text(
+            "Focus a message pane and use Up/Down or Page Up/Page Down to scroll it. Enter / \
+             Space activates a control. Arrow keys change selections. Escape hides revealed \
+             secrets.",
+        )
+        .size(14),
+    );
     panel(
         column![
             scrollable(keys).height(Fill),
@@ -441,12 +472,17 @@ fn connection_controls(app: &App) -> Column<'_, Message> {
 fn stopped(app: &App) -> Element<'_, Message> {
     let form = column![
         text("Connect to your vault").size(27),
-        text("Start the local service to open your encrypted vault. The browser extension uses the same service.").size(15),
+        text(
+            "Start the local service to open your encrypted vault. The browser extension uses the \
+             same service."
+        )
+        .size(15),
         primary("Start local service", Message::Connect, !app.busy()),
         rule::horizontal(1),
         text("Connect to an existing service").size(18),
         connection_controls(app),
-    ].spacing(16);
+    ]
+    .spacing(16);
     container(
         panel(scrollable(form).id("connection-form"))
             .max_width(620)
@@ -460,16 +496,47 @@ fn stopped(app: &App) -> Element<'_, Message> {
 fn unlock(app: &App) -> Element<'_, Message> {
     let enabled = !app.busy();
     if app.connection.vaults.is_empty() && !app.connection.creating {
-        return container(container(scrollable(panel(column![
-            text("Your passwords. Your vault.").size(28),
-            text("Keep logins, notes, and other secrets together in an encrypted vault on this device.").size(16),
-            primary("Create your first vault", Message::Creating(true), app.writes_allowed()),
-            action("Import passwords", Message::OpenFileTool(workflows::FileOperation::Import), enabled),
-            action("Restore an encrypted backup", Message::OpenFileTool(workflows::FileOperation::Restore), enabled),
-            rule::horizontal(1),
-            text("Already have a vault on this device?").size(14),
-            action("Find existing vaults", Message::RefreshVaults, enabled),
-        ].spacing(18)).max_width(580)).height(Fill)).max_width(620)).center_x(Fill).height(Fill).into();
+        return container(
+            container(
+                scrollable(
+                    panel(
+                        column![
+                            text("Your passwords. Your vault.").size(28),
+                            text(
+                                "Keep logins, notes, and other secrets together in an encrypted \
+                                 vault on this device."
+                            )
+                            .size(16),
+                            primary(
+                                "Create your first vault",
+                                Message::Creating(true),
+                                app.writes_allowed()
+                            ),
+                            action(
+                                "Import passwords",
+                                Message::OpenFileTool(workflows::FileOperation::Import),
+                                enabled
+                            ),
+                            action(
+                                "Restore an encrypted backup",
+                                Message::OpenFileTool(workflows::FileOperation::Restore),
+                                enabled
+                            ),
+                            rule::horizontal(1),
+                            text("Already have a vault on this device?").size(14),
+                            action("Find existing vaults", Message::RefreshVaults, enabled),
+                        ]
+                        .spacing(18),
+                    )
+                    .max_width(580),
+                )
+                .height(Fill),
+            )
+            .max_width(620),
+        )
+        .center_x(Fill)
+        .height(Fill)
+        .into();
     }
     let mut form = column![
         text(if app.connection.creating {
@@ -539,7 +606,13 @@ fn unlock(app: &App) -> Element<'_, Message> {
     if app.connection.creating {
         form = form
             .push(text("Use 14+ characters, such as several unrelated words.").size(14))
-            .push(text("Keep this password somewhere safe. It cannot be reset; a backup still needs its original password or key file.").size(14))
+            .push(
+                text(
+                    "Keep this password somewhere safe. It cannot be reset; a backup still needs \
+                     its original password or key file.",
+                )
+                .size(14),
+            )
             .push(
                 column![
                     label("Confirm master password"),
@@ -572,8 +645,19 @@ fn unlock(app: &App) -> Element<'_, Message> {
             form = form.push(error("The passwords do not match yet."));
         }
     } else {
-        form = form.push(text("Forgot your password? There is no reset. Use the key file for a key-based vault, or restore a backup using its original credentials.").size(14))
-            .push(action("Restore an encrypted backup", Message::OpenFileTool(workflows::FileOperation::Restore), enabled));
+        form = form
+            .push(
+                text(
+                    "Forgot your password? There is no reset. Use the key file for a key-based \
+                     vault, or restore a backup using its original credentials.",
+                )
+                .size(14),
+            )
+            .push(action(
+                "Restore an encrypted backup",
+                Message::OpenFileTool(workflows::FileOperation::Restore),
+                enabled,
+            ));
         form = form.push(disclosure(
             "Advanced unlock options",
             app.ui.unlock_advanced,
@@ -869,19 +953,71 @@ fn vault(app: &App) -> Element<'_, Message> {
         details(app, item)
     } else {
         column![
-            panel(column![
-                text(if app.items.is_empty() { "Add your first item" } else { "Select an item" }).size(27),
-                text(if app.items.is_empty() { "Save a login, private note, card, or another secret. You can also import your passwords." } else { "Choose an item to copy its sign-in details, open a website, or make a change." }).size(16),
-                row![primary("Add item",Message::Navigate(Navigate::New),app.writes_allowed()),
-                    action("Import passwords",Message::OpenFileTool(workflows::FileOperation::Import),!app.busy())].spacing(10).wrap(),
-            ].spacing(16)).width(Fill),
-            panel(column![
-                text("Keep your vault in good shape").size(19),
-                text(format!("{} items · Encrypted on this device",app.items.len())).size(14),
-                row![action("Check vault health",Message::OpenTools(workflows::Section::Audit),!app.busy()),
-                    action("Create a backup",Message::OpenFileTool(workflows::FileOperation::Backup),!app.busy())].spacing(10).wrap(),
-            ].spacing(12)).width(Fill),
-        ].spacing(16).width(Fill).height(Fill).into()
+            panel(
+                column![
+                    text(if app.items.is_empty() {
+                        "Add your first item"
+                    } else {
+                        "Select an item"
+                    })
+                    .size(27),
+                    text(if app.items.is_empty() {
+                        "Save a login, private note, card, or another secret. You can also import \
+                         your passwords."
+                    } else {
+                        "Choose an item to copy its sign-in details, open a website, or make a \
+                         change."
+                    })
+                    .size(16),
+                    row![
+                        primary(
+                            "Add item",
+                            Message::Navigate(Navigate::New),
+                            app.writes_allowed()
+                        ),
+                        action(
+                            "Import passwords",
+                            Message::OpenFileTool(workflows::FileOperation::Import),
+                            !app.busy()
+                        )
+                    ]
+                    .spacing(10)
+                    .wrap(),
+                ]
+                .spacing(16)
+            )
+            .width(Fill),
+            panel(
+                column![
+                    text("Keep your vault in good shape").size(19),
+                    text(format!(
+                        "{} items · Encrypted on this device",
+                        app.items.len()
+                    ))
+                    .size(14),
+                    row![
+                        action(
+                            "Check vault health",
+                            Message::OpenTools(workflows::Section::Audit),
+                            !app.busy()
+                        ),
+                        action(
+                            "Create a backup",
+                            Message::OpenFileTool(workflows::FileOperation::Backup),
+                            !app.busy()
+                        )
+                    ]
+                    .spacing(10)
+                    .wrap(),
+                ]
+                .spacing(12)
+            )
+            .width(Fill),
+        ]
+        .spacing(16)
+        .width(Fill)
+        .height(Fill)
+        .into()
     };
     let panes: Element<'_, Message> = if app.compact() {
         if app.editor.is_some() {
@@ -1235,11 +1371,42 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
     };
     let mut form = column![identity, credentials].spacing(8);
     if app.editor.conflicted() {
-        let mut conflict = column![text("This item changed in another client").size(19), text("Your unsaved edits are kept and masked. Review the latest version, then reapply only your changes. Nothing is saved automatically.").size(14), action("Review latest version", Message::ReviewConflict, enabled)].spacing(8);
+        let mut conflict = column![
+            text("This item changed in another client").size(19),
+            text(
+                "Your unsaved edits are kept and masked. Review the latest version, then reapply \
+                 only your changes. Nothing is saved automatically."
+            )
+            .size(14),
+            action("Review latest version", Message::ReviewConflict, enabled)
+        ]
+        .spacing(8);
         if let Some(latest) = app.editor.latest() {
-            conflict = conflict.push(text(format!("Latest: {} · {}\nWebsites: {}\nRevision {} · {} custom fields. Stored secrets stay hidden.", latest.name, latest.username.as_deref().unwrap_or("No username"), latest.urls.join(", "), latest.revision, latest.fields.len())).size(14))
-                .push(text("Reapplying replaces fields you edited, including edits to the same fields in the other client. Untouched fields keep their latest values.").size(14))
-                .push(primary("Reapply my edits to this version", Message::ReapplyConflict, enabled));
+            conflict = conflict
+                .push(
+                    text(format!(
+                        "Latest: {} · {}\nWebsites: {}\nRevision {} · {} custom fields. Stored \
+                         secrets stay hidden.",
+                        latest.name,
+                        latest.username.as_deref().unwrap_or("No username"),
+                        latest.urls.join(", "),
+                        latest.revision,
+                        latest.fields.len()
+                    ))
+                    .size(14),
+                )
+                .push(
+                    text(
+                        "Reapplying replaces fields you edited, including edits to the same \
+                         fields in the other client. Untouched fields keep their latest values.",
+                    )
+                    .size(14),
+                )
+                .push(primary(
+                    "Reapply my edits to this version",
+                    Message::ReapplyConflict,
+                    enabled,
+                ));
             if let Some(original) = &app.item {
                 for comparison in draft.conflict_summary(original, latest) {
                     conflict = conflict.push(text(comparison).size(14));
@@ -1417,7 +1584,13 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
     let mut footer = column![].spacing(8);
     for url in draft.urls.iter().filter(|url| !url.trim().is_empty()) {
         if website::address(url).is_err() {
-            footer = footer.push(text("A website cannot be opened. Use an http:// or https:// address. Other values can still be stored.").size(13));
+            footer = footer.push(
+                text(
+                    "A website cannot be opened. Use an http:// or https:// address. Other values \
+                     can still be stored.",
+                )
+                .size(13),
+            );
             break;
         }
     }
@@ -1657,18 +1830,80 @@ fn generator(app: &App) -> Element<'_, Message> {
     ]
     .spacing(14);
     if app.ui.transfer_generated && !app.generation.value.is_empty() {
-        body = body.push(panel(column![text(if app.editor.is_some() { "Use this secret in your current draft?" } else { "Create an item with this secret?" }).size(19), text("This replaces the draft’s primary secret. Other draft fields are kept. The item is saved only when you choose Save item.").size(14), row![primary("Use generated secret", Message::ConfirmGenerated, app.connection.session.is_some() && !app.busy()), action("Keep current draft", Message::CancelGenerated, !app.busy())].spacing(8).wrap()].spacing(10)));
+        body = body.push(panel(
+            column![
+                text(if app.editor.is_some() {
+                    "Use this secret in your current draft?"
+                } else {
+                    "Create an item with this secret?"
+                })
+                .size(19),
+                text(
+                    "This replaces the draft’s primary secret. Other draft fields are kept. The \
+                     item is saved only when you choose Save item."
+                )
+                .size(14),
+                row![
+                    primary(
+                        "Use generated secret",
+                        Message::ConfirmGenerated,
+                        app.connection.session.is_some() && !app.busy()
+                    ),
+                    action("Keep current draft", Message::CancelGenerated, !app.busy())
+                ]
+                .spacing(8)
+                .wrap()
+            ]
+            .spacing(10),
+        ));
     }
     if !app.generation.value.is_empty() {
-        body = body.push(panel(column![
-            text("Your generated secret").size(18),
-            text_input("Generated value", app.generation.value.expose()).secure(!app.generation.value.visible()).padding(12),
-            row![primary("Copy", Message::CopyGenerated, !app.busy() && app.generation.options.copy_timeout(&app.conf).is_ok_and(|timeout| timeout > 0)),
-                checkbox(app.generation.value.visible()).label("Show value").on_toggle(Message::ShowGenerated)].spacing(16).wrap(),
-            action(if app.editor.is_some() { "Use in current item draft…" } else { "Create item with this secret…" }, Message::UseGenerated, !app.busy() && app.connection.session.is_some()),
-            text(if app.connection.session.is_none() { "Unlock a vault to save this value directly into an item." } else { "Transfer directly to an item without using the clipboard." }).size(14),
-            text("Cleared from this screen after 60 seconds. Stored only when you save it in an item.").size(14),
-        ].spacing(12)));
+        body = body.push(panel(
+            column![
+                text("Your generated secret").size(18),
+                text_input("Generated value", app.generation.value.expose())
+                    .secure(!app.generation.value.visible())
+                    .padding(12),
+                row![
+                    primary(
+                        "Copy",
+                        Message::CopyGenerated,
+                        !app.busy()
+                            && app
+                                .generation
+                                .options
+                                .copy_timeout(&app.conf)
+                                .is_ok_and(|timeout| timeout > 0)
+                    ),
+                    checkbox(app.generation.value.visible())
+                        .label("Show value")
+                        .on_toggle(Message::ShowGenerated)
+                ]
+                .spacing(16)
+                .wrap(),
+                action(
+                    if app.editor.is_some() {
+                        "Use in current item draft…"
+                    } else {
+                        "Create item with this secret…"
+                    },
+                    Message::UseGenerated,
+                    !app.busy() && app.connection.session.is_some()
+                ),
+                text(if app.connection.session.is_none() {
+                    "Unlock a vault to save this value directly into an item."
+                } else {
+                    "Transfer directly to an item without using the clipboard."
+                })
+                .size(14),
+                text(
+                    "Cleared from this screen after 60 seconds. Stored only when you save it in \
+                     an item."
+                )
+                .size(14),
+            ]
+            .spacing(12),
+        ));
         if !app.generation.stats.is_empty() {
             body = body.push(text(&app.generation.stats).size(14));
         }
@@ -1845,7 +2080,15 @@ fn settings(app: &App) -> Element<'_, Message> {
                 !app.busy(),
             )),
         SettingsSection::Connection => {
-            form = form.push(text(if app.connection.running { "The local service is running. It keeps your vault available to the CLI and browser extension when this window closes." } else { "The local service is stopped." }).size(15));
+            form = form.push(
+                text(if app.connection.running {
+                    "The local service is running. It keeps your vault available to the CLI and \
+                     browser extension when this window closes."
+                } else {
+                    "The local service is stopped."
+                })
+                .size(15),
+            );
             form = if app.connection.running {
                 form.push(
                     action(
@@ -1863,11 +2106,28 @@ fn settings(app: &App) -> Element<'_, Message> {
                 ))
             };
             if app.ui.confirm_stop {
-                form = form.push(panel(column![
-                    text("Stop the local service?").size(18),
-                    text("This locks the vault, discards any open item draft, and disconnects the browser extension and CLI until you start it again.").size(14),
-                    row![primary("Keep running", Message::ConfirmStop(false), !app.busy()), action("Stop service", Message::Stop, !app.busy() && app.recovery.id().is_none()).style(button_style::danger)].spacing(8).wrap(),
-                ].spacing(12)));
+                form = form.push(panel(
+                    column![
+                        text("Stop the local service?").size(18),
+                        text(
+                            "This locks the vault, discards any open item draft, and disconnects \
+                             the browser extension and CLI until you start it again."
+                        )
+                        .size(14),
+                        row![
+                            primary("Keep running", Message::ConfirmStop(false), !app.busy()),
+                            action(
+                                "Stop service",
+                                Message::Stop,
+                                !app.busy() && app.recovery.id().is_none()
+                            )
+                            .style(button_style::danger)
+                        ]
+                        .spacing(8)
+                        .wrap(),
+                    ]
+                    .spacing(12),
+                ));
             }
             form.push(cloud_settings(app))
                 .push(rule::horizontal(1))
@@ -2004,11 +2264,30 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
             .placeholder("Cloud vault"),
         );
         if let Some(id) = &app.cloud.vault {
-            form = form.push(row![
-                action("Download selected vault", Message::Cloud(Action::Pull(id.clone())), ready),
-                action("Download comparison copy", Message::Cloud(Action::PullCopy(id.clone())), ready),
-            ].spacing(8).wrap())
-            .push(text("A comparison copy has synchronization disabled and leaves existing local vaults intact.").size(14));
+            form = form
+                .push(
+                    row![
+                        action(
+                            "Download selected vault",
+                            Message::Cloud(Action::Pull(id.clone())),
+                            ready
+                        ),
+                        action(
+                            "Download comparison copy",
+                            Message::Cloud(Action::PullCopy(id.clone())),
+                            ready
+                        ),
+                    ]
+                    .spacing(8)
+                    .wrap(),
+                )
+                .push(
+                    text(
+                        "A comparison copy has synchronization disabled and leaves existing local \
+                         vaults intact.",
+                    )
+                    .size(14),
+                );
         }
     }
     form = form.push(
@@ -2049,8 +2328,15 @@ fn cloud_settings(app: &App) -> Element<'_, Message> {
     );
     if let Some(review) = &app.cloud.review {
         use password_manager::cloud::Side;
-        form = form.push(text("Resolve item differences").size(20))
-            .push(text("Choose every differing field. Protected values stay hidden. Metadata includes item type, URLs and custom fields; authenticators, history and deletion state are chosen as groups. Both complete vault versions are saved as encrypted recovery copies before applying.").size(14));
+        form = form.push(text("Resolve item differences").size(20)).push(
+            text(
+                "Choose every differing field. Protected values stay hidden. Metadata includes \
+                 item type, URLs and custom fields; authenticators, history and deletion state \
+                 are chosen as groups. Both complete vault versions are saved as encrypted \
+                 recovery copies before applying.",
+            )
+            .size(14),
+        );
         if !review.items.is_empty() {
             form = form.push(
                 row![

@@ -7,8 +7,11 @@ var PasswordManagerUiTransport = (() => {
             try {
                 chrome.runtime.sendMessage(message, response => {
                     const error = chrome.runtime.lastError;
-                    resolve(error ? { success: false, error: error.message }
-                        : response || { success: false, error: "Could not contact the extension worker" });
+                    resolve(
+                        error
+                            ? { success: false, error: error.message }
+                            : response || { success: false, error: "Could not contact the extension worker" }
+                    );
                 });
             } catch (error) {
                 resolve({ success: false, error: error.message });
