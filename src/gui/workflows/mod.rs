@@ -1261,7 +1261,7 @@ impl App {
             && self.recovery.id().is_none()
         {
             return Task::batch([
-                self.launch(Job::WatchCopyDefaults, backend::reload_settings),
+                self.reload_then(super::Then::CopyWatchedOtp),
                 if reveal { show_result() } else { Task::none() },
             ]);
         }

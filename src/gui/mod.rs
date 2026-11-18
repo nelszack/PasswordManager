@@ -100,20 +100,12 @@ enum Job {
     DiscoverVaults,
     ReloadSettings,
     OpenSettings,
-    GenerateDefaults,
-    SaveDefaults,
-    SaveEditorDefaults,
-    CopyDefaults,
-    ItemCopyDefaults,
-    UsernameDefaults,
+    /// Reload preferences (clipboard timeouts, generator defaults), then continue.
+    Reload(Then),
     UsernameValue,
     UsernameCopied,
     OpenWebsite,
     VaultName,
-    FieldCopyDefaults(FieldTarget),
-    WorkflowDefaults(workflows::Action),
-    WatchOtpDefaults,
-    WatchCopyDefaults,
     Status,
     List,
     SavedList,
@@ -144,6 +136,22 @@ enum Job {
     CloudList,
     CloudConflicts,
     CloudResolve,
+}
+
+/// Work that must use freshly reloaded preferences, so a setting changed by the
+/// CLI or another window applies to the very next action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Then {
+    Generate,
+    Save,
+    SaveEditor,
+    CopyGenerated,
+    CopyItem,
+    FetchUsername,
+    CopyField(FieldTarget),
+    Workflow(workflows::Action),
+    WatchOtp,
+    CopyWatchedOtp,
 }
 
 #[derive(Clone, Debug)]
@@ -485,8 +493,9 @@ impl App {
             Job::OpenWebsite => RequestState::Passive,
             Job::Reveal
             | Job::Field(_)
-            | Job::WatchOtpDefaults
-            | Job::WorkflowDefaults(workflows::Action::ShowOtp(true)) => RequestState::Revealing,
+            | Job::Reload(Then::WatchOtp | Then::Workflow(workflows::Action::ShowOtp(true))) => {
+                RequestState::Revealing
+            }
             _ => RequestState::Busy,
         };
         if self.busy() {
@@ -497,12 +506,13 @@ impl App {
                 Job::Create => "Creating encrypted vault…".into(),
                 Job::ConflictReview => "Loading the latest version for comparison…".into(),
                 Job::Settings => "Saving settings…".into(),
-                Job::GenerateDefaults => "Loading generation preferences…".into(),
+                Job::Reload(Then::Generate) => "Loading generation preferences…".into(),
                 Job::Copy
                 | Job::CopyGenerated
                 | Job::FieldCopy
-                | Job::CopyDefaults
-                | Job::ItemCopyDefaults => "Copying with timed clipboard cleanup…".into(),
+                | Job::Reload(Then::CopyGenerated | Then::CopyItem) => {
+                    "Copying with timed clipboard cleanup…".into()
+                }
                 Job::Workflow(action) => format!("{}…", action.confirm_label()),
                 Job::Connect | Job::Attach => "Connecting to the local vault service…".into(),
                 _ => "Working…".into(),
@@ -523,6 +533,33 @@ impl App {
             },
             move |result| Message::Finished(serial, job, Arc::new(result)),
         )
+    }
+
+    fn reload_then(&mut self, then: Then) -> Task<Message> {
+        self.launch(Job::Reload(then), backend::reload_settings)
+    }
+
+    fn resume(&mut self, then: Then) -> Task<Message> {
+        match then {
+            Then::Generate => self.generate(),
+            Then::Save => self.save_item(Job::Save),
+            Then::SaveEditor => self.save_item(Job::SaveEditor),
+            Then::CopyGenerated => self.copy_generated(),
+            Then::CopyItem => self.copy_item(),
+            Then::FetchUsername => self.fetch_username(),
+            Then::CopyField(target) => match self.custom_field_command(target, true) {
+                Ok((command, revision)) => self.request(Job::FieldCopy, command, Some(revision)),
+                Err(error) => {
+                    self.report_error(error);
+                    Task::none()
+                }
+            },
+            Then::Workflow(action) => self.workflow(workflows::Event::Run(action)),
+            Then::WatchOtp => {
+                self.workflow(workflows::Event::Toggle(workflows::Toggle::WatchOtp, true))
+            }
+            Then::CopyWatchedOtp => self.copy_watched_otp(),
+        }
     }
 
     fn connect(&mut self) -> Task<Message> {
@@ -985,10 +1022,10 @@ impl App {
                         | workflows::Action::PreviewImport
                 ) =>
             {
-                return self.launch(Job::WorkflowDefaults(action), backend::reload_settings);
+                return self.reload_then(Then::Workflow(action));
             }
             Message::Workflow(workflows::Event::Toggle(workflows::Toggle::WatchOtp, true)) => {
-                return self.launch(Job::WatchOtpDefaults, backend::reload_settings);
+                return self.reload_then(Then::WatchOtp);
             }
             Message::Workflow(event) => return self.workflow(event),
             message @ (Message::Generator(..)
@@ -1110,7 +1147,7 @@ impl App {
                     && self.connection.session.is_some()
                     && self.editor.is_none() =>
             {
-                return self.launch(Job::UsernameDefaults, backend::reload_settings);
+                return self.reload_then(Then::FetchUsername);
             }
             Message::OpenWebsite(index)
                 if self.connection.session.is_some() && self.editor.is_none() =>
@@ -1152,7 +1189,7 @@ impl App {
                     && self.editor.as_ref().is_some_and(|draft| draft.id.is_some()) =>
             {
                 self.workspace.prepared = None;
-                return self.launch(Job::SaveEditorDefaults, backend::reload_settings);
+                return self.reload_then(Then::SaveEditor);
             }
             Message::Save if self.writes_allowed() && self.tab == Tab::Settings => {
                 return self.update(Message::SaveSettings);
@@ -1161,7 +1198,7 @@ impl App {
                 if self.writes_allowed() && self.tab == Tab::Vault && self.editor.is_some() =>
             {
                 self.workspace.prepared = None;
-                return self.launch(Job::SaveDefaults, backend::reload_settings);
+                return self.reload_then(Then::Save);
             }
             Message::RevealField(target) => match self.custom_field_command(target, false) {
                 Ok((command, revision)) => {
@@ -1191,7 +1228,7 @@ impl App {
                 }
             }
             Message::CopyField(target) if self.writes_allowed() => {
-                return self.launch(Job::FieldCopyDefaults(target), backend::reload_settings);
+                return self.reload_then(Then::CopyField(target));
             }
             Message::Reveal => {
                 if self.reveal_until.is_some() {
@@ -1208,7 +1245,7 @@ impl App {
                 }
             }
             Message::Copy if self.writes_allowed() => {
-                return self.launch(Job::ItemCopyDefaults, backend::reload_settings);
+                return self.reload_then(Then::CopyItem);
             }
             Message::Delete => {
                 self.delete_confirm = true;
@@ -1340,32 +1377,9 @@ impl App {
                     if job != Job::ReloadSettings && self.notice == "Settings reloaded." {
                         self.notice.clear();
                     }
-                    return match job {
-                        Job::GenerateDefaults => self.generate(),
-                        Job::SaveDefaults => self.save_item(Job::Save),
-                        Job::SaveEditorDefaults => self.save_item(Job::SaveEditor),
-                        Job::CopyDefaults => self.copy_generated(),
-                        Job::ItemCopyDefaults => self.copy_item(),
-                        Job::UsernameDefaults => self.fetch_username(),
-                        Job::FieldCopyDefaults(target) => {
-                            match self.custom_field_command(target, true) {
-                                Ok((command, revision)) => {
-                                    self.request(Job::FieldCopy, command, Some(revision))
-                                }
-                                Err(error) => {
-                                    self.report_error(error);
-                                    Task::none()
-                                }
-                            }
-                        }
-                        Job::WorkflowDefaults(action) => {
-                            self.workflow(workflows::Event::Run(action))
-                        }
-                        Job::WatchOtpDefaults => self
-                            .workflow(workflows::Event::Toggle(workflows::Toggle::WatchOtp, true)),
-                        Job::WatchCopyDefaults => self.copy_watched_otp(),
-                        _ => Task::none(),
-                    };
+                    if let Job::Reload(then) = job {
+                        return self.resume(then);
+                    }
                 }
                 Reply::Copied => {
                     self.notice = if job == Job::UsernameCopied {

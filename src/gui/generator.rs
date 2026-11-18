@@ -218,7 +218,7 @@ impl App {
             Message::Passphrase(value) => self.generation.passphrase = value,
             Message::Words(value) => self.generation.words = value,
             Message::Generate => {
-                return self.launch(Job::GenerateDefaults, backend::reload_settings);
+                return self.reload_then(Then::Generate);
             }
             Message::ShowGenerated(value) => self.generation.value.set_visible(value),
             Message::UseGenerated
@@ -246,7 +246,7 @@ impl App {
                 return iced::widget::operation::focus("item-name");
             }
             Message::CopyGenerated if !self.generation.value.is_empty() => {
-                return self.launch(Job::CopyDefaults, backend::reload_settings);
+                return self.reload_then(Then::CopyGenerated);
             }
             _ => {}
         }
