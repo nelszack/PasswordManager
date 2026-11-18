@@ -5,9 +5,14 @@ import java.io.InputStream
 
 fun InputStream.readBounded(limit: Int): ByteArray {
     require(limit >= 0)
-    val output = object : ByteArrayOutputStream() {
-        override fun close() { buf.fill(0); reset(); super.close() }
-    }
+    val output =
+        object : ByteArrayOutputStream() {
+            override fun close() {
+                buf.fill(0)
+                reset()
+                super.close()
+            }
+        }
     val buffer = ByteArray(8192)
     try {
         while (true) {
@@ -16,5 +21,8 @@ fun InputStream.readBounded(limit: Int): ByteArray {
             check(count <= limit - output.size()) { "File exceeds size limit" }
             output.write(buffer, 0, count)
         }
-    } finally { buffer.fill(0); output.close() }
+    } finally {
+        buffer.fill(0)
+        output.close()
+    }
 }

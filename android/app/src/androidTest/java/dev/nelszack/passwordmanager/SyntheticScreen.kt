@@ -11,18 +11,26 @@ import androidx.test.core.app.ActivityScenario
 import org.junit.Assert.assertTrue
 
 /** Native widget navigation only; behavior assertions stay in the individual tests. */
-class SyntheticScreen<A : Activity>(private val scenario: ActivityScenario<A>, private val vault: SyntheticVaultRule) {
-    fun views(root: View): List<View> = listOf(root) + if (root is ViewGroup)
-        (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()
+class SyntheticScreen<A : Activity>(
+    private val scenario: ActivityScenario<A>,
+    private val vault: SyntheticVaultRule,
+) {
+    fun views(root: View): List<View> =
+        listOf(root) +
+            if (root is ViewGroup) (0 until root.childCount).flatMap { views(root.getChildAt(it)) }
+            else emptyList()
 
-    fun matches(view: View, text: String) = view is TextView && view.text.toString().lineSequence().any { it == text }
+    fun matches(view: View, text: String) =
+        view is TextView && view.text.toString().lineSequence().any { it == text }
 
     fun waitFor(text: String) {
         val end = SystemClock.elapsedRealtime() + 15000
         var found = false
         while (!found && SystemClock.elapsedRealtime() < end) {
             vault.drain()
-            scenario.onActivity { found = views(it.window.decorView).any { view -> matches(view, text) } }
+            scenario.onActivity {
+                found = views(it.window.decorView).any { view -> matches(view, text) }
+            }
             if (!found) Thread.sleep(50)
         }
         assertTrue("Expected synthetic control: $text", found)
@@ -31,19 +39,28 @@ class SyntheticScreen<A : Activity>(private val scenario: ActivityScenario<A>, p
     fun click(text: String) {
         waitFor(text)
         scenario.onActivity { activity ->
-            views(activity.window.decorView).filterIsInstance<Button>().first { matches(it, text) }.performClick()
+            views(activity.window.decorView)
+                .filterIsInstance<Button>()
+                .first { matches(it, text) }
+                .performClick()
         }
     }
 
     fun input(hint: String, value: String) {
         scenario.onActivity { activity ->
-            views(activity.window.decorView).filterIsInstance<EditText>().first { it.hint?.toString() == hint }.setText(value)
+            views(activity.window.decorView)
+                .filterIsInstance<EditText>()
+                .first { it.hint?.toString() == hint }
+                .setText(value)
         }
     }
 
     fun back() {
         scenario.onActivity { activity ->
-            views(activity.window.decorView).filterIsInstance<Button>().first { it.contentDescription == "Go back" }.performClick()
+            views(activity.window.decorView)
+                .filterIsInstance<Button>()
+                .first { it.contentDescription == "Go back" }
+                .performClick()
         }
     }
 }

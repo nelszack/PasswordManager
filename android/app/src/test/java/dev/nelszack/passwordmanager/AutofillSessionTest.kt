@@ -4,7 +4,8 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AutofillSessionTest {
-    @Test fun grantIsCallerAndSiteScopedExpiresAndCanBeRevoked() {
+    @Test
+    fun grantIsCallerAndSiteScopedExpiresAndCanBeRevoked() {
         var now = 1000L
         val session = AutofillSession { now }
         val scope = AutofillScope("com.android.chrome", "https://accounts.example.com", true)
