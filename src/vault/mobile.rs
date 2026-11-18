@@ -172,7 +172,7 @@ impl MobileVault {
     fn passkeys(&self) -> Result<Vec<(usize, Passkey)>, String> {
         let mut result = Vec::new();
         for item in self.vault()?.active_items() {
-            if let Some(field) = passkey_field(item) {
+            if let Some(field) = item.passkey_field() {
                 let p: Passkey =
                     serde_json::from_str(&field.value).map_err(|_| "Invalid stored passkey")?;
                 p.validate()?;
@@ -210,7 +210,7 @@ impl MobileVault {
         };
         let (vault, credentials) = self.unlocked()?;
         let added = vault
-            .add_typed_entry(entry, credentials)
+            .add_passkey_entry(entry, credentials)
             .map_err(|e| e.to_string())?;
         if !added {
             return Err("Passkey entry already exists; retry registration".into());
@@ -384,15 +384,11 @@ impl MobileVault {
                 ))
             }
             "item" => {
-                let id = id(r)?;
-                let vault = self.vault()?;
-                let mut detail = vault.management_item(id, true).map_err(|e| e.to_string())?;
-                // Never send passkey private keys to the normal item UI.
-                detail.fields.retain(|f| f.name != passkey::FIELD);
-                let is_passkey = vault.item(id).is_some_and(|i| passkey_field(i).is_some());
-                let mut value = json!(detail);
-                value["is_passkey"] = json!(is_passkey);
-                Ok(value)
+                let detail = self
+                    .vault()?
+                    .management_item(id(r)?, true)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!(detail))
             }
             "save" => self.save_login(r),
             "delete" => {
@@ -825,13 +821,6 @@ fn mobile_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     RUNTIME
         .get()
         .ok_or_else(|| "Could not initialize sync runtime".into())
-}
-
-fn passkey_field(item: &Item) -> Option<&CustomField> {
-    item.metadata
-        .custom_fields
-        .iter()
-        .find(|f| f.name == passkey::FIELD)
 }
 
 fn client(r: &Value) -> Result<CloudClient, String> {

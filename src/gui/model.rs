@@ -577,6 +577,7 @@ mod tests {
             }],
             has_totp: false,
             has_duo: false,
+            is_passkey: false,
             created: String::new(),
             modified: String::new(),
         }
@@ -841,6 +842,7 @@ mod merge_tests {
             fields: vec![],
             has_totp: false,
             has_duo: false,
+            is_passkey: false,
             created: String::new(),
             modified: String::new(),
         };

@@ -56,6 +56,9 @@ pub struct ItemDetail {
     pub fields: Vec<ItemField>,
     pub has_totp: bool,
     pub has_duo: bool,
+    /// Passkey records hide their key material and cannot be edited as ordinary items.
+    #[serde(default)]
+    pub is_passkey: bool,
     pub created: String,
     pub modified: String,
 }

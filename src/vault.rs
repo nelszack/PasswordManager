@@ -50,6 +50,7 @@ mod backup;
 pub(crate) use backup::restore_encrypted_backup;
 mod entries;
 mod export;
+pub(crate) mod item_rules;
 
 mod conflicts;
 mod persistence;

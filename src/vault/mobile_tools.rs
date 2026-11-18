@@ -453,7 +453,7 @@ fn save_item(
         .filter(|i| i.active())
         .ok_or("Item not found")?;
     require(
-        passkey_field(existing).is_none(),
+        !existing.is_passkey(),
         "Passkey records cannot be edited as ordinary items",
     )?;
     require(
