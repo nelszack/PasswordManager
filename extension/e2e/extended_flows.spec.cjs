@@ -142,6 +142,10 @@ async function observeAutomaticPrompts(context) {
     return worker;
 }
 
+// Tests outside the shared-browser group each start their own extension, server,
+// profile, and coverage file, so they may run on another worker. The group stays serial.
+test.describe.configure({ mode: "parallel" });
+
 test.describe("extended credential flows", () => {
     test.describe.configure({ mode: "serial", timeout: 90_000 });
     let server;

@@ -5,15 +5,18 @@ const result = spawnSync(
     [
         "--experimental-test-coverage",
         "--test",
-        "--test-coverage-include=extension/*.js",
+        "--test-coverage-include=*.js",
         "--test-coverage-include-all",
-        "--test-coverage-exclude=extension/content_runtime.js",
+        "--test-coverage-exclude=content_runtime.js",
         "--test-coverage-lines=58",
         "--test-coverage-branches=78",
-        "extension/*.test.js",
+        "*.test.js",
     ],
     {
-        cwd: require("node:path").resolve(__dirname, ".."),
+        // Run from the extension directory: --test-coverage-include-all and the
+        // include globs otherwise walk the whole repository, including target/
+        // and node_modules, which took longer than running the tests.
+        cwd: __dirname,
         encoding: "utf8",
         env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
     }

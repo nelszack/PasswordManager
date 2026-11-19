@@ -55,6 +55,13 @@ pm-platform = { path = "crates/pm-platform", features = ["fixtures"] }
 # Property tests run in-process and do not use bit-set strategies.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
+# Line tables keep file/line backtraces and test-failure locations while skipping
+# full variable debug info, which dominated rebuild and link time for the
+# desktop binary and its test harness. Set `CARGO_PROFILE_DEV_DEBUG=true` for a
+# debugger session that needs locals.
+[profile.dev]
+debug = "line-tables-only"
+
 # Keep production KDF parameters in integration tests without paying the cost of
 # unoptimized cryptographic loops. These also improve local debug CLI latency.
 [profile.dev.package.argon2]
@@ -64,6 +71,38 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.zxcvbn]
+opt-level = 2
+
+# The desktop render tests rasterize every screen with the CPU renderer; unoptimized
+# path filling, shaping, and glyph rasterization dominate the test run otherwise.
+[profile.dev.package.tiny-skia]
+opt-level = 2
+
+[profile.dev.package.tiny-skia-path]
+opt-level = 2
+
+[profile.dev.package.iced_tiny_skia]
+opt-level = 2
+
+[profile.dev.package.cosmic-text]
+opt-level = 2
+
+[profile.dev.package.swash]
+opt-level = 2
+
+[profile.dev.package.zeno]
+opt-level = 2
+
+[profile.dev.package.harfrust]
+opt-level = 2
+
+[profile.dev.package.skrifa]
+opt-level = 2
+
+[profile.dev.package.read-fonts]
+opt-level = 2
+
+[profile.dev.package.fontdb]
 opt-level = 2
 
 # Runtime speed for shipped binaries (serialization, search, strength scoring)

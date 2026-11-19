@@ -1189,7 +1189,7 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
     let root = tempfile::tempdir().unwrap();
     let port = unused_port();
     let _server = ServerGuard::start(root.path(), port);
-    let key = create_unlocked_key_vault(root.path(), port, None);
+    create_unlocked_key_vault(root.path(), port, None);
     let input = root.path().join("otp.json");
     std::fs::write(
         &input,
@@ -1211,47 +1211,53 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
         .success()
     );
 
-    for json in [false, true] {
-        if json {
-            assert!(
-                run(
-                    root.path(),
-                    port,
-                    &["unlock", "--key", key.to_str().unwrap()]
-                )
-                .status
-                .success()
-            );
-        }
-        let stdout_file = tempfile::NamedTempFile::new().unwrap();
-        let mut stdout = stdout_file.reopen().unwrap();
-        let mut stderr = tempfile::tempfile().unwrap();
-        let mut command = isolated_pm(root.path());
-        command.args(["--port", &port.to_string()]);
-        if json {
-            command.arg("--json");
-        }
-        let mut watcher = command
-            .args(["totp", "show", "--entry-name", "watch", "--watch"])
-            .stdout(Stdio::from(stdout_file.reopen().unwrap()))
-            .stderr(Stdio::from(stderr.try_clone().unwrap()))
-            .spawn_timeout("TOTP watch");
-        let deadline = Instant::now() + Duration::from_secs(8);
-        let mut output = String::new();
-        loop {
-            output.clear();
-            stdout.rewind().unwrap();
-            stdout.read_to_string(&mut output).unwrap();
-            if output.lines().count() >= 4
-                || watcher.try_wait().unwrap().is_some()
-                || Instant::now() >= deadline
-            {
-                break;
+    // Watch in human and JSON modes at once: both must refresh, then stop on one lock.
+    let watchers: Vec<_> = [false, true]
+        .into_iter()
+        .map(|json| {
+            let stdout_file = tempfile::NamedTempFile::new().unwrap();
+            let stdout = stdout_file.reopen().unwrap();
+            let stderr = tempfile::tempfile().unwrap();
+            let mut command = isolated_pm(root.path());
+            command.args(["--port", &port.to_string()]);
+            if json {
+                command.arg("--json");
             }
-            thread::sleep(Duration::from_millis(25));
-        }
-        let locked = run(root.path(), port, &["lock"]);
-        let deadline = Instant::now() + Duration::from_secs(3);
+            let watcher = command
+                .args(["totp", "show", "--entry-name", "watch", "--watch"])
+                .stdout(Stdio::from(stdout_file.reopen().unwrap()))
+                .stderr(Stdio::from(stderr.try_clone().unwrap()))
+                .spawn_timeout("TOTP watch");
+            (json, watcher, stdout_file, stdout, stderr)
+        })
+        .collect();
+    let read = |mut file: &std::fs::File| {
+        let mut output = String::new();
+        file.rewind().unwrap();
+        file.read_to_string(&mut output).unwrap();
+        output
+    };
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut watchers: Vec<_> = watchers
+        .into_iter()
+        .map(|(json, mut watcher, file, stdout, stderr)| {
+            let output = loop {
+                let output = read(&stdout);
+                if output.lines().count() >= 4
+                    || watcher.try_wait().unwrap().is_some()
+                    || Instant::now() >= deadline
+                {
+                    break output;
+                }
+                thread::sleep(Duration::from_millis(25));
+            };
+            (json, watcher, file, stdout, stderr, output)
+        })
+        .collect();
+    let locked = run(root.path(), port, &["lock"]);
+    assert!(locked.status.success());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    for (json, watcher, _file, stdout, stderr, output) in &mut watchers {
         let stopped = loop {
             if let Some(status) = watcher.try_wait().unwrap() {
                 break Some(status);
@@ -1263,8 +1269,11 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
             }
             thread::sleep(Duration::from_millis(25));
         };
-        assert!(locked.status.success());
-        assert!(!stopped.expect("watch did not stop after locking").success());
+        let json = *json;
+        assert!(
+            !stopped.expect("watch did not stop after locking").success(),
+            "json={json}"
+        );
         assert!(output.lines().count() >= 4, "watch output: {output}");
         let updates: Vec<String> = output
             .lines()
@@ -1290,19 +1299,14 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
                 .windows(2)
                 .any(|pair| pair[0][6..12] != pair[1][6..12])
         );
-        stdout.rewind().unwrap();
-        output.clear();
-        stdout.read_to_string(&mut output).unwrap();
         let error = if json {
+            let output = read(stdout);
             let last: serde_json::Value =
                 serde_json::from_str(output.lines().last().unwrap()).unwrap();
             assert_eq!(last["ok"], false);
             last["error"].as_str().unwrap().to_owned()
         } else {
-            stderr.rewind().unwrap();
-            let mut error = String::new();
-            stderr.read_to_string(&mut error).unwrap();
-            error
+            read(stderr)
         };
         assert!(error.contains("Unlock session changed"), "{error}");
     }
