@@ -5,7 +5,7 @@ mean software is implemented with source/build/test evidence recorded below.
 They do not imply physical-phone acceptance: device checks remain separate from host tests. Never use a personal vault in tests.
 
 Current delivery, **2026-11-16**: Android **0.3.0 (12)** is installed on the
-Galaxy A71 (Android 13, ARM64). Eight isolated phone runs passed for management,
+physical test phone (Android 13, ARM64). Eight isolated phone runs passed for management,
 the redesign, autofill and noninteractive biometric regressions. Light/dark and
 1.7 font-scale checks passed on the isolated API 36 emulator. The
 [0.3.0 verification record](#version-030-usability-verification-2026-11-16)
@@ -123,7 +123,7 @@ Linux shortcuts are platform-specific and do not need mobile equivalents.
 - [x] Synchronize unlocked changes with optimistic concurrency; preserve both sides on conflicts.
 - [x] Retry safely after offline operation or uncertain upload acknowledgement.
 - [x] Provide conflict review/recovery without silently overwriting either copy.
-- [x] Google CSV import uses the existing preview and conflict policies; document Samsung Pass review.
+- [x] Google CSV import uses the existing preview and conflict policies; document reviewing other password managers for unique items.
 
 ## Private distribution
 
@@ -251,8 +251,8 @@ They do not simulate a fingerprint sensor or prove real-browser autofill.
 
 ### Physical-phone acceptance (record device, OS, browser, date, and result)
 
-Partial connectivity evidence, 2026-11-15 (America/Boise): Samsung Galaxy A71
-(SM-A716U1), Android 13/API 33, ARM64. Debug update installation preserved app
+Partial connectivity evidence, 2026-11-15: physical test phone, Android 13/API 33,
+ARM64. Debug update installation preserved app
 data. The isolated `SyncConnectivityTest` reproduced the pre-fix TLS failure
 (`invalid peer certificate: Revoked`) and passed both tests with version 0.1.2:
 the merged policy denies general HTTP while allowing CA revocation-list hosts,
@@ -300,8 +300,8 @@ lint and strict mobile Clippy passed. Clipboard actions use Android's sensitive
 metadata and ownership-checked expiry; a complete Google MFA flow and clipboard
 behavior under OS process suspension remain separate hardware acceptance.
 
-Version 0.1.8 interaction evidence, 2026-11-16 (America/Boise): the SHA-256-verified
-ARM64 debug update installed on the same Galaxy A71 as version code 9, preserving
+Version 0.1.8 interaction evidence, 2026-11-16: the SHA-256-verified
+ARM64 debug update installed on the same test phone as version code 9, preserving
 app data and the selected autofill provider. `AutofillHostnameTest` passed in an
 isolated cache-only process. The test APK was removed afterward and the manager
 was force-stopped/reopened to reset JNI's temporary storage binding.
@@ -314,8 +314,8 @@ keyboard presentation and the automatic fingerprint flow remain pending on this
 phone.
 
 The unlocked phone also passed `AutofillDirectFillTest` and
-`AutofillSessionLifecycleTest` in separate instrumentation processes, with Samsung
-Keyboard selected. Tapping the synthetic account suggestion filled both username
+`AutofillSessionLifecycleTest` in separate instrumentation processes, with the phone's
+vendor keyboard selected. Tapping the synthetic account suggestion filled both username
 and password without another picker. The session check verified completed-handoff
 retention and cancellation, management, and explicit-lock revocation. The direct
 fill test searches all interactive accessibility windows because the initial
@@ -332,12 +332,12 @@ synthetic username and password values without another picker; and
 management, and explicit-lock revocation. The separate synthetic client uses only
 framework Java classes and returns assertion bits, never field values, to the
 test. APK builds, seven JVM tests, and Android lint passed. These synthetic checks
-do not prove Chrome or Samsung Keyboard's inline rendering or a complete Google
+do not prove Chrome or vendor keyboards' inline rendering or a complete Google
 MFA flow; the device scenarios below remain required.
 
 
-Version 0.2.0 parity evidence, 2026-11-16 (America/Boise): version code 10, ARM64
-owner-development debug APK, SHA-256 verified before updating the same Galaxy A71
+Version 0.2.0 parity evidence, 2026-11-16: version code 10, ARM64
+development debug APK, SHA-256 verified before updating the same test phone
 without uninstalling the main app. Installed APK SHA-256:
 `f01224e32f514ed5fe3f7b2c040f7fab13fe615204a43b9fabc7fc9ca3f46138`.
 Eight separately isolated on-phone checks passed:
@@ -390,14 +390,14 @@ zero values and explicit trash purging are explained. Numeric keyboards and
 field-specific validation reject invalid values before saving. This is a UI
 clarification; stored values and Rust settings semantics are unchanged. Android
 APK assembly and lint passed; no additional personal-vault testing was needed.
-The 0.2.1 installation attempt was blocked because Windows did not detect the
-phone over USB; at that time, 0.2.0 remained installed. The 0.3.0 installation
+The 0.2.1 installation attempt was blocked because the host computer did not
+detect the phone over USB; at that time, 0.2.0 remained installed. The 0.3.0 installation
 below supersedes this historical status.
 
 ### Version 0.3.0 usability verification (2026-11-16)
 
 This update supersedes the pending 0.2.1 installation above. Version **0.3.0 (12)**
-was installed with `adb install -r` on the Galaxy A71 (Android 13, ARM64), retaining
+was installed with `adb install -r` on the test phone (Android 13, ARM64), retaining
 the existing app data. APK SHA-256:
 `53eb95a5b86b5904b78d6307db404edbb799ab65cda11e6c7841ab0177dcc5fb`.
 

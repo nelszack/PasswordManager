@@ -6,8 +6,8 @@ This page covers manual installation, credentials, recovery, and storage.
 
 ## Hosting requirements
 
-The server targets Linux and builds with Go 1.24 or newer. Clients connect to a
-private HTTPS endpoint, such as Tailscale Serve. Install and update the server
+The server targets Linux and builds with Go 1.24 or newer. Clients connect over
+HTTPS, typically through a reverse proxy or a private-network HTTPS endpoint. Install and update the server
 separately; Password Manager no longer manages SSH destinations or remote services.
 For a user service to run after logout, arrange an appropriate systemd user
 session and unattended startup policy on the host.
@@ -34,21 +34,22 @@ chmod 700 ~/.local/share/pm-sync
 ~/.local/bin/pm-sync --data ~/.local/share/pm-sync
 ```
 
-The default listen address is `127.0.0.1:8788`. In a separate terminal on the
-server, expose that loopback service with Tailscale Serve:
+The default listen address is `127.0.0.1:8788`. The service speaks plain HTTP
+on loopback, so expose it to clients through something that terminates HTTPS
+with a certificate your devices trust. Common choices:
 
-```bash
-tailscale serve --bg --https=8443 http://127.0.0.1:8788
-```
+- **A reverse proxy** such as Caddy or nginx with a publicly trusted certificate
+  (for example, from Let's Encrypt). With Caddy, a site block containing
+  `reverse_proxy 127.0.0.1:8788` is enough.
+- **A private-network HTTPS endpoint**, if your devices share a VPN or mesh
+  network. For example, Tailscale Serve can publish the loopback service to
+  your tailnet (`tailscale serve --bg --https=8443 http://127.0.0.1:8788`);
+  see the [Tailscale Serve reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
 
-Use the HTTPS URL printed by that command, including `:8443`, on clients. This
-uses a separate HTTPS port to accommodate other services; inspect existing Serve
-configuration before choosing a port. If Tailscale runs in a different network
-namespace, configure its proxy to reach the service instead. See the official
-[Tailscale Serve reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
-Alternatively, place the service behind your own HTTPS reverse proxy and use
-that URL when connecting clients. Manual connections do not require a Tailscale
-hostname or SSH enrollment; use a separately issued device token as shown below.
+Use the resulting HTTPS URL, including any nondefault port, on clients. If the
+proxy runs in a different network namespace or host, make sure it can reach the
+service's listen address. Clients need only that URL and a separately issued
+device token, as shown below.
 Desktop/CLI clients permit localhost HTTP for development; Android's connection
 form requires HTTPS. Clients do not follow
 redirects or use environment HTTP proxies.
@@ -83,8 +84,8 @@ Then, on the laptop:
 pm sync connect https://sync.example.com --token-file ./laptop-sync-token
 ```
 
-Replace `https://sync.example.com` with your server's HTTPS URL. For Tailscale
-Serve, use its reported URL, such as `https://server.example-tailnet.ts.net:8443`.
+Replace `https://sync.example.com` with your server's HTTPS URL, including any
+nondefault port (for example, `https://sync.example.com:8443`).
 
 Omit `--token-file` to paste it into a hidden prompt. The client saves the token
 in its private configuration directory as `sync-token`, separately from

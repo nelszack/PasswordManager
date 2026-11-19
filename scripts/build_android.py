@@ -22,7 +22,7 @@ def main():
     parser.add_argument(
         "--device",
         metavar="HOST[:PORT]",
-        help="install over wireless debugging, e.g. the phone's Tailscale IP; prompts for the port when "
+        help="install over wireless debugging, e.g. the phone's LAN or VPN IP; prompts for the port when "
         "omitted. --install/--install-only use $PM_ANDROID_DEVICE when this is not given",
     )
     parser.add_argument("--install-only", action="store_true", help="skip the build and install the existing APK")
@@ -104,8 +104,8 @@ def install_apk(parser, adb, apk, device):
         print(output)
         if "connected to" not in output:
             sys.exit(
-                f"Could not reach {serial}. Check that Wireless debugging is on, the phone is on Wi-Fi with "
-                "Tailscale connected, the port matches the phone's screen, and this computer is paired "
+                f"Could not reach {serial}. Check that Wireless debugging is on, the phone is on Wi-Fi and "
+                "reachable from this computer, the port matches the phone's screen, and this computer is paired "
                 "(adb pair HOST:PAIRING_PORT)."
             )
         command += ["-s", serial]

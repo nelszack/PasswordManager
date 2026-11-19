@@ -5,9 +5,9 @@ in process. It does not connect to the desktop's local socket. Password autofill
 requires 64-bit Android 9+, and the password/passkey credential provider requires Android
 14+. No Google Play services dependency or store publication is required.
 
-Current development build: **0.3.0 (version code 12)**. It was installed and
-tested with synthetic data on the Galaxy A71, Android 13, on 2026-11-16. That
-phone cannot test Android 14+ passkey-provider operation. See the
+Current development build: **0.3.0 (version code 12)**. It has been tested with
+synthetic data on a physical Android 13 phone and an Android 16 emulator; Android
+14+ passkey-provider operation has not yet been verified on hardware. See the
 [verification record and outstanding acceptance checks](../docs/mobile-implementation.md)
 and the [daily-use guide](../docs/user-guide.md#android-app).
 
@@ -46,24 +46,25 @@ path for this project.
 
 ### Wireless updates (no cable)
 
-Android 11+ wireless debugging also works across a Tailscale tailnet, so the
-phone does not need to be on the same network as the computer. The phone must be
-on some Wi-Fi network (Android disables wireless debugging on mobile data), and
-its Tailscale app must stay connected: set Tailscale's battery usage to
-*Unrestricted* and enable it as the *Always-on VPN*.
+Android 11+ supports wireless debugging. The phone must be on Wi-Fi (Android
+disables wireless debugging on mobile data) and reachable from the computer:
+either on the same local network, or connected to a VPN or mesh network (such as
+Tailscale or WireGuard) that the computer can also reach. If you use a VPN app,
+keep it connected while updating, for example by disabling battery optimization
+for it or enabling it as the *Always-on VPN*.
 
 Pair once. On the phone, open *Developer options → Wireless debugging → Pair
 device with pairing code*, then run:
 
 ```sh
-"$ANDROID_HOME/platform-tools/adb" pair <phone-tailscale-ip>:<pairing-port> <code>
+"$ANDROID_HOME/platform-tools/adb" pair <phone-ip>:<pairing-port> <code>
 ```
 
 To update, turn Wireless debugging on and run one of:
 
 ```sh
-python3 scripts/build_android.py --abi arm64-v8a --device <phone-tailscale-ip>  # build, then install
-python3 scripts/build_android.py --install-only --device <phone-tailscale-ip>   # reinstall the last build
+python3 scripts/build_android.py --abi arm64-v8a --device <phone-ip>  # build, then install
+python3 scripts/build_android.py --install-only --device <phone-ip>   # reinstall the last build
 ```
 
 The script asks for the port shown on the phone's Wireless debugging screen
@@ -280,8 +281,8 @@ the AAR to a JAR loses that policy and can produce misleading `Revoked` errors
 for valid Let's Encrypt certificates; see
 [upstream issue 221](https://github.com/rustls/rustls-platform-verifier/issues/221).
 
-Import Google CSV on the desktop with an import preview, review Samsung Pass for
-unique items, and sync the resulting vault. Direct Google credential exchange
+Import Google CSV on the desktop with an import preview, review any other password
+manager you used (such as a phone vendor's) for unique items, and sync the resulting vault. Direct Google credential exchange
 requires separate implementation; do not assume Google's passkeys were included
 in a CSV export.
 

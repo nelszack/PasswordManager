@@ -7,7 +7,7 @@ copy and synchronizes while the vault is unlocked.
 
 Follow [server installation and device enrollment](cloud-sync-admin.md).
 The client does not deploy, build, or update remote servers. The server can run
-behind Tailscale Serve or another private HTTPS proxy; the client needs its
+behind any HTTPS reverse proxy or private-network HTTPS endpoint; the client needs its
 HTTPS URL and a device credential issued by the administrator.
 
 ## Connect a device
@@ -76,9 +76,9 @@ from **Settings → Review sync conflicts** after unlocking.
   or external key. The device name does not need to match the phone's name.
   Confirm that the credential was issued on this server and has not been revoked.
 - **Error sending request:** inspect the underlying network/certificate cause in
-  the app's error. Confirm the exact HTTPS hostname and port. If using Tailscale,
-  keep the phone connected to the same tailnet and confirm its access policy
-  allows that server and port. The phone's `localhost` refers to the phone.
+  the app's error. Confirm the exact HTTPS hostname and port. If the server is only
+  reachable over a private network or VPN, keep the device connected to it and
+  confirm its access policy allows that server and port. The phone's `localhost` refers to the phone.
 - **Blank Android credential input:** a successful connection stores the token
   securely and leaves the field blank. A failed connection retains the previous
   saved connection; it does not save the newly entered credential.
