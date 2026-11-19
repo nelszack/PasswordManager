@@ -136,9 +136,8 @@ internal object MobileUi {
             val icon =
                 if (badge.isBlank()) null
                 else
-                    Badge(context, badge).apply {
-                        setBounds(0, 0, dp(context, 40), dp(context, 40))
-                    }
+                    Badge(context, badge, ICONS[badge]?.let { ContextCompat.getDrawable(context, it) })
+                        .apply { setBounds(0, 0, dp(context, 40), dp(context, 40)) }
             setCompoundDrawablesRelative(icon, null, chevron, null)
             compoundDrawablePadding = dp(context, 12)
         }
@@ -236,6 +235,25 @@ internal object MobileUi {
             else -> kind
         }
 
+    /** Named badges drawn as icons; any other badge text is drawn as a letter. */
+    private val ICONS =
+        mapOf(
+            "search" to R.drawable.pm_icon_search,
+            "health" to R.drawable.pm_icon_health,
+            "restore" to R.drawable.pm_icon_restore,
+            "sync" to R.drawable.pm_icon_sync,
+            "settings" to R.drawable.pm_icon_settings,
+            "key" to R.drawable.pm_icon_key,
+            "add" to R.drawable.pm_icon_add,
+            "open" to R.drawable.pm_icon_open,
+        )
+
+    /** Logins show their first letter; other types show their type badge. */
+    fun initial(name: String, kind: String): String =
+        if (kind == "login")
+            name.firstOrNull(Char::isLetterOrDigit)?.uppercaseChar()?.toString() ?: "L"
+        else kindBadge(kind)
+
     fun kindBadge(kind: String) =
         when (kind) {
             "secure-note" -> "N"
@@ -248,7 +266,11 @@ internal object MobileUi {
             else -> "L"
         }
 
-    private class Badge(private val context: Context, private val value: String) : Drawable() {
+    private class Badge(
+        private val context: Context,
+        private val value: String,
+        private val icon: Drawable? = null,
+    ) : Drawable() {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
         override fun draw(canvas: Canvas) {
@@ -259,6 +281,18 @@ internal object MobileUi {
                 dp(context, 12).toFloat(),
                 paint,
             )
+            if (icon != null) {
+                val inset = bounds.width() / 4
+                icon.setBounds(
+                    bounds.left + inset,
+                    bounds.top + inset,
+                    bounds.right - inset,
+                    bounds.bottom - inset,
+                )
+                icon.setTint(color(context, R.color.pm_accent))
+                icon.draw(canvas)
+                return
+            }
             paint.color = color(context, R.color.pm_accent)
             paint.textAlign = Paint.Align.CENTER
             paint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)

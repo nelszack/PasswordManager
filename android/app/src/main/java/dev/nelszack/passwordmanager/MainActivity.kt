@@ -103,7 +103,11 @@ open class MainActivity : ManagementActivity() {
         ) {
             generator(back = { home() })
         }
-        actionRow("Autofill & security", "Set up autofill, biometrics and app preferences", "S") {
+        actionRow(
+            "Autofill & security",
+            "Set up autofill, biometrics and app preferences",
+            "settings",
+        ) {
             settingsHome(false)
         }
     }
@@ -183,7 +187,11 @@ open class MainActivity : ManagementActivity() {
                 biometricSettings()
             })
         }
-        actionRow("Mobile settings", "Auto-lock, clipboard, history and generation defaults", "P") {
+        actionRow(
+            "Mobile settings",
+            "Auto-lock, clipboard, history and generation defaults",
+            "settings",
+        ) {
             preferences { settingsHome(unlocked) }
         }
         section("Autofill")
@@ -328,6 +336,12 @@ open class MainActivity : ManagementActivity() {
             )
         val count = label("Loading your items…", 13f)
         primary("Add item") { typedEditor(null) }
+        // Filled once the full list loads, when any item has Duo Push enrolled.
+        val duoShortcut =
+            android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+            }
+        layout.addView(duoShortcut)
         val rows =
             android.widget.LinearLayout(this).apply {
                 orientation = android.widget.LinearLayout.VERTICAL
@@ -392,6 +406,22 @@ open class MainActivity : ManagementActivity() {
                 if (version != queryVersion || rows.parent !== layout) return@task
                 val entries = result.getJSONArray("items")
                 rows.removeAllViews()
+                if (needle.isBlank() && kind == null) {
+                    duoShortcut.removeAllViews()
+                    val accounts = duoAccounts(entries)
+                    if (accounts.isNotEmpty())
+                        duoShortcut.addView(
+                            MobileUi.row(
+                                this,
+                                "Duo Push requests",
+                                if (accounts.size == 1) "Approve or deny a login for ${accounts[0].second}"
+                                else "Approve or deny logins for ${accounts.size} accounts",
+                                "key",
+                            ) {
+                                guarded { duoInbox(accounts, back = { items() }) }
+                            }
+                        )
+                }
                 count.text =
                     "${entries.length()} ${if(entries.length()==1) "item" else "items"}" +
                         if (needle.isNotBlank() || kind != null) " found" else " in your vault"
@@ -638,10 +668,26 @@ open class MainActivity : ManagementActivity() {
                     },
                 )
             }
+            if (entry.optBoolean("has_duo")) {
+                section("Duo Push")
+                primary("Check Duo Push requests") {
+                    duoInbox(listOf(id to entry.getString("name")), back = { detail(id) })
+                }
+            }
             val urls = entry.optJSONArray("urls") ?: JSONArray()
             if (urls.length() > 0) {
                 section("Websites & apps")
-                for (i in 0 until urls.length()) label(urls.getString(i))
+                for (i in 0 until urls.length()) {
+                    val url = urls.getString(i)
+                    val uri = runCatching { Uri.parse(url) }.getOrNull()
+                    // Web addresses open in the browser; app identifiers stay as text.
+                    if (uri?.scheme == "https" || uri?.scheme == "http") {
+                        actionRow(uri.host ?: url, "Open in browser · $url", "open") {
+                            runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                                .onFailure { notice("No app can open this address.") }
+                        }
+                    } else label(url)
+                }
             }
             val fields = entry.optJSONArray("fields") ?: JSONArray()
             if (fields.length() > 0) section("Custom fields")

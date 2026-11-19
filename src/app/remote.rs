@@ -20,10 +20,10 @@ fn confirmed_password(console: &Output, require_minimum: bool) -> String {
 pub(super) fn target_type(target: EntryArgs) -> Target {
     if let Some(id) = target.id {
         Target::Id(id)
-    } else if let Some(name) = target.entry_name {
+    } else if let Some(name) = target.entry_name.or(target.item) {
         Target::Name(name)
     } else {
-        unreachable!("clap requires either --id or --entry-name")
+        unreachable!("clap requires a name, --id, or --entry-name")
     }
 }
 
@@ -117,9 +117,23 @@ pub(super) async fn run(
             }
         }
         command => {
+            let copies_password = matches!(
+                command,
+                CliCommands::Get {
+                    password_only: false,
+                    field: None,
+                    ..
+                }
+            ) && conf.clipboard.timeout > 0;
             if let Err(code) = console.send_command(client, prepare_command(command, conf, console))
             {
                 std::process::exit(code);
+            }
+            if copies_password {
+                console.print_note(&format!(
+                    "Password copied to the clipboard; it clears in {}s.",
+                    conf.clipboard.timeout
+                ));
             }
         }
     }
@@ -222,6 +236,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
         }
 
         CliCommands::Delete(DeleteArgs {
+            item,
             id,
             entry_name,
             vault,
@@ -229,7 +244,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             key,
             keep_key,
             yes,
-        }) => match (id, entry_name, vault) {
+        }) => match (id, entry_name.or(item), vault) {
             (Some(i), None, _) => ServerCommand::Delete(Target::Id(i)),
             (None, Some(n), _) => ServerCommand::Delete(Target::Name(n)),
             (None, None, true) => {

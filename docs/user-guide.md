@@ -246,7 +246,8 @@ credentials; lock first and select the intended filename on the Vault tab.
 External keys are preserved by default during deletion.
 
 Destructive operations, plaintext exports, import application, credential changes,
-enrollment, and Duo responses show a review and confirmation step. Editing the
+and enrollment show a review and confirmation step. A Duo request's card is its
+review: **Approve** or **Deny** on the card answers it in one click. Editing the
 form cancels that pending confirmation. Save or discard any unsaved item edits
 before making changes in Tools. Untouched hidden custom fields remain unchanged;
 renaming or changing the secrecy of a hidden field requires entering its
@@ -254,7 +255,9 @@ replacement value.
 
 Selecting a Push-enrolled account fetches its current Duo requests once and shows
 Approve and Deny controls in the account details, including Verified Push code
-entry. **Watch Duo requests in background** defaults to off. Enable it explicitly
+entry. Clicks are ignored for half a second after the listed requests change, so
+a double-click or a click aimed at the previous list cannot answer a request you
+have not seen. **Watch Duo requests in background** defaults to off. Enable it explicitly
 for repeated polling; its interval and private desktop alerts appear while enabled.
 Duo monitoring stays bound to its enrolled account while you change tabs, select
 other accounts, or switch to a browser. Choose an interval from 3 to 60 seconds. A
@@ -452,7 +455,6 @@ device-specific defaults, use [Android app](#android-app).
 ### Create Your First Vault
 
 ```bash
-pm start
 pm new
 pm unlock
 pm add --name "Example account" --username alice --url https://example.com
@@ -460,14 +462,14 @@ pm view
 pm lock
 ```
 
-`pm new` prompts twice for a master password, creates an empty vault, and leaves
+`pm new` and `pm unlock` start the background server when it is not already
+running. `pm new` prompts twice for a master password, creates an empty vault, and leaves
 it locked. New master passwords must contain at least 14 characters and pass a
 predictability check. Use `pm unlock` before adding or reading entries.
 
 For a vault protected by an external key instead:
 
 ```bash
-pm start
 mkdir -p ./keys
 pm new --key ./keys/vault.key
 pm unlock --key ./keys/vault.key
@@ -611,11 +613,15 @@ in-memory changes.
 ### Get a Password
 
 ```bash
-pm get --entry-name "github.com"
+pm get "github.com"
 ```
 
-`get` prints item details with the primary secret, notes, and secret custom fields
-redacted. It copies a non-empty primary secret when the clipboard timeout is
+Select an item by name (exact, or ignoring case when only one item matches) or
+with `--id ID` from `pm view`. When several items share a name, the command stops
+and lists their IDs instead of guessing. `--entry-name NAME` is an equivalent
+spelling of the positional name.
+
+`get` prints item details with the primary secret and secret custom fields hidden. It copies a non-empty primary secret when the clipboard timeout is
 nonzero. Use `--password-only` to print just the primary secret without copying.
 Use `--reveal-secrets` to display secret custom-field values, or `--field NAME`
 to print one custom field by its case-insensitive name. Add `--copy` to copy that
@@ -632,7 +638,7 @@ pm get --id 3 --field recovery-code --copy
 ### Update an Entry
 
 ```bash
-pm update --name "New Name" --entry-name "github.com"
+pm update "github.com" --name "New Name"
 ```
 
 Change the primary secret through a hidden prompt, or generate a replacement:
@@ -658,7 +664,7 @@ pm update --id 3 --clear-fields
 ### Delete an Entry
 
 ```bash
-pm delete --entry-name "github.com"
+pm delete "github.com"
 ```
 
 Deletion moves the entry and its password history into encrypted trash. Manage
@@ -714,8 +720,8 @@ default limit is ten revisions and can be configured or set to zero to disable
 new history. History output shows timestamps, not password values:
 
 ```bash
-pm history --entry-name "github.com"
-pm restore-password --entry-name "github.com" --revision 1
+pm history "github.com"
+pm restore-password "github.com" --revision 1
 ```
 
 Revision `1` is the newest previous password. Restoring a revision places the
@@ -748,9 +754,9 @@ Paste either a Base32 TOTP secret or a complete `otpauth://totp/...` or `otpauth
 URI into the hidden setup prompt:
 
 ```bash
-pm totp set --entry-name "github.com"
-pm totp show --entry-name "github.com"
-pm totp show --entry-name "github.com" --watch
+pm totp set "github.com"
+pm totp show "github.com"
+pm totp show "github.com" --watch
 pm totp show --id 3 --copy --copy-time 20
 pm totp remove --id 3
 ```
@@ -795,12 +801,12 @@ Use a fresh Duo enrollment link for a separate device, then paste either the
 link into the hidden prompt:
 
 ```bash
-pm totp duo --entry-name "work"
-pm totp show --entry-name "work" --copy
+pm totp duo "work"
+pm totp show "work" --copy
 ```
 
 Duo enrollment defaults to **HOTP**. If your organization accepts time-based
-codes, select TOTP explicitly with `pm totp duo --entry-name "work" --mode totp`.
+codes, select TOTP explicitly with `pm totp duo "work" --mode totp`.
 The link does not identify which passcode type your organization accepts; there
 is no automatic fallback. The command saves the authenticator without generating
 or consuming its first HOTP code. Enrollment refuses to overwrite an existing
@@ -818,7 +824,7 @@ Duo device enrollment before trying again with a fresh link.
 
 At sign-in, Duo may automatically send a push for an enrolled device. Choose
 **Other options → Duo Mobile passcode** for the device enrolled through `pm`,
-then enter the code from `pm totp show --entry-name "work"`. Available sign-in
+then enter the code from `pm totp show "work"`. Available sign-in
 methods are controlled by your organization's [Duo authentication policy](https://duo.com/docs/policy#authentication-methods).
 If the passcode method is missing, an administrator must check whether it is
 allowed for your account and application. Enrollment through `pm` cannot change
@@ -854,14 +860,14 @@ command discarded the private signing key, so its device cannot be upgraded in
 place. Enroll a new device in Duo and replace the local authenticator:
 
 ```bash
-pm duo enroll --entry-name "work" --replace
-pm duo watch --entry-name "work" --interactive
+pm duo enroll "work" --replace
+pm duo watch "work" --interactive
 # Or decide once, without copying an ID when exactly one request is pending:
-pm duo approve --entry-name "work"
-pm duo deny --entry-name "work"
+pm duo approve "work"
+pm duo deny "work"
 # With multiple requests, select the exact ID printed by requests/watch:
-pm duo requests --entry-name "work"
-pm duo deny --entry-name "work" --request REQUEST_ID
+pm duo requests "work"
+pm duo deny "work" --request REQUEST_ID
 ```
 
 Interactive watch displays each request and prompts in the same terminal: type
@@ -870,7 +876,7 @@ to quit. This choice confirms the displayed request; no second confirmation is
 needed. A skipped request is not prompted again unless its context changes or it
 disappears and returns. Verified Push asks for the login-page code after `a`;
 Enter at the code prompt cancels the decision and ends monitoring. Use
-`pm duo watch --entry-name "work" --notify` for passive monitoring instead.
+`pm duo watch "work" --notify` for passive monitoring instead.
 One-shot `approve`/`deny` still display the request and ask you to type the action
 to confirm. Omitting `--request` with multiple pending requests fails without
 answering any of them.
@@ -907,7 +913,13 @@ Rebuild and restart the server, update the native host, and reload the extension
 after updating, so login summaries include Duo enrollment availability.
 
 In the desktop app, select the enrolled item and use its **Duo Push** panel for
-manual request checks or monitoring. Monitoring polls while this
+manual request checks or monitoring.
+
+On Android, **Duo Push requests** at the top of the vault list (or **Check Duo
+Push requests** on an enrolled item) shows every pending request for your
+enrolled accounts on one screen. Tap **Approve** or **Deny** on the request; the
+buttons wake after a short pause, and the code field appears only for Verified
+Push. **Check again** refreshes the list after you start a login. Monitoring polls while this
 item is open; CLI monitoring runs until Ctrl+C, an error, or vault lock. It does
 not register with Android/iOS notification services. `--notify` provides passive
 desktop alerts using `notify-send`, if available. Polling does not reset auto-lock.
@@ -935,7 +947,7 @@ cannot provide mobile hardware attestation.
 An administrator must permit a compatible authentication method; enrollment does
 not change organization policy.
 
-`pm duo remove --entry-name "work"` removes local push credentials and retains
+`pm duo remove "work"` removes local push credentials and retains
 passcodes; remove the device separately in Duo. Push credentials follow trash,
 restore and purge operations. Encrypted backups and **plaintext portable JSON
 exports** include them; CSV exports omit them, just as they omit OTP secrets.
@@ -1214,7 +1226,7 @@ paths and the same values for the server, CLI, and browser-launched native host.
 A browser launched outside your shell may not inherit those overrides. Use the
 same `PM_DATA_DIR` when installing or updating the native host.
 
-Built-in defaults are a 12-character generated password, no generation statistics,
+Built-in defaults are a 20-character generated password, no generation statistics,
 clipboard copying enabled for generated values and newly added login passwords,
 a 15-second clipboard timeout, a 15-minute inactivity timeout, ten password-history
 revisions, disabled trash expiration, and server port 7878. `pm config --reset`

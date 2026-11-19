@@ -95,7 +95,7 @@ test("adds and updates credentials across username, password, and TOTP pages", a
             });
 
             const updatePrompt = await submitCredentials("changed-secret-password");
-            await expect(updatePrompt.locator("#update")).toHaveText("Update End-to-end account");
+            await expect(updatePrompt.locator("#update")).toHaveText("Update “End-to-end account”");
             await updatePrompt.locator("#update").click();
             await expect.poll(() => updatePrompt.isClosed()).toBe(true);
 

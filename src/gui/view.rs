@@ -48,6 +48,106 @@ fn primary<'a>(label: &'a str, message: Message, enabled: bool) -> crate::gui::w
     })
 }
 
+/// Navigation and section tabs: selected tabs are filled and outlined so they
+/// stay distinct in every theme, including high contrast.
+pub(super) fn tab_style(
+    selected: bool,
+) -> impl Fn(&Theme, button_style::Status) -> button_style::Style {
+    move |theme, status| {
+        let palette = theme.extended_palette();
+        let mut style = button_style::text(theme, status);
+        style.border = iced::Border {
+            color: iced::Color::TRANSPARENT,
+            width: 2.0,
+            radius: 8.0.into(),
+        };
+        if selected {
+            style.background = Some(palette.primary.weak.color.into());
+            style.text_color = palette.primary.weak.text;
+            style.border.color = palette.primary.base.color;
+        } else {
+            style.text_color = palette.background.base.text;
+            if matches!(
+                status,
+                button_style::Status::Hovered | button_style::Status::Pressed
+            ) {
+                style.background = Some(palette.background.weak.color.into());
+            }
+        }
+        style
+    }
+}
+
+/// Four-segment strength bar with a text rating, so color is never the only cue.
+pub(super) fn strength_meter<'a>(secret: &str) -> Element<'a, Message> {
+    let (score, rating) = password_manager::password::strength_rating(secret);
+    let filled = usize::from(score.max(1));
+    let mut bars = row![].spacing(4);
+    for index in 0..4 {
+        bars = bars.push(
+            container(text(""))
+                .width(Length::Fixed(36.0))
+                .height(Length::Fixed(6.0))
+                .style(move |theme: &Theme| {
+                    let palette = theme.extended_palette();
+                    let color = if index >= filled {
+                        palette.background.strong.color
+                    } else if score <= 1 {
+                        palette.danger.base.color
+                    } else if score == 2 {
+                        palette.warning.base.color
+                    } else {
+                        palette.success.base.color
+                    };
+                    container::Style {
+                        background: Some(color.into()),
+                        border: iced::Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                }),
+        );
+    }
+    row![bars, text(format!("Strength: {rating}")).size(13)]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// Circular initial badge that makes list rows scannable.
+fn avatar<'a>(name: &str, selected: bool) -> Element<'a, Message> {
+    let initial = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "•".into());
+    container(text(initial).size(16))
+        .width(Length::Fixed(36.0))
+        .height(Length::Fixed(36.0))
+        .center_x(Length::Fixed(36.0))
+        .center_y(Length::Fixed(36.0))
+        .style(move |theme: &Theme| {
+            let palette = theme.extended_palette();
+            let pair = if selected {
+                palette.primary.base
+            } else {
+                palette.primary.weak
+            };
+            container::Style {
+                background: Some(pair.color.into()),
+                text_color: Some(pair.text),
+                border: iced::Border {
+                    radius: 18.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
 fn label(value: &str) -> iced::widget::Text<'_> {
     text(value).size(14)
 }
@@ -104,20 +204,8 @@ fn navigation(app: &App) -> Element<'_, Message> {
         tabs = tabs.push(
             action(title, Message::Tab(tab), !app.busy())
                 .selected(selected)
-                .padding(if app.compact() { [9, 10] } else { [11, 14] })
-                .style(move |theme: &Theme, status| {
-                    if selected {
-                        let mut style = button_style::primary(theme, status);
-                        style.border = iced::Border {
-                            color: theme.palette().primary,
-                            width: 2.0,
-                            radius: 8.0.into(),
-                        };
-                        style
-                    } else {
-                        quiet_button(theme, status)
-                    }
-                }),
+                .padding(if app.compact() { [9, 10] } else { [11, 16] })
+                .style(tab_style(selected)),
         );
     }
     tabs.wrap().into()
@@ -785,16 +873,27 @@ fn vault(app: &App) -> Element<'_, Message> {
             || kind.to_owned(),
             |username| format!("{username} · {kind}"),
         );
-        let entry_content = column![text(&item.name).size(16), text(subtitle).size(14)].spacing(5);
+        let entry_content = row![
+            avatar(&item.name, selected),
+            column![text(&item.name).size(16), text(subtitle).size(13)].spacing(3)
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
         entries = entries.push(
             button(entry_content)
                 .selected(selected)
                 .width(Fill)
-                .padding(12)
-                .style(if selected {
-                    button_style::primary
-                } else {
-                    quiet_button
+                .padding([10, 12])
+                .style(move |theme: &Theme, status| {
+                    let mut style = quiet_button(theme, status);
+                    if selected {
+                        let palette = theme.extended_palette();
+                        style.background = Some(palette.primary.weak.color.into());
+                        style.text_color = palette.primary.weak.text;
+                        style.border.color = palette.primary.base.color;
+                        style.border.width = 2.0;
+                    }
+                    style
                 })
                 .on_press_maybe(
                     (!app.busy()).then_some(Message::Navigate(Navigate::Select(item.id))),
@@ -846,7 +945,8 @@ fn vault(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center),
         row![
-            text_input("Name, username or website", &app.query)
+            text_input("Search items", &app.query)
+                .accessibility_label("Search by name, username, or website")
                 .id("vault-search")
                 .padding(10)
                 .width(Fill)
@@ -940,21 +1040,15 @@ fn vault(app: &App) -> Element<'_, Message> {
                 .spacing(8),
             );
     }
-    if !app.compact() {
-        sidebar = sidebar.push(action(
-            "Refresh items",
-            Message::Navigate(Navigate::Refresh),
-            !app.busy(),
-        ));
-    }
-    let detail = if let Some(draft) = app.editor.as_ref() {
-        editor(app, draft)
-    } else if let Some(item) = &app.item {
-        details(app, item)
-    } else {
-        column![
-            panel(
-                column![
+    let detail =
+        if let Some(draft) = app.editor.as_ref() {
+            editor(app, draft)
+        } else if let Some(item) = &app.item {
+            details(app, item)
+        } else {
+            column![
+                panel(
+                    column![
                     text(if app.items.is_empty() {
                         "Add your first item"
                     } else {
@@ -969,56 +1063,64 @@ fn vault(app: &App) -> Element<'_, Message> {
                          change."
                     })
                     .size(16),
-                    row![
-                        primary(
-                            "Add item",
-                            Message::Navigate(Navigate::New),
-                            app.writes_allowed()
-                        ),
-                        action(
-                            "Import passwords",
-                            Message::OpenFileTool(workflows::FileOperation::Import),
-                            !app.busy()
-                        )
-                    ]
+                    if app.items.is_empty() {
+                        row![
+                            primary(
+                                "Add your first item",
+                                Message::Navigate(Navigate::New),
+                                app.writes_allowed()
+                            ),
+                            action(
+                                "Import passwords",
+                                Message::OpenFileTool(workflows::FileOperation::Import),
+                                !app.busy()
+                            )
+                        ]
+                    } else {
+                        row![text(format!(
+                            "{command}+F searches · {command}+N adds an item",
+                            command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
+                        ))
+                        .size(14)]
+                    }
                     .spacing(10)
                     .wrap(),
                 ]
-                .spacing(16)
-            )
-            .width(Fill),
-            panel(
-                column![
-                    text("Keep your vault in good shape").size(19),
-                    text(format!(
-                        "{} items · Encrypted on this device",
-                        app.items.len()
-                    ))
-                    .size(14),
-                    row![
-                        action(
-                            "Check vault health",
-                            Message::OpenTools(workflows::Section::Audit),
-                            !app.busy()
-                        ),
-                        action(
-                            "Create a backup",
-                            Message::OpenFileTool(workflows::FileOperation::Backup),
-                            !app.busy()
-                        )
+                    .spacing(16)
+                )
+                .width(Fill),
+                panel(
+                    column![
+                        text("Keep your vault in good shape").size(19),
+                        text(format!(
+                            "{} items · Encrypted on this device",
+                            app.items.len()
+                        ))
+                        .size(14),
+                        row![
+                            action(
+                                "Check vault health",
+                                Message::OpenTools(workflows::Section::Audit),
+                                !app.busy()
+                            ),
+                            action(
+                                "Create a backup",
+                                Message::OpenFileTool(workflows::FileOperation::Backup),
+                                !app.busy()
+                            )
+                        ]
+                        .spacing(10)
+                        .wrap(),
                     ]
-                    .spacing(10)
-                    .wrap(),
-                ]
-                .spacing(12)
-            )
-            .width(Fill),
-        ]
-        .spacing(16)
-        .width(Fill)
-        .height(Fill)
-        .into()
-    };
+                    .spacing(12)
+                )
+                .width(Fill),
+            ]
+            .spacing(16)
+            .width(Fill)
+            .height(Fill)
+            .into()
+        };
     let panes: Element<'_, Message> = if app.compact() {
         if app.editor.is_some() {
             detail
@@ -1349,6 +1451,10 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                 entry = entry.push(action("Generate", Message::Generate, enabled).padding([9, 10]));
             }
             secret = secret.push(entry);
+            if matches!(draft.kind, ItemKind::Login | ItemKind::Wifi) && !draft.password.is_empty()
+            {
+                secret = secret.push(strength_meter(draft.password.expose()));
+            }
         }
         if matches!(draft.kind, ItemKind::SshKey | ItemKind::SecureNote) {
             secret = secret.push(
@@ -1864,6 +1970,7 @@ fn generator(app: &App) -> Element<'_, Message> {
                 text_input("Generated value", app.generation.value.expose())
                     .secure(!app.generation.value.visible())
                     .padding(12),
+                strength_meter(app.generation.value.expose()),
                 row![
                     primary(
                         "Copy",
@@ -2185,7 +2292,8 @@ fn settings(app: &App) -> Element<'_, Message> {
                     Message::SaveSettings,
                     !app.busy() && app.settings.is_dirty() && app.settings.changes().is_ok()
                 ),
-                action("Reset to defaults…", Message::ResetSettings, !app.busy())
+                action("Reset to defaults…", Message::ResetSettings, !app.busy()),
+                action("Reload saved", Message::ReloadSettings, !app.busy())
             ]
             .spacing(8)
             .wrap(),
@@ -2200,19 +2308,19 @@ fn settings(app: &App) -> Element<'_, Message> {
         .size(14),
     );
     let options = column![
-        row![
-            pick_list(
-                SettingsSection::ALL,
-                Some(app.ui.settings_section),
-                Message::SettingsSection
-            )
-            .placeholder("Settings category")
-            .width(Fill)
-            .padding(10),
-            action("Refresh", Message::ReloadSettings, !app.busy()),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center),
+        SettingsSection::ALL
+            .into_iter()
+            .fold(row![].spacing(6), |sections, section| {
+                let selected = app.ui.settings_section == section;
+                sections.push(
+                    button(text(section.to_string()).size(15))
+                        .selected(selected)
+                        .padding([8, 12])
+                        .style(tab_style(selected))
+                        .on_press_maybe((!app.busy()).then_some(Message::SettingsSection(section))),
+                )
+            })
+            .wrap(),
         rule::horizontal(1),
         form,
     ]

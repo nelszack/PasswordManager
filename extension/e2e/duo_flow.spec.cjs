@@ -30,7 +30,7 @@ async function openDuoWindow(browser, page, url = `${origin}/duo`, sourceOrigin 
     const opened = browser.context.waitForEvent("page", p => p.url().includes("duo_prompt.html"));
     await page.goto(url);
     const popup = await opened;
-    await expect(popup.getByRole("heading", { name: "Duo Push" })).toBeVisible();
+    await expect(popup.getByRole("heading", { name: "Duo Push request" })).toBeVisible();
     await expect(popup.locator("#requests")).toContainText("Example VPN");
     await expect(popup.locator("#requests")).toContainText("alice@example.com");
     await expect(popup.locator("#destination")).toContainText(sourceOrigin);

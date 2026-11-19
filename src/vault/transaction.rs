@@ -100,7 +100,7 @@ impl Vault {
         let mut resolved = Vec::with_capacity(changes.len());
         for change in changes {
             let id = self
-                .entry_id(&change.entry.target)
+                .entry_id(&change.entry.target)?
                 .ok_or_else(|| VaultError::NotFound("batch target not found".into()))?;
             selected.insert(ItemId::from_public(id)?);
             resolved.push((id, change));

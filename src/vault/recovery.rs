@@ -31,7 +31,7 @@ impl Vault {
         revision: usize,
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
-        let Some(item) = self.target_item(&target) else {
+        let Some(item) = self.resolve_target(&target)? else {
             return Ok(false);
         };
         let id = item.entry.id;

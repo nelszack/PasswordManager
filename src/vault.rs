@@ -451,19 +451,50 @@ impl Vault {
     fn active_entries(&self) -> impl Iterator<Item = &VaultEntry> {
         self.active_items().map(|i| &i.entry)
     }
-    fn target_item(&self, target: &Target) -> Option<&Item> {
-        match target {
-            Target::Id(id) => self.item(*id).filter(|i| i.active()),
-            Target::Name(name) => self.active_items().find(|i| i.entry.name == *name),
-            _ => None,
+    /// Resolve an ID or name. Names match exactly first, then ignoring case;
+    /// a name shared by several items is an error rather than a silent pick.
+    fn resolve_target(&self, target: &Target) -> Result<Option<&Item>, VaultError> {
+        let name = match target {
+            Target::Id(id) => return Ok(self.item(*id).filter(|i| i.active())),
+            Target::Name(name) => name,
+            _ => return Ok(None),
+        };
+        let exact: Vec<_> = self
+            .active_items()
+            .filter(|i| i.entry.name == *name)
+            .collect();
+        let matches = if exact.is_empty() {
+            self.active_items()
+                .filter(|i| i.entry.name.to_lowercase() == name.to_lowercase())
+                .collect()
+        } else {
+            exact
+        };
+        match matches.as_slice() {
+            [] => Ok(None),
+            [item] => Ok(Some(item)),
+            items => Err(VaultError::InvalidInput(format!(
+                "{} items are named {name:?} (IDs {}); pick one by ID, for example `--id {}`",
+                items.len(),
+                items
+                    .iter()
+                    .map(|i| i.entry.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                items[0].entry.id
+            ))),
         }
     }
-    fn require_target(&self, target: &Target) -> Result<&Item, VaultError> {
-        self.target_item(target)
-            .ok_or_else(|| VaultError::NotFound("entry not found".into()))
+    /// Lenient lookup for checks that only need a unique match.
+    fn target_item(&self, target: &Target) -> Option<&Item> {
+        self.resolve_target(target).ok().flatten()
     }
-    fn entry_id(&self, target: &Target) -> Option<usize> {
-        self.target_item(target).map(|i| i.entry.id)
+    fn require_target(&self, target: &Target) -> Result<&Item, VaultError> {
+        self.resolve_target(target)?
+            .ok_or_else(|| VaultError::NotFound(not_found(target)))
+    }
+    fn entry_id(&self, target: &Target) -> Result<Option<usize>, VaultError> {
+        Ok(self.resolve_target(target)?.map(|i| i.entry.id))
     }
     #[cfg(test)]
     fn metadata(&self, id: usize) -> Option<&EntryMetadata> {
@@ -710,3 +741,12 @@ impl Vault {
 
 #[cfg(test)]
 mod benchmarks;
+
+/// A not-found message that names what was looked up.
+fn not_found(target: &Target) -> String {
+    match target {
+        Target::Id(id) => format!("no item has ID {id}"),
+        Target::Name(name) => format!("no item is named {name:?}"),
+        _ => "item not found".into(),
+    }
+}

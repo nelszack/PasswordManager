@@ -46,6 +46,19 @@ const PasswordManagerBackgroundPrompts = {
             }
         }
 
+        // Origins where the user chose "Never for this site". Missing storage
+        // (tests, restricted contexts) means nothing is excluded.
+        function neverSaveSites() {
+            return new Promise(resolve => {
+                const local = chrome.storage?.local;
+                if (typeof local?.get !== "function") return resolve([]);
+                local.get("pmNeverSave", result => {
+                    const sites = result?.pmNeverSave;
+                    resolve(Array.isArray(sites) ? sites.filter(site => typeof site === "string") : []);
+                });
+            });
+        }
+
         function invalidateCredentialPrompts() {
             generation++;
             for (const [token, pending] of pendingCredentialPrompts) {
@@ -79,6 +92,7 @@ const PasswordManagerBackgroundPrompts = {
             ) {
                 throw new Error("Invalid credential prompt request");
             }
+            if ((await neverSaveSites()).includes(domain)) return { success: true, skipped: true };
             const remembered = await pendingCredentials.takeRemembered(sender);
             if (epoch !== generation) return { success: true, skipped: true };
             if (!username && remembered?.domain === domain && Date.now() - remembered.time < 60_000) {
@@ -169,6 +183,13 @@ const PasswordManagerBackgroundPrompts = {
             if (["saving", "invalidatedSaving"].includes(pending.state.phase))
                 throw new Error("Credential operation is already in progress");
             if (request.selection?.action === "cancel") {
+                discardCredentialPrompt(request.token, "cancel", false);
+                return { success: true };
+            }
+            if (request.selection?.action === "never") {
+                const sites = await neverSaveSites();
+                if (!sites.includes(pending.domain) && typeof chrome.storage?.local?.set === "function")
+                    chrome.storage.local.set({ pmNeverSave: [...sites, pending.domain].slice(-500) });
                 discardCredentialPrompt(request.token, "cancel", false);
                 return { success: true };
             }

@@ -22,7 +22,7 @@ impl Vault {
         let item = self
             .item(id)
             .filter(|i| i.active())
-            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
+            .ok_or_else(|| VaultError::NotFound(format!("no item has ID {id}")))?;
         let e = &item.entry;
         Ok(ItemDetail {
             id,
@@ -57,9 +57,7 @@ impl Vault {
         })
     }
     pub fn target_detail(&self, target: &Target, reveal: bool) -> Result<ItemDetail, VaultError> {
-        let id = self
-            .entry_id(target)
-            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
+        let id = self.require_target(target)?.entry.id;
         self.management_item(id, reveal)
     }
 }

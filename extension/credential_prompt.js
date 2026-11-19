@@ -18,8 +18,9 @@ function showError(error) {
 
 async function complete(action) {
     if (completing) return;
-    if (uncertain && action !== "cancel") return;
-    if (action !== "cancel" && !form.reportValidity()) return;
+    const dismissing = action === "cancel" || action === "never";
+    if (uncertain && !dismissing) return;
+    if (!dismissing && !form.reportValidity()) return;
     completing = true;
     const response = await send({
         action: "completeCredentialPrompt",
@@ -61,7 +62,7 @@ async function load() {
     usernameLabel.hidden = !data.askForUsername;
     updateButton.hidden = !data.hasAccounts;
     if (data.updateTarget?.name) {
-        updateButton.textContent = `Update ${data.updateTarget.name}`;
+        updateButton.textContent = `Update “${data.updateTarget.name}”`;
     }
     form.hidden = false;
     (data.askForUsername ? usernameInput : nameInput).focus();
@@ -76,6 +77,9 @@ updateButton.addEventListener("click", event => {
 });
 document.getElementById("cancel").addEventListener("click", event => {
     if (event.isTrusted) complete("cancel").catch(showError);
+});
+document.getElementById("never").addEventListener("click", event => {
+    if (event.isTrusted) complete("never").catch(showError);
 });
 
 document.getElementById("reviewOutcome").addEventListener("click", event => {

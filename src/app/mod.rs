@@ -42,7 +42,23 @@ pub async fn run(
     .await
     {
         if !server_running() {
-            console.exit_error("Server is not running. Start it with `pm start`.", 1);
+            // Creating or opening a vault needs the server, so start it
+            // instead of making the user run `pm start` first.
+            if matches!(
+                command,
+                CliCommands::New { .. } | CliCommands::Unlock { .. }
+            ) {
+                if let Err(error) = password_manager::server::start(port) {
+                    console.exit_error(&format!("Could not start the server: {error}"), 1);
+                }
+                console.print_warning("Started the background server.");
+            } else {
+                console.exit_error(
+                    "Server is not running, so no vault is open. Run `pm unlock` to start it \
+                     and open your vault.",
+                    1,
+                );
+            }
         }
         remote::run(command, &conf, &client, &console).await;
     }

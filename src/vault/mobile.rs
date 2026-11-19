@@ -641,7 +641,7 @@ impl MobileVault {
             return Err(required.into());
         }
         // Saving an item without changes succeeds, as the app has always shown.
-        let existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).is_some());
+        let existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).ok().flatten().is_some());
         if let Some(expected) = expected_revision
             && !operations::expected_revision_matches(Some(vault), &command, expected)
         {

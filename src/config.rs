@@ -161,7 +161,7 @@ impl Default for RecoveryConfig {
 impl Default for GeneratorConfig {
     fn default() -> Self {
         Self {
-            length: 12,
+            length: 20,
             stats: false,
             copy: true,
         }

@@ -171,6 +171,21 @@ abstract class ManagementActivity : VaultActivity() {
         }
     }
 
+    /** Spinner showing plain-language labels; the getter returns the matching command value. */
+    protected fun labeledChoice(
+        title: String,
+        options: List<Pair<String, String>>,
+        selected: String? = null,
+    ): () -> String {
+        val spinner =
+            choice(
+                title,
+                options.map { it.second },
+                options.firstOrNull { it.first == selected }?.second,
+            )
+        return { options[spinner.selectedItemPosition.coerceIn(0, options.lastIndex)].first }
+    }
+
     protected fun toggle(title: String, checked: Boolean = false) =
         CheckBox(this).apply {
             text = title
@@ -230,20 +245,24 @@ abstract class ManagementActivity : VaultActivity() {
         rootNavigation("Tools")
         label("Everything you need to manage and recover your vault.")
         section("Everyday tools")
-        actionRow("Add item", "Logins, notes, cards, keys and more", "+") { typedEditor(null) }
-        actionRow("Advanced search", "Filter by type, website or password health", "S") {
+        actionRow("Add item", "Logins, notes, cards, keys and more", "add") { typedEditor(null) }
+        actionRow("Advanced search", "Filter by type, website or password health", "search") {
             advancedSearch()
         }
         actionRow("Password generator", "Strong passwords and memorable passphrases", "G") {
             generator()
         }
         section("Security")
-        actionRow("Vault health", "Review weak, reused or outdated passwords", "H") { auditForm() }
-        actionRow("Vault credentials", "Change your master password or key", "K") { credentials() }
+        actionRow("Vault health", "Review weak, reused or outdated passwords", "health") {
+            auditForm()
+        }
+        actionRow("Vault credentials", "Change your master password or key", "key") {
+            credentials()
+        }
         section("Recovery & data")
-        actionRow("Deleted items", "Restore items or review your trash", "R") { trash() }
+        actionRow("Deleted items", "Restore items or review your trash", "restore") { trash() }
         actionRow("Files & backups", "Encrypted backups and import / export", "B") { files() }
-        actionRow("Sync controls", "Connection status and synchronization", "S") { syncControls() }
+        actionRow("Sync controls", "Connection status and synchronization", "sync") { syncControls() }
         actionRow("Mobile settings", "Locking, clipboard and generator preferences") {
             preferences(back = { tools() })
         }
@@ -534,7 +553,11 @@ abstract class ManagementActivity : VaultActivity() {
             "Use a fresh activation link for a separate device. Enrollment consumes the link. Existing push credentials are never replaced without confirmation."
         )
         val activation = edit("Duo activation link", secret = true)
-        val mode = choice("Passcode mode", listOf("hotp", "totp"))
+        val mode =
+            labeledChoice(
+                "Passcode mode",
+                listOf("hotp" to "Counter-based codes (HOTP)", "totp" to "Time-based codes (TOTP)"),
+            )
         val push = toggle("Enroll push credentials", true)
         val replace = toggle("Replace existing enrollment")
         button("Enroll Duo") {
@@ -546,7 +569,7 @@ abstract class ManagementActivity : VaultActivity() {
                         VaultCommands.duoEnroll(
                             id,
                             link,
-                            mode.selectedItem.toString(),
+                            mode(),
                             push.isChecked,
                             replace.isChecked,
                         )
@@ -556,7 +579,7 @@ abstract class ManagementActivity : VaultActivity() {
                 }
             }
         }
-        button("Review pending push requests") { duoRequests(id) }
+        button("Check Duo Push requests") { duoInbox(listOf(id to ""), back = { duo(id) }) }
         button("Remove local push credentials") {
             confirm(
                 "Remove this item's local push credentials? Passcodes remain; remove the device in Duo separately."
@@ -567,31 +590,68 @@ abstract class ManagementActivity : VaultActivity() {
         button("Back to authenticator") { authenticator(id) }
     }
 
-    private fun duoRequests(id: Long) {
-        task({ Vault.command(VaultCommands.duoRequests(id)) as JSONArray }) { requests ->
-            page("Review Duo requests")
-            pageBack = { duo(id) }
-            if (requests.length() == 0) label("No pending requests")
-            for (i in 0 until requests.length()) {
-                val request = requests.getJSONObject(i)
-                label(
-                    "${request.getString("application")}\n${request.getString("username")}\n${request.getString("location")}\n${request.getString("summary")}\nExpires: ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(request.getLong("expires_at") * 1000))}"
-                )
-                val code = edit("Verified Push code from the login page", secret = true)
-                val unsupported = request.opt("unsupported") as? String
-                if (unsupported != null) label(unsupported)
-                for (approve in listOf(true, false)) button(
-                    if (approve) "Approve request" else "Deny request"
-                ) {
-                    check(!approve || unsupported == null) {
-                        "This request type cannot be approved"
-                    }
-                    val supplied = code.text.toString()
-                    code.text.clear()
-                    confirm(
-                        if (approve) "Approve this exact reviewed login request?"
-                        else "Deny this exact reviewed login request?"
-                    ) {
+    /**
+     * Every pending push for [accounts] on one page. The card is the review, so Approve or
+     * Deny answers it in one tap; the buttons wake after a short pause so a tap meant for the
+     * previous screen cannot answer a request, and the server re-checks the request's
+     * fingerprint before responding.
+     */
+    protected fun duoInbox(
+        accounts: List<Pair<Long, String>>,
+        back: () -> Unit,
+        message: String = "",
+    ) {
+        task({
+            accounts.map { (id, name) ->
+                Triple(id, name, runCatching { Vault.command(VaultCommands.duoRequests(id)) as JSONArray })
+            }
+        }) { results ->
+            page("Duo Push")
+            pageBack = back
+            if (message.isNotBlank()) notice(message)
+            val now = System.currentTimeMillis() / 1000
+            val guarded = mutableListOf<Button>()
+            var pending = 0
+            for ((id, name, result) in results) {
+                val requests = result.getOrNull()
+                if (requests == null) {
+                    label("$name: ${result.exceptionOrNull()?.message ?: "Could not check requests"}")
+                    continue
+                }
+                for (i in 0 until requests.length()) {
+                    val request = requests.getJSONObject(i)
+                    val expires = request.getLong("expires_at")
+                    if (expires <= now) continue
+                    pending++
+                    section(request.getString("application").ifBlank { name.ifBlank { "Duo login" } })
+                    label(
+                        listOfNotNull(
+                            "Account: ${request.getString("username").ifBlank { "Not provided" }}",
+                            "Location: ${request.getString("location").ifBlank { "Not provided" }}",
+                            request.getString("summary").ifBlank { null },
+                            name.takeIf { it.isNotBlank() }?.let { "Saved login: $it" },
+                            "Expires ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(expires * 1000))}",
+                        ).joinToString("\n")
+                    )
+                    val unsupported = request.opt("unsupported") as? String
+                    val digits = (request.opt("code_digits") as? Number)?.toInt()
+                    val code =
+                        if (digits != null && unsupported == null)
+                            edit("$digits-digit code shown on the login page", secret = true).apply {
+                                inputType =
+                                    android.text.InputType.TYPE_CLASS_NUMBER or
+                                        android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                            }
+                        else null
+                    if (unsupported != null) notice("This request can't be approved here: $unsupported")
+                    fun respond(approve: Boolean) {
+                        val supplied = code?.text?.toString().orEmpty()
+                        if (approve && digits != null && !Regex("[0-9]{$digits}").matches(supplied)) {
+                            code?.requestFocus()
+                            error("Enter the $digits-digit code shown on the login page.")
+                        }
+                        code?.text?.clear()
+                        guarded.forEach { it.isEnabled = false }
                         task({
                             Vault.command(
                                 VaultCommands.duoRespond(
@@ -599,19 +659,33 @@ abstract class ManagementActivity : VaultActivity() {
                                     request.getString("id"),
                                     request.getString("fingerprint"),
                                     approve,
-                                    supplied,
+                                    if (approve) supplied else "",
                                 )
                             ) as String
-                        }) {
-                            label(it)
-                        }
+                        }) { outcome -> duoInbox(accounts, back, outcome) }
                     }
+                    val (approve, deny) =
+                        pairedActions("Approve", "Deny", { respond(true) }, { respond(false) })
+                    if (unsupported == null) guarded.add(approve) else approve.isEnabled = false
+                    guarded.add(deny)
                 }
             }
-            button("Refresh requests") { duoRequests(id) }
-            button("Back to Duo") { duo(id) }
+            if (pending == 0) {
+                label("No pending Duo Push requests.", 18f)
+                label("Start the login on your other device, then check again.", 13f)
+            } else label("Approve only a login you started.", 13f)
+            primary("Check again") { duoInbox(accounts, back) }
+            guarded.forEach { it.isEnabled = false }
+            ui.postDelayed({ guarded.forEach { it.isEnabled = true } }, DUO_INPUT_GUARD_MS)
         }
     }
+
+    /** Duo-enrolled items, by name, from an item list response. */
+    protected fun duoAccounts(entries: JSONArray): List<Pair<Long, String>> =
+        (0 until entries.length())
+            .map(entries::getJSONObject)
+            .filter { it.optBoolean("has_duo") }
+            .map { it.getLong("id") to it.getString("name") }
 
     protected fun generator(use: ((String) -> Unit)? = null, back: (() -> Unit)? = null) {
         task({ Vault.json("settings_get") }) { defaults ->
@@ -675,11 +749,34 @@ abstract class ManagementActivity : VaultActivity() {
         val user = edit("Username contains")
         val url = edit("Website contains")
         val notes = edit("Notes contain", secret = true)
-        val kind = choice("Item type", listOf("all") + kinds)
-        val otp = choice("Authenticator", listOf("any", "present", "missing"))
+        val kind =
+            labeledChoice(
+                "Item type",
+                listOf("all" to "All types") + kinds.map { it to MobileUi.kindLabel(it) },
+            )
+        val otp =
+            labeledChoice(
+                "Authenticator",
+                listOf(
+                    "any" to "Any",
+                    "present" to "Has verification codes",
+                    "missing" to "No verification codes",
+                ),
+            )
         val weak = toggle("Weak passwords only")
-        val days = edit("Password age in days (optional)")
-        val sort = choice("Sort by", listOf("id", "name", "created", "modified", "password-age"))
+        val days = edit("Password older than (days, optional)")
+        days.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        val sort =
+            labeledChoice(
+                "Sort by",
+                listOf(
+                    "name" to "Name",
+                    "modified" to "Recently changed",
+                    "created" to "Date added",
+                    "password-age" to "Password age",
+                    "id" to "Item number",
+                ),
+            )
         val descending = toggle("Descending")
         button("Search items") {
             fun text(field: EditText) = field.text.toString().takeIf(String::isNotEmpty)
@@ -690,24 +787,35 @@ abstract class ManagementActivity : VaultActivity() {
                     username = text(user),
                     url = text(url),
                     notes = text(notes),
-                    kind = kind.selectedItem.toString().takeUnless { it == "all" },
+                    kind = kind().takeUnless { it == "all" },
                     hasTotp =
-                        when (otp.selectedItemPosition) {
-                            1 -> true
-                            2 -> false
+                        when (otp()) {
+                            "present" -> true
+                            "missing" -> false
                             else -> null
                         },
                     weak = weak.isChecked,
-                    staleDays = days.text.toString().takeIf(String::isNotBlank)?.toLong(),
-                    sort = sort.selectedItem.toString(),
+                    staleDays = days.text.toString().trim().toLongOrNull(),
+                    sort = sort(),
                     descending = descending.isChecked,
                 )
             task({ Vault.commandJson(filter).getJSONArray("items") }) { entries ->
                 page("Search results")
-                label("${entries.length()} matching items")
+                label(
+                    if (entries.length() == 0) "No items match. Loosen a filter and try again."
+                    else "${entries.length()} matching ${if (entries.length() == 1) "item" else "items"}"
+                )
                 for (i in 0 until entries.length()) {
                     val entry = entries.getJSONObject(i)
-                    button(entry.getString("name")) { showDetail(entry.getLong("id")) }
+                    val type = entry.optString("kind")
+                    val summary =
+                        listOf(entry.opt("username") as? String ?: "", MobileUi.kindLabel(type))
+                            .filter(String::isNotBlank)
+                            .joinToString(" · ")
+                    val title = entry.getString("name")
+                    actionRow(title, summary, MobileUi.initial(title, type)) {
+                        showDetail(entry.getLong("id"))
+                    }
                 }
                 button("Search again") { advancedSearch() }
                 button("Back to tools") { tools() }
@@ -1117,9 +1225,17 @@ abstract class ManagementActivity : VaultActivity() {
     private fun importForm(uri: Uri) {
         page("Import items")
         pageBack = { files() }
-        val policy = choice("Duplicate policy", listOf("skip", "replace", "keep-both"))
+        val policy =
+            labeledChoice(
+                "When an item already exists",
+                listOf(
+                    "skip" to "Keep the existing item",
+                    "replace" to "Replace it with the imported item",
+                    "keep-both" to "Keep both",
+                ),
+            )
         button("Preview import") {
-            val selected = policy.selectedItem.toString()
+            val selected = policy()
             task({
                 withEncodedFile(uri) { data ->
                     Vault.json(
@@ -1290,5 +1406,7 @@ abstract class ManagementActivity : VaultActivity() {
         const val OPEN_DOCUMENT = 31
         /** Matches the Rust mobile transfer limit. */
         const val MAX_TRANSFER = 16 * 1024 * 1024
+        /** Approve/Deny stay disabled this long after a Duo page appears. */
+        const val DUO_INPUT_GUARD_MS = 600L
     }
 }

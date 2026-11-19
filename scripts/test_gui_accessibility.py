@@ -307,14 +307,13 @@ def main():
         if args.xvfb:
             subprocess.run(["xdotool", "windowsize", xwindow, "480", "480"], env=env, check=True)
             def resized_category():
-                node = find(gui.pid, "combo box", "Settings category")
+                node = find(gui.pid, "button", "Connection")
                 if not node:
                     return False
                 bounds = node.get_component_iface().get_extents(Atspi.CoordType.WINDOW)
                 return bounds.x >= 0 and bounds.x + bounds.width <= 481
             wait_for(resized_category)
-            click(gui.pid, "Settings category", "combo box")
-            click(gui.pid, "Passwords", "menu item")
+            click(gui.pid, "Passwords", "button")
             visited = []
             result["tabbed_controls"] = visited
             def focused_control():
@@ -342,8 +341,17 @@ def main():
             time.sleep(0.5)
         pm("new", "--key", str(key))
         pm("unlock", "--key", str(key), "--timeout", "0")
-        click(gui.pid, "Vault")
-        wait_for(lambda: find(gui.pid, "button", "Refresh items"))
+        # Tabs are disabled while the app refreshes after the external unlock,
+        # so a click that races that refresh is retried rather than lost.
+        wait_for(lambda: find(gui.pid, "label", "Vault unlocked"))
+        for attempt in range(3):
+            click(gui.pid, "Vault")
+            try:
+                wait_for(lambda: find(gui.pid, "button", "Advanced search"), timeout=8)
+                break
+            except AssertionError:
+                if attempt == 2:
+                    raise
         time.sleep(0.5)
         click(gui.pid, "Add item")
         wait_for(lambda: find(gui.pid, ["entry", "text"], "Item name"))
@@ -395,7 +403,7 @@ def main():
             subprocess.run(["xdotool", "mousemove", "--window", xwindow,
                             str(bounds.x + bounds.width // 2), str(bounds.y + bounds.height // 2),
                             "click", "1"], env=env, check=True)
-            wait_for(lambda: find(gui.pid, "combo box", "Settings category"))
+            wait_for(lambda: find(gui.pid, "button", "Appearance"))
             result["checks"]["native_pointer_matches_accessible_bounds"] = True
         time.sleep(2)
         assert reader.poll() is None, "Orca exited during the check"

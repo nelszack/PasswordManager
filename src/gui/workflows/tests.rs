@@ -499,13 +499,8 @@ fn duo_decisions_capture_the_reviewed_fingerprint_and_verified_code() {
         .workspace
         .prepare(Action::Respond(0, true), &app)
         .unwrap();
-    assert!(
-        prepared
-            .confirmation
-            .as_ref()
-            .unwrap()
-            .contains("Example City")
-    );
+    // The request card is the review, so a decision needs no second confirmation.
+    assert!(prepared.confirmation.is_none());
     let ServerCommand::Duo(DuoCommand::Respond {
         request_id,
         fingerprint,
@@ -717,15 +712,21 @@ fn duo_polling_pauses_during_review_and_refreshes_after_a_decision() {
     app.workspace.section = Section::Security;
     app.workspace.duo.watch = Some(WatchTarget::selected(&app).unwrap());
     receive_duo(&mut app, vec![duo_request()]);
-    let _ = app.workflow(Event::Run(Action::Respond(0, false)));
-    assert!(app.workspace.prepared.is_some());
     let now = Instant::now();
     app.workspace.last_watch = now - Duration::from_secs(5);
     app.connection.last_status = now;
     let _ = app.update(super::super::Message::Tick(now));
-    assert!(!app.polling() && !app.busy());
-    let _ = app.workflow(Event::Confirm);
-    assert!(app.busy() && !app.polling());
+    assert!(
+        !app.polling() && !app.busy(),
+        "an unanswered request pauses polling"
+    );
+    app.workspace.duo.shown_at = Some(now - DUO_INPUT_GUARD);
+    let _ = app.workflow(Event::Run(Action::Respond(0, false)));
+    assert!(app.workspace.prepared.is_none());
+    assert!(
+        app.busy() && !app.polling(),
+        "one click answers the request"
+    );
     let reply = workflow_reply(&app, ResponsePayload::Message("Denied".into()));
     let _ = app.update(super::super::Message::Finished(
         app.serial,
@@ -1396,4 +1397,29 @@ fn every_public_cli_command_has_an_entry_in_the_desktop_feature_map() {
             );
         }
     }
+}
+
+#[test]
+fn duo_decisions_are_ignored_until_new_requests_have_been_visible_briefly() {
+    let mut app = app();
+    receive_duo(&mut app, vec![duo_request()]);
+    let serial = app.serial;
+    let _ = app.workflow(Event::Run(Action::Respond(0, false)));
+    assert_eq!(
+        app.serial, serial,
+        "a click right after requests appear is ignored"
+    );
+    assert!(!app.busy() && app.notice.contains("just appeared"));
+    // An identical refresh keeps the review time; a changed list restarts it.
+    let shown = Instant::now() - DUO_INPUT_GUARD;
+    app.workspace.duo.shown_at = Some(shown);
+    receive_duo(&mut app, vec![duo_request()]);
+    assert_eq!(app.workspace.duo.shown_at, Some(shown));
+    let mut other = duo_request();
+    other.fingerprint = "different-fingerprint".into();
+    receive_duo(&mut app, vec![other]);
+    assert!(app.workspace.duo.shown_at.unwrap() > shown);
+    app.workspace.duo.shown_at = Some(shown);
+    let _ = app.workflow(Event::Run(Action::Respond(0, false)));
+    assert!(app.busy(), "after the pause, one click answers");
 }

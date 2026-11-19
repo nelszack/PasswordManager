@@ -9,7 +9,7 @@ const files = [
     "background_prompts.js", "background_router.js", "background_duo.js",
     "native_protocol.js", "pending_credentials.js", "credential_prompt_state.js", "duo_detection.js",
     "content_runtime.js", "ui_transport.js", "ui_session.js", "common.css",
-    "popup.html", "popup.js", "popup_state.js", "popup.css",
+    "popup.html", "popup.js", "popup_state.js", "popup.css", "password_generator.js",
     "picker.html", "picker.js", "picker_state.js", "picker.css",
     "credential_prompt.html", "credential_prompt.js", "credential_prompt.css",
     "duo_prompt.html", "duo_prompt.js", "duo_prompt.css",

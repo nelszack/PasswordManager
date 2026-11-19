@@ -361,7 +361,7 @@ test.describe("extended credential flows", () => {
         await page.locator("#username").fill("alice@example.com");
         await page.locator("#password").fill("alice-updated-password");
         const accountUpdate = await openPrompt(browser.context, page.locator("#submit"));
-        await expect(accountUpdate.locator("#update")).toHaveText("Update Alice");
+        await expect(accountUpdate.locator("#update")).toHaveText("Update “Alice”");
         await accountUpdate.locator("#update").click();
         const updateRequest = await waitForNativeRequest(browser.nativeLog, request =>
             request.action === "updateCredentials" && request.password === "alice-updated-password"

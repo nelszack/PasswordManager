@@ -20,7 +20,7 @@ test("position measurements defer writes and unchanged positions avoid style mut
         const position = positionedButton(input,{style},30);
         const apply = position.measure();
         assert.equal(writes,0);
-        apply(); assert.equal(style.left,"90px"); assert.equal(style.top,"6px");
+        apply(); assert.equal(style.left,"90px"); assert.equal(style.top,"6px"); assert.equal(style.display,"flex");
         const before = writes; position(); assert.equal(writes,before);
         input.isConnected=false; position(); assert.equal(style.display,"none");
     } finally { global.getComputedStyle=previous; }
@@ -54,4 +54,23 @@ test("layout frames measure every control before applying any position", () => {
             if (value===undefined) delete global[key]; else global[key]=value;
         }
     }
+});
+
+test("controls step left of site icons that cover the field's right edge", () => {
+    const { positionedButton } = require("./content_controls.js");
+    const previous = { getComputedStyle: global.getComputedStyle, document: global.document };
+    global.getComputedStyle = () => ({ display: "block", visibility: "visible", opacity: "1" });
+    try {
+        const input = { isConnected: true, nodeType: 1, getBoundingClientRect: () => ({ left: 20, width: 100, height: 20, right: 120, top: 10 }) };
+        const ours = { classList: { contains: name => name === "my-extension-ui" } };
+        let hits = [];
+        global.document = { elementsFromPoint: () => hits };
+        const style = {};
+        const position = positionedButton(input, { style }, 30);
+        hits = [ours, input]; position(); assert.equal(style.left, "90px");
+        hits = [ours, { classList: { contains: () => false }, contains: () => false }]; position();
+        assert.equal(style.left, "58px", "site icon on top");
+        hits = [{ contains: node => node === input }]; position(); assert.equal(style.left, "90px", "ancestor wrapper");
+        hits = []; position(); assert.equal(style.left, "90px");
+    } finally { Object.assign(global, previous); if (!previous.document) delete global.document; }
 });

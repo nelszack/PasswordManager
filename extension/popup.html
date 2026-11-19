@@ -10,20 +10,47 @@
 </head>
 
 <body>
+  <header class="brand">
+    <img src="icons/icon32.png" alt="">
+    <h1>Password Manager</h1>
+  </header>
 
-  <h3>Password Manager</h3>
-
-  <div id="statusRow" role="status" aria-live="polite">
-    <span id="statusDot"></span>
-    <span id="statusText">Checking...</span>
+  <div id="statusCard" class="card">
+    <div id="statusRow" role="status" aria-live="polite">
+      <span id="statusDot"></span>
+      <strong id="statusText">Checking…</strong>
+    </div>
+    <p id="nativeHint" class="hint">Checking the local vault connection…</p>
   </div>
 
-  <p id="nativeHint">Checking the local vault connection…</p>
+  <div class="actions">
+    <button id="openDesktopBtn" class="primary">Open desktop app</button>
+    <button id="lockBtn" disabled>Lock vault</button>
+  </div>
 
-  <button id="openDesktopBtn">Open Desktop App</button>
-  <button id="lockBtn" disabled>Lock Vault</button>
-  <p>Open Password Manager on your desktop to unlock and edit your vault.</p>
-  <section id="recovery" hidden>
+  <section id="generator" class="card" aria-labelledby="generatorTitle">
+    <h2 id="generatorTitle">Generate a password</h2>
+    <div class="generated">
+      <output id="genValue" aria-live="polite"></output>
+      <button id="genNew" class="quiet" title="Generate another" aria-label="Generate another password">↻</button>
+    </div>
+    <button id="genCopy">Copy password</button>
+    <label class="range">Length <span id="genLengthValue"></span>
+      <input id="genLength" type="range" min="8" max="64" step="1">
+    </label>
+    <div class="toggles">
+      <label><input id="genSymbols" type="checkbox"> Symbols</label>
+      <label><input id="genPassphrase" type="checkbox"> Use words</label>
+    </div>
+    <p class="hint">These settings are also used by the ✨ button on sign-up forms.</p>
+  </section>
+
+  <details id="neverSave" hidden>
+    <summary>Sites that never offer to save (<span id="neverCount">0</span>)</summary>
+    <ul id="neverList"></ul>
+  </details>
+
+  <section id="recovery" class="card" hidden>
     <label for="operation">A previous change needs review</label>
     <select id="operation"></select>
     <button id="reviewOperation">Check outcome</button>
@@ -36,6 +63,7 @@
 
   <div id="output" role="status" aria-live="polite"></div>
 
+  <script src="password_generator.js"></script>
   <script src="popup_state.js"></script>
   <script src="popup.js"></script>
 </body>

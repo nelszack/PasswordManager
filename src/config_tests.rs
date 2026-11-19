@@ -129,7 +129,7 @@ fn defaults_and_single_field_updates_preserve_other_settings() {
     for (length, persist_defaults) in [(24, true), (50, false)] {
         let (_directory, config_path) = isolated_config();
         let original = default_test_config(persist_defaults, &config_path);
-        assert_eq!(original.genpass.length, 12);
+        assert_eq!(original.genpass.length, 20);
         assert!(!original.genpass.stats);
         assert!(original.genpass.copy);
         assert_eq!(original.clipboard.timeout, 15);

@@ -40,7 +40,14 @@ pub(super) async fn run(
         }
 
         CliCommands::Vaults => match vault::list_vaults() {
-            Ok(names) => console.print_data(serde_json::json!(&names), &names.join("\n")),
+            Ok(names) => console.print_data(
+                serde_json::json!(&names),
+                &if names.is_empty() {
+                    "No vaults found. Create one with `pm new`.".into()
+                } else {
+                    names.join("\n")
+                },
+            ),
             Err(error) => console.exit_error(&error.to_string(), 1),
         },
         CliCommands::GenerateCommandContract { check } => {

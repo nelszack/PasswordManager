@@ -12,7 +12,11 @@ pub fn render(payload: &ResponsePayload) -> String {
         ResponsePayload::Secret(secret) => secret.expose().to_owned(),
         ResponsePayload::Status(status) => format!(
             "Status: {}\nVersion: {}{}",
-            if status.locked { "Locked" } else { "Unlocked" },
+            if status.locked {
+                "Locked (run `pm unlock` to open your vault)"
+            } else {
+                "Unlocked"
+            },
             status.version,
             status
                 .warning
@@ -59,55 +63,73 @@ pub fn render(payload: &ResponsePayload) -> String {
         ),
         ResponsePayload::ItemPage(page) => {
             if page.items.is_empty() {
-                return "No entries.".into();
+                return "No items. Add one with `pm add --name NAME` or import with `pm import`."
+                    .into();
             }
-            page.items
+            let mut listing: String = page
+                .items
                 .iter()
                 .map(|item| {
-                    format!(
-                        "{}. {} [{}]\n   Username: {}\n   URLs: {}{}\n",
+                    let mut block = format!(
+                        "#{} {} ({}{})\n",
                         item.id,
                         metadata(&item.name).as_str(),
                         item.kind,
-                        optional_metadata(item.username.as_deref()),
-                        urls(&item.urls),
-                        if item.has_totp { " [OTP]" } else { "" }
-                    )
+                        if item.has_totp { ", OTP" } else { "" }
+                    );
+                    if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
+                        block += &format!("   Username: {}\n", metadata(username).as_str());
+                    }
+                    if !item.urls.is_empty() {
+                        block += &format!("   URLs: {}\n", urls(&item.urls));
+                    }
+                    block
                 })
-                .collect()
+                .collect();
+            let shown = page.items.len();
+            let count = if shown == page.total {
+                format!("{shown} {}", if shown == 1 { "item" } else { "items" })
+            } else {
+                format!("{shown} of {} items", page.total)
+            };
+            listing += &format!("\n{count}. Show one with `pm get NAME` or `pm get --id ID`.\n");
+            listing
         }
         ResponsePayload::Item(item) => {
-            let fields = item
-                .fields
-                .iter()
-                .map(|f| {
+            let mut lines = vec![
+                format!("Name:     {}", metadata(&item.name).as_str()),
+                format!("Type:     {}", item.kind),
+            ];
+            if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
+                lines.push(format!("Username: {}", metadata(username).as_str()));
+            }
+            if !item.urls.is_empty() {
+                lines.push(format!("URLs:     {}", urls(&item.urls)));
+            }
+            lines.push(format!(
+                "Password: {}",
+                item.password
+                    .as_ref()
+                    .map(|v| metadata(v.expose()).to_string())
+                    .unwrap_or_else(|| "<hidden> (use --password-only to print it)".into())
+            ));
+            if let Some(notes) = item.notes.as_ref().filter(|n| !n.expose().is_empty()) {
+                lines.push(format!("Notes:    {}", metadata(notes.expose()).as_str()));
+            }
+            if !item.fields.is_empty() {
+                lines.push("Custom fields:".into());
+                lines.extend(item.fields.iter().map(|f| {
                     format!(
-                        "{}={}",
+                        "  {}: {}",
                         metadata(&f.name).as_str(),
                         f.value
                             .as_ref()
                             .map(|v| metadata(v.expose()).to_string())
-                            .unwrap_or_else(|| "<redacted>".into())
+                            .unwrap_or_else(|| "<hidden> (use --reveal-secrets)".into())
                     )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "Name: {}\nType: {}\nUsername: {}\nURLs: {}\nNotes: {}\nPassword: {}\nCustom fields:\n{}\n",
-                metadata(&item.name).as_str(),
-                item.kind,
-                optional_metadata(item.username.as_deref()),
-                urls(&item.urls),
-                item.notes
-                    .as_ref()
-                    .map(|v| metadata(v.expose()).to_string())
-                    .unwrap_or_default(),
-                item.password
-                    .as_ref()
-                    .map(|v| metadata(v.expose()).to_string())
-                    .unwrap_or_else(|| "<redacted>".into()),
-                fields
-            )
+                }));
+            }
+            lines.join("\n") + "\n"
         }
         ResponsePayload::Audit(report) => audit(report),
         ResponsePayload::ImportReport(report) => import_report(report),
@@ -119,7 +141,11 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .iter()
                 .enumerate()
                 .map(|(index, changed)| {
-                    format!("{}. changed {}\n", index + 1, metadata(changed).as_str())
+                    format!(
+                        "{}. changed {}\n",
+                        index + 1,
+                        metadata(&timestamp(changed)).as_str()
+                    )
                 })
                 .collect()
         }
@@ -131,11 +157,11 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .iter()
                 .map(|item| {
                     format!(
-                        "{}. {} [{}] deleted {}\n",
+                        "#{} {} ({}) deleted {}\n",
                         item.id,
                         metadata(&item.name).as_str(),
                         item.kind,
-                        metadata(&item.deleted).as_str(),
+                        metadata(&timestamp(&item.deleted)).as_str(),
                     )
                 })
                 .collect()
@@ -197,7 +223,7 @@ pub fn audit(findings: &crate::vault::AuditReport) -> String {
             "Stale password: {}. {} (last changed {})\n",
             entry.id,
             metadata(&entry.name).as_str(),
-            metadata(&entry.password_changed).as_str()
+            metadata(&timestamp(&entry.password_changed)).as_str()
         ));
     }
     for entry in missing_totp {
@@ -285,5 +311,34 @@ fn urls(values: &[String]) -> String {
             .map(|v| metadata(v).to_string())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+/// Show RFC 3339 instants as `YYYY-MM-DD HH:MM UTC`; leave anything else unchanged.
+fn timestamp(value: &str) -> String {
+    let utc = value.ends_with('Z') || value.ends_with("+00:00");
+    match (value.get(..10), value.get(10..11), value.get(11..16)) {
+        (Some(date), Some("T"), Some(time)) if utc => format!("{date} {time} UTC"),
+        _ => value.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn timestamps_are_shortened_only_when_utc() {
+        assert_eq!(
+            super::timestamp("2026-11-19T04:11:18.793348284+00:00"),
+            "2026-11-19 04:11 UTC"
+        );
+        assert_eq!(
+            super::timestamp("2026-11-19T04:11:18Z"),
+            "2026-11-19 04:11 UTC"
+        );
+        assert_eq!(
+            super::timestamp("2026-11-19T04:11:18+02:00"),
+            "2026-11-19T04:11:18+02:00"
+        );
+        assert_eq!(super::timestamp("yesterday"), "yesterday");
     }
 }

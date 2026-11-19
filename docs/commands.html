@@ -235,10 +235,11 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-delete">
       <h2><code>pm delete</code></h2>
       <p>Move an entry to encrypted trash, or permanently delete an entire vault</p>
-      <pre><code>Usage: pm delete [OPTIONS]</code></pre>
+      <pre><code>Usage: pm delete [OPTIONS] [NAME]</code></pre>
       <dl class="flags">
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Name of the item to move to encrypted trash</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID to move to encrypted trash</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Exact entry name to move to encrypted trash</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Entry name to move to encrypted trash; same as the NAME argument</dd>
         <dt><code>--vault</code></dt><dd>Permanently delete the entire encrypted vault</dd>
         <dt><code>--vault-file &lt;VAULT_FILE&gt;</code></dt><dd>Select the .enc filename from `pm vaults`; otherwise use the default vault</dd>
         <dt><code>--key &lt;KEY&gt;</code></dt><dd>Key file for deleting a key-based vault; otherwise prompts for its password</dd>
@@ -251,19 +252,21 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
     <section class="command" id="pm-history">
       <h2><code>pm history</code></h2>
       <p>List saved password revisions for an entry</p>
-      <pre><code>Usage: pm history &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm history &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
       </dl>
     </section>
     <section class="command" id="pm-restore-password">
       <h2><code>pm restore-password</code></h2>
       <p>Replace an entry&#39;s current password with one of its saved revisions</p>
-      <pre><code>Usage: pm restore-password --revision &lt;REVISION&gt; &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm restore-password --revision &lt;REVISION&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--revision &lt;REVISION&gt;</code></dt><dd>Revision number shown by `pm history`</dd>
       </dl>
     </section>
@@ -308,29 +311,32 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
     <section class="command" id="pm-totp-set">
       <h2><code>pm totp set</code></h2>
       <p>Store a Base32 TOTP secret or TOTP/HOTP otpauth URI using a hidden prompt</p>
-      <pre><code>Usage: pm totp set &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp set &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
       </dl>
     </section>
     <section class="command" id="pm-totp-duo">
       <h2><code>pm totp duo</code></h2>
       <p>Enroll a Duo activation link for passcodes using a hidden prompt</p>
-      <pre><code>Usage: pm totp duo [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp duo [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--mode &lt;MODE&gt;</code></dt><dd>Passcode type accepted by your organization; cannot be inferred from the link Default: <code>hotp</code>.</dd>
       </dl>
     </section>
     <section class="command" id="pm-totp-show">
       <h2><code>pm totp show</code></h2>
       <p>Generate a TOTP code or consume and persist the next HOTP counter</p>
-      <pre><code>Usage: pm totp show [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp show [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--copy</code></dt><dd>Copy the generated code instead of only printing it</dd>
         <dt><code>--copy-time &lt;COPY_TIME&gt;</code></dt><dd>Seconds before clearing the copied code; defaults to clipboard configuration</dd>
         <dt><code>--watch</code></dt><dd>Keep displaying the current TOTP code and countdown until Ctrl+C</dd>
@@ -339,10 +345,11 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
     <section class="command" id="pm-totp-remove">
       <h2><code>pm totp remove</code></h2>
       <p>Remove the authenticator configuration from an entry</p>
-      <pre><code>Usage: pm totp remove &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp remove &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo">
@@ -355,10 +362,11 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-enroll">
       <h2><code>pm duo enroll</code></h2>
       <p>Enroll a fresh Duo link, keeping push credentials in the encrypted vault</p>
-      <pre><code>Usage: pm duo enroll [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo enroll [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--replace</code></dt><dd>Replace this entry&#39;s existing authenticator or Duo enrollment</dd>
         <dt><code>--mode &lt;MODE&gt;</code></dt><dd>Override the passcode mode; by default use Duo&#39;s enrollment response</dd>
       </dl>
@@ -366,19 +374,21 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-requests">
       <h2><code>pm duo requests</code></h2>
       <p>Fetch pending requests for one enrolled device</p>
-      <pre><code>Usage: pm duo requests &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo requests &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-watch">
       <h2><code>pm duo watch</code></h2>
       <p>Monitor pending requests; stop when the vault locks or with Ctrl+C</p>
-      <pre><code>Usage: pm duo watch [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo watch [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--interval &lt;INTERVAL&gt;</code></dt><dd>Seconds between polls. Polling does not extend the vault unlock timeout Default: <code>5</code>.</dd>
         <dt><code>--notify</code></dt><dd>Show passive desktop alerts via notify-send if installed</dd>
         <dt><code>--interactive</code></dt><dd>Review and approve/deny in this terminal with a/d, Enter to skip, or q to quit</dd>
@@ -387,30 +397,33 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-approve">
       <h2><code>pm duo approve</code></h2>
       <p>Review one request and confirm approval; prompt for a Verified Push code</p>
-      <pre><code>Usage: pm duo approve [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo approve [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID; omit when exactly one request is pending</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-deny">
       <h2><code>pm duo deny</code></h2>
       <p>Review one request and confirm denial</p>
-      <pre><code>Usage: pm duo deny [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo deny [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID; omit when exactly one request is pending</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-remove">
       <h2><code>pm duo remove</code></h2>
       <p>Remove local push credentials; remove the device separately in Duo</p>
-      <pre><code>Usage: pm duo remove &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo remove &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
       </dl>
     </section>
     <section class="command" id="pm-backup">
@@ -514,7 +527,7 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
     <section class="command" id="pm-update">
       <h2><code>pm update</code></h2>
       <p>Modify an existing item selected by stable ID or exact name</p>
-      <pre><code>Usage: pm update [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm update [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Replace the item&#39;s display name</dd>
         <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Replace the username or secondary identifier; an empty value clears it</dd>
@@ -522,8 +535,9 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
         <dt><code>--generate-password</code></dt><dd>Generate the replacement secret instead of prompting for it Default: <code>false</code>.</dd>
         <dt><code>--url &lt;URL&gt;</code></dt><dd>Replace the primary URL</dd>
         <dt><code>--notes &lt;NOTES&gt;</code></dt><dd>Replace the notes text; an empty value clears it</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--type &lt;KIND&gt;</code></dt><dd>Change the item&#39;s category</dd>
         <dt><code>--add-url &lt;ADD_URL&gt;</code></dt><dd>Add another URL without replacing the primary URL</dd>
         <dt><code>--remove-url &lt;REMOVE_URL&gt;</code></dt><dd>Remove a matching primary or additional URL</dd>
@@ -538,11 +552,12 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
       <h2><code>pm get</code></h2>
       <p>Display item details, or print its primary secret with `--password-only`.
 
-Details redact the primary secret, notes, and secret custom fields. Use --reveal-secrets to display secret custom fields. The default form copies the primary secret when the configured clipboard timeout is nonzero.</p>
-      <pre><code>Usage: pm get [OPTIONS] &lt;--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+Details hide the primary secret and secret custom fields. Use --reveal-secrets to display secret custom fields. The default form copies the primary secret when the configured clipboard timeout is nonzero.</p>
+      <pre><code>Usage: pm get [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by exact name</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
         <dt><code>--password-only</code></dt><dd>Print only the primary secret, without copying it to the clipboard</dd>
         <dt><code>--reveal-secrets</code></dt><dd>Display secret custom-field values in item details</dd>
         <dt><code>--field &lt;FIELD&gt;</code></dt><dd>Print only this custom field&#39;s value (case-insensitive name)</dd>

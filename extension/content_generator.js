@@ -1,5 +1,5 @@
 "use strict";
-const { positionedButton } = require("./content_controls.js");
+const { positionedButton, controlButton, setIcon, CONTROL_OFFSET } = require("./content_controls.js");
 const PasswordManagerGenerator = require("./password_generator.js");
 const { scopeInputs, credentialScope, isNewPasswordInput } = require("./content_detection.js");
 module.exports.create = function create({ controls, bridge, credentials }) {
@@ -37,26 +37,10 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             return;
         }
 
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "my-extension-ui";
-        button.innerText = "✨";
-        button.title = "Generate a strong password";
-        button.setAttribute("aria-label", "Generate a strong password");
-        Object.assign(button.style, {
-            position: "fixed",
-            border: "none",
-            background: "transparent",
-            cursor: "pointer",
-            fontSize: "15px",
-            zIndex: "2147483647",
-            padding: "0",
-            margin: "0",
-            display: "none",
-        });
-        document.body.appendChild(button);
+        const button = controlButton("sparkle", "Generate a strong password");
+        if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
 
-        const positionButton = positionedButton(input, button, 24);
+        const positionButton = positionedButton(input, button, CONTROL_OFFSET);
 
         button.addEventListener("click", event => {
             if (!event.isTrusted) return;
@@ -68,7 +52,10 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             targets.forEach(field => fillInput(field, password));
             credentials.lastInput = input;
             input.focus();
-            button.title = "Strong password generated and filled";
+            button.title = "Strong password filled. Click again for a different one.";
+            setIcon(button, "check");
+            showToast(input, "Strong password filled. You’ll be asked to save it after signing up.");
+            setTimeout(() => setIcon(button, "sparkle"), 2500);
         });
 
         const control = { remove: null };
@@ -76,6 +63,31 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             if (generatorControls.get(input) === control) generatorControls.delete(input);
         });
         generatorControls.set(input, control);
+    }
+
+    // Brief confirmation under the field; announced politely to screen readers.
+    function showToast(input, message) {
+        const rect = input.getBoundingClientRect();
+        const toast = document.createElement("div");
+        toast.className = "my-extension-ui";
+        toast.setAttribute("role", "status");
+        toast.textContent = message;
+        Object.assign(toast.style, {
+            position: "fixed",
+            left: Math.max(8, rect.left) + "px",
+            top: rect.bottom + 6 + "px",
+            maxWidth: "320px",
+            padding: "8px 12px",
+            borderRadius: "8px",
+            background: "#1f2a44",
+            color: "#ffffff",
+            font: "13px/1.4 system-ui, sans-serif",
+            boxShadow: "0 4px 14px rgba(0,0,0,.25)",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+        });
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3500);
     }
 
     function dispose() {

@@ -213,10 +213,28 @@ impl Options {
 impl App {
     pub(super) fn update_generator(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Generator(event) => self.generation.options.update(event),
-            Message::GeneratorLength(value) => self.generation.length = value,
-            Message::Passphrase(value) => self.generation.passphrase = value,
-            Message::Words(value) => self.generation.words = value,
+            Message::Generator(event) => {
+                let changes_output = matches!(
+                    event,
+                    Event::Toggle(..) | Event::Symbols(_) | Event::Separator(_)
+                );
+                self.generation.options.update(event);
+                if changes_output {
+                    self.refresh_preview();
+                }
+            }
+            Message::GeneratorLength(value) => {
+                self.generation.length = value;
+                self.refresh_preview();
+            }
+            Message::Passphrase(value) => {
+                self.generation.passphrase = value;
+                self.refresh_preview();
+            }
+            Message::Words(value) => {
+                self.generation.words = value;
+                self.refresh_preview();
+            }
             Message::Generate => {
                 return self.reload_then(Then::Generate);
             }
@@ -255,6 +273,35 @@ impl App {
 }
 
 impl App {
+    /// Show a fresh value without copying it: when the Generator opens empty, or
+    /// when an option changes so the displayed value always matches the options.
+    pub(super) fn preview_generated(&mut self) {
+        let Ok(policy) = self.generation.options.generation_policy(&self.conf) else {
+            return;
+        };
+        let Ok(value) = self.generation.options.generate(
+            self.generation.passphrase,
+            &self.generation.length,
+            &self.generation.words,
+        ) else {
+            return;
+        };
+        self.ui.transfer_generated = false;
+        self.generation.value = value.into();
+        self.generation.value.set_visible(false);
+        self.generation.stats = if policy.stats {
+            password_manager::password::password_strength_output(self.generation.value.expose())
+        } else {
+            String::new()
+        };
+    }
+
+    fn refresh_preview(&mut self) {
+        if self.tab == Tab::Generator && !self.generation.value.is_empty() {
+            self.preview_generated();
+        }
+    }
+
     pub(super) fn generate(&mut self) -> Task<Message> {
         let policy = match self.generation.options.generation_policy(&self.conf) {
             Ok(policy) => policy,

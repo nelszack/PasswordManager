@@ -550,6 +550,27 @@ fn generation_uses_reloaded_defaults_without_overwriting_unsaved_settings() {
     assert_eq!(app.settings.length, "40");
 }
 
+#[test]
+fn opening_the_generator_previews_a_value_without_copying_and_options_refresh_it() {
+    let mut app = app();
+    app.conf.genpass.copy = true;
+    let _ = app.update(Message::Tab(Tab::Generator));
+    let first = app.generation.value.expose().to_owned();
+    assert!(!first.is_empty(), "opening the tab shows a value");
+    assert!(!app.generation.value.visible(), "the preview starts hidden");
+    assert!(!app.busy(), "a preview never copies to the clipboard");
+    let _ = app.update(Message::GeneratorLength("32".into()));
+    assert_eq!(app.generation.value.len(), 32);
+    let _ = app.update(Message::GeneratorLength("0".into()));
+    assert_eq!(
+        app.generation.value.len(),
+        32,
+        "invalid input keeps the last value"
+    );
+    let _ = app.update(Message::Passphrase(true));
+    assert!(app.generation.value.expose().contains('-'));
+}
+
 fn editor_summary(item: &ItemDetail) -> ItemSummary {
     ItemSummary {
         id: item.id,
@@ -819,10 +840,10 @@ fn clicking_a_duo_account_fetches_once_and_never_enables_watching() {
         assert!(app.workspace.duo.watch.is_none() && !app.polling());
     }
     app.workspace.authenticator.code = "123".into();
-    let _ = app.update(Message::Workflow(workflows::Event::Run(
-        workflows::Action::Respond(0, true),
-    )));
-    let prepared = app.workspace.prepared.as_ref().unwrap();
+    let prepared = app
+        .workspace
+        .prepare(workflows::Action::Respond(0, true), &app)
+        .unwrap();
     assert_eq!(prepared.revision, Some(3));
     assert_eq!(prepared.command.revision_target(), Some(&Target::Id(1)));
     assert!(

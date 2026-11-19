@@ -355,9 +355,15 @@ pub struct DuoState {
     pub watch: Option<WatchTarget>,
     pub inflight: Option<WatchTarget>,
     pub result: Option<DuoRequests>,
+    /// When the listed requests last changed; decisions wait out [DUO_INPUT_GUARD].
+    pub shown_at: Option<Instant>,
     seen: std::collections::HashSet<String>,
     pub notify: bool,
 }
+/// Approve and Deny answer a listed request in one click, so a click is
+/// ignored briefly after the list changes. A double-click, or a click aimed at
+/// the previous list, cannot answer a request the user has not seen.
+pub const DUO_INPUT_GUARD: Duration = Duration::from_millis(500);
 pub struct DuoRequests {
     pub target: WatchTarget,
     pub requests: Vec<DuoPushRequest>,
@@ -921,16 +927,8 @@ impl State {
                         ));
                     }
                 }
-                confirmation = Some(format!(
-                    "{} this Duo request?\nApplication: {}\nAccount: {}\nLocation: \
-                     {}\n{}\nRequest: {}",
-                    if approve { "Approve" } else { "Deny" },
-                    request.application,
-                    request.username,
-                    request.location,
-                    request.summary,
-                    request.id
-                ));
+                // The request card is the review: its Approve/Deny click
+                // answers it directly, and the server re-checks the fingerprint.
                 ServerCommand::Duo(DuoCommand::Respond {
                     target: target(),
                     request_id: request.id.clone(),
@@ -1066,6 +1064,17 @@ impl State {
             // Only the captured request context can bind a cache. Never infer it
             // from the current selection after the asynchronous read finishes.
             if let Some(target) = self.duo.inflight.take() {
+                let unchanged = self.duo.result.as_ref().is_some_and(|previous| {
+                    previous.target == target
+                        && previous
+                            .requests
+                            .iter()
+                            .map(|request| &request.fingerprint)
+                            .eq(requests.iter().map(|request| &request.fingerprint))
+                });
+                if !unchanged {
+                    self.duo.shown_at = Some(Instant::now());
+                }
                 self.duo.result = Some(DuoRequests { target, requests });
             }
             return;
@@ -1547,6 +1556,16 @@ impl App {
                         path.display()
                     )))
                 });
+            }
+            Event::Run(Action::Respond(..))
+                if self
+                    .workspace
+                    .duo
+                    .shown_at
+                    .is_some_and(|shown| shown.elapsed() < DUO_INPUT_GUARD) =>
+            {
+                self.notice =
+                    "This request just appeared. Check its details, then choose again.".into();
             }
             Event::Run(action) => match self.workspace.prepare(action, self) {
                 Ok(prepared) if prepared.confirmation.is_some() => {

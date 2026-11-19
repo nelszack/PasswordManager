@@ -32,20 +32,101 @@ pub struct Cli {
     ///
     /// The client and server must use the same port. This does not modify the
     /// configuration file; use `pm config --server-port PORT` for that.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(long, global = true, help_heading = "Global options", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
     /// Wrap command output in a stable JSON object for scripts.
-    #[arg(long, global = true, conflicts_with = "quiet")]
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        conflicts_with = "quiet"
+    )]
     pub json: bool,
     /// Suppress successful output while still printing errors.
-    #[arg(long, global = true, conflicts_with = "json")]
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        conflicts_with = "json"
+    )]
     pub quiet: bool,
     #[command(subcommand)]
     pub command: Option<CliCommands>,
 }
+/// Root help groups commands by task; every visible command must appear once.
+pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Items",
+        &[
+            "view",
+            "search",
+            "get",
+            "add",
+            "update",
+            "delete",
+            "genpass",
+            "passcheck",
+        ],
+    ),
+    (
+        "Vault and session",
+        &[
+            "unlock", "lock", "status", "new", "vaults", "rekey", "gui", "start", "kill",
+        ],
+    ),
+    (
+        "Security and recovery",
+        &[
+            "audit",
+            "totp",
+            "duo",
+            "history",
+            "restore-password",
+            "trash",
+            "restore",
+            "purge",
+            "operation",
+        ],
+    ),
+    ("Data and sync", &["import", "export", "backup", "sync"]),
+    ("Setup", &["config", "native-host", "completions", "help"]),
+];
+
+/// The parser with grouped root help. Use this instead of `Cli::command()` for parsing.
+pub fn command() -> clap::Command {
+    use clap::CommandFactory;
+    use std::fmt::Write;
+    let mut root = Cli::command();
+    root.build();
+    let bold = root.get_styles().get_header().render();
+    let reset = root.get_styles().get_header().render_reset();
+    let literal = root.get_styles().get_literal().render();
+    let literal_reset = root.get_styles().get_literal().render_reset();
+    let mut listing = String::new();
+    for (heading, names) in COMMAND_GROUPS {
+        let _ = writeln!(listing, "{bold}{heading}:{reset}");
+        for name in *names {
+            let about = root
+                .find_subcommand(name)
+                .and_then(|command| command.get_about())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = writeln!(listing, "  {literal}{name:<17}{literal_reset}{about}");
+        }
+        listing.push('\n');
+    }
+    root.help_template(format!(
+        "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{listing}{bold}Options:{reset}\n{{options}}{{after-help}}"
+    ))
+}
+
 pub fn cli_parse() -> Cli {
+    use clap::FromArgMatches;
     let args: Vec<_> = std::env::args_os().collect();
-    match Cli::try_parse_from(&args) {
+    match command()
+        .try_get_matches_from(&args)
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+    {
         Ok(cli) => cli,
         Err(error)
             if error.exit_code() != 0
@@ -236,7 +317,7 @@ pub enum CliCommands {
     Kill,
     /// Move an entry to encrypted trash, or permanently delete an entire vault.
     #[command(
-        after_help = "Examples:\n  pm delete --id 12\n  pm delete --entry-name github\n  pm \
+        after_help = "Examples:\n  pm delete github\n  pm delete --id 12\n  pm \
                       delete --vault\n  pm delete --vault --key ./keys/vault.key\n  pm delete \
                       --vault --key ./shared.key --keep-key"
     )]
@@ -290,9 +371,9 @@ pub enum CliCommands {
     /// Requires an unlocked vault. Push decisions do not advance the HOTP
     /// passcode counter. Encrypted backups preserve Duo device credentials.
     #[command(
-        after_help = "Examples:\n  pm duo enroll --entry-name work --replace\n  pm duo watch \
-                      --entry-name work --interactive\n  pm duo approve --entry-name work\n  pm \
-                      duo deny --entry-name work --request REQUEST_ID\n\nInteractive watch lets \
+        after_help = "Examples:\n  pm duo enroll work --replace\n  pm duo watch \
+                      work --interactive\n  pm duo approve work\n  pm \
+                      duo deny work --request REQUEST_ID\n\nInteractive watch lets \
                       you approve or deny in the same terminal after review.\nWithout --request, \
                       approve/deny require exactly one pending request.\nIn the extension, open \
                       Vault manager, select the enrolled item, and use Duo Push.\nVerified Push \
@@ -329,7 +410,7 @@ pub enum CliCommands {
     },
     /// Add a login or another typed secret to the unlocked vault.
     #[command(
-        after_help = "Examples:\n  pm add --name github --username alice --url https://github.com\n  pm add --name router --type wifi --field 'ssid=Home' --secret-field passphrase\n  pm add --name api --type api-secret --generate-password"
+        after_help = "Examples:\n  pm add --name github --username alice --url https://github.com\n  pm add --name router --type wifi --field 'ssid=Home' --secret-field passphrase\n  pm add --name api --type api-secret --generate"
     )]
     Add {
         /// Display name used to identify and search for the item.
@@ -354,7 +435,7 @@ pub enum CliCommands {
         #[arg(long = "secret-field", value_name = "NAME")]
         secret_fields: Vec<String>,
         /// Generate the primary secret instead of prompting for it.
-        #[arg(long = "generate-password")]
+        #[arg(long = "generate-password", visible_alias = "generate")]
         generate_password: bool,
         #[arg(long("no-copy"), default_value_t = false, conflicts_with = "copy")]
         /// Do not copy a newly added login password, overriding configuration.
@@ -378,7 +459,7 @@ pub enum CliCommands {
     Search(SearchArgs),
     /// Modify an existing item selected by stable ID or exact name.
     #[command(
-        after_help = "Examples:\n  pm update --id 4 --username alice@example.com\n  pm update --entry-name github --password --generate-password\n  pm update --id 7 --field environment=production --add-url https://example.com"
+        after_help = "Examples:\n  pm update --id 4 --username alice@example.com\n  pm update github --password --generate\n  pm update --id 7 --field environment=production --add-url https://example.com"
     )]
     Update {
         #[command(flatten)]
@@ -390,11 +471,11 @@ pub enum CliCommands {
     },
     /// Display item details, or print its primary secret with `--password-only`.
     ///
-    /// Details redact the primary secret, notes, and secret custom fields.
+    /// Details hide the primary secret and secret custom fields.
     /// Use --reveal-secrets to display secret custom fields. The default form copies the primary
     /// secret when the configured clipboard timeout is nonzero.
     #[command(
-        after_help = "Examples:\n  pm get --id 4\n  pm get --entry-name github --password-only\n  \
+        after_help = "Examples:\n  pm get github\n  pm get github --password-only\n  pm get --id 4\n  \
                       pm get --id 4 --reveal-secrets\n  pm get --id 4 --field recovery-code --copy"
     )]
     Get {
@@ -742,18 +823,25 @@ impl From<ListArgs> for ListOptions {
 
 #[derive(Args, Debug)]
 pub struct DeleteArgs {
+    /// Name of the item to move to encrypted trash.
+    #[arg(
+        value_name = "NAME",
+        conflicts_with_all = ["id", "entry_name", "vault"],
+        required_unless_present_any = ["id", "entry_name", "vault"]
+    )]
+    pub item: Option<String>,
     /// Stable entry ID to move to encrypted trash.
     #[arg(
         long,
         conflicts_with_all = ["vault", "entry_name"],
-        required_unless_present_any = ["entry_name", "vault"]
+        required_unless_present_any = ["entry_name", "vault", "item"]
     )]
     pub id: Option<usize>,
-    /// Exact entry name to move to encrypted trash.
-    #[arg(long, conflicts_with_all = ["id","vault"], required_unless_present_any=["id", "vault" ])]
+    /// Entry name to move to encrypted trash; same as the NAME argument.
+    #[arg(long, conflicts_with_all = ["id","vault"], required_unless_present_any=["id", "vault", "item"])]
     pub entry_name: Option<String>,
     /// Permanently delete the entire encrypted vault.
-    #[arg(long, conflicts_with_all = ["id","entry_name"], required_unless_present_any=["id", "entry_name" ])]
+    #[arg(long, conflicts_with_all = ["id","entry_name"], required_unless_present_any=["id", "entry_name", "item"])]
     pub vault: bool,
     /// Select the .enc filename from `pm vaults`; otherwise use the default vault.
     #[arg(long, requires = "vault")]
@@ -809,14 +897,14 @@ pub struct SearchArgs {
 #[derive(Subcommand, Debug)]
 pub enum TotpCommands {
     /// Store a Base32 TOTP secret or TOTP/HOTP otpauth URI using a hidden prompt.
-    #[command(after_help = "Examples:\n  pm totp set --id 7\n  pm totp set --entry-name github")]
+    #[command(after_help = "Examples:\n  pm totp set --id 7\n  pm totp set github")]
     Set {
         #[command(flatten)]
         target: EntryArgs,
     },
     /// Enroll a Duo activation link for passcodes using a hidden prompt.
     #[command(
-        after_help = "Examples:\n  pm totp duo --id 7\n  pm totp duo --entry-name work --mode \
+        after_help = "Examples:\n  pm totp duo --id 7\n  pm totp duo work --mode \
                       totp\n\nUse a fresh enrollment link for a separate device. Enrollment \
                       consumes the link.\nHOTP is the default; select TOTP if your organization \
                       accepts time-based codes.\nThis command saves passcodes only; use pm duo \
@@ -831,8 +919,8 @@ pub enum TotpCommands {
     },
     /// Generate a TOTP code or consume and persist the next HOTP counter.
     #[command(
-        after_help = "Examples:\n  pm totp show --id 7\n  pm totp show --entry-name github \
-                      --copy\n  pm totp show --entry-name github --watch\n\nWatch refreshes TOTP \
+        after_help = "Examples:\n  pm totp show --id 7\n  pm totp show github \
+                      --copy\n  pm totp show github --watch\n\nWatch refreshes TOTP \
                       codes and their countdown until Ctrl+C or the vault locks.\nWith --copy, \
                       each new code is copied once. HOTP cannot be watched."
     )]
@@ -916,14 +1004,17 @@ pub enum DuoCommands {
     ArgGroup::new("entry_selector")
         .required(true)
         .multiple(false)
-        .args(["id", "entry_name"])
+        .args(["item", "id", "entry_name"])
 ))]
 pub struct EntryArgs {
-    /// Select an entry by its stable numeric ID.
+    /// Item name. Matches exactly, or ignoring case when only one item matches.
+    #[arg(value_name = "NAME")]
+    pub item: Option<String>,
+    /// Select an entry by its stable numeric ID (shown by `pm view`).
     #[arg(long)]
     pub id: Option<usize>,
-    /// Select an entry by exact name.
-    #[arg(long)]
+    /// Select an entry by name; same as the NAME argument.
+    #[arg(long, hide_short_help = true)]
     pub entry_name: Option<String>,
 }
 
@@ -941,6 +1032,7 @@ pub struct UpdateArgs {
     /// Generate the replacement secret instead of prompting for it.
     #[arg(
         long = "generate-password",
+        visible_alias = "generate",
         default_value_t = false,
         requires = "password"
     )]

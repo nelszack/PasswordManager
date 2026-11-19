@@ -11,7 +11,7 @@ impl Vault {
         configuration: &str,
         key: &mut VaultCredentials,
     ) -> Result<Option<usize>, VaultError> {
-        let Some(item) = self.target_item(&target) else {
+        let Some(item) = self.resolve_target(&target)? else {
             return Ok(None);
         };
         let id = item.entry.id;
@@ -36,7 +36,7 @@ impl Vault {
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let Some(id) = self
-            .target_item(&target)
+            .resolve_target(&target)?
             .filter(|item| item.authenticator.is_some())
             .map(|item| item.entry.id)
         else {

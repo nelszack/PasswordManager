@@ -4,7 +4,7 @@ const prompts = require("./background_prompts.js");
 const security = require("./background_security.js");
 const promptState = require("./credential_prompt_state.js");
 
-function environment() {
+function environment(stored) {
     const calls = [], deliveries = [], destinations = [], removed = [], timers = [];
     let saveError, lookupError, windowError, remembered, held, resolveSave, matched = false;
     let holdLookup, resolveLookup, holdMatch, resolveMatch, holdWindow, createWindow;
@@ -14,7 +14,11 @@ function environment() {
             if (holdWindow) { createWindow = () => callback({ id: 42 }); return; }
             if (windowError) { chrome.runtime.lastError = { message: windowError }; callback(); delete chrome.runtime.lastError; }
             else callback({ id: 42 });
-        }, remove(id, callback) { removed.push(id); callback(); } }
+        }, remove(id, callback) { removed.push(id); callback(); } },
+        ...(stored ? { storage: { local: {
+            get(_key, callback) { callback({ ...stored }); },
+            set(values) { Object.assign(stored, values); }
+        } } } : {})
     };
     const service = prompts.create({ chrome, security, promptState,
         pendingCredentials: { takeRemembered() { const value = remembered; remembered = null; return value; } },
@@ -153,4 +157,22 @@ test("save and update prompts send the session captured by their lookup", async 
         assert.equal(write.fields.expectedSession, "a".repeat(64));
         if (action === "update") assert.equal(write.fields.expectedRevision, 1);
     }
+});
+
+test("never-save sites skip prompts, and choosing Never records the site once", async () => {
+    const stored = { pmNeverSave: ["https://other.test"] };
+    const env = environment(stored);
+    const { token } = await env.open();
+    assert.ok(token);
+    assert.equal((await env.complete(token, "never")).success, true);
+    assert.deepEqual(stored.pmNeverSave, ["https://other.test", "https://example.com"]);
+    assert.equal(env.deliveries.at(-1).result.action, "cancel");
+    assert.equal((await env.open()).skipped, true);
+    assert.equal(env.calls.filter(call => call.action === "getLoginItems").length, 1, "no vault lookup");
+    stored.pmNeverSave = "corrupt";
+    const again = await env.open();
+    assert.ok(again.token);
+    stored.pmNeverSave = ["https://example.com"];
+    assert.equal((await env.complete(again.token, "never")).success, true);
+    assert.deepEqual(stored.pmNeverSave, ["https://example.com"]);
 });

@@ -115,7 +115,7 @@ impl Vault {
         target: Target,
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
-        let Some(id) = self.entry_id(&target) else {
+        let Some(id) = self.entry_id(&target)? else {
             return Ok(false);
         };
         self.transaction(TransactionScope::Entry(id), key, |v| {
@@ -141,7 +141,7 @@ impl Vault {
         key: &mut VaultCredentials,
         limit: usize,
     ) -> Result<bool, VaultError> {
-        let Some(id) = self.entry_id(&change.entry.target) else {
+        let Some(id) = self.entry_id(&change.entry.target)? else {
             let mut change = change;
             change.entry.zeroize();
             return Ok(false);
@@ -356,7 +356,10 @@ mod tests {
                 &mut credentials,
             )
             .unwrap();
-        let id = vault.entry_id(&Target::Name("URL fixture".into())).unwrap();
+        let id = vault
+            .entry_id(&Target::Name("URL fixture".into()))
+            .unwrap()
+            .unwrap();
         (vault, credentials, id)
     }
 

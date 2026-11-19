@@ -111,6 +111,12 @@ impl Output {
             let _ = writeln!(io::stdout());
         }
     }
+    /// Informational stderr line that keeps stdout clean for pipes and JSON.
+    pub fn print_note(&self, note: &str) {
+        if !self.quiet && !self.json {
+            eprintln!("{}", terminal_output(note));
+        }
+    }
     pub fn print_warning(&self, warning: &str) {
         if !self.quiet {
             eprintln!("Warning: {}", terminal_output(warning));

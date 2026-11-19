@@ -157,8 +157,9 @@ includes:
 - Authenticator setup/change/removal for Base32 or otpauth input; HOTP generation
   requires confirmation and persists its counter. Use one device at a time for
   HOTP; counter conflicts still require explicit sync reconciliation.
-- Duo activation and HOTP/TOTP selection, reviewed push requests, explicit
-  approve/deny, and Verified Push input. Shared expiry/fingerprint validation
+- Duo activation and HOTP/TOTP selection. Pending push requests for every
+  enrolled account appear on one screen (vault list → **Duo Push requests**),
+  answered with one tap on the reviewed card, plus Verified Push input. Shared expiry/fingerprint validation
   applies. Do not retry a decision with an unknown outcome without checking the
   login. Live Duo enrollment/push acceptance requires a dedicated test account.
 - Complete encrypted backup containers using a dedicated backup password or an

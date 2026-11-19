@@ -1,7 +1,28 @@
-body { width: 300px; margin: 0; padding: 18px; }
-h3 { margin: 0 0 14px; font-size: 19px; }
-button { width: 100%; margin: 8px 0 12px; }
-#nativeHint, #output { font-size: 13px; line-height: 1.5; }
-#statusRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-#statusDot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: #6b7280; }
-#output { margin-top: 12px; overflow-wrap: anywhere; }
+body { width: 340px; padding: 16px; display: grid; gap: 12px; }
+h1 { margin: 0; font-size: 18px; }
+h2 { margin: 0 0 10px; font-size: 15px; }
+#statusRow { display: flex; align-items: center; gap: 8px; }
+#statusDot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+#nativeHint { margin: 6px 0 0; }
+.actions { display: grid; gap: 8px; }
+button { width: 100%; }
+.generated { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+#genValue {
+  flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: Field; color: FieldText; font-family: ui-monospace, monospace; font-size: 14px;
+  overflow-wrap: anywhere; min-height: 40px;
+}
+#genNew { width: 40px; flex: none; font-size: 18px; padding: 0; }
+.range { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin-top: 10px; font-size: 14px; }
+.range input { grid-column: 1 / -1; width: 100%; }
+#genLengthValue { justify-self: end; font-weight: 600; }
+.toggles { display: flex; gap: 16px; margin-top: 6px; font-size: 14px; }
+#generator .hint { margin: 8px 0 0; }
+#neverSave { padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius); font-size: 14px; }
+#neverList { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+#neverList li { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+#neverList li span { flex: 1; min-width: 0; }
+#neverList button { width: auto; min-height: 32px; padding: 4px 10px; }
+#recovery { display: grid; gap: 8px; }
+#output { font-size: 13px; overflow-wrap: anywhere; }
+#output:empty { display: none; }

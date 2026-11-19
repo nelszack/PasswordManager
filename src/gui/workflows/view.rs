@@ -1152,16 +1152,38 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             form = form
                 .push(text(heading).size(25))
                 .push(text(detail).size(16));
+            // One heading per finding group; rows carry only per-item detail.
+            let mut heading = None;
             for (entry, finding) in audit_rows(report)
                 .skip(window.range.start)
                 .take(presentation::PAGE_SIZE)
             {
-                form = form.push(text(finding.title()).size(19)).push(
-                    button(text(&entry.name).size(16))
-                        .padding(12)
-                        .width(Fill)
-                        .style(crate::gui::view::quiet_button)
-                        .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
+                let title = finding.title();
+                if heading.as_ref() != Some(&title) {
+                    form = form.push(text(title.clone()).size(19));
+                    heading = Some(title);
+                }
+                let mut detail = entry
+                    .username
+                    .as_deref()
+                    .filter(|username| !username.is_empty())
+                    .map(str::to_owned)
+                    .into_iter()
+                    .chain(finding.detail())
+                    .collect::<Vec<_>>();
+                detail.push("Open to fix".into());
+                form = form.push(
+                    button(
+                        column![
+                            text(&entry.name).size(16),
+                            text(detail.join(" · ")).size(13)
+                        ]
+                        .spacing(3),
+                    )
+                    .padding(12)
+                    .width(Fill)
+                    .style(crate::gui::view::quiet_button)
+                    .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
                 );
             }
             if let Some(message) = &report.breach_error {
@@ -1236,7 +1258,13 @@ impl AuditFinding {
         match self {
             Self::Category(title) => title.into(),
             Self::Group(title, group) => format!("{title} · group {group}"),
-            Self::Breached(count) => format!("Exposed password · seen {count} times"),
+            Self::Breached(_) => "Exposed passwords".into(),
+        }
+    }
+    fn detail(self) -> Option<String> {
+        match self {
+            Self::Breached(count) => Some(format!("seen {count} times in breaches")),
+            _ => None,
         }
     }
 }

@@ -143,6 +143,17 @@ pub fn generated_password_output(
     (output, warning)
 }
 
+/// zxcvbn score (0–4) and its plain-language rating, for strength meters.
+pub fn strength_rating(pass: &str) -> (u8, &'static str) {
+    match zxcvbn(pass, &[]).score() {
+        Score::Zero => (0, "Very weak"),
+        Score::One => (1, "Weak"),
+        Score::Two => (2, "Fair"),
+        Score::Three => (3, "Good"),
+        _ => (4, "Strong"),
+    }
+}
+
 pub fn password_strength_output(pass: &str) -> String {
     let mut output = String::from("Password stats:\n");
     let estimate = zxcvbn(pass, &[]);

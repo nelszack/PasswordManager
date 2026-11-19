@@ -1041,6 +1041,9 @@ impl App {
                 self.cancel_passive_read();
                 self.workspace.prepared = None;
                 self.tab = tab;
+                if tab == Tab::Generator && self.generation.value.is_empty() {
+                    self.preview_generated();
+                }
                 if tab == Tab::Vault && self.editor.is_none() {
                     if let Some(item) = &self.item {
                         self.workspace.selected = Some(workflows::Choice {

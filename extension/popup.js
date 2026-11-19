@@ -1,24 +1,23 @@
 let pendingOperations = [];
 let reviewedOperationId = null;
 const sendMessage = PasswordManagerUiTransport.send;
+const element = id => document.getElementById(id);
 
 function renderStatus(status) {
-    const dot = document.getElementById("statusDot");
-    const text = document.getElementById("statusText");
-    const lockButton = document.getElementById("lockBtn");
+    const lockButton = element("lockBtn");
 
     if (Array.isArray(status.pendingOperations)) pendingOperations = status.pendingOperations;
     const operations = pendingOperations;
-    const recovery = document.getElementById("recovery");
+    const recovery = element("recovery");
     if (recovery) {
         recovery.hidden = operations.length === 0;
-        const select = document.getElementById("operation");
+        const select = element("operation");
         const previous = select.value;
         select.replaceChildren(
             ...operations.map(record => {
                 const option = document.createElement("option");
                 option.value = record.operationId;
-                option.textContent = `${record.action}: ${record.operationId}`;
+                option.textContent = PasswordManagerPopupState.operationLabel(record);
                 return option;
             })
         );
@@ -26,18 +25,10 @@ function renderStatus(status) {
         if (select.value !== previous) resetReview();
     }
     const presentation = PasswordManagerPopupState.presentation(status);
-    dot.style.background = presentation.color;
-    text.innerText = presentation.text;
+    element("statusDot").style.background = presentation.color;
+    element("statusText").innerText = presentation.text;
     lockButton.disabled = !presentation.canLock;
-    const hint = document.getElementById("nativeHint");
-    if (hint)
-        hint.textContent = !status.native
-            ? "Open the desktop app and check browser integration settings."
-            : !status.running
-              ? "Open the desktop app to start the server and unlock your vault."
-              : status.locked
-                ? "Open the desktop app to unlock your vault."
-                : "Use the key button beside a website’s login field to choose an account.";
+    element("nativeHint").textContent = PasswordManagerPopupState.hint(status);
 }
 
 async function refreshStatus() {
@@ -51,64 +42,130 @@ chrome.runtime.onMessage.addListener(message => {
     }
 });
 
+// Generator: settings persist in pmGenerator, shared with the in-page ✨ button.
+let generatorStored = {};
+function generatorView() {
+    // Invalid stored settings (from an older version or manual edits) fall back to defaults.
+    let settings;
+    try {
+        settings = PasswordManagerGenerator.validate(generatorStored);
+    } catch (_) {
+        settings = PasswordManagerGenerator.defaults;
+    }
+    const passphrase = settings.mode === "passphrase";
+    element("genLength").value = String(passphrase ? settings.words : settings.length);
+    element("genLength").min = passphrase ? "3" : "8";
+    element("genLength").max = passphrase ? "12" : "64";
+    element("genLength").setAttribute("aria-label", passphrase ? "Number of words" : "Password length");
+    element("genLengthValue").textContent = passphrase ? `${settings.words} words` : `${settings.length}`;
+    element("genSymbols").checked = settings.symbols;
+    element("genSymbols").disabled = passphrase;
+    element("genPassphrase").checked = passphrase;
+    element("genValue").textContent = PasswordManagerGenerator.generate(settings);
+}
+function saveGenerator(changes) {
+    generatorStored = PasswordManagerPopupState.generatorSettings(generatorStored, changes);
+    chrome.storage.local.set({ pmGenerator: generatorStored });
+    generatorView();
+}
+element("genNew").addEventListener("click", generatorView);
+element("genLength").addEventListener("input", event => {
+    const value = Number(event.target.value);
+    saveGenerator(element("genPassphrase").checked ? { words: value } : { length: value });
+});
+element("genSymbols").addEventListener("change", event => saveGenerator({ symbols: event.target.checked }));
+element("genPassphrase").addEventListener("change", event => saveGenerator({ passphrase: event.target.checked }));
+element("genCopy").addEventListener("click", async () => {
+    const value = element("genValue").textContent;
+    if (!value) return;
+    try {
+        await navigator.clipboard.writeText(value);
+        element("output").innerText = "Password copied. Paste it, then generate a new one for the next site.";
+    } catch (_) {
+        element("output").innerText = "Could not copy. Select the password and copy it manually.";
+    }
+});
+
+// Sites where the user chose "Never for this site" in the save prompt.
+function renderNeverSave(sites) {
+    element("neverSave").hidden = sites.length === 0;
+    element("neverCount").textContent = String(sites.length);
+    element("neverList").replaceChildren(
+        ...sites.map(site => {
+            const item = document.createElement("li");
+            const label = document.createElement("span");
+            label.textContent = site;
+            const allow = document.createElement("button");
+            allow.textContent = "Allow";
+            allow.setAttribute("aria-label", `Offer to save logins on ${site} again`);
+            allow.addEventListener("click", () => {
+                const remaining = sites.filter(value => value !== site);
+                chrome.storage.local.set({ pmNeverSave: remaining });
+                renderNeverSave(remaining);
+            });
+            item.append(label, allow);
+            return item;
+        })
+    );
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-    chrome.storage.local.get("pmStatus", result => {
+    chrome.storage.local.get(["pmStatus", "pmGenerator", "pmNeverSave"], result => {
+        generatorStored = result.pmGenerator && typeof result.pmGenerator === "object" ? result.pmGenerator : {};
+        generatorView();
+        renderNeverSave(PasswordManagerPopupState.neverSaveSites(result.pmNeverSave));
         if (result.pmStatus) renderStatus(result.pmStatus);
         refreshStatus();
     });
 });
 
-document.getElementById("lockBtn").addEventListener("click", async () => {
+element("lockBtn").addEventListener("click", async () => {
     const response = await sendMessage({ action: "lockVault" });
-    document.getElementById("output").innerText = response?.success
+    element("output").innerText = response?.success
         ? response.data
-        : response?.error || "Could not contact the native host";
+        : response?.error || "Could not reach the desktop app";
     await refreshStatus();
 });
 
 function resetReview() {
     reviewedOperationId = null;
-    document.getElementById("unknownReview").hidden = true;
-    document.getElementById("inspected").checked = false;
-    document.getElementById("acknowledgeOperation").disabled = true;
+    element("unknownReview").hidden = true;
+    element("inspected").checked = false;
+    element("acknowledgeOperation").disabled = true;
 }
-document.getElementById("operation").addEventListener("change", resetReview);
-document.getElementById("inspected").addEventListener("change", event => {
-    document.getElementById("acknowledgeOperation").disabled = !event.target.checked;
+element("operation").addEventListener("change", resetReview);
+element("inspected").addEventListener("change", event => {
+    element("acknowledgeOperation").disabled = !event.target.checked;
 });
-document.getElementById("reviewOperation").addEventListener("click", async () => {
+element("reviewOperation").addEventListener("click", async () => {
     resetReview();
-    const operationId = document.getElementById("operation").value;
+    const operationId = element("operation").value;
     const result = await sendMessage({ action: "reconcileOperation", operationId });
-    document.getElementById("output").innerText = result?.success
+    element("output").innerText = result?.success
         ? `Operation: ${result.data.state}`
         : result?.error || "Outcome unavailable";
-    if (operationId !== document.getElementById("operation").value) return;
+    if (operationId !== element("operation").value) return;
     reviewedOperationId = result?.success && result.data.state === "unknown" ? operationId : null;
-    document.getElementById("unknownReview").hidden = reviewedOperationId === null;
+    element("unknownReview").hidden = reviewedOperationId === null;
     await refreshStatus();
 });
-document.getElementById("acknowledgeOperation").addEventListener("click", async () => {
-    if (
-        !document.getElementById("inspected").checked ||
-        reviewedOperationId !== document.getElementById("operation").value
-    )
-        return;
-    const operationId = document.getElementById("operation").value;
+element("acknowledgeOperation").addEventListener("click", async () => {
+    if (!element("inspected").checked || reviewedOperationId !== element("operation").value) return;
+    const operationId = element("operation").value;
     const result = await sendMessage({ action: "acknowledgeUnknownOperation", operationId, inspected: true });
-    document.getElementById("output").innerText = result?.success
+    element("output").innerText = result?.success
         ? "Reviewed outcome acknowledged"
         : result?.error || "Acknowledgement failed";
     resetReview();
     await refreshStatus();
 });
 
-document.getElementById("openDesktopBtn").addEventListener("click", async () => {
-    const button = document.getElementById("openDesktopBtn");
+element("openDesktopBtn").addEventListener("click", async () => {
+    const button = element("openDesktopBtn");
     button.disabled = true;
-    document.getElementById("output").innerText = "Opening desktop app…";
+    element("output").innerText = "Opening desktop app…";
     const response = await sendMessage({ action: "openDesktop" });
-    document.getElementById("output").innerText = response?.success
+    element("output").innerText = response?.success
         ? "Desktop app launch requested."
         : response?.error || "Could not open the desktop app";
     button.disabled = false;

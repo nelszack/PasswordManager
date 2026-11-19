@@ -183,7 +183,10 @@ async fn displayed_trash_ids_select_the_same_items_for_restore_and_purge() {
     let listing = crate::client::render_response(&result.responses[0].payload);
     let ids: Vec<usize> = listing
         .lines()
-        .map(|line| line.split_once('.').unwrap().0.parse().unwrap())
+        .map(|line| {
+            let id = line.strip_prefix('#').unwrap();
+            id.split_once(' ').unwrap().0.parse().unwrap()
+        })
         .collect();
     assert_eq!(ids, [17, 42]);
 

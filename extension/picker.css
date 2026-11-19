@@ -1,22 +1,22 @@
-:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-body { margin: 0; background: Canvas; color: CanvasText; }
-main { padding: 18px; }
-h1 { font-size: 18px; margin: 0 0 8px; }
-#status { color: GrayText; margin: 0 0 14px; }
-#destination, #crossOriginWarning { overflow-wrap: anywhere; }
-#crossOriginWarning { margin-bottom: 14px; }
-#items { display: grid; gap: 8px; }
-#items button, #cancel {
-  width: 100%; padding: 10px 12px; border: 1px solid GrayText;
-  border-radius: 6px; background: ButtonFace; color: ButtonText;
-  text-align: left; cursor: pointer;
+main { padding: 16px 18px; display: grid; gap: 10px; }
+h1 { font-size: 17px; margin: 0; }
+#destination { margin: 0; font-size: 13px; font-weight: 600; color: var(--accent); overflow-wrap: anywhere; }
+#crossOriginWarning { display: flex; gap: 8px; align-items: flex-start; overflow-wrap: anywhere; font-size: 14px; }
+#status { margin: 0; }
+#items { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; padding: 2px; }
+#items button {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: Canvas; color: CanvasText;
+  text-align: left; font-weight: 600;
 }
-#items small {
-  display: block; margin-top: 3px; color: ButtonText;
-  font-size: 0.85em; font-weight: 400;
+#items button .text { display: grid; min-width: 0; }
+#items button .text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#items button small {
+  color: var(--muted); font-size: 0.85em; font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-#cancel { margin-top: 16px; text-align: center; }
-
-label { display: block; margin: 12px 0; }
-input[type=search] { width: 100%; padding: 8px; margin-top: 4px; }
-#recovery { margin: 14px 0; }
+#items button:disabled { opacity: .6; }
+#items button:hover:not(:disabled), #items button.active { border-color: var(--accent); background: var(--accent-soft); }
+#recovery p { margin: 0 0 8px; }
+#cancel { width: 100%; }
+kbd { font: 12px ui-monospace, monospace; color: var(--muted); margin-left: 6px; }
