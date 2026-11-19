@@ -1,4 +1,4 @@
-use crate::secret::SecretString;
+use crate::secret::{SecretBuffer, SecretString};
 #[cfg(test)]
 use crate::types::{EntryUpdate, PasswordEntry};
 use crate::{
@@ -95,7 +95,7 @@ impl AuditEntrySnapshot {
 }
 
 mod audit;
-pub(crate) use audit::PendingAudit;
+pub(crate) use audit::{PendingAudit, PendingScores};
 
 mod import;
 

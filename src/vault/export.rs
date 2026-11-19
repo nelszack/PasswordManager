@@ -46,8 +46,8 @@ impl Vault {
         })
     }
     pub(crate) fn export_bytes(&self, json: bool) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-        let mut bytes = Zeroizing::new(Vec::new());
-        struct Bounded<'a>(&'a mut Vec<u8>);
+        let mut bytes = SecretBuffer::default();
+        struct Bounded<'a>(&'a mut SecretBuffer);
         impl Write for Bounded<'_> {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
                 if self.0.len().saturating_add(bytes.len()) > 16 * 1024 * 1024 {
@@ -68,7 +68,7 @@ impl Vault {
                 "Export exceeds mobile transfer limit".into(),
             ));
         }
-        Ok(bytes)
+        Ok(bytes.into_inner())
     }
     fn write_export(&self, destination: impl Write, json: bool) -> Result<(), VaultError> {
         if json {

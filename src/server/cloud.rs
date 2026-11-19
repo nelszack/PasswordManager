@@ -263,6 +263,27 @@ async fn event_loop<F, Fut>(
     }
 }
 
+/// Wait for a burst of local edits to finish before uploading.
+const LOCAL_CHANGE_SETTLE: Duration = Duration::from_millis(250);
+
+/// Resolve once the watched value differs from `seen` (recording it), or
+/// never if the worker has stopped publishing.
+async fn changed_from<T: Clone + PartialEq>(
+    receiver: &mut tokio::sync::watch::Receiver<T>,
+    seen: &mut T,
+) {
+    loop {
+        if receiver.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+        let current = receiver.borrow_and_update().clone();
+        if current != *seen {
+            *seen = current;
+            return;
+        }
+    }
+}
+
 pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -280,10 +301,22 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
         )));
         let mut last_probe = None;
         let mut last_remote = std::time::Instant::now() - Duration::from_secs(60);
+        // Edits, unlocks, and switches made through this server start a check
+        // at once; the timer still catches changes made by other processes.
+        let (mut sessions, mut revisions) = worker.changes();
+        let mut seen_session = sessions.borrow_and_update().clone();
+        let mut seen_revision = *revisions.borrow_and_update();
         while !stopping.load(Ordering::Acquire) {
             let notified = tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => false,
                 _ = wake.notified() => true,
+                _ = changed_from(&mut revisions, &mut seen_revision) => {
+                    // Coalesce a burst of edits into one upload.
+                    tokio::time::sleep(LOCAL_CHANGE_SETTLE).await;
+                    seen_revision = *revisions.borrow_and_update();
+                    false
+                }
+                _ = changed_from(&mut sessions, &mut seen_session) => false,
             };
             let Ok(config) = try_read_config(&config_dir().join("config.toml")) else {
                 events_enabled.send_if_modified(|current| current.take().is_some());
@@ -413,6 +446,38 @@ mod tests {
 #[cfg(test)]
 mod event_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_change_wakes_only_for_a_different_value() {
+        let (sender, mut receiver) = tokio::sync::watch::channel(Some(1u64));
+        let mut seen = *receiver.borrow_and_update();
+        // Every worker job republishes; an unchanged revision must not wake sync.
+        sender.send_replace(Some(1));
+        {
+            let wait = changed_from(&mut receiver, &mut seen);
+            tokio::pin!(wait);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                    .await
+                    .is_err()
+            );
+            sender.send_replace(Some(2));
+            tokio::time::timeout(Duration::from_secs(1), &mut wait)
+                .await
+                .expect("a new revision wakes the sync loop");
+        }
+        assert_eq!(seen, Some(2));
+        drop(sender);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                changed_from(&mut receiver, &mut seen)
+            )
+            .await
+            .is_err(),
+            "a stopped worker must not spin the loop"
+        );
+    }
 
     #[tokio::test]
     async fn disabled_events_cancel_requests_and_connection_changes_reset_the_cursor() {

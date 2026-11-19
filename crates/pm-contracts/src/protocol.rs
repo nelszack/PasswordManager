@@ -75,6 +75,18 @@ pub fn verify_server_hello(token: &str, hello: &[u8]) -> Option<TransportKeys> {
     Some(keys)
 }
 
+/// Largest status-stream record; status carries no item data.
+pub const MAX_STATUS_EVENT_BYTES: usize = 64 * 1024;
+
+/// Key for record `sequence` of a long-lived status stream. Every record has
+/// its own key, so a replayed, dropped, or reordered record fails to decrypt.
+pub fn stream_record_key(response_key: &[u8; 32], sequence: u64) -> zeroize::Zeroizing<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new_keyed(response_key);
+    hasher.update(b"password-manager-status-stream-v1");
+    hasher.update(&sequence.to_be_bytes());
+    zeroize::Zeroizing::new(*hasher.finalize().as_bytes())
+}
+
 pub fn encrypt_record(key: &[u8; 32], plaintext: &[u8]) -> Option<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let nonce = XNonce::generate();
@@ -418,8 +430,12 @@ impl Zeroize for RpcResponse {
 // Responses are often moved into adapters; secret fields have their own Drop.
 pub type ProtocolResponse = RpcResponse;
 
-pub fn encode_rpc_response(response: &RpcResponse) -> Result<Vec<u8>, String> {
-    rmp_serde::to_vec_named(response).map_err(|_| "could not encode server response".into())
+/// Encode a response that may carry secrets into a buffer wiped on growth and drop.
+pub fn encode_rpc_response(response: &RpcResponse) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    let mut bytes = crate::secret::SecretBuffer::default();
+    rmp_serde::encode::write_named(&mut bytes, response)
+        .map_err(|_| "could not encode server response".to_string())?;
+    Ok(bytes.into_inner())
 }
 pub fn decode_responses(bytes: &[u8]) -> Result<RpcResponse, String> {
     use serde::Deserialize;
@@ -568,8 +584,8 @@ mod tests {
         assert!(decode_responses(&encode_rpc_response(&response).unwrap()).is_err());
         let mut encoded =
             encode_rpc_response(&RpcResponse::message(ResponseCode::Success, "one")).unwrap();
-        encoded.extend(
-            encode_rpc_response(&RpcResponse::message(ResponseCode::Success, "two")).unwrap(),
+        encoded.extend_from_slice(
+            &encode_rpc_response(&RpcResponse::message(ResponseCode::Success, "two")).unwrap(),
         );
         assert!(decode_responses(&encoded).is_err());
     }
@@ -694,5 +710,24 @@ mod optional_json_u64 {
                 counter.parse().map_err(serde::de::Error::custom)
             })
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod stream_key_tests {
+    use super::*;
+
+    #[test]
+    fn each_stream_record_uses_a_distinct_key_bound_to_its_connection() {
+        let first = stream_record_key(&[1; 32], 0);
+        assert_ne!(*first, *stream_record_key(&[1; 32], 1));
+        assert_ne!(*first, *stream_record_key(&[2; 32], 0));
+        let record = encrypt_record(&first, b"status").unwrap();
+        let (nonce, ciphertext) = record.split_at(SECURE_RECORD_HEADER_LEN);
+        assert!(decrypt_record(&first, &nonce[..24], ciphertext).is_some());
+        assert!(
+            decrypt_record(&stream_record_key(&[1; 32], 1), &nonce[..24], ciphertext).is_none(),
+            "a record replayed at a later position must not authenticate"
+        );
     }
 }

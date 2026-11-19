@@ -127,7 +127,7 @@ mod tests {
                         } else {
                             Some(expected.clone())
                         };
-                        let encoded = Zeroizing::new(encode_rpc_response(&response).unwrap());
+                        let encoded = encode_rpc_response(&response).unwrap();
                         stream
                             .write_all(&encrypt_record(&keys.response, &encoded).unwrap())
                             .unwrap();

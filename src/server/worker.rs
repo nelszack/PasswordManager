@@ -160,14 +160,16 @@ impl Owner {
         }
         let operation_id = request.operation_id.take();
         let fingerprint = operation_id.as_ref().map(|_| {
-            let bytes = Zeroizing::new(
-                rmp_serde::to_vec_named(&(
+            let mut bytes = crate::secret::SecretBuffer::default();
+            rmp_serde::encode::write_named(
+                &mut bytes,
+                &(
                     &request.command,
                     request.expected_revision,
                     &request.expected_session,
-                ))
-                .expect("commands serialize"),
-            );
+                ),
+            )
+            .expect("commands serialize");
             *blake3::keyed_hash(&self.fingerprint_key, &bytes).as_bytes()
         });
         if let (Some(id), Some(fingerprint)) = (&operation_id, fingerprint) {
@@ -277,6 +279,16 @@ pub(super) struct VaultWorker {
     cloud_warning: Arc<Mutex<Option<String>>>,
 }
 impl VaultWorker {
+    /// Session and vault-revision receivers. The worker publishes after every
+    /// job, so subscribers compare values instead of reacting to each wake.
+    pub(super) fn changes(
+        &self,
+    ) -> (
+        watch::Receiver<Option<String>>,
+        watch::Receiver<Option<u64>>,
+    ) {
+        (self.locked.clone(), self.revision.clone())
+    }
     pub fn start(
         session: VaultSession,
         timeout: Arc<AtomicU64>,

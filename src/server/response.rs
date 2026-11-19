@@ -34,7 +34,7 @@ pub(super) async fn deliver_responses(
             response.request_id = next.request_id;
         }
     }
-    let frame = Zeroizing::new(encode_rpc_response(&response).map_err(std::io::Error::other)?);
+    let frame = encode_rpc_response(&response).map_err(std::io::Error::other)?;
     let encrypted = Zeroizing::new(
         encrypt_record(response_key, &frame)
             .ok_or_else(|| std::io::Error::other("could not encrypt server response"))?,

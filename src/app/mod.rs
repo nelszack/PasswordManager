@@ -17,24 +17,31 @@ pub async fn run(
     console: Output,
 ) {
     let port = client.port;
-    let server_running = is_running(port);
-    let configured_server_running = if port == conf.server.port {
-        server_running
-    } else {
-        is_running(conf.server.port)
+    // Each probe is a full authenticated round trip; run it only when needed.
+    let running = std::cell::OnceCell::new();
+    let server_running = || *running.get_or_init(|| is_running(port));
+    let configured = std::cell::OnceCell::new();
+    let configured_server_running = || {
+        *configured.get_or_init(|| {
+            if port == conf.server.port {
+                server_running()
+            } else {
+                is_running(conf.server.port)
+            }
+        })
     };
     if let Some(command) = local::run(
         command,
         &conf,
         &config_file,
         &client,
-        server_running,
-        configured_server_running,
+        &server_running,
+        &configured_server_running,
         &console,
     )
     .await
     {
-        if !server_running {
+        if !server_running() {
             console.exit_error("Server is not running. Start it with `pm start`.", 1);
         }
         remote::run(command, &conf, &client, &console).await;

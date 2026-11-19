@@ -2012,3 +2012,46 @@ fn newer_status_cannot_make_an_old_item_list_eligible_for_deltas() {
     );
     assert_eq!(app.items_revision, Some(10));
 }
+
+#[test]
+fn pushed_status_refreshes_at_once_and_relaxes_polling_until_the_stream_ends() {
+    let mut app = unlocked();
+    app.request_state = RequestState::Idle;
+    let now = Instant::now();
+    app.connection.last_status = now;
+
+    // A pushed record runs the ordinary status request immediately.
+    let _ = app.update(Message::StatusPushed(true));
+    assert!(app.connection.subscribed);
+    assert!(
+        app.polling(),
+        "a pushed change refreshes without waiting for a tick"
+    );
+    app.request_state = RequestState::Idle;
+
+    // While subscribed, the 2-second poll becomes a 30-second safety check.
+    let serial = app.serial;
+    let started = app.connection.last_status;
+    let _ = app.update(Message::Tick(started + Duration::from_secs(5)));
+    assert_eq!(app.serial, serial);
+    let _ = app.update(Message::Tick(started + Duration::from_secs(30)));
+    assert!(app.polling());
+    app.request_state = RequestState::Idle;
+
+    // A change pushed during another request refreshes on the next tick.
+    app.request_state = RequestState::Busy;
+    let _ = app.update(Message::StatusPushed(true));
+    assert!(app.connection.status_stale);
+    app.request_state = RequestState::Idle;
+    let last = app.connection.last_status;
+    let _ = app.update(Message::Tick(last + Duration::from_secs(1)));
+    assert!(app.polling() && !app.connection.status_stale);
+    app.request_state = RequestState::Idle;
+
+    // When the stream ends (or an older server refuses it), polling resumes.
+    let _ = app.update(Message::StatusPushed(false));
+    assert!(!app.connection.subscribed);
+    let last = app.connection.last_status;
+    let _ = app.update(Message::Tick(last + Duration::from_secs(2)));
+    assert!(app.polling());
+}

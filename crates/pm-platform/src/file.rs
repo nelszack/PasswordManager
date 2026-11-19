@@ -27,8 +27,12 @@ pub fn read_bounded_file(path: &Path, max_bytes: u64) -> io::Result<Zeroizing<Ve
     }
     validate(&fs::metadata(path)?, max_bytes)?;
     let file = fs::File::open(path)?;
-    validate(&file.metadata()?, max_bytes)?;
-    read_bounded(file, max_bytes)
+    let metadata = file.metadata()?;
+    validate(&metadata, max_bytes)?;
+    // Size the buffer from the opened file. Growing a Vec frees the previous
+    // allocation without wiping it, which matters for key and vault files.
+    let expected = usize::try_from(metadata.len()).unwrap_or(0);
+    read_bounded_with_capacity(file, max_bytes, expected)
 }
 
 /// Resolve a client-side path without opening it or requiring it to exist.
@@ -45,8 +49,17 @@ pub fn absolute_unicode_path(path: impl AsRef<Path>) -> io::Result<String> {
         })
 }
 
+#[cfg(test)]
 fn read_bounded(reader: impl Read, max_bytes: u64) -> io::Result<Zeroizing<Vec<u8>>> {
-    let mut contents = Zeroizing::new(Vec::new());
+    read_bounded_with_capacity(reader, max_bytes, 0)
+}
+
+fn read_bounded_with_capacity(
+    reader: impl Read,
+    max_bytes: u64,
+    capacity: usize,
+) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut contents = Zeroizing::new(Vec::with_capacity(capacity));
     reader
         .take(max_bytes.saturating_add(1))
         .read_to_end(&mut contents)?;

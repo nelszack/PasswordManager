@@ -25,6 +25,7 @@ fn test_connection_state() -> ConnectionState {
         system_lock: None,
         password_history_limit: 10,
         trash_retention_days: 0,
+        status_subscribers: Arc::new(Semaphore::new(MAX_STATUS_SUBSCRIBERS)),
     }
 }
 fn test_worker(session: VaultSession, state: &ConnectionState) -> VaultWorker {
@@ -1056,6 +1057,75 @@ async fn asynchronous_results_cannot_survive_a_lock_or_be_relabelled_with_a_new_
 }
 
 #[tokio::test]
+async fn weak_lists_score_outside_the_vault_queue_and_reuse_cached_scores() {
+    let vault = Vault::from_entries(
+        vec![
+            VaultEntry {
+                id: 1,
+                name: "Weak".into(),
+                password: "password1".into(),
+                ..Default::default()
+            },
+            VaultEntry {
+                id: 2,
+                name: "Strong".into(),
+                password: "Zq8!vR2#mW5$kT9&-synthetic-strong".into(),
+                ..Default::default()
+            },
+            VaultEntry {
+                id: 3,
+                name: "Reused weak".into(),
+                password: "password1".into(),
+                ..Default::default()
+            },
+        ],
+        None,
+    );
+    let weak = || {
+        ServerCommand::List(SearchFilter {
+            list: ListOptions {
+                weak: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    };
+    let ids = |result: &outcome::CommandOutcome| match &result.responses[0].payload {
+        ResponsePayload::ItemPage(page) => {
+            page.items.iter().map(|item| item.id).collect::<Vec<_>>()
+        }
+        other => panic!("unexpected payload {other:?}"),
+    };
+    let state = test_connection_state();
+    let worker = test_worker(session(vault), &state);
+    let result = worker
+        .execute(state.clone(), RequestEnvelope::new(weak()))
+        .await;
+    assert!(matches!(
+        result.effect,
+        CommandEffect::Deferred(crate::operations::Deferred::WeakList(..))
+    ));
+    let result = finish_external_effect(result, worker.clone(), None).await;
+    assert_eq!(result.responses[0].code, ResponseCode::Success as i32);
+    assert_eq!(ids(&result), vec![1, 3]);
+
+    // Scores are cached for the session, so the next list answers on the queue.
+    let cached = worker
+        .execute(state.clone(), RequestEnvelope::new(weak()))
+        .await;
+    assert!(matches!(cached.effect, CommandEffect::None));
+    assert_eq!(ids(&cached), vec![1, 3]);
+
+    // A lock while scoring discards the work instead of answering for a new session.
+    let fresh = test_worker(session(sample_vault()), &state);
+    let result = fresh.execute(state, RequestEnvelope::new(weak())).await;
+    fresh.with_session(|live| live.lock()).await.unwrap();
+    let result = finish_external_effect(result, fresh, None).await;
+    assert_eq!(result.responses.len(), 1);
+    assert_eq!(result.responses[0].code, ResponseCode::Conflict as i32);
+}
+
+#[tokio::test]
 async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1348,4 +1418,104 @@ async fn worker_returns_bounded_revision_deltas_and_does_not_replay_them() {
         .remove(0);
     assert!(retried.changes.is_none());
     assert_eq!(worker.vault_revision(), Some(before + 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_subscribers_receive_lock_changes_and_end_when_the_client_leaves() {
+    let state = test_connection_state();
+    let worker = test_worker(session(sample_vault()), &state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted_tx, mut accepted) = mpsc::unbounded_channel();
+    let accept_state = state.clone();
+    let accept_worker = worker.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let task = tokio::spawn(handle_connection(
+                stream,
+                accept_state.clone(),
+                accept_worker.clone(),
+            ));
+            let _ = accepted_tx.send(task);
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let mut client = crate::client::AuthenticatedClient::new(port);
+    client.token_path = root.path().join("token");
+    std::fs::write(&client.token_path, state.token.as_str()).unwrap();
+
+    let unlocked_session = worker.session_id();
+    let (first_tx, first) = tokio::sync::oneshot::channel();
+    let (locked_tx, locked) = tokio::sync::oneshot::channel();
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut events = client.status_events().unwrap();
+        let status = |response: &crate::protocol::ProtocolResponse| match &response.payload {
+            ResponsePayload::Status(status) => status.locked,
+            other => panic!("unexpected payload {other:?}"),
+        };
+        let initial = events.recv().unwrap();
+        first_tx
+            .send((status(&initial), initial.session_id))
+            .unwrap();
+        let next = events.recv().unwrap();
+        locked_tx.send(status(&next)).unwrap();
+        // Dropping the subscription closes the connection.
+    });
+    let (initially_locked, initial_session) = first.await.unwrap();
+    assert!(!initially_locked);
+    assert_eq!(initial_session, unlocked_session);
+    let subscription = accepted.recv().await.unwrap();
+
+    worker.with_session(|live| live.lock()).await.unwrap();
+    let pushed_lock = tokio::time::timeout(Duration::from_secs(1), locked)
+        .await
+        .expect("a lock is pushed without waiting for a poll")
+        .unwrap();
+    assert!(pushed_lock);
+    reader.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), subscription)
+        .await
+        .expect("the server ends a subscription when its client leaves")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_subscriptions_are_bounded_and_refused_ones_report_a_failure() {
+    let state = test_connection_state();
+    let worker = test_worker(VaultSession::Locked, &state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accept_state = state.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(handle_connection(
+                stream,
+                accept_state.clone(),
+                worker.clone(),
+            ));
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let mut client = crate::client::AuthenticatedClient::new(port);
+    client.token_path = root.path().join("token");
+    std::fs::write(&client.token_path, state.token.as_str()).unwrap();
+    tokio::task::spawn_blocking(move || {
+        let mut held = Vec::new();
+        for _ in 0..MAX_STATUS_SUBSCRIBERS {
+            let mut events = client.status_events().unwrap();
+            events.recv().unwrap();
+            held.push(events);
+        }
+        let mut refused = client.status_events().unwrap();
+        assert!(
+            refused
+                .recv()
+                .unwrap_err()
+                .contains("Too many status subscribers")
+        );
+        // Ordinary requests still have connection slots.
+        assert!(client.request_response(ServerCommand::Status).is_ok());
+    })
+    .await
+    .unwrap();
 }

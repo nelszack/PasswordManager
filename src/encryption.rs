@@ -1,4 +1,5 @@
 use crate::file::{key_file_path, new_key_file_path, read_bounded_file, sync_parent};
+use crate::secret::SecretBuffer;
 use crate::types::PasswordType;
 use crate::vault::VaultCredentials;
 use argon2::{Algorithm, Argon2, Block, Params, Version};
@@ -289,6 +290,17 @@ pub(crate) fn new_keyfile_credentials(bytes: &[u8]) -> Result<VaultCredentials, 
     })
 }
 
+/// Bind an already-derived key-file master key to this vault's header, so
+/// unlocking does not read and hash the key file a second time. Returns
+/// `None` when the vault is not protected by a key file.
+pub(crate) fn keyfile_session(encrypted: &[u8], master: &[u8; 32]) -> Option<VaultCredentials> {
+    validate_vault_header(encrypted).ok()?;
+    if encrypted[9] != KDF_KEYFILE {
+        return None;
+    }
+    cached_credentials(encrypted, encryption_key_from_master(master)).ok()
+}
+
 pub(crate) fn cached_credentials(
     encrypted: &[u8],
     encryption_key: [u8; 32],
@@ -324,6 +336,42 @@ pub fn try_encrypt_file_in_place(
     plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let mut plaintext = Zeroizing::new(plaintext);
+    let len = plaintext.len();
+    if plaintext.capacity() - len >= ENCRYPTED_FILE_OVERHEAD {
+        // Frame within the caller's allocation: no copy or reallocation.
+        plaintext.resize(len + HEADER_LEN, 0);
+        plaintext.copy_within(..len, HEADER_LEN);
+        return try_encrypt_framed(key_pass, SecretBuffer::from(plaintext));
+    }
+    let mut framed = framed_plaintext(len);
+    framed.extend_from_slice(&plaintext);
+    drop(plaintext);
+    try_encrypt_framed(key_pass, framed)
+}
+
+/// A plaintext buffer with the vault header reserved in front and room for
+/// `payload_capacity` bytes plus the tag, so encryption neither moves nor
+/// reallocates the serialized document.
+pub(crate) fn framed_plaintext(payload_capacity: usize) -> SecretBuffer {
+    let mut framed =
+        SecretBuffer::with_capacity(payload_capacity.saturating_add(ENCRYPTED_FILE_OVERHEAD));
+    framed.extend_from_slice(&[0; HEADER_LEN]);
+    framed
+}
+
+/// The serialized payload length of a buffer from [`framed_plaintext`].
+pub(crate) fn framed_payload_len(framed: &SecretBuffer) -> usize {
+    framed.len().saturating_sub(HEADER_LEN)
+}
+
+/// Encrypt a [`framed_plaintext`] buffer in place, then fill in its header.
+pub(crate) fn try_encrypt_framed(
+    key_pass: &mut VaultCredentials,
+    mut framed: SecretBuffer,
+) -> Result<Vec<u8>, String> {
+    if framed.len() < HEADER_LEN {
+        return Err("encryption failure".to_string());
+    }
     let cached = match key_pass {
         VaultCredentials::Session {
             encryption_key,
@@ -379,19 +427,16 @@ pub fn try_encrypt_file_in_place(
     header[18..22].copy_from_slice(&parameters.parallelism.to_be_bytes());
     header[22..22 + SALT_LEN].copy_from_slice(&salt);
     header[22 + SALT_LEN..HEADER_LEN].copy_from_slice(&nonce);
-    if cipher
-        .encrypt_in_place(&nonce, &header, &mut *plaintext)
-        .is_err()
-    {
-        plaintext.zeroize();
+    // Reserve the tag while the buffer still holds plaintext; growth wipes.
+    framed.reserve(ENCRYPTED_FILE_OVERHEAD - HEADER_LEN);
+    let Ok(tag) =
+        cipher.encrypt_inout_detached(&nonce, &header, (&mut framed[HEADER_LEN..]).into())
+    else {
         session_key.zeroize();
         return Err("encryption failure".to_string());
-    }
-    let ciphertext_len = plaintext.len();
-    plaintext.reserve(HEADER_LEN);
-    plaintext.resize(ciphertext_len + HEADER_LEN, 0);
-    plaintext.copy_within(..ciphertext_len, HEADER_LEN);
-    plaintext[..HEADER_LEN].copy_from_slice(&header);
+    };
+    framed[..HEADER_LEN].copy_from_slice(&header);
+    framed.extend_from_slice(&tag);
     if !matches!(key_pass, VaultCredentials::Session { .. }) {
         *key_pass = VaultCredentials::Session {
             encryption_key: *session_key,
@@ -403,7 +448,7 @@ pub fn try_encrypt_file_in_place(
         };
     }
     session_key.zeroize();
-    Ok(std::mem::take(&mut *plaintext))
+    Ok(std::mem::take(&mut *framed.into_inner()))
 }
 
 #[cfg(test)]

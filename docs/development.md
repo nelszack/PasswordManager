@@ -116,8 +116,15 @@ messaging I/O; GUI dispatch releases an automatically created console only when
 no other process shares it, preserving existing command prompts.
 
 The desktop GUI calls `AuthenticatedClient` from blocking workers dispatched
-through Iced tasks. It never owns a second decrypted vault. Status polling does
-not extend inactivity; session changes clear selections and editor state. Reads,
+through Iced tasks. It never owns a second decrypted vault. A running server
+pushes status over an authenticated `StatusEvents` subscription: each record
+(lock state, session, revision, warnings; never item data) triggers the ordinary
+status request, and polling drops to a 30-second safety check. Record `n` is
+encrypted under a key derived from the connection's response key and `n`, so
+replayed, dropped, or reordered records fail. Each server accepts eight
+subscribers; older or busy servers refuse and the GUI keeps two-second polling.
+Neither pushed nor polled status extends inactivity; session changes clear
+selections and editor state. Reads,
 copies, and edits bind to the selected unlock session, and item writes include
 the reviewed revision. Late responses from before an explicit lock are ignored.
 Mutation IDs are recorded privately under `desktop-operations/` before sending;

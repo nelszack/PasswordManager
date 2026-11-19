@@ -194,8 +194,10 @@ unlock screen after connecting; the disconnected screen hides them. Recovery cha
 require a server restart. **Settings → Connection** provides **Stop local service…** and **Start local service**. Stopping requires confirmation because it locks the vault, discards an open draft, and disconnects the CLI and extension. Closing the window leaves the existing server
 and lock policy in effect.
 
-Status polling detects CLI/extension locks and vault switches and clears the
-old window contents. Passive polling does not extend the inactivity timeout.
+The local service notifies the window of CLI/extension locks and vault
+switches as they happen (older services are polled every two seconds) and the
+old window contents are cleared. Status updates do not extend the inactivity
+timeout.
 Edits check the reviewed revision; if another client changes an item, refresh
 and reopen it before editing again. Unsaved edits require an explicit discard
 when navigating away.

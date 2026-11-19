@@ -596,3 +596,58 @@ mod completion_tests {
         }
     }
 }
+
+/// Where to subscribe for pushed server status; equal sources share one
+/// subscription across view updates.
+#[derive(Hash)]
+pub(super) struct EventSource {
+    pub(super) port: u16,
+    pub(super) token_path: std::path::PathBuf,
+}
+
+/// Each authenticated status record from the server becomes one refresh
+/// signal; the app then runs its ordinary status request. Records carry no
+/// secrets and never count as vault activity.
+pub(super) fn status_events(
+    source: &EventSource,
+) -> impl iced::futures::Stream<Item = super::Message> + use<> {
+    let mut client = AuthenticatedClient::new(source.port);
+    client.token_path = source.token_path.clone();
+    iced::stream::channel(16, async move |output| {
+        std::thread::spawn(move || forward_status_events(&client, output));
+        std::future::pending::<()>().await
+    })
+}
+
+fn forward_status_events(
+    client: &AuthenticatedClient,
+    mut output: iced::futures::channel::mpsc::Sender<super::Message>,
+) {
+    let mut retry = std::time::Duration::from_secs(2);
+    loop {
+        if let Ok(mut events) = client.status_events() {
+            while events.recv().is_ok() {
+                retry = std::time::Duration::from_secs(2);
+                // A full queue already holds a pending refresh.
+                if output
+                    .try_send(super::Message::StatusPushed(true))
+                    .is_err_and(|error| error.is_disconnected())
+                {
+                    return;
+                }
+            }
+        }
+        // Older servers refuse the subscription; the app keeps polling.
+        if output
+            .try_send(super::Message::StatusPushed(false))
+            .is_err_and(|error| error.is_disconnected())
+        {
+            return;
+        }
+        std::thread::sleep(retry);
+        retry = (retry * 2).min(std::time::Duration::from_secs(60));
+        if output.is_closed() {
+            return;
+        }
+    }
+}

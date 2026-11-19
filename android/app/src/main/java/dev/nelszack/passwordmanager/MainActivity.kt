@@ -6,6 +6,8 @@ import android.os.Bundle
 import org.json.JSONArray
 import org.json.JSONObject
 
+private const val ROW_PAGE_SIZE = 50
+
 open class MainActivity : ManagementActivity() {
     override fun showItems(message: String) {
         items(message = message)
@@ -331,6 +333,48 @@ open class MainActivity : ManagementActivity() {
                 orientation = android.widget.LinearLayout.VERTICAL
             }
         layout.addView(rows)
+        // Build rows a page at a time: large vaults would otherwise inflate
+        // every result on the UI thread before the first one is visible.
+        fun addRows(entries: JSONArray, from: Int, version: Long) {
+            if (version != queryVersion || rows.parent !== layout) return
+            val end = minOf(entries.length(), from + ROW_PAGE_SIZE)
+            for (i in from until end) {
+                val entry = entries.getJSONObject(i)
+                val name = entry.getString("name")
+                val type = entry.getString("kind")
+                val user = entry.opt("username") as? String ?: ""
+                val host =
+                    if (user.isBlank()) {
+                        val url = entry.optJSONArray("urls")?.optString(0).orEmpty()
+                        runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
+                    } else ""
+                val summary =
+                    listOf(user.ifBlank { host }, MobileUi.kindLabel(type))
+                        .filter(String::isNotBlank)
+                        .joinToString(" · ")
+                rows.addView(
+                    MobileUi.row(
+                        this,
+                        name,
+                        summary,
+                        if (type == "login") name.take(1).uppercase()
+                        else MobileUi.kindBadge(type),
+                    ) {
+                        guarded { detail(entry.getLong("id")) }
+                    }
+                )
+            }
+            if (end < entries.length()) {
+                val remaining = entries.length() - end
+                lateinit var more: android.widget.Button
+                more =
+                    MobileUi.button(this, "Show ${minOf(ROW_PAGE_SIZE, remaining)} more of $remaining") {
+                        rows.removeView(more)
+                        addRows(entries, end, version)
+                    }
+                rows.addView(more)
+            }
+        }
         fun load() {
             val needle = search.text.toString()
             searchText = needle
@@ -372,29 +416,7 @@ open class MainActivity : ManagementActivity() {
                         )
                     )
                 }
-                for (i in 0 until entries.length()) {
-                    val entry = entries.getJSONObject(i)
-                    val name = entry.getString("name")
-                    val type = entry.getString("kind")
-                    val user = entry.opt("username") as? String ?: ""
-                    val url = entry.optJSONArray("urls")?.optString(0).orEmpty()
-                    val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
-                    val summary =
-                        listOf(user.ifBlank { host }, MobileUi.kindLabel(type))
-                            .filter(String::isNotBlank)
-                            .joinToString(" · ")
-                    rows.addView(
-                        MobileUi.row(
-                            this,
-                            name,
-                            summary,
-                            if (type == "login") name.take(1).uppercase()
-                            else MobileUi.kindBadge(type),
-                        ) {
-                            guarded { detail(entry.getLong("id")) }
-                        }
-                    )
-                }
+                addRows(entries, 0, version)
             }
         }
         fun drawChips() {

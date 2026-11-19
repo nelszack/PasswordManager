@@ -15,6 +15,9 @@ pub(crate) enum Deferred {
     #[default]
     None,
     Audit(crate::vault::PendingAudit, bool),
+    /// Strength scoring for a weak-password list; the list itself is built
+    /// on the vault queue once the scores are cached.
+    WeakList(crate::vault::PendingScores, Box<SearchFilter>),
     Duo(Box<crate::vault::PreparedDuoPoll>),
     DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
 }
@@ -370,11 +373,16 @@ pub(crate) fn execute_unlocked(
                 responses,
             ),
         },
-        ServerCommand::List(filter) => respond_result(
-            vault.management_list(filter),
-            ResponsePayload::ItemPage,
-            responses,
-        ),
+        ServerCommand::List(filter) => {
+            if let Some(pending) = vault.prepare_weak_list(&filter) {
+                return Deferred::WeakList(pending, Box::new(filter));
+            }
+            respond_result(
+                vault.management_list(filter),
+                ResponsePayload::ItemPage,
+                responses,
+            )
+        }
         ServerCommand::ManagementItem { id, reveal } => respond_result(
             vault.management_item(id, reveal),
             ResponsePayload::Item,
@@ -608,6 +616,21 @@ pub(crate) async fn finish_duo(
             respond_domain_result(result.map(|_| "Duo decision accepted.".into()), responses);
         }
         Ok(Err(error)) => respond_domain_error(&error, responses),
+        Err(error) => respond_failure(&error, responses),
+    }
+}
+
+/// Build a weak-password list after its strength scores were computed off the queue.
+pub(crate) async fn finish_weak_list(
+    filter: SearchFilter,
+    session: &impl SessionAccess,
+    responses: &mut Vec<RpcResponse>,
+) {
+    match session
+        .with_unlocked(move |vault, _| vault.management_list(filter))
+        .await
+    {
+        Ok(result) => respond_result(result, ResponsePayload::ItemPage, responses),
         Err(error) => respond_failure(&error, responses),
     }
 }

@@ -174,6 +174,9 @@ pub enum ServerCommand {
     },
     BrowserDuoItems(String),
     OperationStatus(String),
+    /// Keep the connection open and receive a status record whenever the
+    /// lock state, vault revision, or warnings change. Carries no secrets.
+    StatusEvents,
 }
 
 impl ServerCommand {
@@ -182,6 +185,7 @@ impl ServerCommand {
         !matches!(
             self,
             Self::Status
+                | Self::StatusEvents
                 | Self::Cloud(_)
                 | Self::History(_)
                 | Self::Trash

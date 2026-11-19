@@ -83,6 +83,17 @@ impl Vault {
             .map(|i| self.summary(i))
             .collect()
     }
+    /// IDs of active logins with a password whose saved sites match the
+    /// origin. The origin is parsed once and no summaries are built.
+    pub(crate) fn site_login_ids(&self, domain: &str) -> Vec<usize> {
+        let Some(requested) = parse_site(domain, false) else {
+            return vec![];
+        };
+        self.active_items()
+            .filter(|i| !i.entry.password.is_empty() && item_matches_site(i, &requested))
+            .map(|i| i.entry.id)
+            .collect()
+    }
     /// An active login with this ID whose saved sites match the origin.
     fn site_login(&self, origin: &str, id: usize) -> Option<&Item> {
         let requested = parse_site(origin, false)?;

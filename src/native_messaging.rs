@@ -472,8 +472,8 @@ fn read_message(reader: &mut impl Read) -> Result<Option<Zeroizing<Vec<u8>>>, St
 }
 
 fn write_message(writer: &mut impl Write, response: &NativeResponse) -> Result<(), String> {
-    let mut payload = Zeroizing::new(Vec::new());
-    serde_json::to_writer(&mut *payload, response)
+    let mut payload = crate::secret::SecretBuffer::default();
+    serde_json::to_writer(&mut payload, response)
         .map_err(|error| format!("could not encode native response: {error}"))?;
     if payload.len() > MAX_NATIVE_MESSAGE {
         // Keep the host connected and return an actionable, bounded error.
@@ -493,8 +493,8 @@ fn write_message(writer: &mut impl Write, response: &NativeResponse) -> Result<(
                  retrying.",
             );
         }
-        payload.zeroize();
-        serde_json::to_writer(&mut *payload, &*fallback)
+        payload = crate::secret::SecretBuffer::default();
+        serde_json::to_writer(&mut payload, &*fallback)
             .map_err(|error| format!("could not encode native response: {error}"))?;
     }
     writer

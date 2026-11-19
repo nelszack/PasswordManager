@@ -152,6 +152,15 @@ pub(super) fn encode_document(
     data: &VaultData,
     overlay: Option<(&VaultData, &HashSet<ItemId>)>,
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let mut bytes = SecretBuffer::default();
+    write_document(&mut bytes, data, overlay)?;
+    Ok(bytes.into_inner())
+}
+fn write_document(
+    out: &mut SecretBuffer,
+    data: &VaultData,
+    overlay: Option<(&VaultData, &HashSet<ItemId>)>,
+) -> Result<(), VaultError> {
     let (next_item_id, revision) = overlay
         .map_or((data.next_item_id, data.revision), |(staged, _)| {
             (staged.next_item_id, staged.revision)
@@ -167,10 +176,8 @@ pub(super) fn encode_document(
         },
     };
     // Named fields preserve the durable schema independently of Rust field order.
-    let mut bytes = Zeroizing::new(Vec::new());
-    rmp_serde::encode::write_named(&mut *bytes, &document)
-        .map_err(|e| VaultError::Persistence(format!("could not encode vault document: {e}")))?;
-    Ok(bytes)
+    rmp_serde::encode::write_named(out, &document)
+        .map_err(|e| VaultError::Persistence(format!("could not encode vault document: {e}")))
 }
 pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
     let document: VaultDocument = rmp_serde::from_slice(bytes).map_err(|e| {
@@ -386,11 +393,15 @@ pub(super) fn lookup_vault_in(
     key_pass: &mut VaultCredentials,
     selected: Option<&str>,
 ) -> Result<Option<(String, Vault)>, VaultError> {
-    if matches!(key_pass, VaultCredentials::Unlock(PasswordType::Key(_))) {
-        let _material = Zeroizing::new(
+    // Read the key file before the vault so its errors stay specific; the
+    // derived key is reused for decryption instead of reading the file again.
+    let keyfile_master = if matches!(key_pass, VaultCredentials::Unlock(PasswordType::Key(_))) {
+        Some(Zeroizing::new(
             try_gen_master_key(key_pass.supplied()?, false).map_err(VaultError::Persistence)?,
-        );
-    }
+        ))
+    } else {
+        None
+    };
     let filename = match selected {
         Some(name) => {
             validate_vault_filename(name)?;
@@ -426,7 +437,10 @@ pub(super) fn lookup_vault_in(
         .map_err(|e| VaultError::Persistence(format!("could not read vault {filename:?}: {e}")))?;
     crate::encryption::validate_vault_header(&contents)
         .map_err(|e| VaultError::Validation(e.into()))?;
-    let mut candidate = key_pass.clone();
+    let mut candidate = keyfile_master
+        .as_ref()
+        .and_then(|master| crate::encryption::keyfile_session(&contents, master))
+        .unwrap_or_else(|| key_pass.clone());
     let plaintext = Zeroizing::new(decrypt_file(&mut candidate, &contents).ok_or_else(|| {
         VaultError::Validation("incorrect password/key or modified encrypted contents".into())
     })?);
@@ -565,10 +579,21 @@ fn persist_document(
     credentials: &mut VaultCredentials,
     max_bytes: u64,
 ) -> Result<(), VaultError> {
-    let mut plaintext = encode_document(data, overlay)?;
-    validate_encrypted_size(plaintext.len(), 0, max_bytes, "vault")?;
+    // The current file size (a non-secret length) sizes the buffer, so a
+    // typical save serializes and encrypts without reallocating plaintext.
+    let previous = fs::metadata(directory.join(filename)).map_or(0, |m| m.len().min(max_bytes));
+    let previous = usize::try_from(previous).unwrap_or(0);
+    let mut plaintext =
+        crate::encryption::framed_plaintext(previous.saturating_add(previous / 16 + 4096));
+    write_document(&mut plaintext, data, overlay)?;
+    validate_encrypted_size(
+        crate::encryption::framed_payload_len(&plaintext),
+        0,
+        max_bytes,
+        "vault",
+    )?;
     let mut candidate = credentials.clone();
-    let ciphertext = try_encrypt_file_in_place(&mut candidate, std::mem::take(&mut *plaintext))?;
+    let ciphertext = crate::encryption::try_encrypt_framed(&mut candidate, plaintext)?;
     let result = persist_ciphertext(directory, filename, &ciphertext);
     if result.as_ref().map_or_else(|e| e.committed(), |_| true) {
         *credentials = candidate;

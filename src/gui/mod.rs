@@ -39,6 +39,11 @@ use std::{
 };
 use zeroize::Zeroize;
 
+/// How often an idle desktop session checks server status.
+const STATUS_INTERVAL: Duration = Duration::from_secs(2);
+/// Safety poll while the server pushes changes (it also sends a heartbeat).
+const SUBSCRIBED_STATUS_INTERVAL: Duration = Duration::from_secs(30);
+
 pub fn run(conf: Config, client: AuthenticatedClient) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     crate::desktop::detach_private_console();
@@ -167,6 +172,8 @@ enum Navigate {
 #[derive(Clone)]
 enum Message {
     Tick(Instant),
+    /// `true`: the server pushed a status record; `false`: the push stream ended.
+    StatusPushed(bool),
     Cloud(password_manager::cloud::Action),
     CloudToken(SecretString),
     CloudVault(String),
@@ -354,6 +361,8 @@ impl App {
                 select_created_vault: false,
                 creation: None,
                 last_status: Instant::now(),
+                subscribed: false,
+                status_stale: false,
             },
             generation: generator::State {
                 length: conf.genpass.length.to_string(),
@@ -402,7 +411,8 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            iced::time::every(Duration::from_secs(1)).map(Message::Tick),
+            iced::time::every(self.tick_interval()).map(Message::Tick),
+            self.status_subscription(),
             iced::event::listen_with(|event, status, _| match event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                     match key {
@@ -467,6 +477,32 @@ impl App {
         ])
     }
 
+    /// One-second ticks only while something on screen counts down or
+    /// expires; otherwise tick at the status-poll cadence to avoid idle redraws.
+    fn tick_interval(&self) -> Duration {
+        let timed = self.busy()
+            || self.polling()
+            || self.reveal_until.is_some()
+            || self.generation.value.deadline().is_some()
+            || self.workspace.result_until.is_some()
+            || self.workspace.otp.watch.is_some()
+            || self.workspace.duo.watch.is_some()
+            || self.workspace.duo.result.is_some();
+        Duration::from_secs(if timed { 1 } else { STATUS_INTERVAL.as_secs() })
+    }
+    /// Pushed status from a running server; polling remains the fallback.
+    fn status_subscription(&self) -> Subscription<Message> {
+        if !self.connection.running {
+            return Subscription::none();
+        }
+        Subscription::run_with(
+            backend::EventSource {
+                port: self.connection.client.port,
+                token_path: self.connection.client.token_path.clone(),
+            },
+            backend::status_events,
+        )
+    }
     fn busy(&self) -> bool {
         matches!(
             self.request_state,
@@ -596,6 +632,7 @@ impl App {
 
     fn status(&mut self) -> Task<Message> {
         self.connection.last_status = Instant::now();
+        self.connection.status_stale = false;
         self.request(Job::Status, ServerCommand::Status, None)
     }
 
@@ -769,6 +806,15 @@ impl App {
                     }
                 };
             }
+            Message::StatusPushed(true) => {
+                self.connection.subscribed = true;
+                if self.connection.running && !self.busy() && !self.polling() {
+                    return self.status();
+                }
+                // Refresh once the current request finishes (next tick).
+                self.connection.status_stale = true;
+            }
+            Message::StatusPushed(false) => self.connection.subscribed = false,
             Message::Tick(now) => {
                 if self
                     .workspace
@@ -800,10 +846,18 @@ impl App {
                         return task;
                     }
                 }
+                // Allow timer jitter so an idle tick at the poll cadence is not skipped.
+                let interval = if self.connection.subscribed {
+                    SUBSCRIBED_STATUS_INTERVAL
+                } else {
+                    STATUS_INTERVAL
+                };
                 if self.connection.running
                     && !self.busy()
                     && !self.polling()
-                    && now.duration_since(self.connection.last_status) >= Duration::from_secs(2)
+                    && (self.connection.status_stale
+                        || now.duration_since(self.connection.last_status)
+                            >= interval - Duration::from_millis(250))
                 {
                     return self.status();
                 }

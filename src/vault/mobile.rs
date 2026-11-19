@@ -675,6 +675,16 @@ impl MobileVault {
                     &mut responses,
                 ),
             },
+            Deferred::WeakList(pending, filter) => {
+                if pending.finish(|| cancelled(cancellation)).is_err() {
+                    return Err("Password strength check was cancelled".into());
+                }
+                let host = self.host(None);
+                block_on(
+                    cancellation,
+                    operations::finish_weak_list(*filter, &host, &mut responses),
+                )?;
+            }
             Deferred::Duo(prepared) => {
                 let host = self.host(None);
                 block_on(
@@ -744,30 +754,23 @@ impl MobileVault {
         let Some(vault) = self.vault.as_ref() else {
             return vec![];
         };
-        if origin.starts_with("androidapp://") {
-            vault
-                .active_items()
-                .filter(|i| {
-                    i.metadata.kind == ItemKind::Login
-                        && !i.entry.password.is_empty()
-                        && i.urls().any(|u| u == origin)
-                })
-                .map(|i| i.entry.id)
-                .collect()
-        } else if origin.starts_with("https://") {
-            vault
-                .browser_logins(origin)
-                .into_iter()
-                .filter(|i| {
-                    vault
-                        .item(i.id)
-                        .is_some_and(|item| !item.entry.password.is_empty())
-                })
-                .map(|i| i.id)
-                .collect()
-        } else {
-            vec![]
+        if origin.starts_with("https://") {
+            return vault.site_login_ids(origin);
         }
+        vault
+            .active_items()
+            .filter(|item| login_matches(vault, item, origin))
+            .map(|item| item.entry.id)
+            .collect()
+    }
+
+    /// Whether one item is a login matching `origin`, without scanning the vault.
+    fn login_matches_id(&self, id: usize, origin: &str) -> bool {
+        self.vault.as_ref().is_some_and(|vault| {
+            vault
+                .item(id)
+                .is_some_and(|item| item.active() && login_matches(vault, item, origin))
+        })
     }
 
     fn browser_choices(
@@ -794,7 +797,7 @@ impl MobileVault {
     }
 
     fn login(&self, id: usize, origin: &str) -> Result<Value, String> {
-        if !self.login_ids(origin).contains(&id) {
+        if !self.login_matches_id(id, origin) {
             return Err("No matching login".into());
         }
         let item = self.vault()?.item(id).ok_or("No matching login")?;
@@ -813,7 +816,7 @@ impl MobileVault {
     fn site_otp(&self, id: usize, origin: &str) -> Result<Value, String> {
         let vault = self.vault()?;
         let matches = if origin.starts_with("androidapp://") {
-            self.login_ids(origin).contains(&id)
+            self.login_matches_id(id, origin)
                 && vault.item(id).is_some_and(|item| {
                     matches!(
                         item.authenticator.as_ref().map(|auth| &auth.state),
@@ -919,6 +922,22 @@ impl MobileVault {
 
 /// Vault commands the app may send. Session lifecycle and file paths belong to
 /// the mobile requests above; clipboard copies belong to the app.
+/// An active login with a password whose saved app or website matches `origin`.
+fn login_matches(vault: &Vault, item: &Item, origin: &str) -> bool {
+    if item.entry.password.is_empty() {
+        return false;
+    }
+    if origin.starts_with("androidapp://") {
+        item.metadata.kind == ItemKind::Login && item.urls().any(|url| url == origin)
+    } else if origin.starts_with("https://") {
+        vault
+            .browser_login_revision(origin, item.entry.id)
+            .is_some()
+    } else {
+        false
+    }
+}
+
 fn mobile_command(command: &ServerCommand) -> Result<(), &'static str> {
     use ServerCommand as C;
     let allowed = match command {

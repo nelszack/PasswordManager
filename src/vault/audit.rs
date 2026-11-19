@@ -234,6 +234,19 @@ impl Vault {
             cold,
         }
     }
+    /// Cold scores a weak-password list needs, or `None` when all are cached.
+    pub(crate) fn prepare_weak_list(&self, filter: &SearchFilter) -> Option<PendingScores> {
+        if !filter.list.weak {
+            return None;
+        }
+        let cold: Vec<_> = self
+            .search_items(filter)
+            .into_iter()
+            .filter(|item| !item.entry.password.is_empty() && item.strength.0.get().is_none())
+            .map(|item| (item.entry.password.clone(), item.strength.clone()))
+            .collect();
+        (!cold.is_empty()).then_some(PendingScores(cold))
+    }
 }
 
 /// Only cold scores need temporary password copies; discard them before networking.
@@ -247,19 +260,17 @@ impl PendingAudit {
         mut self,
         cancelled: impl Fn() -> bool,
     ) -> Result<AuditSnapshot, &'static str> {
-        let mut scores = HashMap::new();
-        for (id, password, cache) in self.cold.drain(..) {
-            if cancelled() {
-                return Err("Vault changed during audit; run it again");
-            }
-            let score = *cache
-                .0
-                .get_or_init(|| zxcvbn::zxcvbn(&password, &[]).score());
-            scores.insert(id, score);
-        }
-        if cancelled() {
-            return Err("Vault changed during audit; run it again");
-        }
+        let scored: Vec<_> = self
+            .cold
+            .iter()
+            .map(|(_, password, cache)| (password, cache))
+            .collect();
+        score_passwords(&scored, cancelled)?;
+        let scores: HashMap<_, _> = self
+            .cold
+            .drain(..)
+            .filter_map(|(id, _, cache)| cache.0.get().map(|score| (id, *score)))
+            .collect();
         for entry in &mut self.snapshot.entries {
             if let Some(score) = scores.get(&entry.id) {
                 entry.weak = *score <= zxcvbn::Score::Two;
@@ -267,6 +278,71 @@ impl PendingAudit {
         }
         Ok(self.snapshot)
     }
+}
+
+/// Cold strength scores for a weak-password list, computed outside the vault queue.
+pub(crate) struct PendingScores(Vec<(SecretString, CachedStrength)>);
+impl PendingScores {
+    pub(crate) fn finish(self, cancelled: impl Fn() -> bool) -> Result<(), &'static str> {
+        let scored: Vec<_> = self
+            .0
+            .iter()
+            .map(|(password, cache)| (password, cache))
+            .collect();
+        score_passwords(&scored, cancelled)
+    }
+}
+
+/// Score cold passwords on every available core. Reused passwords are scored
+/// once. Only the calling thread polls `cancelled`; helpers stop before their
+/// next password once it reports a change. No password is copied here.
+fn score_passwords(
+    cold: &[(&SecretString, &CachedStrength)],
+    cancelled: impl Fn() -> bool,
+) -> Result<(), &'static str> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    const CHANGED: &str = "Vault changed during audit; run it again";
+    let mut order: Vec<usize> = (0..cold.len()).collect();
+    order.sort_unstable_by(|&a, &b| cold[a].0.expose().cmp(cold[b].0.expose()));
+    let groups: Vec<&[usize]> = order
+        .chunk_by(|&a, &b| cold[a].0.expose() == cold[b].0.expose())
+        .collect();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let work = |poll: &dyn Fn() -> bool| {
+        while !stop.load(Ordering::Relaxed) {
+            if poll() {
+                stop.store(true, Ordering::Relaxed);
+                return;
+            }
+            let Some(group) = groups.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                return;
+            };
+            let (password, first) = cold[group[0]];
+            let score = *first
+                .0
+                .get_or_init(|| zxcvbn::zxcvbn(password.expose(), &[]).score());
+            for &member in &group[1..] {
+                let _ = cold[member].1.0.set(score);
+            }
+        }
+    };
+    if cancelled() {
+        return Err(CHANGED);
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(groups.len());
+    std::thread::scope(|scope| {
+        for _ in 1..threads {
+            scope.spawn(|| work(&|| false));
+        }
+        work(&cancelled);
+    });
+    if stop.load(Ordering::Relaxed) || cancelled() {
+        return Err(CHANGED);
+    }
+    Ok(())
 }
 
 impl AuditSnapshot {
@@ -534,5 +610,57 @@ mod tests {
             assert!(!rendered.contains(password));
         }
         assert!(!snapshot.audit(false).await.incomplete);
+    }
+}
+
+#[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    #[test]
+    fn parallel_scores_match_sequential_scores_and_reused_passwords_share_one() {
+        let passwords: Vec<SecretString> = [
+            "password1",
+            "correct horse battery staple synthetic",
+            "password1",
+            "Zq8!vR2#mW5$kT9&",
+            "letmein",
+            "correct horse battery staple synthetic",
+        ]
+        .into_iter()
+        .chain((0..40).map(|_| "qwerty"))
+        .map(SecretString::from)
+        .collect();
+        let caches: Vec<CachedStrength> = passwords.iter().map(|_| Default::default()).collect();
+        let cold: Vec<_> = passwords.iter().zip(&caches).collect();
+        score_passwords(&cold, || false).unwrap();
+        for (password, cache) in passwords.iter().zip(&caches) {
+            assert_eq!(
+                cache.0.get().copied(),
+                Some(zxcvbn::zxcvbn(password.expose(), &[]).score())
+            );
+        }
+        assert!(score_passwords(&[], || false).is_ok());
+    }
+
+    #[test]
+    fn cancellation_stops_scoring_and_reports_a_change() {
+        let passwords: Vec<SecretString> = (0..64)
+            .map(|i| SecretString::from(format!("synthetic-{i}")))
+            .collect();
+        let caches: Vec<CachedStrength> = passwords.iter().map(|_| Default::default()).collect();
+        let cold: Vec<_> = passwords.iter().zip(&caches).collect();
+        assert!(score_passwords(&cold, || true).is_err());
+        assert!(
+            caches.iter().all(|cache| cache.0.get().is_none()),
+            "a change before scoring starts must not score anything"
+        );
+        // A change during scoring is reported even if every score finished.
+        let calls = std::cell::Cell::new(0);
+        let result = score_passwords(&cold, || {
+            calls.set(calls.get() + 1);
+            calls.get() > 2
+        });
+        assert!(result.is_err());
     }
 }

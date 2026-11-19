@@ -125,3 +125,127 @@ mod tests {
         assert!(secret.is_empty());
     }
 }
+
+/// A growable plaintext byte buffer. Growing copies into a fresh allocation
+/// and wipes the old one, whereas `Vec` growth frees it without wiping.
+/// It dereferences only to a slice, so callers cannot grow it unwiped.
+#[derive(Default)]
+pub struct SecretBuffer(zeroize::Zeroizing<Vec<u8>>);
+
+impl SecretBuffer {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(zeroize::Zeroizing::new(Vec::with_capacity(capacity)))
+    }
+
+    /// Ensure room for `additional` more bytes without an unwiped reallocation.
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        if self.0.capacity() - self.0.len() < additional {
+            self.grow(additional);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, additional: usize) {
+        let needed = self
+            .0
+            .len()
+            .checked_add(additional)
+            .expect("secret buffer capacity overflow");
+        let capacity = needed.max(self.0.capacity().saturating_mul(2)).max(64);
+        let mut grown = Vec::with_capacity(capacity);
+        grown.extend_from_slice(&self.0);
+        // Dropping the previous Zeroizing wrapper wipes its whole allocation.
+        drop(std::mem::replace(
+            &mut self.0,
+            zeroize::Zeroizing::new(grown),
+        ));
+    }
+
+    #[inline]
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.reserve(bytes.len());
+        self.0.extend_from_slice(bytes);
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+    pub fn into_inner(self) -> zeroize::Zeroizing<Vec<u8>> {
+        self.0
+    }
+}
+
+impl From<zeroize::Zeroizing<Vec<u8>>> for SecretBuffer {
+    fn from(bytes: zeroize::Zeroizing<Vec<u8>>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl Deref for SecretBuffer {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl DerefMut for SecretBuffer {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+impl fmt::Debug for SecretBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretBuffer(<redacted>)")
+    }
+}
+impl std::io::Write for SecretBuffer {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    #[inline]
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod secret_buffer_tests {
+    use super::SecretBuffer;
+    use std::io::Write;
+
+    #[test]
+    fn growth_preserves_contents_and_reserved_capacity_is_not_reallocated() {
+        let mut buffer = SecretBuffer::default();
+        for chunk in 0..200u8 {
+            buffer.write_all(&[chunk; 37]).unwrap();
+        }
+        assert_eq!(buffer.len(), 200 * 37);
+        assert!(
+            buffer
+                .chunks(37)
+                .enumerate()
+                .all(|(i, c)| c.iter().all(|&b| b == i as u8))
+        );
+
+        let mut sized = SecretBuffer::with_capacity(1024);
+        let before = sized.as_ptr();
+        sized.extend_from_slice(&[1; 1000]);
+        sized.reserve(24);
+        sized.extend_from_slice(&[2; 24]);
+        assert_eq!(
+            sized.as_ptr(),
+            before,
+            "reserved capacity must be used in place"
+        );
+        assert_eq!(sized.capacity(), 1024);
+    }
+}

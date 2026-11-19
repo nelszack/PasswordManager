@@ -16,6 +16,10 @@ pub(super) struct State {
     pub(super) select_created_vault: bool,
     pub(super) creation: Option<Creation>,
     pub(super) last_status: Instant,
+    /// The server is pushing status changes, so polling can be rare.
+    pub(super) subscribed: bool,
+    /// A pushed change arrived while another request was running.
+    pub(super) status_stale: bool,
 }
 
 fn parse_connection_port(value: &str) -> Result<u16, &'static str> {

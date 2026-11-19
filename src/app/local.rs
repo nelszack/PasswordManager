@@ -20,21 +20,30 @@ pub(super) async fn run(
     conf: &config::Config,
     config_file: &std::path::Path,
     client: &client::AuthenticatedClient,
-    server_running: bool,
-    configured_server_running: bool,
+    server_running: &dyn Fn() -> bool,
+    configured_server_running: &dyn Fn() -> bool,
     console: &Output,
 ) -> Option<CliCommands> {
     let port = client.port;
-    match (command, server_running) {
-        (CliCommands::Sync { command }, _) => {
-            super::sync::run(command, conf, config_file, client, server_running, console).await;
+    // Probe the server only for commands whose behavior depends on it.
+    match command {
+        CliCommands::Sync { command } => {
+            super::sync::run(
+                command,
+                conf,
+                config_file,
+                client,
+                server_running(),
+                console,
+            )
+            .await;
         }
 
-        (CliCommands::Vaults, _) => match vault::list_vaults() {
+        CliCommands::Vaults => match vault::list_vaults() {
             Ok(names) => console.print_data(serde_json::json!(&names), &names.join("\n")),
             Err(error) => console.exit_error(&error.to_string(), 1),
         },
-        (CliCommands::GenerateCommandContract { check }, _) => {
+        CliCommands::GenerateCommandContract { check } => {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extension");
             for (name, expected) in [
                 (
@@ -62,36 +71,33 @@ pub(super) async fn run(
                 }
             }
         }
-        (CliCommands::ClipboardHelper { timeout }, _) => {
+        CliCommands::ClipboardHelper { timeout } => {
             if let Err(error) = clipboard::run_helper(timeout) {
                 console.exit_error(&error, 1);
             }
         }
-        (CliCommands::GenerateCommandReference { check }, _) => {
+        CliCommands::GenerateCommandReference { check } => {
             if let Err(error) = docs::generate_command_reference(check) {
                 console.exit_error(&error, 1);
             }
         }
-        (
-            CliCommands::Genpass {
-                length,
-                no_stats,
-                stats,
-                copy,
-                no_copy,
-                copy_time,
-                no_uppercase,
-                no_lowercase,
-                no_digits,
-                no_symbols,
-                symbols,
-                exclude_ambiguous,
-                passphrase,
-                words,
-                separator,
-            },
-            _,
-        ) => {
+        CliCommands::Genpass {
+            length,
+            no_stats,
+            stats,
+            copy,
+            no_copy,
+            copy_time,
+            no_uppercase,
+            no_lowercase,
+            no_digits,
+            no_symbols,
+            symbols,
+            exclude_ambiguous,
+            passphrase,
+            words,
+            separator,
+        } => {
             let show_stats = if !stats && !no_stats {
                 conf.genpass.stats
             } else {
@@ -137,7 +143,7 @@ pub(super) async fn run(
                 Err(error) => console.exit_error(&error, 2),
             }
         }
-        (CliCommands::Passcheck { password }, _) => {
+        CliCommands::Passcheck { password } => {
             let password = password.unwrap_or_else(|| {
                 rpassword::prompt_password("Password to check: ").unwrap_or_else(|error| {
                     console.exit_error(&format!("could not read password: {error}"), 1)
@@ -145,7 +151,7 @@ pub(super) async fn run(
             });
             console.print_success(&password_strength_output(&password));
         }
-        (CliCommands::Completions { shell, output }, _) => {
+        CliCommands::Completions { shell, output } => {
             let mut cmd = Cli::command();
             if output.to_string_lossy() == "-" {
                 let mut generated = Vec::new();
@@ -166,7 +172,7 @@ pub(super) async fn run(
                 console.print_success(&format!("Completions written to {}", output.display()));
             }
         }
-        (CliCommands::NativeHost { command }, _) => match command {
+        CliCommands::NativeHost { command } => match command {
             NativeHostCommands::Update => match native_messaging::update() {
                 Ok(path) => console.print_success(&format!(
                     "Native messaging host updated at {}",
@@ -190,24 +196,24 @@ pub(super) async fn run(
                 }
             }
         },
-        (CliCommands::Config(command), _) => {
+        CliCommands::Config(command) => {
             let requested_port = if command.reset {
                 Some(password_manager::server::DEFAULT_PORT)
             } else {
                 command.server_port
             };
             if requested_port.is_some_and(|new_port| new_port != conf.server.port)
-                && configured_server_running
+                && configured_server_running()
             {
                 console.exit_error(
                     "stop the running server before changing its configured port",
                     1,
                 );
             }
-            let restart_required = configured_server_running
-                && (command.reset
-                    || command.password_history_limit.is_some()
-                    || command.trash_retention_days.is_some());
+            let restart_required = (command.reset
+                || command.password_history_limit.is_some()
+                || command.trash_retention_days.is_some())
+                && configured_server_running();
             let effective = if command.has_updates() {
                 try_update(conf.clone(), command, config_file)
                     .unwrap_or_else(|error| console.exit_error(&error, 1))
@@ -227,11 +233,11 @@ pub(super) async fn run(
                 );
             }
         }
-        (CliCommands::Start, false) | (CliCommands::Start, true) => match start(port) {
+        CliCommands::Start => match start(port) {
             Ok(message) => console.print_success(&message),
             Err(error) => console.exit_error(&error, 1),
         },
-        (CliCommands::Run, false) => {
+        CliCommands::Run if !server_running() => {
             if let Err(error) = server(
                 port,
                 conf.recovery.password_history_limit,
@@ -242,8 +248,8 @@ pub(super) async fn run(
                 console.exit_error(&error, 1);
             }
         }
-        (CliCommands::Run, true) => console.print_success("Server is already running."),
-        (command, _) => return Some(command),
+        CliCommands::Run => console.print_success("Server is already running."),
+        command => return Some(command),
     };
     None
 }

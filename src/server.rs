@@ -229,6 +229,7 @@ pub async fn server(
     let cloud_task = cloud::start(worker.clone(), stopping.clone());
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
+    let status_subscribers = Arc::new(Semaphore::new(MAX_STATUS_SUBSCRIBERS));
 
     loop {
         tokio::select! {
@@ -251,6 +252,7 @@ pub async fn server(
                     system_lock: Some(Arc::clone(&system_lock)),
                     password_history_limit,
                     trash_retention_days,
+                    status_subscribers: Arc::clone(&status_subscribers),
                 };
                 let permit = match Arc::clone(&connection_slots).acquire_owned().await {
                     Ok(permit) => permit,
@@ -289,10 +291,12 @@ struct ConnectionState {
     system_lock: Option<Arc<system_lock::Monitor>>,
     password_history_limit: usize,
     trash_retention_days: u64,
+    /// Bounds long-lived status subscriptions for this server.
+    status_subscribers: Arc<Semaphore>,
 }
 
-async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker: VaultWorker) {
-    let _instance_lock = state.instance_lock.clone();
+async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, worker: VaultWorker) {
+    let instance_lock = state.instance_lock.clone();
     let Ok(Some(AuthenticatedRequest {
         request,
         response_key,
@@ -300,6 +304,17 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
     else {
         return;
     };
+    if matches!(request.command, ServerCommand::StatusEvents) {
+        // A subscription is long-lived and runs no command, so it must not
+        // keep the data directory owned after the server stops.
+        drop(instance_lock);
+        state.instance_lock = None;
+        if request.validate().is_ok() {
+            stream_status(stream, &state, &worker, &response_key, &request.request_id).await;
+        }
+        return;
+    }
+    let _instance_lock = instance_lock;
     // Bound audit-owned cold-password snapshots before the vault clones them.
     static AUDIT_REQUEST: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
     let _audit_permit = if matches!(request.command, ServerCommand::Audit(_)) {
@@ -326,28 +341,8 @@ async fn handle_connection(mut stream: TcpStream, state: ConnectionState, worker
         if matches!(request.command, ServerCommand::Status) && request.validate().is_ok() {
             // Status is nonsecret published state; it remains responsive while
             // the owner finishes a filesystem commit or derives a key.
-            let warnings = [
-                state.background_error.lock().await.clone(),
-                state
-                    .system_lock
-                    .as_deref()
-                    .and_then(system_lock::Monitor::warning),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-            let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
-            let session_id = worker.session_id();
-            let mut response = RpcResponse::success(ResponsePayload::Status(
-                crate::protocol::ServerStatus::new(session_id.is_none(), warning),
-            ));
-            if let ResponsePayload::Status(status) = &mut response.payload {
-                status.vault_revision = worker.vault_revision();
-                status.cloud_warning = worker.cloud_warning().await;
-            }
-            response.session_id = session_id;
             outcome::CommandOutcome {
-                responses: vec![response],
+                responses: vec![current_status(&state, &worker).await],
                 effect: CommandEffect::None,
                 ..Default::default()
             }
@@ -421,6 +416,8 @@ async fn finish_external_effect(
         worker: &worker,
         session: result.session_id.clone(),
     };
+    // One CPU-heavy strength scoring at a time, outside the vault queue.
+    static SCORING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
     match work {
         Deferred::Duo(prepared) => {
             crate::operations::finish_duo(*prepared, &started, &mut result.responses).await
@@ -430,10 +427,12 @@ async fn finish_external_effect(
                 .await
         }
         Deferred::Audit(snapshot, check_breaches) => {
-            // One CPU audit at a time, outside the vault queue. Check the captured
-            // session/revision between scores so locking and edits remain responsive.
-            static AUDIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-            let permit = AUDIT.acquire().await.expect("audit semaphore stays open");
+            // Check the captured session/revision between scores so locking and
+            // edits remain responsive.
+            let permit = SCORING
+                .acquire()
+                .await
+                .expect("scoring semaphore stays open");
             let expected_session = result.session_id.clone();
             let expected_revision = Some(snapshot.revision);
             let audit_worker = worker.clone();
@@ -467,9 +466,145 @@ async fn finish_external_effect(
                 &mut result.responses,
             );
         }
+        Deferred::WeakList(pending, filter) => {
+            // Edits during scoring only leave a few cold scores for the list
+            // to compute on the queue; a lock or switch discards the work.
+            let permit = SCORING
+                .acquire()
+                .await
+                .expect("scoring semaphore stays open");
+            let expected_session = result.session_id.clone();
+            let scoring_worker = worker.clone();
+            let scored = tokio::task::spawn_blocking(move || {
+                pending.finish(|| scoring_worker.session_id() != expected_session)
+            })
+            .await;
+            drop(permit);
+            if matches!(scored, Ok(Ok(()))) {
+                crate::operations::finish_weak_list(*filter, &started, &mut result.responses).await;
+            } else {
+                outcome::respond_conflict(
+                    "Vault was locked or changed while checking password strength; run it again",
+                    &mut result.responses,
+                );
+            }
+        }
         Deferred::None => {}
     }
     worker.finish_external(result, operation_id).await
+}
+
+/// Nonsecret published state. Reading it never touches the vault queue or
+/// counts as activity, so it cannot keep a vault unlocked.
+async fn current_status(state: &ConnectionState, worker: &VaultWorker) -> RpcResponse {
+    let warnings = [
+        state.background_error.lock().await.clone(),
+        state
+            .system_lock
+            .as_deref()
+            .and_then(system_lock::Monitor::warning),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+    let session_id = worker.session_id();
+    let mut response = RpcResponse::success(ResponsePayload::Status(
+        crate::protocol::ServerStatus::new(session_id.is_none(), warning),
+    ));
+    if let ResponsePayload::Status(status) = &mut response.payload {
+        status.vault_revision = worker.vault_revision();
+        status.cloud_warning = worker.cloud_warning().await;
+    }
+    response.session_id = session_id;
+    response
+}
+
+/// Concurrent status subscribers; each also holds a connection slot.
+const MAX_STATUS_SUBSCRIBERS: usize = 8;
+/// Warnings have no change signal, so they are rechecked in memory this often.
+const STATUS_WARNING_CHECK: Duration = Duration::from_secs(2);
+/// An unchanged stream still sends a record this often, so clients detect a
+/// stopped server and refresh anything outside the published status.
+const STATUS_HEARTBEAT: Duration = Duration::from_secs(20);
+
+/// Push a status record whenever the session, revision, or warnings change.
+/// Record `n` is encrypted under its own key derived from the connection's
+/// response key, so records cannot be replayed, dropped, or reordered.
+async fn stream_status(
+    mut stream: TcpStream,
+    state: &ConnectionState,
+    worker: &VaultWorker,
+    response_key: &[u8; 32],
+    request_id: &str,
+) {
+    let Ok(_subscriber) = state.status_subscribers.try_acquire() else {
+        let mut response = RpcResponse::message(
+            ResponseCode::Failure,
+            "Too many status subscribers; poll status instead",
+        );
+        response.request_id = Some(request_id.to_owned());
+        let key = crate::protocol::stream_record_key(response_key, 0);
+        let _ = write_status_record(&mut stream, &key, &response).await;
+        return;
+    };
+    let (mut sessions, mut revisions) = worker.changes();
+    let mut sequence = 0u64;
+    let mut last_sent: Option<Zeroizing<Vec<u8>>> = None;
+    let mut last_write = tokio::time::Instant::now();
+    loop {
+        if state.stopping.load(Ordering::Acquire) {
+            return;
+        }
+        let mut response = current_status(state, worker).await;
+        response.request_id = Some(request_id.to_owned());
+        let Ok(encoded) = crate::protocol::encode_rpc_response(&response) else {
+            return;
+        };
+        if last_sent.as_ref() != Some(&encoded) || last_write.elapsed() >= STATUS_HEARTBEAT {
+            let key = crate::protocol::stream_record_key(response_key, sequence);
+            if write_status_record(&mut stream, &key, &response)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            sequence += 1;
+            last_sent = Some(encoded);
+            last_write = tokio::time::Instant::now();
+        }
+        tokio::select! {
+            changed = sessions.changed() => if changed.is_err() { return },
+            changed = revisions.changed() => if changed.is_err() { return },
+            _ = tokio::time::sleep(STATUS_WARNING_CHECK) => {}
+            readable = stream.readable() => {
+                // Clients never write after subscribing: data or EOF ends it.
+                if readable.is_err() {
+                    return;
+                }
+                match stream.try_read(&mut [0u8; 1]) {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    _ => return,
+                }
+            }
+        }
+    }
+}
+
+async fn write_status_record(
+    stream: &mut TcpStream,
+    key: &[u8; 32],
+    response: &RpcResponse,
+) -> std::io::Result<()> {
+    let frame = crate::protocol::encode_rpc_response(response).map_err(std::io::Error::other)?;
+    let record = encrypt_record(key, &frame)
+        .ok_or_else(|| std::io::Error::other("could not encrypt status record"))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        stream.write_all(&record).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "status write timed out"))?
 }
 
 async fn handle_tcp(message: &mut TcpStream, token: &str) -> Option<AuthenticatedRequest> {

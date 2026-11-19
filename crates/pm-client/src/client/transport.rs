@@ -1,8 +1,9 @@
 use crate::{
     file::{TOKEN_FILE, data_dir},
     protocol::{
-        ProtocolResponse, RequestEnvelope, ResponseCode, SECURE_HELLO_LEN, SECURE_PREFACE,
-        decode_responses, decrypt_record_stream, encrypt_record, server_addr, verify_server_hello,
+        MAX_STATUS_EVENT_BYTES, ProtocolResponse, RequestEnvelope, ResponseCode, SECURE_HELLO_LEN,
+        SECURE_PREFACE, SECURE_RECORD_HEADER_LEN, TransportKeys, decode_responses, decrypt_record,
+        decrypt_record_stream, encrypt_record, server_addr, stream_record_key, verify_server_hello,
     },
     types::*,
 };
@@ -127,36 +128,16 @@ impl AuthenticatedClient {
         } else {
             self.io_timeout
         };
-        let address = server_addr(self.port);
-        let mut connection = TcpStream::connect_timeout(&address, self.connect_timeout)
-            .map_err(|e| format!("could not connect to the password manager server: {e}"))?;
-        connection
-            .set_read_timeout(Some(read_timeout))
-            .map_err(|e| format!("could not configure server connection: {e}"))?;
-        connection
-            .set_write_timeout(Some(self.io_timeout))
-            .map_err(|e| format!("could not configure server connection: {e}"))?;
-        let token = server_token(&self.token_path)?;
-        connection
-            .write_all(SECURE_PREFACE)
-            .and_then(|_| connection.flush())
-            .map_err(|e| format!("could not start secure server handshake: {e}"))?;
-        let mut hello = [0u8; SECURE_HELLO_LEN];
-        connection
-            .read_exact(&mut hello)
-            .map_err(|e| format!("could not authenticate the password manager server: {e}"))?;
-        let keys = verify_server_hello(&token, &hello)
-            .ok_or_else(|| "password manager server authentication failed".to_string())?;
+        let (mut connection, keys) = self.open_secure(read_timeout)?;
         #[cfg(target_os = "windows")]
         let shutdown_wait = if matches!(command, ServerCommand::Kill) {
             super::shutdown::ShutdownWait::capture(&self.token_path)?
         } else {
             None
         };
-        let data = Zeroizing::new(
-            rmp_serde::to_vec_named(envelope)
-                .map_err(|e| format!("could not encode command: {e}"))?,
-        );
+        let mut data = crate::secret::SecretBuffer::default();
+        rmp_serde::encode::write_named(&mut data, envelope)
+            .map_err(|e| format!("could not encode command: {e}"))?;
         let mut encrypted_request = encrypt_record(&keys.request, &data)
             .ok_or_else(|| "could not encrypt command".to_string())?;
         *sent = true;
@@ -223,6 +204,106 @@ impl AuthenticatedClient {
         response
     }
 }
+impl AuthenticatedClient {
+    /// Connect and authenticate the server, returning the connection's keys.
+    fn open_secure(&self, read_timeout: Duration) -> Result<(TcpStream, TransportKeys), String> {
+        let address = server_addr(self.port);
+        let mut connection = TcpStream::connect_timeout(&address, self.connect_timeout)
+            .map_err(|e| format!("could not connect to the password manager server: {e}"))?;
+        connection
+            .set_read_timeout(Some(read_timeout))
+            .map_err(|e| format!("could not configure server connection: {e}"))?;
+        connection
+            .set_write_timeout(Some(self.io_timeout))
+            .map_err(|e| format!("could not configure server connection: {e}"))?;
+        let token = server_token(&self.token_path)?;
+        connection
+            .write_all(SECURE_PREFACE)
+            .and_then(|_| connection.flush())
+            .map_err(|e| format!("could not start secure server handshake: {e}"))?;
+        let mut hello = [0u8; SECURE_HELLO_LEN];
+        connection
+            .read_exact(&mut hello)
+            .map_err(|e| format!("could not authenticate the password manager server: {e}"))?;
+        let keys = verify_server_hello(&token, &hello)
+            .ok_or_else(|| "password manager server authentication failed".to_string())?;
+        Ok((connection, keys))
+    }
+
+    /// Subscribe to pushed status records. Older servers close the connection,
+    /// which surfaces as an error from the first [`StatusEvents::recv`].
+    pub fn status_events(&self) -> Result<StatusEvents, String> {
+        let envelope = RequestEnvelope::new(ServerCommand::StatusEvents);
+        let (mut connection, keys) = self.open_secure(STATUS_EVENT_TIMEOUT)?;
+        let mut data = crate::secret::SecretBuffer::default();
+        rmp_serde::encode::write_named(&mut data, &envelope)
+            .map_err(|e| format!("could not encode command: {e}"))?;
+        let request = encrypt_record(&keys.request, &data)
+            .ok_or_else(|| "could not encrypt command".to_string())?;
+        connection
+            .write_all(&request)
+            .and_then(|_| connection.flush())
+            .map_err(|e| format!("could not subscribe to server status: {e}"))?;
+        Ok(StatusEvents {
+            connection,
+            response_key: Zeroizing::new(keys.response),
+            sequence: 0,
+            request_id: envelope.request_id,
+        })
+    }
+}
+
+/// The server sends a record at least every 20 seconds; silence beyond this
+/// means it stopped or the connection broke.
+const STATUS_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Authenticated, ordered status records pushed by the server.
+pub struct StatusEvents {
+    connection: TcpStream,
+    response_key: Zeroizing<[u8; 32]>,
+    sequence: u64,
+    request_id: String,
+}
+
+impl StatusEvents {
+    /// Block until the next status record. Any error ends the subscription.
+    pub fn recv(&mut self) -> Result<ProtocolResponse, String> {
+        let mut header = [0u8; SECURE_RECORD_HEADER_LEN];
+        self.connection
+            .read_exact(&mut header)
+            .map_err(|e| format!("status subscription ended: {e}"))?;
+        let length =
+            u32::from_be_bytes(header[24..].try_into().expect("four length bytes")) as usize;
+        if !(16..=MAX_STATUS_EVENT_BYTES + 16).contains(&length) {
+            return Err("server sent an invalid status record".into());
+        }
+        let mut ciphertext = vec![0u8; length];
+        self.connection
+            .read_exact(&mut ciphertext)
+            .map_err(|e| format!("status subscription ended: {e}"))?;
+        let key = stream_record_key(&self.response_key, self.sequence);
+        let plaintext = Zeroizing::new(
+            decrypt_record(&key, &header[..24], &ciphertext)
+                .ok_or_else(|| "server sent an unauthenticated status record".to_string())?,
+        );
+        self.sequence += 1;
+        let response = decode_responses(&plaintext)?;
+        if response.request_id.as_deref() != Some(self.request_id.as_str()) {
+            return Err("status record refers to a different request".into());
+        }
+        if response.code != ResponseCode::Success as i32 {
+            return Err(response.error_message());
+        }
+        if !matches!(
+            response.payload,
+            crate::protocol::ResponsePayload::Status(_)
+        ) {
+            return Err("server sent a status record without status".into());
+        }
+        Ok(response)
+    }
+}
+
 fn server_token(path: &Path) -> Result<Zeroizing<String>, String> {
     let contents = Zeroizing::new(
         fs::read_to_string(path)
@@ -280,7 +361,7 @@ mod tests {
             let envelope: RequestEnvelope = rmp_serde::from_slice(&plaintext).unwrap();
             envelope.validate().unwrap();
             if let Some(response) = reply(&envelope) {
-                let response = Zeroizing::new(encode_rpc_response(&response).unwrap());
+                let response = encode_rpc_response(&response).unwrap();
                 stream
                     .write_all(&encrypt_record(&keys.response, &response).unwrap())
                     .unwrap();
