@@ -44,6 +44,34 @@ package installer can also open a downloaded/copied APK after you enable
 installation from that source. USB/ADB is the verified development installation
 path for this project.
 
+### Wireless updates (no cable)
+
+Android 11+ wireless debugging also works across a Tailscale tailnet, so the
+phone does not need to be on the same network as the computer. The phone must be
+on some Wi-Fi network (Android disables wireless debugging on mobile data), and
+its Tailscale app must stay connected: set Tailscale's battery usage to
+*Unrestricted* and enable it as the *Always-on VPN*.
+
+Pair once. On the phone, open *Developer options → Wireless debugging → Pair
+device with pairing code*, then run:
+
+```sh
+"$ANDROID_HOME/platform-tools/adb" pair <phone-tailscale-ip>:<pairing-port> <code>
+```
+
+To update, turn Wireless debugging on and run one of:
+
+```sh
+python3 scripts/build_android.py --abi arm64-v8a --device <phone-tailscale-ip>  # build, then install
+python3 scripts/build_android.py --install-only --device <phone-tailscale-ip>   # reinstall the last build
+```
+
+The script asks for the port shown on the phone's Wireless debugging screen
+(it changes every time the setting is toggled; pass `HOST:PORT` to skip the
+prompt). Setting `PM_ANDROID_DEVICE` to the phone's address lets `--install` and
+`--install-only` use it by default. Wireless debugging gives full device
+control to any paired computer, so turn it off after updating.
+
 Update by installing a higher-version APK with the same package identity and
 signing key. Do not uninstall to update: uninstalling removes the local vault and
 device keys. Export an encrypted vault or verify sync before changing signing keys.
