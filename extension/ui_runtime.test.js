@@ -117,27 +117,34 @@ test("popup runtime renders cached/live status and performs an explicit lock", a
     assert.match(env.elements.nativeHint.textContent, /key button/);
 });
 
+// Picker data defaults to a same-origin login; tests override only what differs.
+async function pickerEnvironment(items, data = {}, search = "?token=picker-token") {
+    const env = environment([
+        "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin",
+        "crossOriginText", "search", "recovery", "retry"
+    ], {
+        getSecurePickerData: { success: true, kind: "login", origin: "https://example.com",
+            topOrigin: "https://example.com", items, ...data },
+        completeSecurePicker: { success: true }
+    }, search);
+    env.context.PasswordManagerPickerState = require("./picker_state.js");
+    execute("picker.js", env.context);
+    await settle();
+    return env;
+}
+
 test("picker runtime discloses destinations and requires trusted, confirmed selections", async () => {
     for (const crossOrigin of [false, true]) {
         const item = crossOrigin ? { id: 2, name: "Visa" } : { id: 7, name: "Personal", username: "alice" };
         const origin = crossOrigin ? "https://embedded.example" : "https://example.com";
-        const env = environment([
-            "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin", "crossOriginText", "search", "recovery", "retry"
-        ], {
-            getSecurePickerData: {
-                success: true, kind: crossOrigin ? "payment-card" : "login", origin,
-                topOrigin: crossOrigin ? "https://shop.example" : origin, crossOrigin,
-                items: [item]
-            },
-            completeSecurePicker: { success: true }
-        }, crossOrigin ? "?token=card-token" : "?token=picker-token");
-        env.context.PasswordManagerPickerState = require("./picker_state.js");
-        execute("picker.js", env.context);
-        await settle();
+        const env = await pickerEnvironment([item], crossOrigin ? {
+            kind: "payment-card", origin, topOrigin: "https://shop.example", crossOrigin
+        } : {}, crossOrigin ? "?token=card-token" : "?token=picker-token");
         assert.equal(env.elements.title.textContent, crossOrigin ? "Choose a payment card" : "Choose a login");
         assert.equal(env.elements.destination.textContent, `Fill on: ${origin}`);
         assert.equal(env.elements.crossOriginWarning.hidden, !crossOrigin);
         assert.equal(env.elements.items.children.length, 1);
+        assert.equal(env.elements.search.hidden, true, "a single item needs no search");
         assert.notEqual(env.elements.items.children[0].focused, true, "no account is pre-focused");
         assert.equal(env.elements.items.children[0].disabled, true, "items start disabled");
         await new Promise(resolve => setTimeout(resolve, 550));
@@ -292,21 +299,6 @@ test("credential prompt can stop offering to save on this site", async () => {
     assert.equal(env.context.closed, true);
 });
 
-async function pickerEnvironment(items) {
-    const env = environment([
-        "items", "status", "title", "cancel", "destination", "crossOriginWarning", "confirmCrossOrigin",
-        "crossOriginText", "search", "recovery", "retry"
-    ], {
-        getSecurePickerData: { success: true, kind: "login", origin: "https://example.com",
-            topOrigin: "https://example.com", items },
-        completeSecurePicker: { success: true }
-    }, "?token=picker-token");
-    env.context.PasswordManagerPickerState = require("./picker_state.js");
-    execute("picker.js", env.context);
-    await settle();
-    return env;
-}
-
 test("picker supports search, arrow keys, Enter, and Escape", async () => {
     const env = await pickerEnvironment([
         { id: 1, name: "Work", username: "w@corp" },
@@ -356,12 +348,6 @@ test("picker supports search, arrow keys, Enter, and Escape", async () => {
     key("Escape");
     await settle();
     assert.equal(env.messages.at(-1).cancel, true);
-});
-
-test("picker hides search for one item without pre-focusing it", async () => {
-    const env = await pickerEnvironment([{ id: 9, name: "Solo" }]);
-    assert.equal(env.elements.search.hidden, true);
-    assert.notEqual(env.elements.items.children[0].focused, true);
 });
 
 test("popup generator persists settings and copies the visible password", async () => {

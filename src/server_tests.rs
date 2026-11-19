@@ -64,6 +64,48 @@ async fn send(stream: &mut TcpStream, token: &str, request: RequestEnvelope) -> 
         Zeroizing::new(decrypt_record_stream(&keys.response, &encrypted, 1024 * 1024).unwrap());
     decode_responses(&plaintext).unwrap()
 }
+/// Serves one encrypted connection on `worker` and returns its response.
+async fn request_over_tcp(
+    state: &ConnectionState,
+    worker: VaultWorker,
+    request: RequestEnvelope,
+) -> RpcResponse {
+    let (mut client, server) = tcp_pair().await;
+    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
+    let response = send(&mut client, &state.token, request).await;
+    task.await.unwrap();
+    response
+}
+/// Accepts connections like the server loop and returns an authenticated client
+/// for them, its token directory, and each accepted connection's task.
+async fn serve_authenticated_clients(
+    state: &ConnectionState,
+    worker: VaultWorker,
+) -> (
+    crate::client::AuthenticatedClient,
+    tempfile::TempDir,
+    mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted_tx, accepted) = mpsc::unbounded_channel();
+    let accept_state = state.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let task = tokio::spawn(handle_connection(
+                stream,
+                accept_state.clone(),
+                worker.clone(),
+            ));
+            let _ = accepted_tx.send(task);
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let mut client = crate::client::AuthenticatedClient::new(port);
+    client.token_path = root.path().join("token");
+    std::fs::write(&client.token_path, state.token.as_str()).unwrap();
+    (client, root, accepted)
+}
 async fn dispatch(vault: Vault, command: ServerCommand, locked: bool) -> RpcResponse {
     let state = test_connection_state();
     let worker = test_worker(
@@ -74,7 +116,6 @@ async fn dispatch(vault: Vault, command: ServerCommand, locked: bool) -> RpcResp
         },
         &state,
     );
-    let (mut client, server) = tcp_pair().await;
     let mut request = RequestEnvelope::new(command);
     if matches!(
         request.command,
@@ -92,10 +133,7 @@ async fn dispatch(vault: Vault, command: ServerCommand, locked: bool) -> RpcResp
             request.expected_revision = Some(1);
         }
     }
-    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
-    let response = send(&mut client, &state.token, request).await;
-    task.await.unwrap();
-    response
+    request_over_tcp(&state, worker, request).await
 }
 fn response_text(response: &RpcResponse) -> String {
     serde_json::to_string(&response.payload).unwrap()
@@ -532,18 +570,15 @@ async fn status_and_error_classification_are_typed_and_correlated() {
     let state = test_connection_state();
     *state.background_error.lock().await = Some("cleanup warning".into());
     let worker = test_worker(VaultSession::Locked, &state);
-    let (mut client, server) = tcp_pair().await;
-    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
     let request = RequestEnvelope::new(ServerCommand::Status);
     let id = request.request_id.clone();
-    let response = send(&mut client, &state.token, request).await;
+    let response = request_over_tcp(&state, worker, request).await;
     assert_eq!(response.request_id, Some(id));
     let ResponsePayload::Status(status) = response.payload else {
         panic!("expected status")
     };
     assert!(status.locked);
     assert_eq!(status.warning.as_deref(), Some("cleanup warning"));
-    task.await.unwrap();
     let (mut client, mut server) = tcp_pair().await;
     let response_key = [42; 32];
     deliver_responses(
@@ -927,12 +962,9 @@ async fn asynchronous_audit_reply_keeps_the_unlocked_session_over_encrypted_tcp(
     let worker = test_worker(session(sample_vault()), &state);
     let expected_session = worker.session_id();
     assert!(expected_session.is_some());
-    let (mut client, server) = tcp_pair().await;
     let mut request = RequestEnvelope::new(ServerCommand::Audit(Default::default()));
     request.expected_session = expected_session.clone();
-    let task = tokio::spawn(handle_connection(server, state.clone(), worker));
-    let response = send(&mut client, &state.token, request).await;
-    task.await.unwrap();
+    let response = request_over_tcp(&state, worker, request).await;
     assert_eq!(response.code, ResponseCode::Success as i32);
     assert!(matches!(response.payload, ResponsePayload::Audit(_)));
     assert_eq!(response.session_id, expected_session);
@@ -1228,15 +1260,9 @@ async fn published_status_remains_responsive_while_owner_is_busy() {
             .await
     });
     ready.await.unwrap();
-    let (mut client, server) = tcp_pair().await;
-    let connection = tokio::spawn(handle_connection(server, state.clone(), worker));
     let response = tokio::time::timeout(
         Duration::from_millis(250),
-        send(
-            &mut client,
-            &state.token,
-            RequestEnvelope::new(ServerCommand::Status),
-        ),
+        request_over_tcp(&state, worker, RequestEnvelope::new(ServerCommand::Status)),
     )
     .await
     .expect("status must use nonsecret published state");
@@ -1246,7 +1272,6 @@ async fn published_status_remains_responsive_while_owner_is_busy() {
     assert!(!status.locked);
     release.send(()).unwrap();
     busy.await.unwrap().unwrap();
-    connection.await.unwrap();
 }
 
 #[tokio::test]
@@ -1427,25 +1452,7 @@ async fn worker_returns_bounded_revision_deltas_and_does_not_replay_them() {
 async fn status_subscribers_receive_lock_changes_and_end_when_the_client_leaves() {
     let state = test_connection_state();
     let worker = test_worker(session(sample_vault()), &state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let (accepted_tx, mut accepted) = mpsc::unbounded_channel();
-    let accept_state = state.clone();
-    let accept_worker = worker.clone();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let task = tokio::spawn(handle_connection(
-                stream,
-                accept_state.clone(),
-                accept_worker.clone(),
-            ));
-            let _ = accepted_tx.send(task);
-        }
-    });
-    let root = tempfile::tempdir().unwrap();
-    let mut client = crate::client::AuthenticatedClient::new(port);
-    client.token_path = root.path().join("token");
-    std::fs::write(&client.token_path, state.token.as_str()).unwrap();
+    let (client, _root, mut accepted) = serve_authenticated_clients(&state, worker.clone()).await;
 
     let unlocked_session = worker.session_id();
     let (first_tx, first) = tokio::sync::oneshot::channel();
@@ -1486,22 +1493,7 @@ async fn status_subscribers_receive_lock_changes_and_end_when_the_client_leaves(
 async fn status_subscriptions_are_bounded_and_refused_ones_report_a_failure() {
     let state = test_connection_state();
     let worker = test_worker(VaultSession::Locked, &state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let accept_state = state.clone();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(handle_connection(
-                stream,
-                accept_state.clone(),
-                worker.clone(),
-            ));
-        }
-    });
-    let root = tempfile::tempdir().unwrap();
-    let mut client = crate::client::AuthenticatedClient::new(port);
-    client.token_path = root.path().join("token");
-    std::fs::write(&client.token_path, state.token.as_str()).unwrap();
+    let (client, _root, _accepted) = serve_authenticated_clients(&state, worker).await;
     tokio::task::spawn_blocking(move || {
         let mut held = Vec::new();
         for _ in 0..MAX_STATUS_SUBSCRIBERS {
