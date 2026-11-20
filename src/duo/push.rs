@@ -8,6 +8,10 @@ use std::collections::{BTreeMap, HashSet};
 use subtle::ConstantTimeEq;
 
 pub(crate) fn validate_credentials(c: &DuoCredentials) -> Result<(), VaultError> {
+    signing_key(c).map(|_| ())
+}
+/// Validates the credentials and parses their signing key once for a request.
+fn signing_key(c: &DuoCredentials) -> Result<crypto::RsaKeyPair, VaultError> {
     if !valid_host(&c.host, "api-")
         || c.host != c.host.to_ascii_lowercase()
         || [&c.akey, &c.pkey]
@@ -17,7 +21,7 @@ pub(crate) fn validate_credentials(c: &DuoCredentials) -> Result<(), VaultError>
     {
         return Err(invalid("invalid Duo push credentials"));
     }
-    crypto::load_key(&c.private_key).map(|_| ())
+    crypto::load_key(&c.private_key)
 }
 
 fn common(c: &DuoCredentials) -> BTreeMap<String, String> {
@@ -39,8 +43,12 @@ fn encoded(params: &BTreeMap<String, String>) -> String {
 fn canonical(date: &str, method: &str, host: &str, path: &str, form: &str) -> String {
     format!("{date}\n{method}\n{host}\n{path}\n{form}")
 }
-fn authorization(c: &DuoCredentials, message: &str) -> Result<Zeroizing<String>, VaultError> {
-    let signature = crypto::sign(&c.private_key, message.as_bytes())?;
+fn authorization(
+    c: &DuoCredentials,
+    key: &crypto::RsaKeyPair,
+    message: &str,
+) -> Result<Zeroizing<String>, VaultError> {
+    let signature = crypto::sign(key, message.as_bytes())?;
     let raw = Zeroizing::new(format!("{}:{}", c.pkey, STANDARD.encode(&signature)));
     Ok(Zeroizing::new(format!(
         "Basic {}",
@@ -60,22 +68,33 @@ trait PushTransport {
 }
 struct SignedHttp<'a> {
     c: &'a DuoCredentials,
+    key: crypto::RsaKeyPair,
     client: reqwest::Client,
     deadline: Instant,
 }
+/// One connection pool for every poll and decision. The client holds no
+/// credentials; each prepared request carries its own signature and deadline.
+fn push_client() -> Result<reqwest::Client, VaultError> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| invalid("could not initialize Duo push client"))?;
+    Ok(CLIENT.get_or_init(|| client).clone())
+}
 impl<'a> SignedHttp<'a> {
     fn new(c: &'a DuoCredentials) -> Result<Self, VaultError> {
-        validate_credentials(c)?;
-        let client = reqwest::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|_| invalid("could not initialize Duo push client"))?;
+        let key = signing_key(c)?;
         Ok(Self {
             c,
-            client,
+            key,
+            client: push_client()?,
             deadline: Instant::now() + Duration::from_secs(15),
         })
     }
@@ -92,7 +111,7 @@ impl<'a> SignedHttp<'a> {
             value.zeroize();
         }
         let message = Zeroizing::new(canonical(&date, method, &self.c.host, path, &form));
-        let auth = authorization(self.c, &message)?;
+        let auth = authorization(self.c, &self.key, &message)?;
         let mut url = Url::parse(&format!("https://{}{path}", self.c.host))
             .map_err(|_| invalid("invalid Duo push endpoint"))?;
         validate_https(&url)?;
@@ -673,7 +692,7 @@ mod tests {
             "/push/v2/device/transactions/test-id",
             &form,
         );
-        let auth = authorization(&c, &message).unwrap();
+        let auth = authorization(&c, &key, &message).unwrap();
         let decoded = STANDARD
             .decode(auth.strip_prefix("Basic ").unwrap())
             .unwrap();
