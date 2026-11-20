@@ -19,7 +19,9 @@ impl Vault {
                     .is_none_or(|days| password_is_stale_at(item.password_changed(), days, now))
         });
         match options.sort {
-            SortField::Name => items.sort_by_cached_key(|item| item.entry.name.to_lowercase()),
+            SortField::Name => {
+                items.sort_by(|a, b| a.search_metadata().name.cmp(&b.search_metadata().name));
+            }
             // Search traverses the ID-ordered item map and retain preserves order.
             SortField::Id => {}
             _ => items.sort_by_cached_key(|item| {
@@ -47,8 +49,7 @@ impl Vault {
             query.is_some() || name.is_some() || username.is_some() || url.is_some();
         self.active_items()
             .filter(|item| {
-                let metadata = metadata_needed
-                    .then(|| item.search.0.get_or_init(|| SearchMetadata::new(item)));
+                let metadata = metadata_needed.then(|| item.search_metadata());
                 let contains = |value: Option<&str>, needle: &Option<Zeroizing<String>>| {
                     needle
                         .as_ref()
@@ -130,10 +131,16 @@ impl PartialEq for CachedSearch {
 }
 #[derive(Clone)]
 pub(super) struct SearchMetadata {
-    name: Zeroizing<String>,
+    pub(super) name: Zeroizing<String>,
     username: Option<Zeroizing<String>>,
     urls: Vec<Zeroizing<String>>,
     fields: Vec<(Zeroizing<String>, Option<Zeroizing<String>>)>,
+}
+impl Item {
+    /// Lowercased searchable fields, computed once until the item changes.
+    pub(super) fn search_metadata(&self) -> &SearchMetadata {
+        self.search.0.get_or_init(|| SearchMetadata::new(self))
+    }
 }
 impl SearchMetadata {
     fn new(item: &Item) -> Self {
