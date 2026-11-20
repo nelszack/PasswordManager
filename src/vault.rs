@@ -473,8 +473,9 @@ impl Vault {
             .filter(|i| i.entry.name == *name)
             .collect();
         let matches = if exact.is_empty() {
+            let name = Zeroizing::new(name.to_lowercase());
             self.active_items()
-                .filter(|i| i.entry.name.to_lowercase() == name.to_lowercase())
+                .filter(|i| i.search_metadata().name.as_str() == name.as_str())
                 .collect()
         } else {
             exact
