@@ -42,7 +42,13 @@ test("decision windows register the token's window and its expiry", async () => 
     });
     assert.equal(id, 42);
     assert.deepEqual(env.created, [
-        { url: "chrome-extension://id/picker.html?token=to%20ken", type: "popup", width: 380, height: 480, focused: true },
+        {
+            url: "chrome-extension://id/picker.html?token=to%20ken",
+            type: "popup",
+            width: 380,
+            height: 480,
+            focused: true,
+        },
     ]);
     assert.equal(env.timers.length, 1);
     assert.ok(env.timers[0].delay > 59_000 && env.timers[0].delay <= 60_000);
