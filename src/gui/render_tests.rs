@@ -569,6 +569,41 @@ fn tool_search_trash_and_audit_pages_bound_widgets_and_keep_item_identity() {
 }
 
 #[test]
+fn secret_and_code_results_render_from_protected_values_only() {
+    for (payload, shown) in [
+        (
+            ResponsePayload::Secret("revealed-synthetic-secret".into()),
+            ["revealed-synthetic-secret", "revealed-synthetic-secret"],
+        ),
+        (
+            ResponsePayload::Authenticator(password_manager::protocol::AuthenticatorResponse {
+                code: "123456".into(),
+                expires_in: Some(17),
+                counter: None,
+                mode: "totp".into(),
+            }),
+            ["123456", "17 seconds remaining"],
+        ),
+    ] {
+        let mut app = tests::app();
+        app.request_state = RequestState::Idle;
+        app.connection.running = true;
+        app.connection.session = Some("synthetic-session".into());
+        app.tab = Tab::Tools;
+        app.workspace.section = workflows::Section::Utilities;
+        app.workspace.receive(payload);
+        let rendered = render(&app, "secret-result", 1060, 800, 1.0);
+        for value in shown {
+            assert!(
+                rendered.1.iter().any(|text| text.contains(value)),
+                "{value} missing from {:?}",
+                rendered.1
+            );
+        }
+    }
+}
+
+#[test]
 fn dynamic_banners_preserve_editor_focus_across_view_updates() {
     use renderer::Renderer as _;
     let mut app = tests::app();
