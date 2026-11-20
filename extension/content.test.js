@@ -179,21 +179,34 @@ test("other buttons prompt only once the page leaves the password step", async t
     }
 });
 
-test("buttons outside the password's form and Enter in a credential field prompt at once", async t => {
-    for (const trigger of ["outside button", "enter"]) {
-        await t.test(trigger, async t => {
+test("Enter in a credential field prompts at once", async t => {
+    const env = await contentEnvironment(t);
+    env.type(env.username, "alice@example.com");
+    env.type(env.password, "secret");
+    env.document.dispatch("keydown", {
+        key: "Enter",
+        target: env.password,
+        composedPath: () => [env.password],
+    });
+    await env.settle();
+    assert.equal(env.prompts().length, 1);
+    const remembered = env.messages.filter(message => message.action === "setPendingCredentials");
+    assert.equal(remembered.at(-1).pending.username, "alice@example.com");
+});
+
+test("buttons outside the password's form prompt only once the page leaves the password step", async t => {
+    for (const scenario of ["unrelated banner button", "form-less login continue"]) {
+        await t.test(scenario, async t => {
             const env = await contentEnvironment(t);
             env.type(env.username, "alice@example.com");
             env.type(env.password, "secret");
-            if (trigger === "enter")
-                env.document.dispatch("keydown", {
-                    key: "Enter",
-                    target: env.password,
-                    composedPath: () => [env.password],
-                });
-            else env.click(env.outside);
+            env.click(env.outside);
             await env.settle();
-            assert.equal(env.prompts().length, 1);
+            assert.equal(env.prompts().length, 0, "nothing opens at click time");
+            if (scenario === "form-less login continue") env.password.remove();
+            await env.advance(1000);
+            const expected = scenario === "form-less login continue" ? 1 : 0;
+            assert.equal(env.prompts().length, expected);
             const remembered = env.messages.filter(message => message.action === "setPendingCredentials");
             assert.equal(remembered.at(-1).pending.username, "alice@example.com");
         });
