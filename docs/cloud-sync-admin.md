@@ -164,8 +164,17 @@ new credentials to access the changed vault. Seamless remote rekey handling is
 not implemented yet.
 
 The server cannot forge authenticated vault contents, but it can withhold or
-replay old encrypted data. This first version does not provide cryptographic
-protection against a malicious server rolling back an otherwise valid snapshot.
+replay old encrypted data. Every saved change, conflict resolution, and password
+or key change increases the vault's encrypted revision number, and clients
+apply a downloaded snapshot only when its authenticated revision is greater than
+their own (or it holds identical contents). A server restored from an older
+backup, or one that replays an old snapshot, therefore cannot silently roll back
+a client that has seen newer data: sync stops with "Cloud copy is not newer than
+this vault", keeps the local vault, and asks for a conflict review. Resolving
+that review uploads a vault with a higher revision, so the server catches up.
+This protects each client against rollback below what it has already seen; a
+device that has never synchronized (for example, a fresh `pm sync pull`) still
+trusts whatever the server returns, and a server can always withhold updates.
 
 ## Storage and recovery
 
