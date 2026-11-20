@@ -108,9 +108,13 @@ opt-level = 2
 # Runtime speed for shipped binaries (serialization, search, strength scoring)
 # at the cost of slower release builds. Keep the default `panic = "unwind"`:
 # aborting would skip the drop-time wiping of secrets during a panic.
+# Shipped binaries drop symbol tables (panic messages keep file/line locations)
+# and keep integer overflow checks, turning a silent wraparound into a panic.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = "symbols"
+overflow-checks = true
 
 [patch.crates-io]
 zbus-lockstep = { path = "vendor/zbus-lockstep" }
