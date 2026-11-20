@@ -1191,6 +1191,20 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
                     .push(text(format!("Breach check incomplete: {message}")).style(text::danger));
             }
         }
+        // Secrets render from the borrowed protected value: building a String
+        // here would leave an unwiped copy behind on every redraw.
+        ResponsePayload::Secret(secret) => form = form.push(text(secret.expose()).size(16)),
+        ResponsePayload::Authenticator(code) => {
+            form = form
+                .push(
+                    row![
+                        text(code.mode.to_uppercase()).size(16),
+                        text(code.code.expose()).size(16)
+                    ]
+                    .spacing(8),
+                )
+                .push(text(authenticator_detail(code)).size(16));
+        }
         _ => form = form.push(text(report(result)).size(16)),
     }
 
@@ -1406,6 +1420,20 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
     .into()
 }
 
+fn authenticator_detail(code: &password_manager::protocol::AuthenticatorResponse) -> String {
+    code.counter
+        .map(|counter| format!("Counter {counter}; the next counter has been saved."))
+        .unwrap_or_else(|| {
+            format!(
+                "{} seconds remaining at retrieval.",
+                code.expires_in.unwrap_or_default()
+            )
+        })
+}
+
+/// Plain-text summary of a non-secret result. Secret and one-time-code results
+/// are rendered by [`results`] directly from their protected values, so this
+/// never copies them into an ordinary `String`.
 pub(super) fn report(payload: &ResponsePayload) -> String {
     match payload {
         ResponsePayload::Operation(receipt) => format!(
@@ -1428,18 +1456,6 @@ pub(super) fn report(payload: &ResponsePayload) -> String {
                 .unwrap_or_default()
         ),
         ResponsePayload::Message(message) => message.clone(),
-        ResponsePayload::Secret(secret) => secret.expose().to_owned(),
-        ResponsePayload::Authenticator(code) => format!(
-            "{}: {}{}",
-            code.mode.to_uppercase(),
-            code.code.expose(),
-            code.counter
-                .map(|counter| format!("\nCounter {counter}; the next counter has been saved."))
-                .unwrap_or_else(|| format!(
-                    "\n{} seconds remaining at retrieval.",
-                    code.expires_in.unwrap_or_default()
-                ))
-        ),
         ResponsePayload::Vault(reference) => format!(
             "Restored vault: {}\nUnlock it using the backup password or key.",
             reference.vault_file

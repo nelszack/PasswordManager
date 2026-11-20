@@ -1423,3 +1423,12 @@ fn duo_decisions_are_ignored_until_new_requests_have_been_visible_briefly() {
     let _ = app.workflow(Event::Run(Action::Respond(0, false)));
     assert!(app.busy(), "after the pause, one click answers");
 }
+
+#[test]
+fn plain_text_reports_never_copy_secret_or_code_values() {
+    assert!(
+        !view::report(&ResponsePayload::Secret("revealed-synthetic-secret".into()))
+            .contains("revealed-synthetic-secret")
+    );
+    assert!(!view::report(&totp("123456")).contains("123456"));
+}
