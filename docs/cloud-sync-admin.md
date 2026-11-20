@@ -67,6 +67,20 @@ This starts with the user's systemd session. Configure unattended startup on
 the host if the server must run without an active login. Service logs contain
 startup/errors, not vault contents or tokens.
 
+The unit is sandboxed: the filesystem is read-only except `~/.local/share/pm-sync`
+(change `ReadWritePaths` together with `--data` if you store vaults elsewhere),
+it gets a private `/tmp`, may only open IP and Unix sockets, cannot create
+namespaces or writable executable memory, and is limited to the
+`@system-service` system calls, 512 MiB of memory, and 128 tasks. In a user
+unit, `ProtectSystem`, `ProtectHome`, `ReadWritePaths`, and `PrivateTmp` are
+implemented with an unprivileged user namespace. If the service fails to start
+with a namespace or permission error, the host disables unprivileged user
+namespaces (for example, `kernel.unprivileged_userns_clone=0` or an AppArmor
+restriction); either allow them for this user or comment out those four lines.
+`MemoryMax` and `TasksMax` take effect only when the user manager has the memory
+and pids controllers delegated, which is the default on current systemd. Check
+the result with `systemd-analyze --user security pm-sync.service`.
+
 ## Manual device enrollment
 
 On the server, generate a separate credential for each device:

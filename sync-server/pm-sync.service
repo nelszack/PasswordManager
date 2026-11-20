@@ -1,6 +1,7 @@
 [Unit]
 Description=Encrypted password vault sync
-After=network.target
+# A user manager has no network.target to order against; the service listens
+# on loopback and needs no network-online ordering.
 
 [Service]
 ExecStart=%h/.local/bin/pm-sync --data %h/.local/share/pm-sync --listen 127.0.0.1:8788 --max-storage 268435456 --keep 3
@@ -8,6 +9,24 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
+
+# Sandboxing. In a user unit, the filesystem and namespace options below need
+# unprivileged user namespaces; see docs/cloud-sync-admin.md if startup fails.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/pm-sync
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Uploads stream to disk; memory use stays far below the vault size limit.
+MemoryMax=512M
+TasksMax=128
 
 [Install]
 WantedBy=default.target
