@@ -288,6 +288,54 @@ async fn shutdown_rejects_already_authenticated_connections() {
 }
 
 #[test]
+fn unlock_succeeds_and_warns_when_purging_expired_trash_fails() {
+    init_test_data_dir();
+    let mut state = test_connection_state();
+    state.trash_retention_days = 30;
+    let credentials = || VaultCredentials::Session {
+        encryption_key: [42; 32],
+        salt: [42; 16],
+        kdf: 1,
+        memory_kib: 8192,
+        iterations: 1,
+        parallelism: 1,
+    };
+    for (fault, warning, purged) in [
+        (0, None, true),
+        (1, Some("Could not purge expired trash"), false),
+        (2, Some("may not be durable"), true),
+    ] {
+        let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));
+        let mut vault = Vault::from_entries(
+            vec![VaultEntry {
+                id: 1,
+                name: "Expired".into(),
+                ..Default::default()
+            }],
+            Some(filename),
+        );
+        vault.set_test_trashed(1, "2020-01-01T00:00:00Z");
+        *state.background_error.blocking_lock() = Some("stale warning".into());
+        let mut session = VaultSession::Locked;
+        crate::vault::with_write_fault(fault, || {
+            commands::install_unlocked(&state, &mut session, vault, credentials())
+        })
+        .unwrap();
+        assert!(!session.is_locked(), "fault {fault} must still unlock");
+        let current = state.background_error.blocking_lock().clone();
+        match warning {
+            None => assert_eq!(current, None),
+            Some(text) => assert!(current.unwrap().contains(text), "fault {fault}"),
+        }
+        assert_eq!(
+            session.vault().unwrap().revision(1).is_none(),
+            purged,
+            "fault {fault}"
+        );
+    }
+}
+
+#[test]
 fn mutation_responses_preserve_precommit_and_committed_durability_states() {
     init_test_data_dir();
     let filename = format!("{}.enc", hex::encode(rand::random::<[u8; 16]>()));

@@ -19,6 +19,34 @@ fn combined_lock_warning(
     (!warnings.is_empty()).then(|| warnings.join("; "))
 }
 
+/// Installs an unlocked vault, then purges expired trash best-effort. Unlock
+/// succeeds even when the purge cannot be saved; the failure (or uncertain
+/// durability of a committed purge) is reported as a status warning instead.
+pub(super) fn install_unlocked(
+    state: &ConnectionState,
+    session: &mut VaultSession,
+    vault: Vault,
+    credentials: VaultCredentials,
+) -> Result<(), crate::vault::VaultError> {
+    session.install(vault, credentials)?;
+    let days = state.trash_retention_days;
+    let warning = session
+        .with_unlocked(|vault, credentials| vault.purge_expired_trash(days, credentials))
+        .err()
+        .map(|error| {
+            if error.committed() {
+                format!("Expired trash was purged, but the save may not be durable: {error}")
+            } else {
+                format!("Could not purge expired trash: {error}")
+            }
+        });
+    if session.is_locked() {
+        return Err(crate::vault::VaultError::Locked);
+    }
+    *state.background_error.blocking_lock() = warning;
+    Ok(())
+}
+
 fn handle_command(
     responses: &mut Vec<RpcResponse>,
     state: ConnectionState,
@@ -79,20 +107,12 @@ fn handle_command(
             }
             let mut credentials = VaultCredentials::from(info.key);
             let result = unlock_selected_vault(&mut credentials, info.vault_file.as_deref())
-                .and_then(|mut vault| {
-                    vault
-                        .purge_expired_trash(state.trash_retention_days, &mut credentials)
-                        .inspect_err(|_| {
-                            let _ = lock_session(session);
-                        })?;
-                    session.install(vault, credentials)
-                });
+                .and_then(|vault| install_unlocked(&state, session, vault, credentials));
             match result {
                 Ok(()) => {
                     state
                         .inactivity_timeout
                         .store(info.timeout, Ordering::Release);
-                    *state.background_error.blocking_lock() = None;
                     respond("Vault unlocked.", responses);
                 }
                 Err(error) => respond_failed("Unlock failed", &error, responses),

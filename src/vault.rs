@@ -731,6 +731,11 @@ impl Vault {
             custom_fields: fields,
         };
     }
+    pub(crate) fn set_test_trashed(&mut self, id: usize, deleted_at: &str) {
+        self.item_mut(id).unwrap().lifecycle = Lifecycle::Trashed {
+            deleted_at: deleted_at.into(),
+        };
+    }
     pub(crate) fn set_test_duo(&mut self, id: usize, credentials: DuoCredentials) {
         self.item_mut(id).unwrap().duo = Some(DuoRecord {
             credentials,
