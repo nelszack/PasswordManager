@@ -2,7 +2,18 @@
 const PasswordManagerBackgroundPickers = {
     create({ chrome, security, protocol, nativeRequest, crypto, setTimeout, onLoginSelected }) {
         const pendingPickers = new Map();
-        const pickerWindows = new Map();
+        const pickerWindows = (
+            typeof PasswordManagerDecisionWindows === "undefined"
+                ? require("./background_windows.js")
+                : PasswordManagerDecisionWindows
+        ).create({
+            chrome,
+            page: "picker.html",
+            width: 380,
+            height: 480,
+            setTimeout,
+            unavailable: "Could not open secure picker",
+        });
         const filledLogins = new Map();
         const filledLoginLifetime = 10 * 60_000;
         let generation = 0;
@@ -93,8 +104,8 @@ const PasswordManagerBackgroundPickers = {
                 )
                 .catch(() => {});
             if (!Number.isInteger(pending.windowId)) return;
-            pickerWindows.delete(pending.windowId);
-            if (closeWindow) chrome.windows.remove(pending.windowId, () => void chrome.runtime.lastError);
+            pickerWindows.release(pending.windowId);
+            if (closeWindow) pickerWindows.close(pending.windowId);
         }
 
         function invalidateSecurePickers() {
@@ -166,35 +177,23 @@ const PasswordManagerBackgroundPickers = {
             // Load accounts while the browser opens the window rather than after.
             startLoading(token, pending);
 
-            return new Promise((resolve, reject) => {
-                chrome.windows.create(
-                    {
-                        url: chrome.runtime.getURL(`picker.html?token=${encodeURIComponent(token)}`),
-                        type: "popup",
-                        width: 380,
-                        height: 480,
-                        focused: true,
-                    },
-                    window => {
-                        const error = chrome.runtime.lastError?.message;
-                        if (error || !window?.id) {
-                            pendingPickers.delete(token);
-                            reject(new Error(error || "Could not open secure picker"));
-                            return;
-                        }
-                        if (pendingPickers.get(token) !== pending || pending.expiresAt <= Date.now()) {
-                            discardPicker(token);
-                            chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
-                            reject(new Error("Secure picker expired"));
-                            return;
-                        }
-                        pending.windowId = window.id;
-                        pickerWindows.set(window.id, token);
-                        setTimeout(() => discardPicker(token), Math.max(0, pending.expiresAt - Date.now()));
-                        resolve({ success: true, token });
-                    }
-                );
-            });
+            let windowId;
+            try {
+                windowId = await pickerWindows.open(token, token, {
+                    isCurrent: () => pendingPickers.get(token) === pending && pending.expiresAt > Date.now(),
+                    expiresAt: pending.expiresAt,
+                    onExpire: () => discardPicker(token),
+                });
+            } catch (error) {
+                pendingPickers.delete(token);
+                throw error;
+            }
+            if (windowId === null) {
+                discardPicker(token);
+                throw new Error("Secure picker expired");
+            }
+            pending.windowId = windowId;
+            return { success: true, token };
         }
 
         async function completeSecurePicker(request, sender) {
@@ -263,7 +262,7 @@ const PasswordManagerBackgroundPickers = {
                 // cancellation can run between an async check and its caller.
                 requirePendingPicker(request.token, pending);
                 pendingPickers.delete(request.token);
-                pickerWindows.delete(pending.windowId);
+                pickerWindows.release(pending.windowId);
                 const key = filledLoginKey(pending);
                 if (filledLogin) {
                     // Remember only a fingerprint of the explicitly selected secret,
@@ -328,7 +327,7 @@ const PasswordManagerBackgroundPickers = {
             return data({ token: request.token }, sender);
         }
         function windowRemoved(windowId) {
-            const token = pickerWindows.get(windowId);
+            const token = pickerWindows.release(windowId);
             if (!token) return;
             discardPicker(token, false);
         }

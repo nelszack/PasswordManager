@@ -2,7 +2,18 @@ const PasswordManagerBackgroundDuo = {
     create({ chrome, security, protocol, detection, nativeRequest, refreshStatus, crypto, setTimeout }) {
         const sessions = new Map(),
             tokens = new Map(),
-            windows = new Map(),
+            windows = (
+                typeof PasswordManagerDecisionWindows === "undefined"
+                    ? require("./background_windows.js")
+                    : PasswordManagerDecisionWindows
+            ).create({
+                chrome,
+                page: "duo_prompt.html",
+                width: 440,
+                height: 590,
+                setTimeout,
+                unavailable: "Could not open Duo window",
+            }),
             recentLogins = new Map(),
             observers = new Map(),
             // Documents whose origins have no Duo-enrolled login. Their content
@@ -38,8 +49,8 @@ const PasswordManagerBackgroundDuo = {
             if (session.token) tokens.delete(session.token);
             session.token = null;
             if (Number.isInteger(session.windowId)) {
-                windows.delete(session.windowId);
-                chrome.windows.remove(session.windowId, () => void chrome.runtime.lastError);
+                windows.release(session.windowId);
+                windows.close(session.windowId);
             }
             session.windowId = null;
         }
@@ -205,33 +216,16 @@ const PasswordManagerBackgroundDuo = {
                     const token = crypto.randomUUID();
                     session.token = token;
                     tokens.set(token, session);
-                    await new Promise((resolve, reject) =>
-                        chrome.windows.create(
-                            {
-                                url: chrome.runtime.getURL(`duo_prompt.html?token=${encodeURIComponent(token)}`),
-                                type: "popup",
-                                width: 440,
-                                height: 590,
-                                focused: true,
-                            },
-                            window => {
-                                const error = chrome.runtime.lastError?.message;
-                                if (error || !Number.isInteger(window?.id)) {
-                                    dismiss(session);
-                                    reject(new Error(error || "Could not open Duo window"));
-                                    return;
-                                }
-                                if (tokens.get(token) !== session) {
-                                    chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
-                                    resolve();
-                                    return;
-                                }
-                                session.windowId = window.id;
-                                windows.set(window.id, session);
-                                resolve();
-                            }
-                        )
-                    );
+                    let windowId;
+                    try {
+                        windowId = await windows.open(token, session, {
+                            isCurrent: () => tokens.get(token) === session,
+                        });
+                    } catch (error) {
+                        dismiss(session);
+                        throw error;
+                    }
+                    if (windowId !== null) session.windowId = windowId;
                 }
                 // Never expose tokens, account names, requests or fingerprints to a page.
                 return { success: true };
@@ -333,9 +327,8 @@ const PasswordManagerBackgroundDuo = {
             }
         }
         function windowRemoved(windowId) {
-            const session = windows.get(windowId);
+            const session = windows.release(windowId);
             if (!session) return false;
-            windows.delete(windowId);
             session.windowId = null;
             dismiss(session);
             return true;

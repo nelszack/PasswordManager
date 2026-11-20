@@ -5,7 +5,7 @@ const root = path.resolve(__dirname, "../extension");
 const files = [
     "manifest.json", "background.js", "command_contract.js",
     "background_security.js", "background_state.js", "background_native.js",
-    "background_status.js", "background_pending.js", "background_pickers.js",
+    "background_status.js", "background_pending.js", "background_windows.js", "background_pickers.js",
     "background_prompts.js", "background_router.js", "background_duo.js",
     "native_protocol.js", "pending_credentials.js", "credential_prompt_state.js", "duo_detection.js",
     "content_runtime.js", "ui_transport.js", "ui_session.js", "common.css",
