@@ -8,6 +8,7 @@ importScripts(
     "background_native.js",
     "background_status.js",
     "background_pending.js",
+    "background_windows.js",
     "background_pickers.js",
     "background_prompts.js",
     "background_router.js",

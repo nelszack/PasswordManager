@@ -14,7 +14,18 @@ const PasswordManagerBackgroundPrompts = {
         onLoginContext,
     }) {
         const pendingCredentialPrompts = new Map();
-        const credentialPromptWindows = new Map();
+        const credentialPromptWindows = (
+            typeof PasswordManagerDecisionWindows === "undefined"
+                ? require("./background_windows.js")
+                : PasswordManagerDecisionWindows
+        ).create({
+            chrome,
+            page: "credential_prompt.html",
+            width: 400,
+            height: 430,
+            setTimeout,
+            unavailable: "Could not open credential prompt",
+        });
         let generation = 0;
         function credentialPromptSenderAllowed(sender) {
             return security.securePickerSender(
@@ -40,10 +51,8 @@ const PasswordManagerBackgroundPrompts = {
             pending.state = { phase: "closed" };
             notifyCredentialPrompt(token, pending, action);
             if (!Number.isInteger(pending.windowId)) return;
-            credentialPromptWindows.delete(pending.windowId);
-            if (closeWindow) {
-                chrome.windows.remove(pending.windowId, () => void chrome.runtime.lastError);
-            }
+            credentialPromptWindows.release(pending.windowId);
+            if (closeWindow) credentialPromptWindows.close(pending.windowId);
         }
 
         // Origins where the user chose "Never for this site". Missing storage
@@ -141,36 +150,24 @@ const PasswordManagerBackgroundPrompts = {
             };
             pendingCredentialPrompts.set(token, pending);
 
-            return new Promise((resolve, reject) => {
-                chrome.windows.create(
-                    {
-                        url: chrome.runtime.getURL(`credential_prompt.html?token=${encodeURIComponent(token)}`),
-                        type: "popup",
-                        width: 400,
-                        height: 430,
-                        focused: true,
-                    },
-                    window => {
-                        const error = chrome.runtime.lastError?.message;
-                        if (error || !window?.id) {
-                            pendingCredentialPrompts.delete(token);
-                            pending.state = { phase: "closed" };
-                            reject(new Error(error || "Could not open credential prompt"));
-                            return;
-                        }
-                        if (pendingCredentialPrompts.get(token) !== pending || pending.expiresAt <= Date.now()) {
-                            discardCredentialPrompt(token, "skipped");
-                            chrome.windows.remove(window.id, () => void chrome.runtime.lastError);
-                            resolve({ success: true, skipped: true });
-                            return;
-                        }
-                        pending.windowId = window.id;
-                        credentialPromptWindows.set(window.id, token);
-                        setTimeout(() => discardCredentialPrompt(token), Math.max(0, pending.expiresAt - Date.now()));
-                        resolve({ success: true, token });
-                    }
-                );
-            });
+            let windowId;
+            try {
+                windowId = await credentialPromptWindows.open(token, token, {
+                    isCurrent: () => pendingCredentialPrompts.get(token) === pending && pending.expiresAt > Date.now(),
+                    expiresAt: pending.expiresAt,
+                    onExpire: () => discardCredentialPrompt(token),
+                });
+            } catch (error) {
+                pendingCredentialPrompts.delete(token);
+                pending.state = { phase: "closed" };
+                throw error;
+            }
+            if (windowId === null) {
+                discardCredentialPrompt(token, "skipped");
+                return { success: true, skipped: true };
+            }
+            pending.windowId = windowId;
+            return { success: true, token };
         }
 
         async function completeCredentialPrompt(request, sender) {
@@ -262,9 +259,8 @@ const PasswordManagerBackgroundPrompts = {
                 : { success: false, error: "Credential prompt expired" };
         }
         function windowRemoved(windowId) {
-            const token = credentialPromptWindows.get(windowId);
+            const token = credentialPromptWindows.release(windowId);
             if (!token) return false;
-            credentialPromptWindows.delete(windowId);
             const pending = pendingCredentialPrompts.get(token);
             if (pending && ["saving", "invalidatedSaving"].includes(pending.state.phase)) pending.windowId = null;
             else discardCredentialPrompt(token, "cancel", false);
