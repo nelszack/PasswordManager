@@ -272,21 +272,38 @@ impl VaultStore {
             active_vault_limit(),
         )
     }
-    /// Memory stores keep nothing durable; a detached handle cannot be written.
-    /// Confirm a later save could create its replacement file, without
+    /// Confirm a later save could write its replacement file, without
     /// rewriting the vault: a fresh encryption nonce would change the file
-    /// digest and make cloud sync see a local edit.
+    /// digest and make cloud sync see a local edit. The probe is as large as
+    /// the vault plus headroom and is flushed to disk, so a nearly full disk
+    /// fails here, before work that cannot be repeated (a Duo activation).
     pub(super) fn check_writable(&self) -> Result<(), VaultError> {
+        const HEADROOM: u64 = 64 * 1024;
         match self {
             Self::Memory => Ok(()),
             Self::Detached => Err(VaultError::Persistence("vault has no durable store".into())),
-            Self::File { directory, .. } => run_blocking_io(|| {
-                NamedTempFile::new_in(directory).map(drop).map_err(|e| {
+            Self::File {
+                directory,
+                filename,
+            } => run_blocking_io(|| {
+                let failed = |e: std::io::Error| {
                     VaultError::Persistence(format!("vault directory is not writable: {e}"))
-                })
+                };
+                let mut left = fs::metadata(directory.join(filename))
+                    .map_or(0, |metadata| metadata.len())
+                    + HEADROOM;
+                let mut probe = NamedTempFile::new_in(directory).map_err(failed)?;
+                let chunk = [0u8; 64 * 1024];
+                while left > 0 {
+                    let len = chunk.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+                    probe.write_all(&chunk[..len]).map_err(failed)?;
+                    left -= len as u64;
+                }
+                probe.as_file().sync_all().map_err(failed)
             }),
         }
     }
+    /// Memory stores keep nothing durable; a detached handle cannot be written.
     fn persist(
         &self,
         data: &VaultData,
