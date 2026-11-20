@@ -1,13 +1,23 @@
 const PasswordManagerSecurity = (() => {
-    function senderOrigin(sender) {
+    // Normalized HTTP(S) origin of a URL the browser reported, such as a tab URL.
+    function urlOrigin(value) {
         try {
-            const url = new URL(sender?.url || sender?.tab?.url || "");
+            const url = new URL(typeof value === "string" ? value : "");
             if (url.protocol !== "https:" && url.protocol !== "http:") return null;
             const host = url.hostname.toLowerCase().replace(/\.$/, "");
             return `${url.protocol}//${host}${url.port ? `:${url.port}` : ""}`;
         } catch (_) {
             return null;
         }
+    }
+
+    // A message sender's security origin. Use the browser-computed origin, not the
+    // document URL: a CSP-sandboxed document keeps its site's URL but has an opaque
+    // ("null") origin, and a frame must never inherit its top-level tab's URL.
+    function senderOrigin(sender) {
+        const origin = sender?.origin;
+        if (typeof origin !== "string" || origin === "null") return null;
+        return urlOrigin(origin);
     }
 
     function pendingStorageKey(sender) {
@@ -31,7 +41,7 @@ const PasswordManagerSecurity = (() => {
         }
     }
 
-    return { senderOrigin, pendingStorageKey, securePickerSender };
+    return { senderOrigin, urlOrigin, pendingStorageKey, securePickerSender };
 })();
 
 if (typeof module !== "undefined") module.exports = PasswordManagerSecurity;

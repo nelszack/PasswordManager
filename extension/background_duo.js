@@ -60,7 +60,7 @@ const PasswordManagerBackgroundDuo = {
                 return (
                     sessions.get(session.key) === session &&
                     session.expiresAt > Date.now() &&
-                    security.senderOrigin({ url: tab.url }) === session.topOrigin &&
+                    security.urlOrigin(tab.url) === session.topOrigin &&
                     state?.active === true
                 );
             } catch (_) {
@@ -137,7 +137,7 @@ const PasswordManagerBackgroundDuo = {
                 if (sessions.size >= 64) return { success: true };
                 const tab = await chrome.tabs.get(sender.tab.id);
                 if (epoch !== generation) return { success: true };
-                const topOrigin = security.senderOrigin({ url: tab.url });
+                const topOrigin = security.urlOrigin(tab.url);
                 if (!topOrigin) throw new Error("Invalid top-level login page");
                 session = {
                     key,

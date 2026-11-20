@@ -7,19 +7,28 @@ test("production content scripts are injected only on HTTPS pages", () => {
     assert.deepEqual(manifest.content_scripts[0].matches, ["https://*/*"]);
 });
 
-test("sender origins use trusted HTTP(S) metadata without unsafe fallbacks", () => {
-    for (const [label, sender, , origin] of [
-        ["HTTPS sender", { url: "https://Login.Example.COM./path" }, "login.example.com", "https://login.example.com"],
-        ["tab fallback", { tab: { url: "http://localhost:3000/login" } }, "localhost", "http://localhost:3000"],
-        ["file", { url: "file:///tmp/login.html" }, null, null],
-        ["extension", { url: "chrome-extension://abcdefghijklmnop/" }, null, null],
-        ["malformed", { url: "not a url" }, null, null],
-        ["invalid sender with trusted tab", { url: "not a url", tab: { url: "https://trusted.example/login" } }, null, null]
+test("sender origins use the browser-computed HTTP(S) origin without unsafe fallbacks", () => {
+    for (const [label, sender, origin] of [
+        ["HTTPS sender", { origin: "https://Login.Example.COM.", url: "https://login.example.com/path" }, "https://login.example.com"],
+        ["HTTP port", { origin: "http://localhost:3000", url: "http://localhost:3000/login" }, "http://localhost:3000"],
+        // A CSP-sandboxed document keeps its site's URL but has an opaque origin.
+        ["opaque sandboxed document", { origin: "null", url: "https://victim.example/login" }, null],
+        ["opaque sandbox in a trusted tab", { origin: "null", url: "https://victim.example/", tab: { url: "https://victim.example/" } }, null],
+        // A frame never inherits the top-level page's origin.
+        ["URL without origin", { url: "https://victim.example/login" }, null],
+        ["tab without origin", { tab: { url: "https://victim.example/login" } }, null],
+        ["file", { origin: "file://", url: "file:///tmp/login.html" }, null],
+        ["extension", { origin: "chrome-extension://abcdefghijklmnop", url: "chrome-extension://abcdefghijklmnop/" }, null],
+        ["malformed", { origin: "not a url" }, null],
+        ["non-string", { origin: { toString: () => "https://victim.example" } }, null],
+        ["missing sender", null, null],
     ]) {
         assert.equal(security.senderOrigin(sender), origin, label);
     }
+    assert.equal(security.urlOrigin("https://Shop.Example./cart?x=1"), "https://shop.example");
+    assert.equal(security.urlOrigin("chrome://settings"), null);
+    assert.equal(security.urlOrigin(undefined), null);
 });
-
 
 test("pending credentials are isolated by browser tab", () => {
     assert.equal(security.pendingStorageKey({ tab: { id: 42 } }), "pmPopupPending:42");

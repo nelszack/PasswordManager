@@ -25,7 +25,7 @@ function environment() {
             usable: (record, domain) => records.usable(record, domain, now)
         }, setTimeout(fn) { timers.push(fn); }
     });
-    const sender = { tab: { id: 7 }, frameId: 0, url: "https://example.com/login" };
+    const sender = { tab: { id: 7 }, frameId: 0, url: "https://example.com/login", origin: "https://example.com" };
     const call = (service, method, ...args) => new Promise(resolve => service[method](...args, resolve));
     const set = (service, value = "alice") => call(service, "set", { pending: { username: value } }, sender);
     return { create, stored, sender, timers, call, set,
@@ -50,7 +50,7 @@ test("cross-origin and cross-tab navigation cannot consume another site's creden
     const env = environment(), service = env.create(); await env.set(service);
     const otherTab = await env.call(service, "consume", { ...env.sender, tab: { id: 8 } });
     assert.equal(otherTab.pending, null);
-    const otherSite = await env.call(service, "consume", { ...env.sender, url: "https://attacker.example" });
+    const otherSite = await env.call(service, "consume", { ...env.sender, url: "https://attacker.example", origin: "https://attacker.example" });
     assert.equal(otherSite.pending, null);
     assert.equal((await env.call(service, "consume", env.sender)).pending, null);
 });
@@ -87,7 +87,7 @@ test("remembered usernames are origin-bound and are not reusable", async () => {
     assert.equal(await service.takeRemembered(env.sender), null); await flush();
     assert.equal(env.stored["pmPopupPending:7"], undefined);
     await env.set(service);
-    assert.equal(await service.takeRemembered({ ...env.sender, url: "https://other.example" }), null);
+    assert.equal(await service.takeRemembered({ ...env.sender, url: "https://other.example", origin: "https://other.example" }), null);
 });
 
 test("storage failures disclose no pending secret and do not poison later operations", async () => {
@@ -125,7 +125,7 @@ test("navigation records reject password-bearing payloads and persist only usern
 test("embedded frames cannot replace, consume, or take top-level username context", async () => {
     const env = environment(), service = env.create(); await env.set(service);
     for (const url of [env.sender.url, "https://embedded.example"]) {
-        const frame = { ...env.sender, frameId: 3, url };
+        const frame = { ...env.sender, frameId: 3, url, origin: new URL(url).origin };
         assert.equal((await env.call(service, "set", { pending: { username: "mallory" } }, frame)).success, false);
         assert.equal((await env.call(service, "consume", frame)).success, false);
         assert.equal(await service.takeRemembered(frame), null);

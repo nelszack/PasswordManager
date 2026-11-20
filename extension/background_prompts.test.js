@@ -37,7 +37,7 @@ function environment(stored) {
             return { success: true, data: "Saved" };
         }
     });
-    const sender = { tab: { id: 1 }, frameId: 0, documentId: "original-document", url: "https://example.com/login" };
+    const sender = { tab: { id: 1 }, frameId: 0, documentId: "original-document", url: "https://example.com/login", origin: "https://example.com" };
     const popup = { id: chrome.runtime.id, url: chrome.runtime.getURL("credential_prompt.html") };
     const open = (request = {}) => service.open({ username: "alice", password: "synthetic", ...request }, sender);
     const complete = (token, action = "add") => service.complete({ token, selection: { action, name: "Example" } }, popup);
