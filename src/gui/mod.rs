@@ -479,16 +479,30 @@ impl App {
 
     /// One-second ticks only while something on screen counts down or
     /// expires; otherwise tick at the status-poll cadence to avoid idle redraws.
+    /// A status request in flight does not count: its reply arrives as a
+    /// message, so switching timers for it would only recreate the subscription.
     fn tick_interval(&self) -> Duration {
         let timed = self.busy()
-            || self.polling()
+            || self.connection.status_stale
             || self.reveal_until.is_some()
             || self.generation.value.deadline().is_some()
             || self.workspace.result_until.is_some()
             || self.workspace.otp.watch.is_some()
             || self.workspace.duo.watch.is_some()
             || self.workspace.duo.result.is_some();
-        Duration::from_secs(if timed { 1 } else { STATUS_INTERVAL.as_secs() })
+        if timed {
+            Duration::from_secs(1)
+        } else {
+            self.status_interval()
+        }
+    }
+    /// Pushed status needs only an occasional safety poll.
+    fn status_interval(&self) -> Duration {
+        if self.connection.subscribed {
+            SUBSCRIBED_STATUS_INTERVAL
+        } else {
+            STATUS_INTERVAL
+        }
     }
     /// Pushed status from a running server; polling remains the fallback.
     fn status_subscription(&self) -> Subscription<Message> {
@@ -847,11 +861,7 @@ impl App {
                     }
                 }
                 // Allow timer jitter so an idle tick at the poll cadence is not skipped.
-                let interval = if self.connection.subscribed {
-                    SUBSCRIBED_STATUS_INTERVAL
-                } else {
-                    STATUS_INTERVAL
-                };
+                let interval = self.status_interval();
                 if self.connection.running
                     && !self.busy()
                     && !self.polling()

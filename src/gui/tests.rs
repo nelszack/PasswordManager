@@ -2076,3 +2076,28 @@ fn pushed_status_refreshes_at_once_and_relaxes_polling_until_the_stream_ends() {
     let _ = app.update(Message::Tick(last + Duration::from_secs(2)));
     assert!(app.polling());
 }
+
+#[test]
+fn idle_ticks_follow_the_status_cadence_and_ignore_status_requests() {
+    let mut app = unlocked();
+    app.generation.value.clear();
+    app.request_state = RequestState::Idle;
+    assert_eq!(app.tick_interval(), STATUS_INTERVAL);
+    // A status request in flight replies with a message; it must not swap timers.
+    app.request_state = RequestState::Polling;
+    assert_eq!(app.tick_interval(), STATUS_INTERVAL);
+    app.connection.subscribed = true;
+    assert_eq!(app.tick_interval(), SUBSCRIBED_STATUS_INTERVAL);
+    app.request_state = RequestState::Idle;
+    assert_eq!(app.tick_interval(), SUBSCRIBED_STATUS_INTERVAL);
+
+    // A change pushed during another request is refreshed on the next second.
+    app.connection.status_stale = true;
+    assert_eq!(app.tick_interval(), Duration::from_secs(1));
+    app.connection.status_stale = false;
+    app.request_state = RequestState::Busy;
+    assert_eq!(app.tick_interval(), Duration::from_secs(1));
+    app.request_state = RequestState::Idle;
+    app.generation.value = "counting down".into();
+    assert_eq!(app.tick_interval(), Duration::from_secs(1));
+}
