@@ -37,10 +37,18 @@ const thresholds = {
     "duo_detection.js": [95, 75],
     "background_security.js": [95, 90],
     "background_state.js": [100, 95],
+    "background_windows.js": [100, 100],
+    "content.js": [92, 82],
+    "content_controls.js": [98, 88],
+    "content_credentials.js": [100, 98],
     "content_detection.js": [80, 70],
+    "content_duo.js": [100, 90],
+    "content_entry.js": [100, 100],
+    "content_generator.js": [100, 88],
     "content_fields.js": [90, 65],
     "credential_prompt.js": [80, 40],
     "credential_prompt_state.js": [90, 75],
+    "duo_prompt.js": [100, 90],
     "form_submission.js": [95, 85],
     "native_protocol.js": [95, 85],
     "pending_credentials.js": [95, 85],
@@ -48,6 +56,7 @@ const thresholds = {
     "picker_state.js": [95, 90],
     "popup.js": [95, 80],
     "popup_state.js": [95, 90],
+    "ui_session.js": [100, 88],
 };
 
 for (const [file, [minimumLines, minimumBranches]] of Object.entries(thresholds)) {
