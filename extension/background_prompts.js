@@ -258,7 +258,7 @@ const PasswordManagerBackgroundPrompts = {
             return pending &&
                 !["invalidatedSaving", "closed"].includes(pending.state.phase) &&
                 pending.expiresAt > Date.now()
-                ? { success: true, data: pending.data, loading: false, error: pending.state.error || null }
+                ? { success: true, data: pending.data, error: pending.state.error || null }
                 : { success: false, error: "Credential prompt expired" };
         }
         function windowRemoved(windowId) {

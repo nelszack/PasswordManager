@@ -38,16 +38,40 @@ const PasswordManagerBackgroundRouter = {
                     if (refreshAfter) refreshStatus();
                 })
                 .catch(error => {
-                    sendResponse({
-                        success: false,
-                        error: error.message,
-                        uncertain: Boolean(error.uncertain),
-                        operationId: error.operationId,
-                        operationAction: error.operationAction,
-                    });
+                    sendResponse(operationFailure(error));
                     if (refreshAfter) refreshStatus();
                 });
         }
+
+        function errorResponse(error) {
+            return { success: false, error: error.message };
+        }
+        function operationFailure(error) {
+            return {
+                success: false,
+                error: error.message,
+                uncertain: Boolean(error.uncertain),
+                operationId: error.operationId,
+                operationAction: error.operationAction,
+            };
+        }
+        // Requests answered by one service method. Each method authorizes its own
+        // sender; rejections become failure responses.
+        const serviceActions = {
+            observeDuoChallenge: { handle: (request, sender) => duo.observe(request, sender) },
+            getDuoPromptData: { handle: (request, sender) => duo.data(request, sender) },
+            completeDuoPrompt: { handle: (request, sender) => duo.complete(request, sender) },
+            openCredentialPrompt: { handle: (request, sender) => prompts.open(request, sender) },
+            reviewCredentialPrompt: { handle: (request, sender) => prompts.review(request, sender) },
+            getCredentialPromptData: { handle: (request, sender) => prompts.data(request, sender) },
+            completeCredentialPrompt: {
+                handle: (request, sender) => prompts.complete(request, sender),
+                failure: operationFailure,
+            },
+            openSecurePicker: { handle: (request, sender) => pickers.open(request, sender) },
+            getSecurePickerData: { handle: (request, sender) => pickers.dataWhenLoaded(request, sender) },
+            completeSecurePicker: { handle: (request, sender) => pickers.complete(request, sender) },
+        };
 
         function handleRequest(request, sender, sendResponse) {
             if (!request || typeof request !== "object" || typeof request.action !== "string") {
@@ -79,74 +103,19 @@ const PasswordManagerBackgroundRouter = {
                     sendResponse({ success: false, error: "Invalid operation review" });
                     return false;
                 }
-                reconcile(request.operationId)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
+                reconcile(request.operationId).then(sendResponse, error => sendResponse(errorResponse(error)));
                 return true;
             }
-            const duoActions = {
-                observeDuoChallenge: "observe",
-                getDuoPromptData: "data",
-                completeDuoPrompt: "complete",
-            };
-            if (Object.hasOwn(duoActions, request.action)) {
-                duo[duoActions[request.action]](request, sender)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
-                return true;
-            }
-            if (request.action === "openCredentialPrompt") {
-                prompts
-                    .open(request, sender)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
-                return true;
-            }
-            if (request.action === "reviewCredentialPrompt") {
-                prompts
-                    .review(request, sender)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
-                return true;
-            }
-            if (request.action === "getCredentialPromptData") {
-                sendResponse(prompts.data(request, sender));
-                return true;
-            }
-            if (request.action === "completeCredentialPrompt") {
-                prompts
-                    .complete(request, sender)
-                    .then(sendResponse)
-                    .catch(error =>
-                        sendResponse({
-                            success: false,
-                            error: error.message,
-                            uncertain: Boolean(error.uncertain),
-                            operationId: error.operationId,
-                            operationAction: error.operationAction,
-                        })
-                    );
-                return true;
-            }
-            if (request.action === "openSecurePicker") {
-                pickers
-                    .open(request, sender)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
-                return true;
-            }
-            if (request.action === "getSecurePickerData") {
-                pickers
-                    .dataWhenLoaded(request, sender)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
-                return true;
-            }
-            if (request.action === "completeSecurePicker") {
-                pickers
-                    .complete(request, sender)
-                    .then(sendResponse)
-                    .catch(error => sendResponse({ success: false, error: error.message }));
+            if (Object.hasOwn(serviceActions, request.action)) {
+                const { handle, failure = errorResponse } = serviceActions[request.action];
+                let result;
+                try {
+                    result = handle(request, sender);
+                } catch (error) {
+                    sendResponse(failure(error));
+                    return false;
+                }
+                Promise.resolve(result).then(sendResponse, error => sendResponse(failure(error)));
                 return true;
             }
             if (request.action === "getStatus") {

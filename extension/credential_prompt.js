@@ -48,11 +48,6 @@ async function load() {
     if (!token) throw new Error("Missing credential prompt token");
     const response = await send({ action: "getCredentialPromptData", token });
     if (!response?.success) throw new Error(response?.error || "Credential prompt unavailable");
-    if (response.loading) {
-        status.textContent = "Checking saved credentials…";
-        setTimeout(() => load().catch(showError), 150);
-        return;
-    }
     if (response.error) throw new Error(response.error);
     const data = response.data;
     site.textContent = data.site;
