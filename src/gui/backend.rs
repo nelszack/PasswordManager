@@ -695,6 +695,16 @@ fn forward_status_events(
                     return;
                 }
             }
+            // The read failed; close the shared handle too, so the server
+            // stops streaming to a connection nobody reads during backoff.
+            drop(events);
+            if let Some(connection) = current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                connection.shutdown();
+            }
         }
         // Older servers refuse the subscription; the app keeps polling.
         if output

@@ -2,7 +2,8 @@
 use super::*;
 
 /// Start of the error returned for a cloud snapshot that is not newer than
-/// the local vault; hosts recognize it to request a conflict review.
+/// the local vault. The full message points the user to a conflict review;
+/// no host matches on this prefix.
 pub(crate) const ROLLBACK_PREFIX: &str = "Cloud copy is not newer than this vault";
 
 /// Constructed only from authenticated remote data or this vault's validated merge.
