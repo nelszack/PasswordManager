@@ -24,7 +24,7 @@ function environment() {
     const duo = service.create({ chrome, security: require("./background_security.js"), detection,
         protocol: require("./native_protocol.js"), crypto: require("node:crypto").webcrypto,
         setTimeout: (callback, delay) => timers.push({ callback, delay }),
-        refreshStatus: async () => ({ native: true, running: true, locked }),
+        refreshStatus: async () => { calls.push({ action: "status" }); return { native: true, running: true, locked }; },
         nativeRequest: async (action, fields) => {
             calls.push({ action, ...fields });
             if (action === "getLoginItems") return { success: true, sessionId: "a".repeat(64), data: items };
@@ -72,7 +72,7 @@ test("Duo windows require both a site enrollment and a live request; pages get n
     const env = environment();
     const response = await env.duo.observe({ entryId: 999, domain: "https://evil.example" }, env.sender);
     assert.deepEqual(response, { success: true });
-    assert.equal(env.calls[0].domain, "https://login.example");
+    assert.equal(env.calls.find(call => call.action === "getLoginItems").domain, "https://login.example");
     assert.equal(env.created.length, 1);
     assert.equal(env.created[0].type, "popup");
     assert.equal(env.calls.some(r => r.action === "duoRespond"), false);
@@ -170,7 +170,7 @@ test("locking during tab lookup cannot recreate a Duo session after invalidation
     await flush(); env.duo.invalidate(); release();
     assert.deepEqual(await opening, { success: true });
     assert.equal(env.created.length, 0);
-    assert.equal(env.calls.length, 0);
+    assert.deepEqual(env.calls, [{ action: "status" }]);
     assert.equal(env.timers.length, 0);
 });
 
@@ -232,6 +232,46 @@ test("Duo-hosted challenges can find their enrolled issuer without a remembered 
         }
         assert.equal(env.calls.some(call => call.action === "duoRespond"), false);
     }
+});
+
+test("an open Duo window polls alone; the page loop stops calling the vault and Duo", async () => {
+    const env = environment(), token = await env.open();
+    const before = env.calls.length;
+    for (let i = 0; i < 3; i++) assert.deepEqual(await env.duo.observe({}, env.sender), { success: true });
+    assert.equal(env.calls.length, before, "page reports make no status, lookup or Duo request calls");
+    await env.duo.data({ token }, env.popup);
+    assert.equal(env.calls.slice(before).filter(call => call.action === "duoRequests").length, 1);
+    await env.duo.complete({ token, cancel: true }, env.popup);
+    await env.duo.observe({}, env.sender);
+    assert.equal(env.calls.slice(before).filter(call => call.action === "duoRequests").length, 2,
+        "a dismissed window resumes page-driven polling");
+});
+
+test("documents without a Duo-enrolled login skip repeated lookups until a new login context or lock", async () => {
+    const env = environment();
+    env.setItems([]);
+    await env.duo.observe({}, env.sender);
+    const lookups = () => env.calls.filter(call => call.action === "getLoginItems").length;
+    assert.equal(lookups(), 1);
+    for (let i = 0; i < 3; i++) await env.duo.observe({}, env.sender);
+    assert.equal(lookups(), 1);
+    assert.equal(env.calls.filter(call => call.action === "status").length, 1);
+    env.sender.documentId = "doc-two";
+    await env.duo.observe({}, env.sender);
+    assert.equal(lookups(), 2, "another document looks up again");
+    env.setItems([{ id: 1, name: "Work", has_duo: true }]);
+    env.duo.rememberLogin({ sender: env.sender, accounts: [] });
+    await env.duo.observe({}, env.sender);
+    assert.equal(lookups(), 3, "a new login context in the tab clears the cache");
+    assert.equal(env.created.length, 1);
+    env.duo.invalidate();
+    env.setItems([]);
+    await env.duo.observe({}, env.sender);
+    await env.duo.observe({}, env.sender);
+    assert.equal(lookups(), 4);
+    env.duo.invalidate();
+    await env.duo.observe({}, env.sender);
+    assert.equal(lookups(), 5, "locking clears the cache");
 });
 
 test("Duo challenge detection distinguishes sign-in prompts from informational text", () => {

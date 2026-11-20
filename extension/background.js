@@ -41,7 +41,8 @@ const duo = PasswordManagerBackgroundDuo.create({
     protocol: PasswordManagerNativeProtocol,
     detection: PasswordManagerDuoDetection,
     nativeRequest: native.request,
-    refreshStatus: () => status.refresh(),
+    // Duo pages report challenges every few seconds; reuse a recent status.
+    refreshStatus: () => status.recent(10_000),
     crypto,
     setTimeout,
 });
