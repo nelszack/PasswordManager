@@ -535,6 +535,7 @@ open class MainActivity : ManagementActivity() {
                 val item = entries.getJSONObject(i)
                 label("${item.optString("local")} / ${item.optString("remote")}", 20f)
                 val fields = item.getJSONArray("fields")
+                if (fields.length() == 0) label("Separate items: both are kept, nothing to choose.")
                 for (j in 0 until fields.length()) {
                     val field = fields.getJSONObject(j)
                     label(
