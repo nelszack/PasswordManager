@@ -36,11 +36,6 @@ async function load(retry = false) {
     if (!token) throw new Error("Missing picker token");
     const response = await send({ action: "getSecurePickerData", token, ...(retry ? { retry: true } : {}) });
     if (!response?.success) throw new Error(response?.error || "Picker unavailable");
-    if (response.loading) {
-        status.textContent = "Loading saved items…";
-        setTimeout(() => load().catch(showError), 150);
-        return;
-    }
     if (response.error) throw new Error(response.error);
     title.textContent = PasswordManagerPickerState.title(response.kind);
     document.getElementById("destination").textContent = `Fill on: ${response.origin}`;
