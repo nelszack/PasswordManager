@@ -9,7 +9,7 @@ use crate::{
         engine::{self, Bind, Snapshot, SyncHost},
     },
     operations::{self, Deferred, SessionAccess},
-    passkey::{self, Passkey},
+    passkey::{self, Passkey, PasskeyIdentity},
     protocol::{ResponseCode, ResponsePayload, RpcResponse},
     secret::SecretString,
     types::{ServerCommand, TotpCommand},
@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{
-        OnceLock,
-        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -29,6 +29,8 @@ use std::{
 mod tools;
 
 const LOCKED: &str = "Vault is locked";
+const INTERRUPTED: &str = "Operation interrupted; vault locked. A remote change may have \
+                           completed; inspect before retrying";
 /// Largest request accepted over the FFI boundary (encoded imports and backups).
 const MAX_REQUEST_BYTES: usize = 180 * 1024 * 1024;
 /// Largest encrypted vault handed back to the app as a snapshot.
@@ -135,6 +137,10 @@ enum Request {
     Sync {
         server: String,
         token: SecretString,
+        /// Report a disabled vault as `{"synced": false, "disabled": true}`
+        /// instead of failing, so background syncs need no status read first.
+        #[serde(default)]
+        if_enabled: bool,
     },
     SyncStatus,
     SyncCheck {
@@ -175,6 +181,12 @@ enum Request {
         password: Option<SecretString>,
         key_file: Option<SecretString>,
     },
+    /// Counts this vault's recovery copies still encrypted with old credentials.
+    RekeyRecovery,
+    DeleteRekeyRecovery {
+        #[serde(default)]
+        confirmed: bool,
+    },
     DeleteVault {
         #[serde(default)]
         confirmed: bool,
@@ -204,22 +216,120 @@ impl Request {
                 | Self::CloudDownload { .. }
         )
     }
+
+    /// Requests that open a new unlock session.
+    fn opens_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Unlock { .. }
+                | Self::BiometricUnlock { .. }
+                | Self::Create { .. }
+                | Self::CreateKey { .. }
+        )
+    }
 }
 
-/// One vault per app process. The native bridge serializes all access, including
-/// file replacement and sync. Adapters must also lock on background/screen lock.
+/// The app's lock signal. It is raised without the vault mutex, so it can wake
+/// network waits at once. New requests are refused until the app sends `lock`;
+/// requests already running when it was raised stay cancelled even after that
+/// `lock` clears it.
+pub struct Cancellation {
+    raised: AtomicBool,
+    generation: AtomicU64,
+    notify: tokio::sync::Notify,
+}
+
+impl Cancellation {
+    pub const fn new() -> Self {
+        Self {
+            raised: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            notify: tokio::sync::Notify::const_new(),
+        }
+    }
+
+    /// Raised on background, screen-off, or an explicit lock in the app.
+    pub fn signal(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.raised.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn clear(&self) {
+        self.raised.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Default for Cancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One request's view of the lock signal.
+struct Ticket<'a> {
+    flag: Option<&'a Cancellation>,
+    generation: u64,
+}
+
+impl<'a> Ticket<'a> {
+    fn new(flag: Option<&'a Cancellation>) -> Self {
+        Self {
+            flag,
+            generation: flag.map_or(0, |f| f.generation.load(Ordering::SeqCst)),
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.flag.is_some_and(|f| {
+            f.raised.load(Ordering::SeqCst)
+                || f.generation.load(Ordering::SeqCst) != self.generation
+        })
+    }
+
+    /// Completes once this request is cancelled; never without a signal.
+    async fn wait(&self) {
+        let Some(flag) = self.flag else {
+            return std::future::pending().await;
+        };
+        loop {
+            // Register before checking, so a signal in between still wakes us.
+            let mut notified = std::pin::pin!(flag.notify.notified());
+            notified.as_mut().enable();
+            if self.cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// One vault per app process. Vault state has its own mutex, held only for
+/// local work: sync, Duo, and breach-check network transfers run without it,
+/// and anything they bring back is re-checked against the unlock session (and,
+/// for sync, the file and checkpoint) they started from. Adapters must also
+/// signal [`Cancellation`] on background/screen lock.
 pub struct MobileVault {
+    state: Mutex<MobileState>,
+    /// Serializes sync-engine operations that write checkpoints or files.
+    sync: Mutex<()>,
+    cancellation: Option<&'static Cancellation>,
+}
+
+/// Everything that requires the vault mutex.
+struct MobileState {
     directory: PathBuf,
     vault: Option<Vault>,
     credentials: VaultCredentials,
     touched: Instant,
     /// Identifies one unlock so reviews and late network replies cannot cross sessions.
     session: Option<String>,
+    /// Counts opened sessions, so a cancelled request locks only its own session.
+    adoptions: u64,
     /// True only when unlocked with the original password or key file, not biometrics.
     primary_unlock: bool,
     settings: tools::MobileSettings,
     import_review: Option<ImportReview>,
-    cancellation: Option<&'static AtomicBool>,
 }
 
 /// An import preview the user must confirm against unchanged input and vault state.
@@ -230,10 +340,29 @@ struct ImportReview {
     conflicts: ConflictPolicy,
 }
 
-impl Drop for MobileVault {
+/// A shared vault command after its vault step, waiting for deferred work.
+struct PreparedCommand {
+    responses: Vec<RpcResponse>,
+    deferred: Deferred,
+    existing_update: bool,
+    session: Option<String>,
+}
+
+impl Drop for MobileState {
     fn drop(&mut self) {
         self.lock();
     }
+}
+
+/// Locks the vault state. A panic while it was held may have interrupted a
+/// change, so a poisoned state is locked before anyone uses it again.
+fn guard(state: &Mutex<MobileState>) -> MutexGuard<'_, MobileState> {
+    state.lock().unwrap_or_else(|poisoned| {
+        state.clear_poison();
+        let mut owner = poisoned.into_inner();
+        owner.lock();
+        owner
+    })
 }
 
 impl MobileVault {
@@ -246,24 +375,321 @@ impl MobileVault {
             .map_err(|_| "Could not protect mobile storage")?;
         let settings = tools::MobileSettings::load(&directory)?;
         Ok(Self {
-            directory,
-            vault: None,
-            credentials: VaultCredentials::Locked,
-            touched: Instant::now(),
-            session: None,
-            primary_unlock: false,
-            settings,
-            import_review: None,
+            state: Mutex::new(MobileState {
+                directory,
+                vault: None,
+                credentials: VaultCredentials::Locked,
+                touched: Instant::now(),
+                session: None,
+                adoptions: 0,
+                primary_unlock: false,
+                settings,
+                import_review: None,
+            }),
+            sync: Mutex::new(()),
             cancellation: None,
         })
     }
 
-    /// Android's lock signal is independent of the serialized JNI vault mutex.
-    pub fn set_cancellation(&mut self, flag: &'static AtomicBool) {
+    /// Android's lock signal is independent of the vault mutex.
+    pub fn set_cancellation(&mut self, flag: &'static Cancellation) {
         self.cancellation = Some(flag);
     }
 
-    pub fn lock(&mut self) {
+    pub fn lock(&self) {
+        self.state().lock();
+    }
+
+    fn state(&self) -> MutexGuard<'_, MobileState> {
+        guard(&self.state)
+    }
+
+    /// Held for one sync-engine operation; never while holding the vault state.
+    fn sync_turn(&self) -> MutexGuard<'_, ()> {
+        self.sync.lock().unwrap_or_else(|poisoned| {
+            self.sync.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
+    /// JSON is only a process-local FFI envelope. Never log requests or results.
+    /// Safe to call from several threads: local work is serialized by the vault
+    /// mutex, and network work runs between its snapshot and apply steps.
+    pub fn call(&self, input: &str) -> Result<Value, String> {
+        if input.len() > MAX_REQUEST_BYTES {
+            return Err("Mobile request exceeds limit".into());
+        }
+        let mut envelope: Value =
+            serde_json::from_str(input).map_err(|_| "Invalid mobile request")?;
+        let op = envelope
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        // Deserialization errors can echo rejected values; report only the operation.
+        let request = Request::deserialize(&envelope)
+            .map_err(|_| format!("Invalid or unsupported mobile request: {op}"));
+        wipe_json(&mut envelope);
+        let request = request?;
+        let ticket = Ticket::new(self.cancellation);
+        if matches!(request, Request::Lock) {
+            if let Some(flag) = self.cancellation {
+                flag.clear();
+            }
+            self.lock();
+            return Ok(json!({}));
+        }
+        if ticket.cancelled() {
+            self.lock();
+            return Err(LOCKED.into());
+        }
+        let opens_session = request.opens_session();
+        let adoptions = self.state().adoptions;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.dispatch(request, &ticket)
+        }));
+        if ticket.cancelled() {
+            if let Ok(Ok(mut value)) = result {
+                wipe_json(&mut value);
+            }
+            // A session another request opened after the app's `lock` is not ours to end.
+            let mut state = self.state();
+            if opens_session || state.adoptions == adoptions {
+                state.lock();
+            }
+            return Err(INTERRUPTED.into());
+        }
+        result.unwrap_or_else(|_| {
+            self.lock();
+            Err("Mobile operation failed; vault locked".into())
+        })
+    }
+
+    /// Routes network requests to handlers that release the vault between
+    /// steps; everything else runs once under the vault mutex.
+    fn dispatch(&self, request: Request, ticket: &Ticket<'_>) -> Result<Value, String> {
+        match request {
+            Request::Vault {
+                command,
+                expected_revision,
+                confirmed,
+            } => self.run_command(ticket, *command, expected_revision, confirmed),
+            request @ (Request::CloudList { .. }
+            | Request::CloudDownload { .. }
+            | Request::Sync { .. }
+            | Request::SyncStatus
+            | Request::SyncCheck { .. }
+            | Request::SyncEnabled { .. }
+            | Request::CloudConflicts { .. }
+            | Request::CloudResolve { .. }) => {
+                if request.needs_unlock() {
+                    self.state().open()?;
+                }
+                self.cloud_request(request, ticket)
+            }
+            request => self.state().dispatch(request),
+        }
+    }
+
+    fn cloud_request(&self, request: Request, ticket: &Ticket<'_>) -> Result<Value, String> {
+        match request {
+            Request::CloudList { server, token } => {
+                let client = client(&server, token)?;
+                Ok(json!(block_on(ticket, client.list())??))
+            }
+            Request::CloudDownload {
+                server,
+                token,
+                id,
+                copy,
+            } => {
+                let _turn = self.sync_turn();
+                let download =
+                    self.run_sync(ticket, Some(client(&server, token)?), async |host| {
+                        engine::download(host, &id, copy).await
+                    })?;
+                // Installed under the vault mutex, so lock and unlock cannot interleave.
+                let name = download.install(&self.state().directory)?;
+                Ok(json!({ "vault": name }))
+            }
+            Request::Sync {
+                server,
+                token,
+                if_enabled,
+            } => {
+                if if_enabled && !self.state().sync_enabled()? {
+                    return Ok(json!({
+                        "synced": false,
+                        "disabled": true,
+                        "message": "Sync is disabled for this vault",
+                    }));
+                }
+                let _turn = self.sync_turn();
+                let message =
+                    self.run_sync(ticket, Some(client(&server, token)?), async |host| {
+                        engine::sync(host, None, Bind::CreateIfMissing).await
+                    })?;
+                Ok(json!({ "synced": true, "message": message }))
+            }
+            Request::SyncStatus => self.sync_status(ticket, None, false),
+            Request::SyncCheck { server, token } => {
+                self.sync_status(ticket, Some(client(&server, token)?), true)
+            }
+            Request::SyncEnabled {
+                server,
+                token,
+                enabled,
+            } => {
+                let client = client(&server, token)?;
+                {
+                    let _turn = self.sync_turn();
+                    self.run_sync(ticket, Some(client.clone()), async |host| {
+                        engine::set_enabled(host, None, enabled, Bind::Enable).await
+                    })?;
+                }
+                self.sync_status(ticket, Some(client), false)
+            }
+            Request::CloudConflicts { server, token } => {
+                let _turn = self.sync_turn();
+                let review =
+                    self.run_sync(ticket, Some(client(&server, token)?), async |host| {
+                        engine::review(host, None).await
+                    })?;
+                Ok(json!(review))
+            }
+            Request::CloudResolve {
+                server,
+                token,
+                review_token,
+                choices,
+            } => {
+                let resolution = Resolution {
+                    token: review_token,
+                    choices,
+                };
+                let _turn = self.sync_turn();
+                let resolved =
+                    self.run_sync(ticket, Some(client(&server, token)?), async |host| {
+                        engine::resolve(host, None, resolution).await
+                    })?;
+                Ok(json!({ "synced": resolved.synced, "message": resolved.message }))
+            }
+            _ => Err(MISROUTED.into()),
+        }
+    }
+
+    /// Runs a shared vault command exactly as the desktop service would. Its
+    /// deferred network or long CPU work runs after the vault mutex is
+    /// released and may re-enter only the session that prepared it.
+    fn run_command(
+        &self,
+        ticket: &Ticket<'_>,
+        command: ServerCommand,
+        expected_revision: Option<u64>,
+        confirmed: bool,
+    ) -> Result<Value, String> {
+        let PreparedCommand {
+            mut responses,
+            deferred,
+            existing_update,
+            session,
+        } = self
+            .state()
+            .prepare_command(command, expected_revision, confirmed)?;
+        match deferred {
+            Deferred::None => {}
+            Deferred::Audit(pending, check_breaches) => {
+                match pending.finish(|| ticket.cancelled()) {
+                    Ok(snapshot) => {
+                        let audit = block_on(ticket, snapshot.audit(check_breaches))?;
+                        let code = if audit.incomplete {
+                            ResponseCode::Failure
+                        } else {
+                            ResponseCode::Success
+                        };
+                        responses
+                            .push(RpcResponse::new(code, ResponsePayload::Audit(audit.report)));
+                    }
+                    Err(_) => operations::respond_conflict(
+                        "Vault changed or audit evaluation failed; run it again",
+                        &mut responses,
+                    ),
+                }
+            }
+            Deferred::WeakList(pending, filter) => {
+                if pending.finish(|| ticket.cancelled()).is_err() {
+                    return Err("Password strength check was cancelled".into());
+                }
+                let host = self.host(session, None);
+                block_on(
+                    ticket,
+                    operations::finish_weak_list(*filter, &host, &mut responses),
+                )?;
+            }
+            Deferred::Duo(prepared) => {
+                let host = self.host(session, None);
+                block_on(
+                    ticket,
+                    operations::finish_duo(*prepared, &host, &mut responses),
+                )?;
+            }
+            Deferred::DuoEnrollment(prepared) => {
+                let host = self.host(session, None);
+                block_on(
+                    ticket,
+                    operations::finish_duo_enrollment(*prepared, &host, &mut responses),
+                )?;
+            }
+        }
+        response_value(responses, existing_update)
+    }
+
+    /// Lends the vault state to the shared sync engine or Duo completion for
+    /// one request; `session` is the unlock that request started in.
+    fn host(&self, session: Option<String>, client: Option<CloudClient>) -> MobileHost<'_> {
+        MobileHost {
+            directory: self.state().directory.clone(),
+            session,
+            client,
+            owner: &self.state,
+        }
+    }
+
+    /// Runs one sync-engine operation; the app's lock signal aborts its network work.
+    fn run_sync<T>(
+        &self,
+        ticket: &Ticket<'_>,
+        client: Option<CloudClient>,
+        operation: impl AsyncFnOnce(&MobileHost<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let session = self.state().session.clone();
+        let host = self.host(session, client);
+        block_on(ticket, operation(&host))?
+    }
+
+    fn sync_status(
+        &self,
+        ticket: &Ticket<'_>,
+        client: Option<CloudClient>,
+        check: bool,
+    ) -> Result<Value, String> {
+        let status = self.run_sync(ticket, client, async |host| {
+            engine::status(host, check).await
+        })?;
+        Ok(json!({
+            "enabled": status.binding.as_ref().map_or(!status.recovery_copy, |b| b.enabled),
+            "configured": status.binding.is_some(),
+            "local_changed": status.local_changed,
+            "remote": status.remote,
+            "binding": status.binding,
+        }))
+    }
+}
+
+const MISROUTED: &str = "Mobile request was routed incorrectly";
+
+impl MobileState {
+    fn lock(&mut self) {
         self.vault = None;
         self.credentials.zeroize();
         self.session = None;
@@ -323,6 +749,7 @@ impl MobileVault {
         self.credentials = key;
         self.primary_unlock = primary;
         self.session = Some(hex::encode(rand::random::<[u8; 16]>()));
+        self.adoptions += 1;
         self.touched = Instant::now();
     }
 
@@ -340,58 +767,50 @@ impl MobileVault {
         Ok(json!({ "vault": name }))
     }
 
-    /// JSON is only a process-local FFI envelope. Never log requests or results.
-    pub fn call(&mut self, input: &str) -> Result<Value, String> {
-        if input.len() > MAX_REQUEST_BYTES {
-            return Err("Mobile request exceeds limit".into());
-        }
-        let mut envelope: Value =
-            serde_json::from_str(input).map_err(|_| "Invalid mobile request")?;
-        let op = envelope
-            .get("op")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        // Deserialization errors can echo rejected values; report only the operation.
-        let request = Request::deserialize(&envelope)
-            .map_err(|_| format!("Invalid or unsupported mobile request: {op}"));
-        wipe_json(&mut envelope);
-        let request = request?;
-        if !matches!(request, Request::Lock) && cancelled(self.cancellation) {
-            self.lock();
-            return Err(LOCKED.into());
-        }
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(request)));
-        if cancelled(self.cancellation) {
-            if let Ok(Ok(mut value)) = result {
-                wipe_json(&mut value);
-            }
-            self.lock();
-            return Err(
-                "Operation interrupted; vault locked. A remote change may have \
-                        completed; inspect before retrying"
-                    .into(),
-            );
-        }
-        result.unwrap_or_else(|_| {
-            self.lock();
-            Err("Mobile operation failed; vault locked".into())
-        })
+    /// Whether a sync of this vault would run: an explicit checkpoint setting,
+    /// or for an unbound vault, anything but a recovery copy. Reads only the
+    /// small checkpoint file, never the vault.
+    fn sync_enabled(&self) -> Result<bool, String> {
+        let path = self.vault()?.sync_path()?;
+        Ok(crate::cloud::binding(&path)?
+            .map_or_else(|| !engine::recovery_copy(&path), |binding| binding.enabled))
     }
 
+    /// Runs one local request; the caller has applied the idle timeout.
     fn dispatch(&mut self, request: Request) -> Result<Value, String> {
         if request.needs_unlock() {
             self.open()?;
         }
         match request {
-            Request::Lock => {
-                if let Some(flag) = self.cancellation {
-                    flag.store(false, Ordering::SeqCst);
-                }
-                self.lock();
-                Ok(json!({}))
-            }
+            request @ (Request::Status
+            | Request::Vaults
+            | Request::Unlock { .. }
+            | Request::BiometricUnlock { .. }
+            | Request::Create { .. }
+            | Request::CreateKey { .. }
+            | Request::NewKeyFile
+            | Request::ImportVault { .. }
+            | Request::RestoreBackup { .. }
+            | Request::BiometricMaterial) => self.session_request(request),
+            request @ (Request::SettingsGet
+            | Request::SettingsSave { .. }
+            | Request::Generate(_)
+            | Request::Passcheck { .. }) => self.settings_request(request),
+            request @ (Request::Logins { .. }
+            | Request::HostnameLogins { .. }
+            | Request::OtpLogins { .. }
+            | Request::Login { .. }
+            | Request::SiteOtp { .. }) => self.autofill_request(request),
+            request @ (Request::Passkeys { .. }
+            | Request::PasskeyCreate { .. }
+            | Request::PasskeyGet { .. }) => self.passkey_request(request),
+            request => self.file_request(request),
+        }
+    }
+
+    /// Vault files, unlocking, and the biometric key.
+    fn session_request(&mut self, request: Request) -> Result<Value, String> {
+        match request {
             Request::Status => Ok(json!({
                 "unlocked": self.open().is_ok(),
                 "unlock_seconds": self.settings.unlock_seconds,
@@ -447,6 +866,14 @@ impl MobileVault {
                 password,
                 key_file,
             } => self.restore_backup(&data, password, key_file),
+            Request::BiometricMaterial => self.biometric_material(),
+            _ => Err(MISROUTED.into()),
+        }
+    }
+
+    /// Device-local preferences and tools that never touch the vault.
+    fn settings_request(&mut self, request: Request) -> Result<Value, String> {
+        match request {
             Request::SettingsGet => Ok(json!(self.settings)),
             Request::SettingsSave { settings } => {
                 settings.save(&self.directory)?;
@@ -457,27 +884,13 @@ impl MobileVault {
             Request::Passcheck { password } => Ok(json!({
                 "assessment": crate::password::password_strength_output(&password),
             })),
-            Request::CloudList { server, token } => {
-                let client = client(&server, token)?;
-                Ok(json!(block_on(self.cancellation, client.list())??))
-            }
-            Request::CloudDownload {
-                server,
-                token,
-                id,
-                copy,
-            } => {
-                let download = self.run_sync(Some(client(&server, token)?), async |host| {
-                    engine::download(host, &id, copy).await
-                })?;
-                let name = download.install(&self.directory)?;
-                Ok(json!({ "vault": name }))
-            }
-            Request::Vault {
-                command,
-                expected_revision,
-                confirmed,
-            } => self.run_command(*command, expected_revision, confirmed),
+            _ => Err(MISROUTED.into()),
+        }
+    }
+
+    /// Platform autofill: logins and codes only for an origin the app verified.
+    fn autofill_request(&mut self, request: Request) -> Result<Value, String> {
+        match request {
             Request::Logins { origin } => {
                 let vault = self.vault()?;
                 let logins: Vec<_> = self
@@ -495,17 +908,16 @@ impl MobileVault {
             } => self.browser_choices(&origin, hostname_only, true),
             Request::Login { id, origin } => self.login(id, &origin),
             Request::SiteOtp { id, origin } => self.site_otp(id, &origin),
-            Request::Snapshot => {
-                let path = self.vault()?.sync_path()?;
-                let bytes = crate::file::read_bounded_file(&path, MAX_SNAPSHOT_BYTES).map_err(
-                    |_| "Encrypted vault exceeds mobile transfer limit or could not be read",
-                )?;
-                Ok(json!({ "data": passkey::encode(bytes) }))
-            }
-            Request::BiometricMaterial => self.biometric_material(),
+            _ => Err(MISROUTED.into()),
+        }
+    }
+
+    /// The platform credential provider's passkeys.
+    fn passkey_request(&mut self, request: Request) -> Result<Value, String> {
+        match request {
             Request::Passkeys { request } => {
                 let passkeys: Vec<_> = self
-                    .passkeys()?
+                    .passkey_identities()?
                     .iter()
                     .filter(|(_, p)| request.as_ref().is_none_or(|q| p.matches(q)))
                     .map(|(id, p)| {
@@ -525,7 +937,11 @@ impl MobileVault {
                 origin,
                 client_hash,
             } => {
-                let existing: Vec<_> = self.passkeys()?.into_iter().map(|(_, p)| p).collect();
+                let existing: Vec<_> = self
+                    .passkey_identities()?
+                    .into_iter()
+                    .map(|(_, p)| p)
+                    .collect();
                 let hash = client_hash.as_deref().map(passkey::decode).transpose()?;
                 let (p, response) = passkey::create(&request, &origin, hash.as_deref(), &existing)?;
                 self.save_passkey(&p)?;
@@ -537,55 +953,23 @@ impl MobileVault {
                 origin,
                 client_hash,
             } => {
-                let (_, p) = self
-                    .passkeys()?
-                    .into_iter()
-                    .find(|(passkey_id, _)| *passkey_id == id)
-                    .ok_or("Passkey not found")?;
+                let p = self.passkey(id)?;
                 let hash = client_hash.as_deref().map(passkey::decode).transpose()?;
                 p.authenticate(&request, &origin, hash.as_deref())
             }
-            Request::Sync { server, token } => {
-                let message = self.run_sync(Some(client(&server, token)?), async |host| {
-                    engine::sync(host, None, Bind::CreateIfMissing).await
-                })?;
-                Ok(json!({ "synced": true, "message": message }))
-            }
-            Request::SyncStatus => self.sync_status(None, false),
-            Request::SyncCheck { server, token } => {
-                self.sync_status(Some(client(&server, token)?), true)
-            }
-            Request::SyncEnabled {
-                server,
-                token,
-                enabled,
-            } => {
-                let client = client(&server, token)?;
-                self.run_sync(Some(client.clone()), async |host| {
-                    engine::set_enabled(host, None, enabled, Bind::Enable).await
-                })?;
-                self.sync_status(Some(client), false)
-            }
-            Request::CloudConflicts { server, token } => {
-                let review = self.run_sync(Some(client(&server, token)?), async |host| {
-                    engine::review(host, None).await
-                })?;
-                Ok(json!(review))
-            }
-            Request::CloudResolve {
-                server,
-                token,
-                review_token,
-                choices,
-            } => {
-                let resolution = Resolution {
-                    token: review_token,
-                    choices,
-                };
-                let resolved = self.run_sync(Some(client(&server, token)?), async |host| {
-                    engine::resolve(host, None, resolution).await
-                })?;
-                Ok(json!({ "synced": resolved.synced, "message": resolved.message }))
+            _ => Err(MISROUTED.into()),
+        }
+    }
+
+    /// Snapshots, transfers, credentials, and retention.
+    fn file_request(&mut self, request: Request) -> Result<Value, String> {
+        match request {
+            Request::Snapshot => {
+                let path = self.vault()?.sync_path()?;
+                let bytes = crate::file::read_bounded_file(&path, MAX_SNAPSHOT_BYTES).map_err(
+                    |_| "Encrypted vault exceeds mobile transfer limit or could not be read",
+                )?;
+                Ok(json!({ "data": passkey::encode(bytes) }))
             }
             Request::ExportItems { format, confirmed } => {
                 self.export_items(format.as_deref() != Some("csv"), confirmed)
@@ -607,6 +991,8 @@ impl MobileVault {
             Request::Rekey { password, key_file } => {
                 self.rekey(tools::new_credentials(password, key_file)?)
             }
+            Request::RekeyRecovery => self.rekey_recovery(),
+            Request::DeleteRekeyRecovery { confirmed } => self.delete_rekey_recovery(confirmed),
             Request::DeleteVault { confirmed } => self.delete_vault(confirmed),
             Request::PurgeExpired => {
                 let days = self.settings.trash_days;
@@ -616,23 +1002,25 @@ impl MobileVault {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "removed": removed }))
             }
+            _ => Err(MISROUTED.into()),
         }
     }
 
-    /// Runs a shared vault command exactly as the desktop service would,
-    /// including deferred network work, then returns its payload.
-    fn run_command(
+    /// The vault step of a shared command, including the idle timeout. Any
+    /// deferred work is returned for the caller to finish without the mutex.
+    fn prepare_command(
         &mut self,
         mut command: ServerCommand,
         expected_revision: Option<u64>,
         confirmed: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<PreparedCommand, String> {
+        self.open()?;
         if let Err(error) = mobile_command(&command) {
             command.zeroize();
             return Err(error.into());
         }
         let history_limit = self.settings.history_limit;
-        let cancellation = self.cancellation;
+        let session = self.session.clone();
         let (vault, credentials) = self.unlocked()?;
         if let Some(required) = confirmation(vault, &command)
             && !confirmed
@@ -656,51 +1044,12 @@ impl MobileVault {
             credentials,
             history_limit,
         );
-        match deferred {
-            Deferred::None => {}
-            Deferred::Audit(pending, check_breaches) => match pending
-                .finish(|| cancelled(cancellation))
-            {
-                Ok(snapshot) => {
-                    let audit = block_on(cancellation, snapshot.audit(check_breaches))?;
-                    let code = if audit.incomplete {
-                        ResponseCode::Failure
-                    } else {
-                        ResponseCode::Success
-                    };
-                    responses.push(RpcResponse::new(code, ResponsePayload::Audit(audit.report)));
-                }
-                Err(_) => operations::respond_conflict(
-                    "Vault changed or audit evaluation failed; run it again",
-                    &mut responses,
-                ),
-            },
-            Deferred::WeakList(pending, filter) => {
-                if pending.finish(|| cancelled(cancellation)).is_err() {
-                    return Err("Password strength check was cancelled".into());
-                }
-                let host = self.host(None);
-                block_on(
-                    cancellation,
-                    operations::finish_weak_list(*filter, &host, &mut responses),
-                )?;
-            }
-            Deferred::Duo(prepared) => {
-                let host = self.host(None);
-                block_on(
-                    cancellation,
-                    operations::finish_duo(*prepared, &host, &mut responses),
-                )?;
-            }
-            Deferred::DuoEnrollment(prepared) => {
-                let host = self.host(None);
-                block_on(
-                    cancellation,
-                    operations::finish_duo_enrollment(*prepared, &host, &mut responses),
-                )?;
-            }
-        }
-        response_value(responses, existing_update)
+        Ok(PreparedCommand {
+            responses,
+            deferred,
+            existing_update,
+            session,
+        })
     }
 
     fn vault_names(&self) -> Result<Vec<String>, String> {
@@ -838,17 +1187,38 @@ impl MobileVault {
         Ok(json!({ "code": code, "expires_in": expires }))
     }
 
-    fn passkeys(&self) -> Result<Vec<(usize, Passkey)>, String> {
+    /// Public identities of stored passkeys. Private keys are neither parsed
+    /// nor copied, and a damaged record is skipped instead of hiding the rest.
+    fn passkey_identities(&self) -> Result<Vec<(usize, PasskeyIdentity)>, String> {
         let mut result = Vec::new();
+        let mut skipped = 0usize;
         for item in self.vault()?.active_items() {
             if let Some(field) = item.passkey_field() {
-                let p: Passkey =
-                    serde_json::from_str(&field.value).map_err(|_| "Invalid stored passkey")?;
-                p.validate()?;
-                result.push((item.entry.id, p));
+                match serde_json::from_str::<PasskeyIdentity>(&field.value) {
+                    Ok(p) if p.validate().is_ok() => result.push((item.entry.id, p)),
+                    _ => skipped += 1,
+                }
             }
         }
+        if skipped > 0 {
+            // A count only: never log a record, identity, or key.
+            eprintln!("pm-mobile: skipped {skipped} invalid stored passkey record(s)");
+        }
         Ok(result)
+    }
+
+    /// One stored passkey with its signing key, fully validated before use.
+    fn passkey(&self, id: usize) -> Result<Passkey, String> {
+        let field = self
+            .vault()?
+            .item(id)
+            .filter(|item| item.active())
+            .and_then(|item| item.passkey_field())
+            .ok_or("Passkey not found")?;
+        let p: Passkey =
+            serde_json::from_str(&field.value).map_err(|_| "Invalid stored passkey")?;
+        p.validate()?;
+        Ok(p)
     }
 
     fn save_passkey(&mut self, p: &Passkey) -> Result<(), String> {
@@ -885,38 +1255,6 @@ impl MobileVault {
             return Err("Passkey entry already exists; retry registration".into());
         }
         Ok(())
-    }
-
-    /// Lends this owner to the shared sync engine and Duo completion for one request.
-    fn host(&mut self, client: Option<CloudClient>) -> MobileHost<'_> {
-        MobileHost {
-            session: self.session.clone(),
-            directory: self.directory.clone(),
-            client,
-            owner: std::sync::Mutex::new(self),
-        }
-    }
-
-    /// Runs one sync-engine operation; the app's lock signal aborts its network work.
-    fn run_sync<T>(
-        &mut self,
-        client: Option<CloudClient>,
-        operation: impl AsyncFnOnce(&MobileHost<'_>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let cancellation = self.cancellation;
-        let host = self.host(client);
-        block_on(cancellation, operation(&host))?
-    }
-
-    fn sync_status(&mut self, client: Option<CloudClient>, check: bool) -> Result<Value, String> {
-        let status = self.run_sync(client, async |host| engine::status(host, check).await)?;
-        Ok(json!({
-            "enabled": status.binding.as_ref().map_or(!status.recovery_copy, |b| b.enabled),
-            "configured": status.binding.is_some(),
-            "local_changed": status.local_changed,
-            "remote": status.remote,
-            "binding": status.binding,
-        }))
     }
 }
 
@@ -1004,30 +1342,24 @@ fn response_value(responses: Vec<RpcResponse>, existing_update: bool) -> Result<
     }
 }
 
-/// Mobile host for the shared sync engine and Duo completion. The JNI mutex
-/// already serializes access; this lock only lets async code borrow the owner.
+/// Mobile host for the shared sync engine and Duo completion. Each step takes
+/// the vault mutex only for itself, so network transfers never hold it.
 struct MobileHost<'a> {
-    owner: std::sync::Mutex<&'a mut MobileVault>,
+    owner: &'a Mutex<MobileState>,
     /// The unlock session this request started in.
     session: Option<String>,
     client: Option<CloudClient>,
     directory: PathBuf,
 }
 
-impl<'a> MobileHost<'a> {
-    fn owner(&self) -> Result<std::sync::MutexGuard<'_, &'a mut MobileVault>, String> {
-        self.owner
-            .lock()
-            .map_err(|_| "Mobile session failed".into())
-    }
-
+impl MobileHost<'_> {
     /// Runs `apply` only if `session` is still the open unlock.
     fn with_session<T>(
         &self,
         session: Option<&String>,
         apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> T,
     ) -> Result<T, String> {
-        let mut owner = self.owner()?;
+        let mut owner = guard(self.owner);
         if session.is_none() || owner.session.as_ref() != session {
             return Err("Vault locked or switched; nothing was applied".into());
         }
@@ -1046,16 +1378,16 @@ impl SyncHost for MobileHost<'_> {
     }
     fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot, String>> + Send {
         let snapshot = (|| {
-            let owner = self.owner()?;
+            let owner = guard(self.owner);
             let vault = owner.vault()?;
             let path = vault.sync_path()?;
-            let bytes = crate::file::read_bounded_file(&path, crate::cloud::MAX_BYTES)
+            let mut bytes = crate::file::read_bounded_file(&path, crate::cloud::MAX_BYTES)
                 .map_err(|_| "Could not read local snapshot")?;
             Ok(Snapshot {
                 id: hex::encode(vault.vault_id()),
                 session: owner.session.clone().ok_or(LOCKED)?,
                 state: crate::cloud::binding(&path)?,
-                bytes: bytes.to_vec(),
+                bytes: std::mem::take(&mut *bytes),
                 path,
             })
         })();
@@ -1102,10 +1434,10 @@ fn mobile_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
 
 /// Runs network work on the shared runtime; the app's lock signal aborts it.
 fn block_on<T>(
-    cancellation: Option<&AtomicBool>,
+    ticket: &Ticket<'_>,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, String> {
-    Ok(mobile_runtime()?.block_on(interruptible(cancellation, future))?)
+    Ok(mobile_runtime()?.block_on(interruptible(ticket, future))?)
 }
 
 fn client(server: &str, token: SecretString) -> Result<CloudClient, String> {
@@ -1125,21 +1457,13 @@ pub fn wipe_response(value: &mut Value) {
     wipe_json(value);
 }
 
-fn cancelled(flag: Option<&AtomicBool>) -> bool {
-    flag.is_some_and(|flag| flag.load(Ordering::SeqCst))
-}
-
 async fn interruptible<T>(
-    flag: Option<&AtomicBool>,
+    ticket: &Ticket<'_>,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, &'static str> {
     tokio::select! {
         result = future => Ok(result),
-        _ = async {
-            while !cancelled(flag) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        } => Err("Operation interrupted; inspect any remote change before retrying"),
+        () = ticket.wait() => Err("Operation interrupted; inspect any remote change before retrying"),
     }
 }
 
@@ -1255,17 +1579,20 @@ mod tests {
         ] {
             save(&mut api, name, "synthetic-user", "", origin).unwrap();
         }
-        let vault = api.vault.as_mut().unwrap();
-        for id in [1, 2] {
+        {
+            let mut state = api.state();
+            let vault = state.vault.as_mut().unwrap();
+            for id in [1, 2] {
+                vault.set_test_totp(
+                    id,
+                    "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                );
+            }
             vault.set_test_totp(
-                id,
-                "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                3,
+                "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
             );
         }
-        vault.set_test_totp(
-            3,
-            "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
-        );
         let choices = api.call(r#"{"op":"otp_logins","origin":"https://accounts.example.com","hostname_only":true}"#).unwrap();
         assert_eq!(choices.as_array().unwrap().len(), 2);
         assert!(!choices.to_string().contains("GEZDGNBV"));
@@ -1403,7 +1730,7 @@ mod tests {
             !raw.windows(b"private_key".len())
                 .any(|w| w == b"private_key")
         );
-        let mut key = api.credentials.clone();
+        let mut key = api.state().credentials.clone();
         let plain = Zeroizing::new(decrypt_file(&mut key, &raw).unwrap());
         let document = persistence::decode_document(&plain).unwrap();
         assert_eq!(document.items.len(), 1);
@@ -1411,9 +1738,10 @@ mod tests {
         let stored: Passkey =
             serde_json::from_str(&record.metadata.custom_fields[0].value).unwrap();
         assert_eq!(stored.credential_id, response["id"]);
-        assert!(api.save_passkey(&stored).is_err());
+        assert!(api.state().save_passkey(&stored).is_err());
         assert!(
-            api.vault
+            api.state()
+                .vault
                 .as_ref()
                 .unwrap()
                 .browser_logins("https://example.com")
@@ -1426,7 +1754,8 @@ mod tests {
                 .is_empty()
         );
         let export = temp.path().join("portable.json");
-        api.vault
+        api.state()
+            .vault
             .as_ref()
             .unwrap()
             .export(export.to_string_lossy().into_owned(), false)
@@ -1438,7 +1767,8 @@ mod tests {
             record.metadata.custom_fields[0].value
         );
         assert!(
-            api.vault
+            api.state()
+                .vault
                 .as_ref()
                 .unwrap()
                 .export(
@@ -1448,7 +1778,8 @@ mod tests {
                 .is_err()
         );
         let backup = temp.path().join("vault.pmbackup");
-        api.vault
+        api.state()
+            .vault
             .as_ref()
             .unwrap()
             .encrypted_backup(
@@ -1485,6 +1816,48 @@ mod tests {
         );
         let assertion = json!({"op":"passkey_get","id":1,"origin":"https://example.com","request":{"rpId":"example.com","challenge":passkey::encode([3;32])}});
         assert!(api.call(&assertion.to_string()).is_ok());
+        // A damaged record is skipped by listing and registration and fails
+        // only when it is the passkey being used.
+        {
+            let mut state = api.state();
+            let (vault, credentials) = state.unlocked().unwrap();
+            let damaged = TypedEntry {
+                entry: crate::types::PasswordEntry {
+                    name: "Damaged passkey".into(),
+                    username: None,
+                    password: "".into(),
+                    url: Some("https://example.com".into()),
+                    notes: None,
+                    copy: false,
+                },
+                kind: ItemKind::Login,
+                additional_urls: vec![],
+                custom_fields: vec![CustomField {
+                    name: passkey::FIELD.into(),
+                    value: "not a passkey".into(),
+                    secret: true,
+                }],
+            };
+            assert!(vault.add_passkey_entry(damaged, credentials).unwrap());
+        }
+        let listed = api.call(r#"{"op":"passkeys"}"#).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], 1);
+        assert!(api.call(&assertion.to_string()).is_ok());
+        let mut damaged = assertion.clone();
+        damaged["id"] = json!(2);
+        assert!(api.call(&damaged.to_string()).is_err());
+        let mut second = registration.clone();
+        second["request"]["user"] =
+            json!({"id":passkey::encode(b"bob"),"name":"bob","displayName":"Bob"});
+        assert!(api.call(&second.to_string()).is_ok());
+        let mut excluded = registration;
+        excluded["request"]["excludeCredentials"] =
+            json!([{"type":"public-key","id":response["id"]}]);
+        assert_eq!(
+            api.call(&excluded.to_string()).unwrap_err(),
+            "CredentialExcluded"
+        );
     }
     #[test]
     fn mobile_persists_existing_format_and_biometric_unlock_rejects_wrong_keys() {
@@ -1526,7 +1899,7 @@ mod tests {
                 .unwrap_err(),
             "No matching login"
         );
-        api.touched = Instant::now() - Duration::from_secs(301);
+        api.state().touched = Instant::now() - Duration::from_secs(301);
         assert!(list(&mut api).is_err());
     }
 }

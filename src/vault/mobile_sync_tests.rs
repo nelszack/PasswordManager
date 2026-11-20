@@ -220,3 +220,44 @@ fn offline_conflicts_stale_reviews_and_lost_ack_preserve_data() {
         "acknowledgement-lost"
     );
 }
+
+#[test]
+fn network_waits_release_the_vault_and_the_lock_signal_interrupts_them() {
+    static CANCEL: Cancellation = Cancellation::new();
+    // Accepts connections but never answers, like a stalled server.
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", socket.local_addr().unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let mut api = MobileVault::new(directory.path().into()).unwrap();
+    api.set_cancellation(&CANCEL);
+    api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+        .unwrap();
+    save(
+        &mut api,
+        "Example",
+        "alice",
+        "secret",
+        "https://example.com",
+    )
+    .unwrap();
+    let api = &api;
+    thread::scope(|scope| {
+        let syncing = scope.spawn(|| {
+            api.call(&json!({"op":"sync","server":url,"token":"1".repeat(64)}).to_string())
+        });
+        let _held = socket.accept().unwrap();
+        // The sync is now waiting on the network; autofill still answers.
+        let started = Instant::now();
+        let logins = api
+            .call(r#"{"op":"logins","origin":"https://example.com"}"#)
+            .unwrap();
+        assert_eq!(logins.as_array().unwrap().len(), 1);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        CANCEL.signal();
+        let interrupted = syncing.join().unwrap().unwrap_err();
+        assert!(interrupted.contains("interrupted"), "{interrupted}");
+    });
+    assert!(api.call(r#"{"op":"status"}"#).is_err());
+    api.call(r#"{"op":"lock"}"#).unwrap();
+    assert_eq!(api.call(r#"{"op":"status"}"#).unwrap()["unlocked"], false);
+}

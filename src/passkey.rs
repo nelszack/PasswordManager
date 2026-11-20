@@ -23,6 +23,46 @@ pub struct Passkey {
     pub display_name: String,
     private_key: String,
 }
+/// A stored passkey's public identity, read without copying or parsing its
+/// private key. Listing and exclusion checks need nothing more.
+#[derive(Clone, Deserialize)]
+pub struct PasskeyIdentity {
+    pub credential_id: String,
+    pub rp_id: String,
+    pub user_name: String,
+    pub display_name: String,
+}
+impl PasskeyIdentity {
+    /// Cheap structural checks; the signing key is validated only when used.
+    pub fn validate(&self) -> Result<()> {
+        validate_rp(&self.rp_id)?;
+        if self.credential_id.len() > 2048
+            || self.user_name.len() > 1024
+            || self.display_name.len() > 1024
+            || decode(&self.credential_id)?.is_empty()
+        {
+            return Err("Invalid passkey identity".into());
+        }
+        Ok(())
+    }
+    pub fn matches(&self, request: &Value) -> bool {
+        request_matches(&self.rp_id, &self.credential_id, request)
+    }
+}
+/// Whether a WebAuthn get request may use this RP's credential.
+fn request_matches(rp_id: &str, credential_id: &str, request: &Value) -> bool {
+    request["rpId"].as_str() == Some(rp_id)
+        && match request.get("allowCredentials") {
+            None => true,
+            Some(Value::Array(ids)) => {
+                ids.is_empty()
+                    || ids.iter().any(|id| {
+                        id["type"] == "public-key" && id["id"].as_str() == Some(credential_id)
+                    })
+            }
+            _ => false,
+        }
+}
 impl std::fmt::Debug for Passkey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Passkey").finish_non_exhaustive()
@@ -141,7 +181,7 @@ pub fn create(
     request: &Value,
     origin: &str,
     client_hash: Option<&[u8]>,
-    existing: &[Passkey],
+    existing: &[PasskeyIdentity],
 ) -> Result<(Passkey, Value)> {
     let rp = text(request.get("rp").ok_or("Missing RP")?, "id")?;
     validate_origin(rp, origin)?;
@@ -273,18 +313,15 @@ impl Passkey {
             .map_err(|_| "Invalid passkey signing key".into())
     }
     pub fn matches(&self, request: &Value) -> bool {
-        request["rpId"].as_str() == Some(&self.rp_id)
-            && match request.get("allowCredentials") {
-                None => true,
-                Some(Value::Array(ids)) => {
-                    ids.is_empty()
-                        || ids.iter().any(|id| {
-                            id["type"] == "public-key"
-                                && id["id"].as_str() == Some(&self.credential_id)
-                        })
-                }
-                _ => false,
-            }
+        request_matches(&self.rp_id, &self.credential_id, request)
+    }
+    pub fn identity(&self) -> PasskeyIdentity {
+        PasskeyIdentity {
+            credential_id: self.credential_id.clone(),
+            rp_id: self.rp_id.clone(),
+            user_name: self.user_name.clone(),
+            display_name: self.display_name.clone(),
+        }
     }
     pub fn authenticate(
         &self,
@@ -435,15 +472,7 @@ mod tests {
         assert!(create(&options, "https://example.com", None, &[]).is_err());
         options = registration();
         options["excludeCredentials"] = json!([{"type":"public-key","id":key.credential_id}]);
-        assert!(
-            create(
-                &options,
-                "https://example.com",
-                None,
-                std::slice::from_ref(&key)
-            )
-            .is_err()
-        );
+        assert!(create(&options, "https://example.com", None, &[key.identity()]).is_err());
         let request = json!({"rpId":"example.com","challenge":encode([1;32]),"allowCredentials":[{"type":"public-key","id":encode([0;32])}]});
         assert!(
             key.authenticate(&request, "https://example.com", None)
