@@ -119,12 +119,15 @@
         if (explicitScope) return explicitScope;
         let candidate = input.parentElement;
         while (candidate && candidate !== document.body) {
-            const fields = Array.from(candidate.querySelectorAll("input")).filter(isUsableInput);
-            if (
-                fields.some(field => field.type === "password") &&
-                fields.some(field => USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))
-            ) {
-                return candidate;
+            // Check cheap type tests first and stop as soon as both roles are
+            // present; visibility checks read computed styles up the tree.
+            let password = false;
+            let username = false;
+            for (const field of candidate.querySelectorAll("input")) {
+                if (!password && field.type === "password") password = isUsableInput(field);
+                else if (!username && USERNAME_INPUT_TYPES.has(field.type))
+                    username = !hasSearchHint(field) && isUsableInput(field);
+                if (password && username) return candidate;
             }
             candidate = candidate.parentElement;
         }
