@@ -1046,16 +1046,8 @@ impl App {
                     .into();
             }
         }
-        if !self.busy()
-            && !self.polling()
-            && now.saturating_duration_since(self.connection.last_status) < Duration::from_secs(2)
-        {
-            let task = self.poll_tool_watches(now);
-            if self.polling() || self.busy() {
-                return task;
-            }
-        }
         // Allow timer jitter so an idle tick at the poll cadence is not skipped.
+        // The status check runs first so a fast watch can never starve it.
         let interval = self.status_interval();
         if self.connection.running
             && !self.busy()
@@ -1065,6 +1057,16 @@ impl App {
                     >= interval - Duration::from_millis(250))
         {
             return self.status();
+        }
+        // Watches need a current session. A live status subscription keeps it
+        // current (changes arrive as pushes); otherwise require a recent poll.
+        let status_current = if self.connection.subscribed {
+            !self.connection.status_stale
+        } else {
+            now.saturating_duration_since(self.connection.last_status) < Duration::from_secs(2)
+        };
+        if !self.busy() && !self.polling() && status_current {
+            return self.poll_tool_watches(now);
         }
         Task::none()
     }

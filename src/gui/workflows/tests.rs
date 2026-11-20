@@ -612,6 +612,31 @@ fn passive_watch_does_not_extend_unlock_or_starve_status_checks() {
 }
 
 #[test]
+fn subscribed_status_keeps_watches_running_between_safety_checks() {
+    let mut app = app();
+    let now = Instant::now();
+    app.tab = Tab::Tools;
+    app.workspace.otp.watch = Some(WatchTarget::selected(&app).unwrap());
+    app.workspace.last_watch = now - Duration::from_secs(1);
+    // Pushed status is current long after the last poll.
+    app.connection.subscribed = true;
+    app.connection.last_status = now - Duration::from_secs(10);
+    let _ = app.update(super::super::Message::Tick(now));
+    assert!(
+        app.polling(),
+        "the watch polls without waiting for a status refresh"
+    );
+    assert!(!app.busy());
+    // A stale pushed status is refreshed before any watch request.
+    app.request_state = RequestState::Idle;
+    app.connection.status_stale = true;
+    app.workspace.last_watch = now - Duration::from_secs(5);
+    let _ = app.update(super::super::Message::Tick(now + Duration::from_secs(1)));
+    assert!(app.polling());
+    assert!(!app.connection.status_stale, "the status refresh ran first");
+}
+
+#[test]
 fn passive_watch_preserves_inputs_and_watch_target_when_selection_changes() {
     let mut app = app();
     app.workspace.authenticator.code = "123".into();
