@@ -432,9 +432,6 @@ impl<'a> Button<'a> {
         });
         self
     }
-    pub fn on_press(self, message: Message) -> Self {
-        self.on_press_maybe(Some(message))
-    }
     pub fn on_press_maybe(mut self, message: Option<Message>) -> Self {
         self.inner = self.inner.on_press_maybe(message.clone());
         self.message = message;
@@ -710,7 +707,8 @@ mod tests {
 
     #[test]
     fn keyboard_activation_requires_focus_enabled_control_and_no_shortcut_modifiers() {
-        let mut control: Element<'_, Message> = button("Save").on_press(Message::Save).into();
+        let mut control: Element<'_, Message> =
+            button("Save").on_press_maybe(Some(Message::Save)).into();
         assert!(
             press(
                 &mut control,

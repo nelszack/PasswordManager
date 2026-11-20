@@ -11,6 +11,7 @@ mod model;
 mod presentation;
 mod settings;
 mod state;
+mod styles;
 mod vault_names;
 mod view;
 mod website;
