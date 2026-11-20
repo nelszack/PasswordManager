@@ -265,7 +265,25 @@ pub struct StatusEvents {
     request_id: String,
 }
 
+/// Closes a [`StatusEvents`] connection from another thread, so a blocked
+/// [`StatusEvents::recv`] returns at once instead of at the next heartbeat.
+pub struct StatusEventsShutdown(TcpStream);
+
+impl StatusEventsShutdown {
+    pub fn shutdown(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl StatusEvents {
+    /// A handle that ends this subscription from another thread.
+    pub fn shutdown_handle(&self) -> Result<StatusEventsShutdown, String> {
+        self.connection
+            .try_clone()
+            .map(StatusEventsShutdown)
+            .map_err(|e| format!("could not share the status connection: {e}"))
+    }
+
     /// Block until the next status record. Any error ends the subscription.
     pub fn recv(&mut self) -> Result<ProtocolResponse, String> {
         let mut header = [0u8; SECURE_RECORD_HEADER_LEN];
@@ -324,6 +342,33 @@ mod tests {
         encode_rpc_response, server_hello,
     };
     use std::{net::TcpListener, thread};
+
+    #[test]
+    fn shutdown_handle_wakes_a_blocked_status_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let connection = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // The server side stays open and silent, as between heartbeats.
+        let (_server, _) = listener.accept().unwrap();
+        let mut events = StatusEvents {
+            connection,
+            response_key: Zeroizing::new([0; 32]),
+            sequence: 0,
+            request_id: "status".into(),
+        };
+        let handle = events.shutdown_handle().unwrap();
+        let reader = thread::spawn(move || events.recv().map(|_| ()));
+        thread::sleep(Duration::from_millis(100));
+        handle.shutdown();
+        let started = std::time::Instant::now();
+        while !reader.is_finished() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the blocked read must return once the connection is shut down"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reader.join().unwrap().is_err());
+    }
 
     fn fixture(
         reply: impl FnOnce(&RequestEnvelope) -> Option<RpcResponse> + Send + 'static,
