@@ -186,18 +186,58 @@ pub(crate) fn execute_unlocked(
     password_history_limit: usize,
 ) -> Deferred {
     match msg {
-        ServerCommand::Rekey(new_key) => match vault.rekey(server_info, new_key) {
-            Ok(()) => respond("Vault re-encrypted with the new key.", responses),
-            Err(error) => respond_failed(
-                if error.committed() {
-                    "Rekey committed with uncertain durability"
-                } else {
-                    "Rekey failed before replacement"
-                },
-                &error,
-                responses,
-            ),
-        },
+        msg @ (ServerCommand::Add { .. }
+        | ServerCommand::Delete(..)
+        | ServerCommand::History(..)
+        | ServerCommand::RestorePassword { .. }
+        | ServerCommand::Update(..)
+        | ServerCommand::Get { .. }
+        | ServerCommand::GetField { .. }
+        | ServerCommand::GetSecret(..)) => {
+            item_command(responses, msg, vault, server_info, password_history_limit);
+            Deferred::None
+        }
+        msg @ (ServerCommand::List(..)
+        | ServerCommand::ManagementItem { .. }
+        | ServerCommand::ManagementCopy { .. }
+        | ServerCommand::Audit(..)) => management_command(responses, msg, vault),
+        msg @ (ServerCommand::Totp(..)
+        | ServerCommand::Duo(..)
+        | ServerCommand::AuthenticatorData(..)
+        | ServerCommand::BrowserAuthenticatorData { .. }) => {
+            authenticator_command(responses, msg, vault, server_info)
+        }
+        msg @ (ServerCommand::BrowserAutofill
+        | ServerCommand::BrowserDuoItems(..)
+        | ServerCommand::BrowserLogins(..)
+        | ServerCommand::BrowserLogin { .. }
+        | ServerCommand::BrowserAutofillItem(..)) => {
+            browser_command(responses, msg, vault);
+            Deferred::None
+        }
+        msg @ (ServerCommand::Trash
+        | ServerCommand::RestoreTrash(..)
+        | ServerCommand::PurgeTrash(..)
+        | ServerCommand::Rekey(..)
+        | ServerCommand::Export { .. }
+        | ServerCommand::Backup(..)
+        | ServerCommand::Import(..)) => {
+            recovery_command(responses, msg, vault, server_info);
+            Deferred::None
+        }
+        _ => unreachable!("session lifecycle operations handled before unlocked dispatch"),
+    }
+}
+
+/// Edit, read, and copy individual items.
+fn item_command(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+    password_history_limit: usize,
+) {
+    match msg {
         ServerCommand::Add {
             entry: info,
             copy_timeout,
@@ -237,62 +277,126 @@ pub(crate) fn execute_unlocked(
             Some("Password restore failed"),
             responses,
         ),
-        ServerCommand::Trash => {
-            let trash = vault
-                .view_trash()
-                .into_iter()
-                .map(|item| crate::vault::TrashSummary {
-                    id: item.entry.entry.id,
-                    name: item.entry.entry.name.clone(),
-                    kind: item.entry.metadata.map_or(ItemKind::Login, |m| m.kind),
-                    username: item.entry.entry.username.clone(),
-                    deleted: item.deleted.to_owned(),
-                    has_totp: item.entry.has_totp,
-                })
-                .collect();
-            respond_ok(
-                ResponsePayload::Trash(crate::vault::TrashPage { trash }),
-                responses,
-            );
+        ServerCommand::Update(update) => respond_change(
+            vault.update_typed_entry_with_limit(update, server_info, password_history_limit),
+            "Item updated.",
+            "Item not found or unchanged.",
+            Some("Update failed"),
+            responses,
+        ),
+        ServerCommand::Get {
+            target,
+            copy_timeout,
+            reveal_secrets,
+        } => respond_result(
+            vault.target_detail(&target, reveal_secrets),
+            |mut item| {
+                // CLI secret-field reveal does not implicitly reveal the primary secret.
+                item.password = None;
+                if copy_timeout > 0
+                    && let Ok(secret) = vault.get_secret(&target)
+                {
+                    copy_in_background(secret.to_string(), copy_timeout);
+                }
+                ResponsePayload::Item(item)
+            },
+            responses,
+        ),
+        ServerCommand::GetField {
+            target,
+            name,
+            copy_timeout,
+        } => {
+            if copy_timeout == Some(0) {
+                respond_domain_error(
+                    &crate::vault::VaultError::InvalidInput(CLIPBOARD_DISABLED.into()),
+                    responses,
+                );
+            } else {
+                match vault.get_custom_field(&target, &name) {
+                    Ok(mut value) => match copy_timeout {
+                        Some(timeout) => respond_copy(
+                            crate::clipboard::try_copy_in_background(
+                                std::mem::take(&mut *value),
+                                timeout,
+                            ),
+                            "Custom field copied to clipboard.",
+                            "custom field",
+                            responses,
+                        ),
+                        None => respond_data(&value, responses),
+                    },
+                    Err(error) => respond_domain_error(&error, responses),
+                }
+            }
         }
-        ServerCommand::RestoreTrash(id) => respond_change(
-            vault.restore_trashed(id, server_info),
-            "Entry restored.",
-            "Trash entry not found.",
-            Some("Restore failed"),
+        ServerCommand::GetSecret(target) => match vault.get_secret(&target) {
+            Ok(secret) => respond_data(&secret, responses),
+            Err(error) => respond_domain_error(&error, responses),
+        },
+        _ => unreachable!("dispatched by execute_unlocked"),
+    }
+}
+
+/// Management listings, item details, copies, and audits.
+fn management_command(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+) -> Deferred {
+    match msg {
+        ServerCommand::List(filter) => {
+            if let Some(pending) = vault.prepare_weak_list(&filter) {
+                return Deferred::WeakList(pending, Box::new(filter));
+            }
+            respond_result(
+                vault.management_list(filter),
+                ResponsePayload::ItemPage,
+                responses,
+            )
+        }
+        ServerCommand::ManagementItem { id, reveal } => respond_result(
+            vault.management_item(id, reveal),
+            ResponsePayload::Item,
             responses,
         ),
-        ServerCommand::PurgeTrash(id) => respond_change(
-            vault.purge_trash(id, server_info),
-            "Trash purged.",
-            "Trash entry not found.",
-            Some("Purge failed"),
-            responses,
-        ),
+        ServerCommand::ManagementCopy { id, timeout } => {
+            if timeout == 0 {
+                respond_failure(CLIPBOARD_DISABLED, responses);
+            } else {
+                match vault.get_secret(&Target::Id(id)) {
+                    Ok(mut secret) => respond_copy(
+                        crate::clipboard::try_copy_in_background(
+                            std::mem::take(&mut *secret),
+                            timeout,
+                        ),
+                        "Secret copied to clipboard.",
+                        "secret",
+                        responses,
+                    ),
+                    Err(error) => respond_domain_error(&error, responses),
+                }
+            }
+        }
         // Build the local findings and one-way password hashes while the vault
         // is available, then release the live state before any network-backed
         // breach checks begin.
         ServerCommand::Audit(options) => {
             return Deferred::Audit(vault.prepare_audit(&options), options.check_breaches);
         }
-        ServerCommand::Duo(command) => match &command {
-            DuoCommand::Requests { .. } | DuoCommand::Respond { .. } => {
-                match vault.prepare_duo_poll(command, server_info) {
-                    Ok(prepared) => return Deferred::Duo(Box::new(prepared)),
-                    Err(error) => respond_domain_error(&error, responses),
-                }
-            }
-            DuoCommand::Enroll { .. } => {
-                match vault.prepare_duo_enrollment(command, true, server_info) {
-                    Ok(prepared) => return Deferred::DuoEnrollment(Box::new(prepared)),
-                    Err(error) => respond_domain_error(&error, responses),
-                }
-            }
-            _ => {
-                let command = Zeroizing::new(command);
-                respond_domain_result(vault.duo_command(&command, server_info), responses);
-            }
-        },
+        _ => unreachable!("dispatched by execute_unlocked"),
+    }
+    Deferred::None
+}
+
+/// TOTP/HOTP codes and Duo enrollment and push requests.
+fn authenticator_command(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+) -> Deferred {
+    match msg {
         ServerCommand::Totp(command) => match command {
             TotpCommand::Watch {
                 target,
@@ -373,39 +477,44 @@ pub(crate) fn execute_unlocked(
                 responses,
             ),
         },
-        ServerCommand::List(filter) => {
-            if let Some(pending) = vault.prepare_weak_list(&filter) {
-                return Deferred::WeakList(pending, Box::new(filter));
-            }
-            respond_result(
-                vault.management_list(filter),
-                ResponsePayload::ItemPage,
-                responses,
-            )
-        }
-        ServerCommand::ManagementItem { id, reveal } => respond_result(
-            vault.management_item(id, reveal),
-            ResponsePayload::Item,
-            responses,
-        ),
-        ServerCommand::ManagementCopy { id, timeout } => {
-            if timeout == 0 {
-                respond_failure(CLIPBOARD_DISABLED, responses);
-            } else {
-                match vault.get_secret(&Target::Id(id)) {
-                    Ok(mut secret) => respond_copy(
-                        crate::clipboard::try_copy_in_background(
-                            std::mem::take(&mut *secret),
-                            timeout,
-                        ),
-                        "Secret copied to clipboard.",
-                        "secret",
-                        responses,
-                    ),
+        ServerCommand::Duo(command) => match &command {
+            DuoCommand::Requests { .. } | DuoCommand::Respond { .. } => {
+                match vault.prepare_duo_poll(command, server_info) {
+                    Ok(prepared) => return Deferred::Duo(Box::new(prepared)),
                     Err(error) => respond_domain_error(&error, responses),
                 }
             }
+            DuoCommand::Enroll { .. } => {
+                match vault.prepare_duo_enrollment(command, true, server_info) {
+                    Ok(prepared) => return Deferred::DuoEnrollment(Box::new(prepared)),
+                    Err(error) => respond_domain_error(&error, responses),
+                }
+            }
+            _ => {
+                let command = Zeroizing::new(command);
+                respond_domain_result(vault.duo_command(&command, server_info), responses);
+            }
+        },
+        ServerCommand::AuthenticatorData(target) => {
+            respond_authenticator(vault.current_otp(target, server_info), responses);
         }
+        ServerCommand::BrowserAuthenticatorData { domain, id } => {
+            let result = match vault.browser_login_revision(&domain, id) {
+                Some(_) => vault.current_otp(Target::Id(id), server_info),
+                None => Err(crate::vault::VaultError::NotFound(
+                    "Login item not found for this site.".into(),
+                )),
+            };
+            respond_authenticator(result, responses);
+        }
+        _ => unreachable!("dispatched by execute_unlocked"),
+    }
+    Deferred::None
+}
+
+/// Browser-extension summaries and site-bound logins.
+fn browser_command(responses: &mut Vec<RpcResponse>, msg: ServerCommand, vault: &mut Vault) {
+    match msg {
         ServerCommand::BrowserAutofill => respond_ok(
             ResponsePayload::Summaries(vault.browser_autofill()),
             responses,
@@ -430,75 +539,62 @@ pub(crate) fn execute_unlocked(
             "Autofill item not found.",
             responses,
         ),
-        ServerCommand::Get {
-            target,
-            copy_timeout,
-            reveal_secrets,
-        } => respond_result(
-            vault.target_detail(&target, reveal_secrets),
-            |mut item| {
-                // CLI secret-field reveal does not implicitly reveal the primary secret.
-                item.password = None;
-                if copy_timeout > 0
-                    && let Ok(secret) = vault.get_secret(&target)
-                {
-                    copy_in_background(secret.to_string(), copy_timeout);
-                }
-                ResponsePayload::Item(item)
-            },
+        _ => unreachable!("dispatched by execute_unlocked"),
+    }
+}
+
+/// Trash, re-encryption, and file import, export, and backup.
+fn recovery_command(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+) {
+    match msg {
+        ServerCommand::Trash => {
+            let trash = vault
+                .view_trash()
+                .into_iter()
+                .map(|item| crate::vault::TrashSummary {
+                    id: item.entry.entry.id,
+                    name: item.entry.entry.name.clone(),
+                    kind: item.entry.metadata.map_or(ItemKind::Login, |m| m.kind),
+                    username: item.entry.entry.username.clone(),
+                    deleted: item.deleted.to_owned(),
+                    has_totp: item.entry.has_totp,
+                })
+                .collect();
+            respond_ok(
+                ResponsePayload::Trash(crate::vault::TrashPage { trash }),
+                responses,
+            );
+        }
+        ServerCommand::RestoreTrash(id) => respond_change(
+            vault.restore_trashed(id, server_info),
+            "Entry restored.",
+            "Trash entry not found.",
+            Some("Restore failed"),
             responses,
         ),
-        ServerCommand::GetField {
-            target,
-            name,
-            copy_timeout,
-        } => {
-            if copy_timeout == Some(0) {
-                respond_domain_error(
-                    &crate::vault::VaultError::InvalidInput(CLIPBOARD_DISABLED.into()),
-                    responses,
-                );
-            } else {
-                match vault.get_custom_field(&target, &name) {
-                    Ok(mut value) => match copy_timeout {
-                        Some(timeout) => respond_copy(
-                            crate::clipboard::try_copy_in_background(
-                                std::mem::take(&mut *value),
-                                timeout,
-                            ),
-                            "Custom field copied to clipboard.",
-                            "custom field",
-                            responses,
-                        ),
-                        None => respond_data(&value, responses),
-                    },
-                    Err(error) => respond_domain_error(&error, responses),
-                }
-            }
-        }
-        ServerCommand::AuthenticatorData(target) => {
-            respond_authenticator(vault.current_otp(target, server_info), responses);
-        }
-        ServerCommand::BrowserAuthenticatorData { domain, id } => {
-            let result = match vault.browser_login_revision(&domain, id) {
-                Some(_) => vault.current_otp(Target::Id(id), server_info),
-                None => Err(crate::vault::VaultError::NotFound(
-                    "Login item not found for this site.".into(),
-                )),
-            };
-            respond_authenticator(result, responses);
-        }
-        ServerCommand::GetSecret(target) => match vault.get_secret(&target) {
-            Ok(secret) => respond_data(&secret, responses),
-            Err(error) => respond_domain_error(&error, responses),
+        ServerCommand::PurgeTrash(id) => respond_change(
+            vault.purge_trash(id, server_info),
+            "Trash purged.",
+            "Trash entry not found.",
+            Some("Purge failed"),
+            responses,
+        ),
+        ServerCommand::Rekey(new_key) => match vault.rekey(server_info, new_key) {
+            Ok(()) => respond("Vault re-encrypted with the new key.", responses),
+            Err(error) => respond_failed(
+                if error.committed() {
+                    "Rekey committed with uncertain durability"
+                } else {
+                    "Rekey failed before replacement"
+                },
+                &error,
+                responses,
+            ),
         },
-        ServerCommand::Update(update) => respond_change(
-            vault.update_typed_entry_with_limit(update, server_info, password_history_limit),
-            "Item updated.",
-            "Item not found or unchanged.",
-            Some("Update failed"),
-            responses,
-        ),
         ServerCommand::Export { path, force } => match vault.export(path, force) {
             Ok(()) => respond(
                 "Export finished. WARNING: the export contains plaintext secrets.",
@@ -525,9 +621,8 @@ pub(crate) fn execute_unlocked(
             ResponsePayload::ImportReport,
             responses,
         ),
-        _ => unreachable!("session lifecycle operations handled before unlocked dispatch"),
+        _ => unreachable!("dispatched by execute_unlocked"),
     }
-    Deferred::None
 }
 
 pub(crate) fn respond_authenticator(
