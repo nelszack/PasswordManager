@@ -225,7 +225,13 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
     for row in review {
         let id = ItemId::try_from(row.id).map_err(str::to_owned)?;
         if separate.contains_key(&id) {
-            // The local item keeps this ID unchanged; the cloud item moved above.
+            // The local item keeps this ID and its contents; the cloud item
+            // moved above. Its revision still moves past both sides, so a
+            // stale edit of the cloud item (same ID, often the same revision)
+            // cannot pass the revision check and overwrite the local one.
+            let item = data.items.get_mut(&id).ok_or("Missing local item")?;
+            item.revision = next_revision(item.revision.max(remote.items[&id].revision))
+                .ok_or("Item revision exhausted")?;
             continue;
         }
         // Freeze the selected secret's effective age before independently
@@ -516,7 +522,11 @@ mod tests {
         );
         let merged = merge(&local.data, &remote, &[]).unwrap();
         assert_eq!(merged.items.len(), 2);
-        assert_eq!(merged.items[&ItemId(1)], local.data.items[&ItemId(1)]);
+        let kept = &merged.items[&ItemId(1)];
+        assert_eq!(kept.entry, local.data.items[&ItemId(1)].entry);
+        // A stale edit of the cloud item at its old revision must not match.
+        assert!(kept.revision > local.data.items[&ItemId(1)].revision);
+        assert!(kept.revision > remote.items[&ItemId(1)].revision);
         let moved = &merged.items[&ItemId(2)];
         assert_eq!(moved.entry.id, 2);
         assert_eq!(moved.entry.name, "Unrelated cloud item");
