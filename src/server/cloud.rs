@@ -263,6 +263,99 @@ async fn event_loop<F, Fut>(
     }
 }
 
+/// How often an idle, healthy loop rechecks the cloud.
+const REMOTE_RECHECK: Duration = Duration::from_secs(30);
+/// Upper bound for the backoff after repeated transient failures.
+const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+/// A stuck sync is retried in full at least this often, even when the cheap
+/// check sees no change, in case a failure was misclassified.
+const STUCK_FULL_RETRY: Duration = Duration::from_secs(30 * 60);
+
+/// Failure memory for automatic sync. A stuck failure (conflict, undecryptable
+/// or rolled-back cloud copy) cannot succeed until either copy changes, so it
+/// is not repeated while both stay the same. Other failures back off.
+#[derive(Default)]
+struct Retry {
+    failures: u32,
+    stuck: Option<(engine::Stuck, std::time::Instant)>,
+}
+
+impl Retry {
+    /// Minimum time between unprompted cloud checks.
+    fn delay(&self) -> Duration {
+        let factor = 1u32 << self.failures.min(10);
+        REMOTE_RECHECK.saturating_mul(factor).min(MAX_BACKOFF)
+    }
+    fn record(&mut self, result: &Result<String, engine::SyncError>, now: std::time::Instant) {
+        match result {
+            Ok(_) => *self = Self::default(),
+            Err(engine::SyncError {
+                stuck: Some(stuck), ..
+            }) => {
+                self.failures = 0;
+                self.stuck = Some((stuck.clone(), now));
+            }
+            Err(_) => {
+                self.failures = self.failures.saturating_add(1);
+                self.stuck = None;
+            }
+        }
+    }
+    /// The stuck state to verify cheaply instead of syncing again, if any.
+    fn stuck(&self, now: std::time::Instant) -> Option<&engine::Stuck> {
+        self.stuck
+            .as_ref()
+            .filter(|(_, since)| now.duration_since(*since) < STUCK_FULL_RETRY)
+            .map(|(stuck, _)| stuck)
+    }
+}
+
+#[cfg(unix)]
+type FileIdentity = u64;
+#[cfg(not(unix))]
+type FileIdentity = ();
+
+/// Rereads config.toml only when its metadata changes, off the async threads.
+#[derive(Default)]
+struct ConfigCache {
+    stamp: Option<(u64, Option<std::time::SystemTime>, FileIdentity)>,
+    sync: Option<crate::config::SyncConfig>,
+}
+
+impl ConfigCache {
+    async fn load(&mut self, path: PathBuf) -> Option<crate::config::SyncConfig> {
+        let known = self.stamp;
+        let (stamp, sync) = blocking(move || {
+            let stat = || {
+                std::fs::metadata(&path).ok().map(|metadata| {
+                    #[cfg(unix)]
+                    let identity = {
+                        use std::os::unix::fs::MetadataExt;
+                        metadata.ino()
+                    };
+                    #[cfg(not(unix))]
+                    let identity = ();
+                    (metadata.len(), metadata.modified().ok(), identity)
+                })
+            };
+            let stamp = stat();
+            if stamp.is_some() && stamp == known {
+                return Ok((stamp, None));
+            }
+            let sync = try_read_config(&path).ok().map(|c| c.sync);
+            // Reading a missing file writes the defaults; record that file.
+            Ok((stamp.or_else(stat), Some(sync)))
+        })
+        .await
+        .ok()?;
+        if let Some(sync) = sync {
+            self.sync = sync;
+        }
+        self.stamp = stamp;
+        self.sync.clone()
+    }
+}
+
 /// Wait for a burst of local edits to finish before uploading.
 const LOCAL_CHANGE_SETTLE: Duration = Duration::from_millis(250);
 
@@ -300,7 +393,9 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
             },
         )));
         let mut last_probe = None;
-        let mut last_remote = std::time::Instant::now() - Duration::from_secs(60);
+        let mut last_remote = std::time::Instant::now();
+        let mut retry = Retry::default();
+        let mut config_cache = ConfigCache::default();
         // Edits, unlocks, and switches made through this server start a check
         // at once; the timer still catches changes made by other processes.
         let (mut sessions, mut revisions) = worker.changes();
@@ -318,20 +413,17 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
                 }
                 _ = changed_from(&mut sessions, &mut seen_session) => false,
             };
-            let Ok(config) = try_read_config(&config_dir().join("config.toml")) else {
+            let Some(config) = config_cache.load(config_dir().join("config.toml")).await else {
                 events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
             };
-            if !config.sync.automatic
-                || config.sync.server_url.is_empty()
-                || worker.session_id().is_none()
-            {
+            if !config.automatic || config.server_url.is_empty() || worker.session_id().is_none() {
                 events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
             }
-            let Ok(current) = probe(&worker, config.sync.server_url).await else {
+            let Ok(current) = probe(&worker, config.server_url).await else {
                 events_enabled.send_if_modified(|current| current.take().is_some());
                 last_probe = None;
                 continue;
@@ -355,10 +447,11 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
             // A full snapshot is needed only for a change, notification, or
             // bounded remote recheck. The recheck also covers external writes
             // whose timestamps/size happen to match the previous file.
-            if last_probe.as_ref() == Some(&current)
-                && !notified
-                && last_remote.elapsed() < Duration::from_secs(30)
-            {
+            let local_changed = last_probe.as_ref() != Some(&current);
+            if local_changed {
+                // New local state deserves a prompt attempt and a fresh backoff.
+                retry.failures = 0;
+            } else if !notified && last_remote.elapsed() < retry.delay() {
                 continue;
             }
             let _guard = SYNC.lock().await;
@@ -366,10 +459,30 @@ pub(super) fn start(worker: VaultWorker, stopping: Arc<AtomicBool>) -> tokio::ta
                 worker: &worker,
                 stopping: stopping.clone(),
             };
-            let result = engine::sync(&host, None, Bind::Existing).await;
+            let now = std::time::Instant::now();
+            if !local_changed && let Some(stuck) = retry.stuck(now) {
+                // Repeating the same download would fail the same way.
+                let unchanged = engine::still_stuck(&host, stuck).await;
+                last_remote = now;
+                match unchanged {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => {
+                        retry.failures = retry.failures.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+            let result = engine::sync_checked(&host, None, Bind::Existing).await;
             worker
-                .set_cloud_warning(result.as_ref().err().map(|e| format!("Cloud sync: {e}")))
+                .set_cloud_warning(
+                    result
+                        .as_ref()
+                        .err()
+                        .map(|e| format!("Cloud sync: {}", e.message)),
+                )
                 .await;
+            retry.record(&result, std::time::Instant::now());
             last_probe = Some(current);
             last_remote = std::time::Instant::now();
         }
@@ -446,6 +559,69 @@ mod tests {
 #[cfg(test)]
 mod event_tests {
     use super::*;
+
+    #[test]
+    fn automatic_sync_backs_off_and_waits_for_a_change_when_stuck() {
+        let start = std::time::Instant::now();
+        let mut retry = Retry::default();
+        assert_eq!(retry.delay(), REMOTE_RECHECK);
+        let transient = Err(engine::SyncError::from("Sync request timed out"));
+        let mut previous = retry.delay();
+        for _ in 0..12 {
+            retry.record(&transient, start);
+            assert!(retry.delay() >= previous && retry.delay() <= MAX_BACKOFF);
+            previous = retry.delay();
+        }
+        assert_eq!(retry.delay(), MAX_BACKOFF);
+        assert!(retry.stuck(start).is_none());
+        let stuck = engine::Stuck {
+            remote: Some("a".repeat(32)),
+            local: "b".repeat(64),
+        };
+        retry.record(
+            &Err(engine::SyncError {
+                message: "conflict".into(),
+                stuck: Some(stuck.clone()),
+            }),
+            start,
+        );
+        assert_eq!(retry.delay(), REMOTE_RECHECK);
+        assert_eq!(retry.stuck(start), Some(&stuck));
+        // A full retry is still made occasionally in case of misclassification.
+        assert!(retry.stuck(start + STUCK_FULL_RETRY).is_none());
+        retry.record(&transient, start);
+        assert!(retry.stuck(start).is_none());
+        retry.record(&Ok("Vault is up to date".into()), start);
+        assert_eq!(retry.delay(), REMOTE_RECHECK);
+        assert!(retry.stuck.is_none());
+    }
+
+    #[tokio::test]
+    async fn configuration_is_reread_only_after_the_file_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut cache = ConfigCache::default();
+        let first = cache
+            .load(path.clone())
+            .await
+            .expect("default configuration");
+        assert!(cache.stamp.is_some());
+        // Same metadata: the cached value is served without parsing.
+        cache.sync = Some(crate::config::SyncConfig {
+            server_url: "https://cached.example".into(),
+            automatic: false,
+        });
+        assert_eq!(
+            cache.load(path.clone()).await.unwrap().server_url,
+            "https://cached.example"
+        );
+        // A replaced file is read again.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let temporary = path.with_extension("replacement");
+        std::fs::write(&temporary, text + "\n").unwrap();
+        std::fs::rename(&temporary, &path).unwrap();
+        assert_eq!(cache.load(path).await.unwrap(), first);
+    }
 
     #[tokio::test]
     async fn local_change_wakes_only_for_a_different_value() {

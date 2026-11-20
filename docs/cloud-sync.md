@@ -39,7 +39,11 @@ using Keystore; the desktop uses a private `sync-token` file.
 Unlock the vault and choose **Enable for open vault**, or run `pm sync enable`.
 On the desktop service, saved changes synchronize automatically while that vault
 is unlocked, even after the desktop window closes. Repeat for each vault you want
-synchronized.
+synchronized. When automatic sync stops on a conflict, or on a cloud copy this
+session cannot or should not apply, it shows a warning and does not download
+the vault again until the local vault or the cloud version changes. Network and
+server errors are retried with increasing delays, up to 15 minutes apart; a
+local edit or a change notification retries at once.
 
 On Android, unlock and open **Tools → Sync controls → Enable sync for this
 vault**. The app checks sync on opening the vault and after supported mutations;
