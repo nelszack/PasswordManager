@@ -170,7 +170,7 @@ class VaultAutofillService : AutofillService() {
         signal: CancellationSignal,
         callback: FillCallback,
     ) {
-        Vault.worker.execute {
+        Vault.services.execute {
             if (signal.isCanceled) return@execute
             val response = runCatching {
                 val structure =
@@ -265,7 +265,7 @@ class VaultAutofillService : AutofillService() {
     }
 
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
-        Vault.worker.execute {
+        Vault.services.execute {
             runCatching {
                 val structure =
                     request.fillContexts.lastOrNull()?.structure ?: error("Missing login form")

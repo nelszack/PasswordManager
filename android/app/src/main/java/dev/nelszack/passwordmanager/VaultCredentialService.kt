@@ -39,7 +39,7 @@ class VaultCredentialService : CredentialProviderService() {
         signal: CancellationSignal,
         callback: OutcomeReceiver<BeginGetCredentialResponse, GetCredentialException>,
     ) {
-        Vault.worker.execute {
+        Vault.services.execute {
             if (signal.isCanceled) return@execute
             runCatching {
                     if (!Vault.json("status").getBoolean("unlocked"))

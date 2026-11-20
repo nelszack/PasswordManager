@@ -27,10 +27,10 @@ abstract class VaultActivity : SecureActivity() {
 
     protected open fun contentScroller(): ScrollView = ScrollView(this)
 
-    protected val settings
+    internal val settings
         get() = getSharedPreferences("settings", MODE_PRIVATE)
 
-    protected var selectedVault: String
+    internal var selectedVault: String
         get() = settings.getString("vault", "").orEmpty()
         set(value) {
             settings.edit().putString("vault", value).apply()
@@ -47,7 +47,7 @@ abstract class VaultActivity : SecureActivity() {
         setContentView(contentScroller().apply { addView(layout) })
     }
 
-    protected fun page(title: String) {
+    internal fun page(title: String) {
         screenRevision++
         layout.removeAllViews()
         if (modernUi) {
@@ -57,7 +57,7 @@ abstract class VaultActivity : SecureActivity() {
         } else label(title, 24f)
     }
 
-    protected fun label(value: String, size: Float = 16f): TextView {
+    internal fun label(value: String, size: Float = 16f): TextView {
         if (modernUi)
             return MobileUi.text(this, value, size, muted = size < 18f, bold = size >= 18f).apply {
                 layoutParams = MobileUi.margins(this@VaultActivity, 12)
@@ -71,7 +71,7 @@ abstract class VaultActivity : SecureActivity() {
         }
     }
 
-    protected fun button(title: String, action: () -> Unit): Button {
+    internal fun button(title: String, action: () -> Unit): Button {
         if (modernUi)
             return MobileUi.button(
                     this,
@@ -91,7 +91,7 @@ abstract class VaultActivity : SecureActivity() {
         }
     }
 
-    protected fun edit(hint: String, value: String = "", secret: Boolean = false): EditText {
+    internal fun edit(hint: String, value: String = "", secret: Boolean = false): EditText {
         if (modernUi) return MobileUi.field(this, layout, hint, value, secret)
         return EditText(this).apply {
             this.hint = hint
@@ -113,12 +113,12 @@ abstract class VaultActivity : SecureActivity() {
         if (DeviceKeys.enabled(this, vault)) "Biometric unlock: Enabled on this device"
         else "Biometric unlock: Disabled on this device"
 
-    protected fun unlockOriginal(done: () -> Unit) {
+    internal fun unlockOriginal(done: () -> Unit) {
         originalUnlockOnly = true
         unlock(done, fresh = true)
     }
 
-    protected fun unlock(done: () -> Unit, fresh: Boolean = false) {
+    internal fun unlock(done: () -> Unit, fresh: Boolean = false) {
         val complete = {
             unlockContinuation = null
             originalUnlockOnly = false
@@ -243,7 +243,7 @@ abstract class VaultActivity : SecureActivity() {
         }
     }
 
-    protected fun pickFile(maxBytes: Int = 1024 * 1024, done: (ByteArray) -> Unit) {
+    internal fun pickFile(maxBytes: Int = 1024 * 1024, done: (ByteArray) -> Unit) {
         require(maxBytes in 1..(16 * 1024 * 1024))
         pickedLimit = maxBytes
         picked = done
@@ -284,13 +284,15 @@ abstract class VaultActivity : SecureActivity() {
             "token" to DeviceKeys.token(this),
         )
 
+    /** Syncs after an in-app change and describes the outcome. Run on a task thread. */
     protected fun syncAfterChange(): String {
         if (settings.getString("server", "").isNullOrBlank()) return "Saved locally"
-        if (!Vault.json("sync_status").getBoolean("enabled")) return "Saved locally (sync disabled)"
         return runCatching {
-            Vault.request("sync", *syncArgs())
-            "Saved and synchronized"
-        }
+                // Rust reports a disabled vault itself, so no separate status read is needed.
+                val result = Vault.json("sync", *syncArgs(), "if_enabled" to true)
+                if (result.optBoolean("disabled")) "Saved locally (sync disabled)"
+                else "Saved and synchronized"
+            }
             .getOrElse { "Saved locally. Sync pending: ${it.message}" }
     }
 
