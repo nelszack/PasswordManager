@@ -6,23 +6,27 @@ mod android {
         errors::ThrowRuntimeExAndDefault,
         objects::{JClass, JObject, JString},
     };
-    use password_manager::mobile::MobileVault;
+    use password_manager::mobile::{Cancellation, MobileVault};
     use std::{
         path::PathBuf,
         sync::{Mutex, OnceLock},
     };
     use zeroize::Zeroizing;
 
-    static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static CANCELLED: Cancellation = Cancellation::new();
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_dev_nelszack_passwordmanager_NativeBridge_invalidate(
         _: EnvUnowned<'_>,
         _: JClass<'_>,
     ) {
-        CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        CANCELLED.signal();
     }
 
-    static VAULT: OnceLock<Mutex<MobileVault>> = OnceLock::new();
+    /// Calls may arrive from several app threads. The vault serializes its
+    /// own state and releases it during network transfers, so a sync never
+    /// blocks autofill.
+    static VAULT: OnceLock<MobileVault> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_dev_nelszack_passwordmanager_NativeBridge_call<'local>(
@@ -41,16 +45,17 @@ mod android {
                 let request = Zeroizing::new(request.try_to_string(env)?);
                 let result = (|| -> Result<serde_json::Value, String> {
                     if VAULT.get().is_none() {
-                        let mut vault = MobileVault::new(PathBuf::from(directory))?;
-                        vault.set_cancellation(&CANCELLED);
-                        let _ = VAULT.set(Mutex::new(vault));
+                        let _init = INIT.lock().map_err(|_| "Mobile initialization failed")?;
+                        if VAULT.get().is_none() {
+                            let mut vault = MobileVault::new(PathBuf::from(directory))?;
+                            vault.set_cancellation(&CANCELLED);
+                            let _ = VAULT.set(vault);
+                        }
                     }
-                    let mut vault = VAULT
+                    VAULT
                         .get()
                         .ok_or("Mobile initialization failed")?
-                        .lock()
-                        .map_err(|_| "Mobile session failed; restart the app")?;
-                    vault.call(&request)
+                        .call(&request)
                 })();
                 let mut envelope = match result {
                     Ok(data) => serde_json::json!({"ok":true,"data":data}),

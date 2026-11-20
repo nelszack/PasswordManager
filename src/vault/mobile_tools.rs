@@ -8,6 +8,9 @@ const MAX_TRANSFER_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_SYMBOLS: &str = "!@#$%^&*-_=+";
 /// Encrypted backups start with a 9-byte container header.
 const BACKUP_HEADER_BYTES: usize = 9;
+/// Recovery copies saved by a credential change; the sync engine treats this
+/// prefix as a copy that never syncs implicitly.
+const REKEY_RECOVERY_PREFIX: &str = "rekey-recovery-";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -179,7 +182,7 @@ fn transfer(bytes: &[u8], what: &str) -> Result<Value, String> {
     Ok(json!({ "data": passkey::encode(bytes) }))
 }
 
-impl MobileVault {
+impl MobileState {
     pub(super) fn restore_backup(
         &mut self,
         data: &str,
@@ -268,18 +271,23 @@ impl MobileVault {
     }
 
     /// Re-encrypts with new credentials after saving a recovery copy, then locks.
+    /// The copy is still encrypted with the old credentials; the app offers to
+    /// delete it once the new ones have unlocked the vault.
     pub(super) fn rekey(&mut self, candidate: VaultCredentials) -> Result<Value, String> {
         if !self.primary_unlock {
             return Err(
                 "Unlock with your original password or key file before changing credentials".into(),
             );
         }
-        let path = self.vault()?.sync_path()?;
-        let original = fs::read(&path).map_err(|_| "Could not read recovery snapshot")?;
+        let vault = self.vault()?;
+        let path = vault.sync_path()?;
         let recovery = self.directory.join(format!(
-            "rekey-recovery-{}.enc",
-            hex::encode(rand::random::<[u8; 16]>())
+            "{}{}-{}.enc",
+            REKEY_RECOVERY_PREFIX,
+            hex::encode(vault.vault_id()),
+            hex::encode(rand::random::<[u8; 8]>())
         ));
+        let original = fs::read(&path).map_err(|_| "Could not read recovery snapshot")?;
         crate::cloud::write_private(&recovery, &original, false)?;
         let (vault, credentials) = self.unlocked()?;
         let result = vault.rekey_credentials(credentials, candidate);
@@ -288,13 +296,59 @@ impl MobileVault {
         Ok(json!({ "locked": true }))
     }
 
+    /// This vault's recovery copies from earlier credential changes. Copies
+    /// from builds that did not record the vault identity are not attributed.
+    fn rekey_recovery_paths(&self) -> Result<Vec<PathBuf>, String> {
+        let prefix = format!(
+            "{REKEY_RECOVERY_PREFIX}{}-",
+            hex::encode(self.vault()?.vault_id())
+        );
+        Ok(self
+            .vault_names()?
+            .into_iter()
+            .filter(|name| name.starts_with(&prefix))
+            .map(|name| self.directory.join(name))
+            .collect())
+    }
+
+    pub(super) fn rekey_recovery(&self) -> Result<Value, String> {
+        Ok(json!({ "copies": self.rekey_recovery_paths()?.len() }))
+    }
+
+    /// Deletes recovery copies still encrypted with old credentials. Requires
+    /// the current credentials, so a biometric session cannot remove them.
+    pub(super) fn delete_rekey_recovery(&mut self, confirmed: bool) -> Result<Value, String> {
+        if !self.primary_unlock || !confirmed {
+            return Err("Original credential and confirmation required".into());
+        }
+        let mut deleted = 0;
+        for path in self.rekey_recovery_paths()? {
+            fs::remove_file(&path).map_err(|_| "Could not remove recovery copy")?;
+            remove_sync_checkpoint(&path)?;
+            deleted += 1;
+        }
+        Ok(json!({ "deleted": deleted }))
+    }
+
+    /// Removes the local vault and its sync checkpoint (server and vault ID).
     pub(super) fn delete_vault(&mut self, confirmed: bool) -> Result<Value, String> {
         if !self.primary_unlock || !confirmed {
             return Err("Original credential and confirmation required".into());
         }
-        fs::remove_file(self.vault()?.sync_path()?).map_err(|_| "Could not remove vault")?;
+        let path = self.vault()?.sync_path()?;
+        fs::remove_file(&path).map_err(|_| "Could not remove vault")?;
         self.lock();
+        remove_sync_checkpoint(&path)?;
         Ok(json!({ "deleted": true }))
+    }
+}
+
+/// Deletes the `<name>.sync.json` checkpoint beside a vault file, if any.
+fn remove_sync_checkpoint(vault: &Path) -> Result<(), String> {
+    match fs::remove_file(vault.with_extension("sync.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Vault removed, but its sync settings could not be removed".into()),
     }
 }
 
@@ -359,28 +413,123 @@ mod tests {
     }
     #[test]
     fn cancellation_locks_the_owner_and_interrupts_pending_network_work() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static CANCEL: AtomicBool = AtomicBool::new(false);
+        static CANCEL: Cancellation = Cancellation::new();
         let (_directory, mut api, _) = fixture();
         api.set_cancellation(&CANCEL);
-        CANCEL.store(true, Ordering::SeqCst);
+        CANCEL.signal();
         assert!(api.call(r#"{"op":"status"}"#).is_err());
-        assert!(api.vault.is_none());
+        assert!(api.state().vault.is_none());
         request(&mut api, json!({"op":"lock"}));
-        assert!(!CANCEL.load(Ordering::SeqCst));
-        let flag = AtomicBool::new(false);
+        assert!(!Ticket::new(Some(&CANCEL)).cancelled());
+        // A waiter is woken by the signal itself, not by polling, and a
+        // request that started before a signal stays cancelled after `lock`.
+        let flag = Cancellation::new();
+        let ticket = Ticket::new(Some(&flag));
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(10));
-                flag.store(true, Ordering::SeqCst);
+                flag.signal();
+                flag.clear();
             });
+            let started = Instant::now();
             assert!(
                 mobile_runtime()
                     .unwrap()
-                    .block_on(interruptible(Some(&flag), std::future::pending::<()>()))
+                    .block_on(interruptible(&ticket, std::future::pending::<()>()))
                     .is_err()
             );
+            assert!(started.elapsed() < Duration::from_secs(5));
         });
+        assert!(ticket.cancelled());
+        assert!(!Ticket::new(Some(&flag)).cancelled());
+    }
+    #[test]
+    fn deleting_a_vault_removes_its_sync_settings_and_rekey_copies_can_be_removed() {
+        let (directory, mut api, name) = fixture();
+        let vault = directory.path().join(&name);
+        let checkpoint = vault.with_extension("sync.json");
+        // An unrelated vault's checkpoint survives.
+        let other = directory.path().join("other.sync.json");
+        fs::write(&other, b"{}").unwrap();
+        request(
+            &mut api,
+            json!({"op":"rekey","password":"Replacement-Mobile-Tools-9274!"}),
+        );
+        // A recovery copy from an older build cannot be attributed and is kept.
+        let legacy = directory.path().join("rekey-recovery-0123.enc");
+        fs::write(&legacy, b"legacy").unwrap();
+        assert!(
+            api.call(r#"{"op":"rekey_recovery"}"#).is_err(),
+            "rekey locks the vault"
+        );
+        request(
+            &mut api,
+            json!({"op":"unlock","vault":name,"password":"Replacement-Mobile-Tools-9274!"}),
+        );
+        assert_eq!(
+            request(&mut api, json!({"op":"rekey_recovery"}))["copies"],
+            1
+        );
+        assert!(
+            api.call(r#"{"op":"delete_rekey_recovery"}"#).is_err(),
+            "deletion must be confirmed"
+        );
+        let copy = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(REKEY_RECOVERY_PREFIX)
+                    && *path != legacy
+            })
+            .unwrap();
+        // The copy still opens with the old password until it is deleted.
+        let mut old = VaultCredentials::from(PasswordType::Password(PASSWORD.into()));
+        assert!(decrypt_file(&mut old, &fs::read(&copy).unwrap()).is_some());
+        assert_eq!(
+            request(
+                &mut api,
+                json!({"op":"delete_rekey_recovery","confirmed":true})
+            )["deleted"],
+            1
+        );
+        assert!(!copy.exists() && legacy.exists());
+        assert_eq!(
+            request(&mut api, json!({"op":"rekey_recovery"}))["copies"],
+            0
+        );
+        let binding = json!({
+            "server_url": "https://sync.example.com",
+            "vault_id": name.trim_end_matches(".enc"),
+            "enabled": false,
+        });
+        fs::write(&checkpoint, binding.to_string()).unwrap();
+        // A background sync of a disabled vault reports it without a network request.
+        let skipped = request(
+            &mut api,
+            json!({"op":"sync","server":"https://127.0.0.1:9","token":"1".repeat(64),"if_enabled":true}),
+        );
+        assert_eq!(skipped["disabled"], true);
+        // An explicit sync still refuses instead of reporting success.
+        assert!(
+            api.call(
+                &json!({"op":"sync","server":"https://127.0.0.1:9","token":"1".repeat(64)})
+                    .to_string()
+            )
+            .is_err()
+        );
+        assert!(
+            !request(&mut api, json!({"op":"sync_status"}))["enabled"]
+                .as_bool()
+                .unwrap()
+        );
+        request(&mut api, json!({"op":"delete_vault","confirmed":true}));
+        assert!(!vault.exists() && !checkpoint.exists() && other.exists());
+        // Without a checkpoint, deletion still succeeds.
+        let (_directory, mut api, _) = fixture();
+        request(&mut api, json!({"op":"delete_vault","confirmed":true}));
     }
     #[test]
     fn typed_edit_history_trash_and_desktop_roundtrip_preserve_unrelated_data() {
