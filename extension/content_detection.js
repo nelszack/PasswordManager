@@ -194,8 +194,40 @@
         return hasUsernameHint(input) || isUsernameBeforePassword(input, formUsernames);
     }
 
+    // Buttons that only reveal or mask a password are not login steps.
+    const VISIBILITY_TOGGLE_RE = /show|hide|reveal|unmask|toggle|visib|(?<![a-z])eye|eye(?![a-z])/i;
+    function isVisibilityToggle(control) {
+        if (!control?.getAttribute) return false;
+        if (control.hasAttribute?.("aria-pressed")) return true;
+        const text = String(control.textContent || "").trim();
+        return [
+            control.id,
+            control.getAttribute("class"),
+            control.getAttribute("name"),
+            control.getAttribute("title"),
+            control.getAttribute("aria-label"),
+            control.getAttribute("data-testid"),
+            control instanceof HTMLInputElement ? control.value : "",
+            text.length <= 40 ? text : "",
+        ].some(value => value && VISIBILITY_TOGGLE_RE.test(String(value)));
+    }
+
+    // Hosts of the extension's in-page controls. A registry rather than a class
+    // name or tag, so pages cannot make their own elements look like ours.
+    const extensionUi = new WeakSet();
+    function markExtensionUi(element) {
+        extensionUi.add(element);
+        return element;
+    }
+    function isExtensionUi(node) {
+        return Boolean(node) && extensionUi.has(node);
+    }
+
     return {
         USERNAME_INPUT_TYPES,
+        isExtensionUi,
+        isVisibilityToggle,
+        markExtensionUi,
         autocompleteTokens,
         credentialFields,
         credentialScope,

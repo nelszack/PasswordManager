@@ -120,3 +120,92 @@ test("navigation reserves the attempt and disposal cannot be undone by a late sk
     assert.equal(attempt.idle, false);
     assert.equal(attempt.reserve(), false);
 });
+
+function advanceClock() {
+    const clock = { now: 0, timers: [] };
+    clock.options = {
+        now: () => clock.now,
+        setTimeout: (callback, delay) => {
+            const timer = { callback, at: clock.now + delay };
+            clock.timers.push(timer);
+            return timer;
+        },
+        clearTimeout: timer => {
+            clock.timers = clock.timers.filter(candidate => candidate !== timer);
+        },
+    };
+    clock.run = until => {
+        while (clock.timers.length) {
+            clock.timers.sort((a, b) => a.at - b.at);
+            if (clock.timers[0].at > until) break;
+            const timer = clock.timers.shift();
+            clock.now = timer.at;
+            timer.callback();
+        }
+        clock.now = Math.max(clock.now, until);
+    };
+    return clock;
+}
+
+test("non-submit advances prompt only after the page leaves the password step", () => {
+    for (const [label, leavesAt, expected] of [
+        ["removed after 120 ms", 120, 1],
+        ["still on the password step after 500 ms", Infinity, 0],
+        ["left too late", 600, 0],
+    ]) {
+        const clock = advanceClock();
+        const prompts = [];
+        const remembered = [];
+        const watch = scheduleCredentialAdvance(
+            { username: "alice", password: "secret" },
+            {
+                ...clock.options,
+                remember: username => remembered.push(username),
+                shouldIgnore: () => false,
+                advanced: () => clock.now >= leavesAt,
+                prompt: credentials => prompts.push(credentials),
+            }
+        );
+        assert.deepEqual(remembered, ["alice"], label);
+        assert.equal(prompts.length, 0, `${label}: nothing opens before confirmation`);
+        assert.equal(watch.pending, true);
+        clock.run(1000);
+        assert.equal(prompts.length, expected, label);
+        assert.equal(watch.pending, false);
+        assert.equal(clock.timers.length, 0, `${label}: polling stops`);
+    }
+});
+
+test("page hide confirms a pending advance and cancellation drops it", () => {
+    for (const action of ["confirm", "cancel"]) {
+        const clock = advanceClock();
+        const prompts = [];
+        const watch = scheduleCredentialAdvance(
+            { username: "", password: "secret" },
+            {
+                ...clock.options,
+                remember: () => assert.fail("no username to remember"),
+                shouldIgnore: () => false,
+                advanced: () => false,
+                prompt: credentials => prompts.push(credentials),
+            }
+        );
+        assert.deepEqual(watch.credentials, { username: "", password: "secret" });
+        watch[action]();
+        watch.confirm();
+        clock.run(1000);
+        assert.equal(prompts.length, action === "confirm" ? 1 : 0, action);
+    }
+    const clock = advanceClock();
+    const ignored = scheduleCredentialAdvance(
+        { username: "", password: "secret" },
+        { ...clock.options, remember() {}, shouldIgnore: () => true, advanced: () => true, prompt: () => assert.fail() }
+    );
+    clock.run(1000);
+    assert.equal(ignored.pending, false);
+    assert.equal(
+        scheduleCredentialAdvance({ username: "", password: "" }, { remember() {}, advanced: () => true }),
+        null,
+        "a click without a password has nothing to confirm"
+    );
+});

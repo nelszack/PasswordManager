@@ -1,8 +1,10 @@
 "use strict";
 const {
-    isUsableInput,
     credentialFields,
     credentialScope,
+    isElementVisible,
+    isExtensionUi = () => false,
+    markExtensionUi = element => element,
     withVisibilityCache = action => action(),
 } = require("./content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
@@ -10,13 +12,14 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     const { storeUsernameForLater } = credentials;
     const { fillTypedItem, typedFillContext } = autofill;
     const lifecycle = new AbortController();
-    let layoutObserver;
     // Reposition secure picker and generator buttons as the page layout changes.
     const positionedControls = new Set();
-    let layoutObserverStarted = false;
+    let listenersStarted = false;
     let disposed = false;
-    let schedulePosition = () => {};
     let repositionScheduled = false;
+    // Scrolling moves controls with their fields; only layout changes can move a
+    // site's own icon over a field, so only they repeat the overlay hit test.
+    let layoutPending = false;
     let controlResizeObserver = null;
 
     function registerPositionedControl(input, button, position, onRemove = () => {}) {
@@ -34,63 +37,48 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             },
         };
         positionedControls.add(record);
-        startLayoutObserver();
+        startListeners();
         controlResizeObserver?.observe(input);
         schedulePosition();
         return record.remove;
     }
 
-    function startLayoutObserver() {
-        if (layoutObserverStarted) return;
-        layoutObserverStarted = true;
-
-        const reposition = () => {
-            if (disposed || repositionScheduled) return;
-            repositionScheduled = true;
-            requestAnimationFrame(() => {
-                repositionScheduled = false;
-                if (disposed) return;
-                const writes = [];
-                withVisibilityCache(() => {
-                    for (const control of positionedControls) {
-                        if (!control.input.isConnected) {
-                            control.remove();
-                            continue;
-                        }
-                        if (control.position.measure) writes.push(control.position.measure());
-                        else writes.push(control.position);
+    function reposition(layout) {
+        if (disposed || !positionedControls.size) return;
+        layoutPending ||= layout;
+        if (repositionScheduled) return;
+        repositionScheduled = true;
+        requestAnimationFrame(() => {
+            repositionScheduled = false;
+            const full = layoutPending;
+            layoutPending = false;
+            if (disposed) return;
+            const writes = [];
+            withVisibilityCache(() => {
+                for (const control of positionedControls) {
+                    if (!control.input.isConnected) {
+                        control.remove();
+                        continue;
                     }
-                });
-                for (const write of writes) write();
+                    if (control.position.measure) writes.push(control.position.measure(full));
+                    else writes.push(control.position);
+                }
             });
-        };
+            for (const write of writes) write();
+        });
+    }
+    const schedulePosition = () => reposition(true);
 
-        schedulePosition = reposition;
-        window.addEventListener("load", reposition, { signal: lifecycle.signal });
-        window.addEventListener("scroll", reposition, { capture: true, signal: lifecycle.signal });
-        window.addEventListener("resize", reposition, { signal: lifecycle.signal });
-
-        controlResizeObserver = new ResizeObserver(reposition);
+    // Page mutations reach controls through the content observer, which watches
+    // the document and every registered open shadow root.
+    function startListeners() {
+        if (listenersStarted) return;
+        listenersStarted = true;
+        window.addEventListener("load", schedulePosition, { signal: lifecycle.signal });
+        window.addEventListener("scroll", () => reposition(false), { capture: true, signal: lifecycle.signal });
+        window.addEventListener("resize", schedulePosition, { signal: lifecycle.signal });
+        controlResizeObserver = new ResizeObserver(schedulePosition);
         for (const control of positionedControls) controlResizeObserver.observe(control.input);
-
-        // Ancestor visibility/layout changes can move or hide controls without
-        // changing the inputs themselves. Ignore our own style writes to avoid
-        // scheduling another layout frame after every reposition.
-        layoutObserver = new MutationObserver(mutations => {
-            if (
-                mutations.some(
-                    mutation =>
-                        mutation.type !== "attributes" || !mutation.target.classList?.contains("my-extension-ui")
-                )
-            )
-                reposition();
-        });
-        layoutObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open"],
-        });
     }
 
     const securePickerControls = new WeakMap();
@@ -107,12 +95,12 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         }
         existing?.remove();
 
-        const button = controlButton(icon, title);
+        const { host, button } = controlButton(icon, title);
         // Keep keyboard traversal beside the field the control belongs to.
-        if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
-        const positionButton = positionedButton(input, button, CONTROL_OFFSET);
+        if (!input.insertAdjacentElement?.("afterend", host)) document.body.appendChild(host);
+        const positionButton = positionedButton(input, host, CONTROL_OFFSET);
         const control = { kind, remove: null };
-        control.remove = registerPositionedControl(input, button, positionButton, () => {
+        control.remove = registerPositionedControl(input, host, positionButton, () => {
             if (securePickerControls.get(input) === control) {
                 securePickerControls.delete(input);
             }
@@ -186,7 +174,6 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     function dispose() {
         disposed = true;
         lifecycle.abort();
-        layoutObserver?.disconnect();
         controlResizeObserver?.disconnect();
         for (const control of positionedControls) control.remove();
     }
@@ -197,7 +184,8 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         createSecureTypedButton,
         removeSecurePickerButton,
         registerPositionedControl,
-        schedulePosition: () => schedulePosition(),
+        schedulePosition,
+        layoutChanged: schedulePosition,
         accountUsername,
         dispose,
     };
@@ -208,13 +196,22 @@ const CONTROL_OFFSET = 30;
 // Feather-style outline icons (24×24, stroke = currentColor) so controls look the
 // same on every OS instead of depending on emoji fonts.
 const ICONS = {
-    key: ["M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"],
+    key: [
+        "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4",
+    ],
     clock: ["M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z", "M12 6v6l4 2"],
     card: ["M3 4h18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M1 10h22"],
     person: ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"],
-    sparkle: ["M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z", "M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"],
+    sparkle: [
+        "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z",
+        "M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z",
+    ],
     check: ["M20 6L9 17l-5-5"],
-    warning: ["M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z", "M12 9v4", "M12 17h.01"],
+    warning: [
+        "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+        "M12 9v4",
+        "M12 17h.01",
+    ],
 };
 function setIcon(button, name) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -239,64 +236,86 @@ function setIcon(button, name) {
     button.replaceChildren(svg);
     button.dataset.icon = name;
 }
+// In-page UI lives in a closed shadow root under an autonomous custom element:
+// it stays out of form.elements and page selectors, and page styles cannot
+// restyle the button. Browser tests set the hook below from a test-only content
+// script so Playwright can reach the controls; pages cannot set content-script
+// globals.
+const UI_TAG = "pm-field-control";
+// Important :host rules beat page !important rules on the host. They must not
+// declare display/left/top/pointer-events: those are written inline (also
+// !important), and a shadow-context !important rule would override them.
+const HOST_STYLE =
+    ":host{position:fixed!important;right:auto!important;bottom:auto!important;width:auto!important;height:auto!important;margin:0!important;padding:0!important;border:0!important;float:none!important;transform:none!important;filter:none!important;clip-path:none!important;opacity:1!important;visibility:visible!important;z-index:2147483647!important;}";
+const BUTTON_STYLE = `button{all:initial;box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:${CONTROL_SIZE}px;height:${CONTROL_SIZE}px;padding:0;margin:0;border:1px solid #c7d3f5;border-radius:6px;background:#eef2fd;color:#2850be;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12);}button:hover{background:#dbe4fb;}button:focus-visible{outline:2px solid #2850be;outline-offset:2px;}svg{display:block;pointer-events:none;}`;
+const TOAST_STYLE =
+    "div{max-width:320px;padding:8px 12px;border-radius:8px;background:#1f2a44;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);}";
+function setImportantStyles(element, values) {
+    for (const [key, value] of Object.entries(values)) {
+        if (element.style.getPropertyValue(key) !== value || element.style.getPropertyPriority(key) !== "important")
+            element.style.setProperty(key, value, "important");
+    }
+}
+function uiHost(css) {
+    const host = document.createElement(UI_TAG);
+    markExtensionUi(host);
+    const root = host.attachShadow({ mode: globalThis.__pmTestOpenShadowRoots === true ? "open" : "closed" });
+    const style = document.createElement("style");
+    style.textContent = HOST_STYLE + css;
+    root.appendChild(style);
+    setImportantStyles(host, { display: "none" });
+    return { host, root };
+}
 // A small branded chip that reads clearly on light and dark fields.
 function controlButton(icon, title) {
+    const { host, root } = uiHost(BUTTON_STYLE);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "my-extension-ui";
     button.title = title;
     button.setAttribute("aria-label", title);
-    Object.assign(button.style, {
-        position: "fixed",
-        display: "none",
-        alignItems: "center",
-        justifyContent: "center",
-        boxSizing: "border-box",
-        width: CONTROL_SIZE + "px",
-        height: CONTROL_SIZE + "px",
-        minWidth: CONTROL_SIZE + "px",
-        minHeight: CONTROL_SIZE + "px",
-        padding: "0",
-        margin: "0",
-        border: "1px solid #c7d3f5",
-        borderRadius: "6px",
-        background: "#eef2fd",
-        color: "#2850be",
-        cursor: "pointer",
-        zIndex: "2147483647",
-        boxShadow: "0 1px 2px rgba(0,0,0,.12)",
-    });
-    button.addEventListener("mouseenter", () => (button.style.background = "#dbe4fb"));
-    button.addEventListener("mouseleave", () => (button.style.background = "#eef2fd"));
     setIcon(button, icon);
-    return button;
+    root.appendChild(button);
+    return { host, button };
+}
+// A brief status message, announced politely to screen readers.
+function toastHost(message, left, top) {
+    const { host, root } = uiHost(TOAST_STYLE);
+    const toast = document.createElement("div");
+    toast.setAttribute("role", "status");
+    toast.textContent = message;
+    root.appendChild(toast);
+    setImportantStyles(host, { display: "block", left: left + "px", top: top + "px", "pointer-events": "none" });
+    return host;
 }
 // Sites often place their own icon (show password, clear) at the field's right
 // edge. When something other than the field is on top there, step left of it.
+// Returns null when the probe point is off screen, where no hit test is possible.
 function overlayShift(input, left, top) {
-    const hits = globalThis.document?.elementsFromPoint?.(left + CONTROL_SIZE / 2, top + CONTROL_SIZE / 2);
-    const hit = hits?.find(element => !element.classList?.contains("my-extension-ui"));
+    const x = left + CONTROL_SIZE / 2;
+    const y = top + CONTROL_SIZE / 2;
+    const { innerWidth = Infinity, innerHeight = Infinity } = globalThis.window || {};
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+    const hits = globalThis.document?.elementsFromPoint?.(x, y);
+    const hit = hits?.find(element => !isExtensionUi(element));
     if (!hit || hit === input || hit.contains?.(input) || input.getRootNode?.()?.host === hit) return 0;
     return CONTROL_SIZE + 4;
 }
 
 // Return deferred writes so callers can finish all style/geometry reads first.
-function positionedButton(input, button, offset) {
-    const { isElementVisible } = require("./content_detection.js");
-    const measure = () => {
+// The overlay hit test is cached and repeated only for layout changes.
+function positionedButton(input, host, offset) {
+    let shift = null;
+    const measure = (layout = true) => {
         const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
         let values = { display: "none" };
         if (rect?.width && rect?.height) {
             const top = rect.top + rect.height / 2 - CONTROL_SIZE / 2;
             const left = rect.right - offset;
-            const shifted = Math.max(rect.left ?? -Infinity, left - overlayShift(input, left, top));
-            values = { display: "flex", left: shifted + "px", top: top + "px" };
+            if (layout || shift === null) shift = overlayShift(input, left, top);
+            const shifted = Math.max(rect.left ?? -Infinity, left - (shift ?? 0));
+            values = { display: "block", left: shifted + "px", top: top + "px" };
         }
-        return () => {
-            for (const [key, value] of Object.entries(values)) {
-                if (button.style[key] !== value) button.style[key] = value;
-            }
-        };
+        return () => setImportantStyles(host, values);
     };
     const position = () => measure()();
     position.measure = measure;
@@ -304,5 +323,6 @@ function positionedButton(input, button, offset) {
 }
 module.exports.positionedButton = positionedButton;
 module.exports.controlButton = controlButton;
+module.exports.toastHost = toastHost;
 module.exports.setIcon = setIcon;
 module.exports.CONTROL_OFFSET = CONTROL_OFFSET;

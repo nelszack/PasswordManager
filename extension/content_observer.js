@@ -4,14 +4,26 @@ const {
     isCredentialInput,
     isUsableInput,
     isNewPasswordInput,
+    isExtensionUi = () => false,
     withVisibilityCache = action => action(),
 } = require("./content_detection.js");
-module.exports.create = function create({ controls, generator, autofill, onRoot = () => {}, onRemoveRoot = () => {} }) {
+// The one subtree observer per frame. Discovery uses it directly; other page
+// mutations (control layout, Duo text) are dispatched through onMutations.
+module.exports.create = function create({
+    controls,
+    generator,
+    autofill,
+    onRoot = () => {},
+    onRemoveRoot = () => {},
+    onMutations = () => {},
+    observeText = false,
+}) {
     const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } =
         controls;
     const { createGeneratorButton, removeGeneratorButton } = generator;
     const { typedAutofillKind } = autofill;
     let observer;
+    let handleMutations = () => {};
     let scan = () => {};
     let disposed = false;
     const registeredRoots = new Set();
@@ -45,7 +57,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     }
     function attachInput(input, formUsernames, typedContext) {
         // Ignore extension UI elements
-        if (!isFormControl(input) || input.classList.contains("my-extension-ui")) return;
+        if (!isFormControl(input) || isExtensionUi(input)) return;
         const typedKind = typedAutofillKind(input, typedContext);
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
@@ -102,13 +114,15 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     function observeInputs() {
         const pendingRoots = new Set();
         let attachScheduled = false;
-        observer = new MutationObserver(mutations => {
-            const ownUI = node => node?.nodeType === 1 && node.classList?.contains("my-extension-ui");
+        handleMutations = mutations => {
+            // Ignore the extension's own controls being added, removed or moved.
             mutations = mutations.filter(mutation => {
+                if (mutation.type === "attributes") return !isExtensionUi(mutation.target);
                 if (mutation.type !== "childList") return true;
                 const changed = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
-                return !changed.length || !changed.every(ownUI);
+                return !changed.length || !changed.every(isExtensionUi);
             });
+            if (!mutations.length) return;
             for (const mutation of mutations) {
                 if (mutation.type !== "childList") continue;
                 // Mutation targets invalidate ancestor snapshots, including across shadow hosts.
@@ -138,7 +152,6 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             }
             for (const mutation of mutations) {
                 if (mutation.type === "attributes") {
-                    if (mutation.target.classList?.contains("my-extension-ui")) continue;
                     if (
                         isFormControl(mutation.target) ||
                         ["class", "style", "hidden", "open"].includes(mutation.attributeName)
@@ -146,11 +159,13 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
                         scheduleAttach(mutation.target);
                     }
                 }
-                for (const node of mutation.addedNodes) {
+                for (const node of mutation.addedNodes || []) {
                     if (node.nodeType === 1) scheduleAttach(node);
                 }
             }
-        });
+            onMutations(mutations);
+        };
+        observer = new MutationObserver(records => handleMutations(records));
         const observationOptions = {
             childList: true,
             subtree: true,
@@ -170,6 +185,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
                 "aria-label",
                 "role",
             ],
+            ...(observeText ? { characterData: true } : {}),
         };
         const observeRoot = root => {
             if (disposed || (root !== document && !root.host) || registeredRoots.has(root)) return;
@@ -203,5 +219,11 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         scan(document);
     }
 
-    return { attachToInputs, coveredByPendingRoot, observeInputs, dispose, scan: root => scan(root) };
+    // Deliver queued records now, for readers that must not use stale state.
+    function flush() {
+        const records = observer?.takeRecords?.() || [];
+        if (records.length) handleMutations(records);
+    }
+
+    return { attachToInputs, coveredByPendingRoot, observeInputs, dispose, flush, scan: root => scan(root) };
 };

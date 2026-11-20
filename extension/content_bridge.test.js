@@ -88,3 +88,32 @@ test("normal results, cancellation, timeouts and opening errors all clean up", a
     assert.deepEqual(await skipped, { action: "skipped" });
     assert.equal(env.timers.size, 0);
 });
+
+test("an invalidated extension context rejects the request and reports the invalidation", async t => {
+    const previousChrome = Object.getOwnPropertyDescriptor(global, "chrome");
+    t.after(() => {
+        if (previousChrome) Object.defineProperty(global, "chrome", previousChrome);
+        else delete global.chrome;
+    });
+    let invalidations = 0;
+    let failure = new Error("Extension context invalidated.");
+    global.chrome = {
+        runtime: {
+            sendMessage() {
+                throw failure;
+            },
+            onMessage: { addListener() {}, removeListener() {} },
+        },
+    };
+    const bridge = create({ onInvalidated: () => invalidations++ });
+    await assert.rejects(bridge.openSecurePicker("login"), /context invalidated/);
+    assert.equal(invalidations, 1);
+    failure = new Error("Other failure");
+    await assert.rejects(bridge.openCredentialPrompt("alice", "secret"), /Other failure/);
+    assert.equal(invalidations, 1, "other send failures are ordinary errors");
+    const { contextInvalidated } = require("./content_bridge.js");
+    assert.equal(contextInvalidated("Extension context invalidated."), true);
+    assert.equal(contextInvalidated(null), false);
+    bridge.dispose();
+    assert.deepEqual(await bridge.openSecurePicker("login"), null, "a disposed bridge cancels new requests");
+});

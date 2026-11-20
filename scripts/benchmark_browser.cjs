@@ -150,7 +150,7 @@ async function main() {
                         const ordered=[...means].sort((a,b)=>a-b);
                         wall.sort((a,b)=>a-b);
                         // Document queries do not cross the open shadow roots in this fixture.
-                        if (inputs.some(input => !input.nextElementSibling?.classList.contains("my-extension-ui")
+                        if (inputs.some(input => !window.PasswordManagerContentDetection.isExtensionUi(input.nextElementSibling)
                             || !input.nextElementSibling.style.left)) throw new Error("Missing rendered controls");
                         results.push({schema_version:1,suite:"browser",name:"controls_position",size,unit:"ns/op",samples,
                             iterations_per_sample:1,median_ns:(ordered[Math.floor((samples-1)/2)]+ordered[Math.floor(samples/2)])/2,
