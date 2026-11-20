@@ -3,8 +3,8 @@
 //! review, recovery copies, and checkpoint updates. Network transfers never
 //! hold the vault: every change is rechecked against the snapshot it came from.
 use super::{
-    Binding, CloudClient, ConflictReview, MAX_BYTES, RemoteVault, Resolution, binding, digest,
-    install_download, save_binding,
+    Binding, CloudClient, ConflictReview, DIRECT_UPLOAD_BYTES, Fetched, MAX_BYTES, RemoteVault,
+    Resolution, Uploaded, binding, digest, install_download, save_binding,
 };
 use crate::file::read_bounded_file;
 use crate::vault::{Vault, VaultCredentials};
@@ -125,12 +125,61 @@ fn unchanged_since(path: &Path, bytes_digest: &str, state: Option<&Binding>) -> 
     Ok(())
 }
 
+/// A failed sync. `stuck` is set when retrying cannot succeed until the local
+/// vault or the cloud version changes (a conflict, a missing cloud vault, or a
+/// cloud snapshot this session cannot or must not apply).
+#[derive(Debug)]
+pub(crate) struct SyncError {
+    pub message: String,
+    pub stuck: Option<Stuck>,
+}
+
+/// The two copies a stuck sync compared.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Stuck {
+    /// Cloud version, or `None` when the cloud vault is missing.
+    pub remote: Option<String>,
+    /// Digest of the local encrypted vault file.
+    pub local: String,
+}
+
+impl From<String> for SyncError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            stuck: None,
+        }
+    }
+}
+impl From<&str> for SyncError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+const REMOTE_MISSING: &str = "Cloud vault is missing; local vault preserved";
+const CONFLICT: &str = "Sync conflict: local and cloud vaults both changed. Both copies are \
+                        preserved; review the conflicts before synchronizing again.";
+
 pub(crate) async fn sync<H: SyncHost>(
     host: &H,
     expected: Option<&str>,
     bind: Bind,
 ) -> Result<String, String> {
-    let snap = current(host, expected).await?;
+    sync_checked(host, expected, bind)
+        .await
+        .map_err(|error| error.message)
+}
+
+/// One request in the common cases: a conditional download (If-None-Match)
+/// when only the cloud may have changed, or a conditional upload (If-Match)
+/// when the local vault changed. A rejected upload downloads for comparison.
+pub(crate) async fn sync_checked<H: SyncHost>(
+    host: &H,
+    expected: Option<&str>,
+    bind: Bind,
+) -> Result<String, SyncError> {
+    let mut snap = current(host, expected).await?;
     let client = host.client().await?;
     let mut state = match snap.state.clone() {
         Some(state) => state,
@@ -159,64 +208,99 @@ pub(crate) async fn sync<H: SyncHost>(
     if !state.enabled {
         return Err("Sync is disabled for this vault".into());
     }
-    let remote = client.head(&snap.id).await?;
     let local_digest = digest(&snap.bytes);
     let local_changed = state.digest.as_deref() != Some(&local_digest);
-    let remote_version = remote.as_ref().map(|v| v.version.clone());
-    let decision = sync_decision(
-        local_changed,
-        state.version.as_deref(),
-        remote_version.as_deref(),
-    );
-    match decision {
-        SyncDecision::UpToDate => return Ok("Vault is up to date".into()),
-        SyncDecision::RemoteMissing => {
-            return Err("Cloud vault is missing; local vault preserved".into());
-        }
-        SyncDecision::Upload => {
+    let stuck = |remote: Option<&str>, message: String| SyncError {
+        message,
+        stuck: Some(Stuck {
+            remote: remote.map(str::to_owned),
+            local: local_digest.clone(),
+        }),
+    };
+    let fetched = if local_changed {
+        // Large bodies check the version first instead of risking a doomed transfer.
+        let attempt = if snap.bytes.len() > DIRECT_UPLOAD_BYTES {
+            let remote = client.head(&snap.id).await?.map(|remote| remote.version);
+            match sync_decision(true, state.version.as_deref(), remote.as_deref()) {
+                SyncDecision::RemoteMissing => return Err(stuck(None, REMOTE_MISSING.into())),
+                decision => decision == SyncDecision::Upload,
+            }
+        } else {
+            true
+        };
+        if attempt {
             // The server compares the base version atomically before committing.
-            let version = client
-                .upload(&snap.id, state.version.as_deref(), snap.bytes)
-                .await?;
-            state.version = Some(version);
-            state.digest = Some(local_digest);
-            save_binding(&snap.path, &state)?;
-            return Ok("Uploaded encrypted vault changes".into());
+            match client
+                .try_upload(
+                    &snap.id,
+                    state.version.as_deref(),
+                    std::mem::take(&mut snap.bytes),
+                )
+                .await?
+            {
+                Uploaded::Committed(version) => {
+                    state.version = Some(version);
+                    state.digest = Some(local_digest.clone());
+                    save_binding(&snap.path, &state)?;
+                    return Ok("Uploaded encrypted vault changes".into());
+                }
+                // The cloud changed or vanished: compare before declaring a conflict.
+                Uploaded::Stale => {}
+            }
         }
-        SyncDecision::Download | SyncDecision::Compare | SyncDecision::Conflict => {}
-    }
-    let remote = remote.ok_or("Cloud vault is missing; local vault preserved")?;
-    let (version, bytes) = client.download(&snap.id).await?;
-    match compare_snapshot(local_changed, bytes == snap.bytes) {
+        client.fetch(&snap.id, None).await?
+    } else {
+        client.fetch(&snap.id, state.version.as_deref()).await?
+    };
+    let (version, bytes) = match fetched {
+        Fetched::NotModified => return Ok("Vault is up to date".into()),
+        Fetched::Missing if state.version.is_none() && !local_changed => {
+            return Ok("Vault is up to date".into());
+        }
+        Fetched::Missing => return Err(stuck(None, REMOTE_MISSING.into())),
+        Fetched::Snapshot { version, bytes } => (version, bytes),
+    };
+    // A comparison is required before declaring a conflict: independently
+    // uploaded ciphertext may already be byte-for-byte equal to the local vault.
+    match compare_snapshot(local_changed, digest(&bytes) == local_digest) {
         SyncDecision::UpToDate => {
             state.version = Some(version);
-            state.digest = Some(local_digest);
+            state.digest = Some(local_digest.clone());
             save_binding(&snap.path, &state)?;
             return Ok("Vault is up to date".into());
         }
-        SyncDecision::Conflict => {
-            return Err(
-                "Sync conflict: local and cloud vaults both changed. Both copies are preserved; \
-                 review the conflicts before synchronizing again."
-                    .into(),
-            );
-        }
+        SyncDecision::Conflict => return Err(stuck(Some(&version), CONFLICT.into())),
         _ => {}
     }
-    if version != remote.version {
-        return Err("Cloud changed during download; retry sync".into());
-    }
-    state.version = Some(version);
+    // The version arrived with these bytes, so a concurrent upload cannot mismatch them.
+    state.version = Some(version.clone());
     state.digest = Some(digest(&bytes));
     let path = snap.path;
-    host.with_unlocked(snap.session, move |vault, key| {
-        unchanged_since(&path, &local_digest, checkpoint.as_ref())
-            .map_err(|_| "Local vault changed during download; both copies preserved")?;
-        vault.apply_cloud(key, &bytes)?;
-        save_binding(&path, &state)?;
-        Ok("Downloaded and applied cloud changes".to_owned())
-    })
-    .await
+    let unchanged = local_digest.clone();
+    let applied = host
+        .with_unlocked(snap.session, move |vault, key| {
+            unchanged_since(&path, &unchanged, checkpoint.as_ref())
+                .map_err(|_| "Local vault changed during download; both copies preserved")?;
+            // A snapshot that cannot be applied stays unapplicable until it changes.
+            if let Err(error) = vault.apply_cloud(key, &bytes) {
+                return Ok(Err(error));
+            }
+            save_binding(&path, &state)?;
+            Ok(Ok("Downloaded and applied cloud changes".to_owned()))
+        })
+        .await?;
+    applied.map_err(|message| stuck(Some(&version), message))
+}
+
+/// Whether both copies a stuck sync compared are still unchanged. Costs one
+/// local read and one metadata request instead of a full download.
+pub(crate) async fn still_stuck<H: SyncHost>(host: &H, stuck: &Stuck) -> Result<bool, String> {
+    let snap = current(host, None).await?;
+    if digest(&snap.bytes) != stuck.local {
+        return Ok(false);
+    }
+    let remote = host.client().await?.head(&snap.id).await?;
+    Ok(remote.map(|remote| remote.version) == stuck.remote)
 }
 
 pub(crate) struct Status {
