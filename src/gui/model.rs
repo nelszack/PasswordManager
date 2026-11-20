@@ -7,6 +7,7 @@ use password_manager::{
     },
     vault::ItemDetail,
 };
+use zeroize::Zeroize;
 
 pub const KINDS: [ItemKind; 8] = [
     ItemKind::Login,
@@ -153,6 +154,9 @@ impl std::fmt::Display for ClipboardPolicy {
     }
 }
 
+/// A zxcvbn score (0–4) and its display rating.
+pub type Strength = (u8, &'static str);
+
 #[derive(Default)]
 pub struct FieldDraft {
     pub original_name: Option<String>,
@@ -173,6 +177,8 @@ pub struct Draft {
     pub username: String,
     pub kind: ItemKind,
     pub password: SecretString,
+    /// Scored when `password` changes (see [`Draft::set_password`]), never per frame.
+    pub password_strength: Option<Strength>,
     pub replace_password: bool,
     pub urls: Vec<String>,
     pub notes: text_editor::Content,
@@ -197,6 +203,18 @@ impl Validation {
 }
 
 impl Draft {
+    /// Replace the primary secret and score it once, so redraws only read the result.
+    pub fn set_password(&mut self, value: SecretString) {
+        self.password_strength = (!value.is_empty())
+            .then(|| password_manager::password::strength_rating(value.expose()));
+        self.password = value;
+    }
+
+    pub fn clear_password(&mut self) {
+        self.password.zeroize();
+        self.password_strength = None;
+    }
+
     pub fn from_item(item: &ItemDetail) -> Self {
         let notes = item.notes.clone().unwrap_or_default();
         Self {
@@ -379,6 +397,7 @@ impl Draft {
         }
         if self.replace_password {
             merged.password = self.password.clone();
+            merged.password_strength = self.password_strength;
             merged.replace_password = true;
         }
         for field in &self.fields {

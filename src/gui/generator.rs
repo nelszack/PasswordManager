@@ -252,7 +252,7 @@ impl App {
             {
                 self.ui.transfer_generated = false;
                 let draft = self.editor.get_or_insert_with(Draft::default);
-                draft.password = self.generation.value.secret();
+                draft.set_password(self.generation.value.secret());
                 draft.replace_password = true;
                 draft.dirty = true;
                 draft.secret_editor = text_editor::Content::new();
@@ -320,7 +320,7 @@ impl App {
                 if self.tab == Tab::Vault
                     && let Some(draft) = self.editor.as_mut()
                 {
-                    draft.password = value.into();
+                    draft.set_password(value.into());
                     draft.secret_editor = if draft.multiline {
                         text_editor::Content::with_text(draft.password.expose())
                     } else {
