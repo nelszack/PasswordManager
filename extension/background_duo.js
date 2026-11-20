@@ -18,8 +18,9 @@ const PasswordManagerBackgroundDuo = {
             observers = new Map(),
             // Documents whose origins have no Duo-enrolled login. Their content
             // loop keeps reporting challenges; skip repeated vault lookups.
+            // Short-lived: enrolling Duo in another app changes no session here.
             unenrolled = new Map();
-        const unenrolledLifetime = 60_000;
+        const unenrolledLifetime = 10_000;
         let generation = 0;
         const lifetime = 5 * 60_000;
         const keyFor = sender => JSON.stringify([sender.tab.id, sender.frameId, sender.documentId]);
