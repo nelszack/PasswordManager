@@ -12,9 +12,14 @@ import org.json.JSONObject
 abstract class ManagementActivity : VaultActivity() {
     override val modernUi = true
     private lateinit var scaffold: MobileScaffold
+    // Screens with their own controllers; this activity hosts them and their shared widgets.
+    private val duoScreens = DuoScreens(this)
+    private val preferenceScreens = PreferenceScreens(this)
+    private val fileScreens = FileScreens(this)
+    private val credentialScreens = CredentialScreens(this)
     private var workCount = 0
     private val dialogs = mutableListOf<android.app.Dialog>()
-    protected var pageBack: (() -> Unit)? = null
+    internal var pageBack: (() -> Unit)? = null
         set(value) {
             field = value
             if (::scaffold.isInitialized) scaffold.backAction = value
@@ -39,7 +44,7 @@ abstract class ManagementActivity : VaultActivity() {
         )
     }
 
-    protected open fun navigate(tab: String) {
+    internal open fun navigate(tab: String) {
         when (tab) {
             "Vault" -> showItems()
             "Tools" -> tools()
@@ -80,21 +85,21 @@ abstract class ManagementActivity : VaultActivity() {
         if (::scaffold.isInitialized) scaffold.clear()
     }
 
-    protected fun section(title: String) {
+    internal fun section(title: String) {
         label(title, 18f)
     }
 
-    protected fun primary(title: String, action: () -> Unit) =
+    internal fun primary(title: String, action: () -> Unit) =
         MobileUi.button(this, title, primary = true) { guarded(action) }.also(layout::addView)
 
-    protected fun actionRow(
+    internal fun actionRow(
         title: String,
         subtitle: String,
         badge: String = "",
         action: () -> Unit,
     ) = MobileUi.row(this, title, subtitle, badge) { guarded(action) }.also(layout::addView)
 
-    protected fun pairedActions(
+    internal fun pairedActions(
         left: String,
         right: String,
         leftAction: () -> Unit,
@@ -119,7 +124,7 @@ abstract class ManagementActivity : VaultActivity() {
         return first to second
     }
 
-    protected fun notice(message: String) {
+    internal fun notice(message: String) {
         label(message).apply {
             background = MobileUi.shape(this@ManagementActivity, R.color.pm_accent_soft)
             val p = MobileUi.dp(this@ManagementActivity, 14)
@@ -127,13 +132,13 @@ abstract class ManagementActivity : VaultActivity() {
         }
     }
 
-    protected abstract fun showItems(message: String = "")
+    internal abstract fun showItems(message: String = "")
 
-    protected abstract fun showDetail(id: Long)
+    internal abstract fun showDetail(id: Long)
 
-    protected abstract fun showHome()
+    internal abstract fun showHome()
 
-    protected open fun afterToolChange() = syncAfterChange()
+    internal open fun afterToolChange() = syncAfterChange()
 
     private val kinds =
         listOf(
@@ -172,7 +177,7 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     /** Spinner showing plain-language labels; the getter returns the matching command value. */
-    protected fun labeledChoice(
+    internal fun labeledChoice(
         title: String,
         options: List<Pair<String, String>>,
         selected: String? = null,
@@ -186,7 +191,7 @@ abstract class ManagementActivity : VaultActivity() {
         return { options[spinner.selectedItemPosition.coerceIn(0, options.lastIndex)].first }
     }
 
-    protected fun toggle(title: String, checked: Boolean = false) =
+    internal fun toggle(title: String, checked: Boolean = false) =
         CheckBox(this).apply {
             text = title
             isChecked = checked
@@ -199,7 +204,7 @@ abstract class ManagementActivity : VaultActivity() {
             this@ManagementActivity.layout.addView(this)
         }
 
-    protected fun confirm(message: String, action: () -> Unit) {
+    internal fun confirm(message: String, action: () -> Unit) {
         val dialog =
             AlertDialog.Builder(this)
                 .setMessage(message)
@@ -211,13 +216,13 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     /** Dialogs are dismissed with other secrets when the vault locks. */
-    private fun track(dialog: AlertDialog) {
+    internal fun track(dialog: AlertDialog) {
         dialogs.add(dialog)
         dialog.setOnDismissListener { dialogs.remove(dialog) }
     }
 
     /** Runs a shared vault command that changes the vault, then syncs. */
-    private fun change(
+    internal fun change(
         command: org.json.JSONObject,
         confirmed: Boolean = false,
         done: () -> Unit,
@@ -240,7 +245,7 @@ abstract class ManagementActivity : VaultActivity() {
         }
     }
 
-    protected fun tools() {
+    internal fun tools() {
         page("Tools & recovery")
         rootNavigation("Tools")
         label("Everything you need to manage and recover your vault.")
@@ -257,7 +262,7 @@ abstract class ManagementActivity : VaultActivity() {
             auditForm()
         }
         actionRow("Vault credentials", "Change your master password or key", "key") {
-            credentials()
+            credentialScreens.show()
         }
         section("Recovery & data")
         actionRow("Deleted items", "Restore items or review your trash", "restore") { trash() }
@@ -478,7 +483,7 @@ abstract class ManagementActivity : VaultActivity() {
         }
     }
 
-    protected fun authenticator(id: Long) {
+    internal fun authenticator(id: Long) {
         task({ Vault.commandJson(VaultCommands.item(id)) }) { item ->
             val mode = VaultCommands.authenticatorMode(item)
             page("Authenticator")
@@ -521,7 +526,7 @@ abstract class ManagementActivity : VaultActivity() {
                         change(VaultCommands.removeAuthenticator(id)) { authenticator(id) }
                     }
                 }
-            button("Duo enrollment & push") { duo(id) }
+            button("Duo enrollment & push") { duoScreens.enrollment(id) }
             button("Back to item") { showDetail(id) }
         }
     }
@@ -546,146 +551,14 @@ abstract class ManagementActivity : VaultActivity() {
         button("Back to authenticator") { authenticator(id) }
     }
 
-    private fun duo(id: Long) {
-        page("Duo enrollment & push")
-        pageBack = { authenticator(id) }
-        label(
-            "Use a fresh activation link for a separate device. Enrollment consumes the link. Existing push credentials are never replaced without confirmation."
-        )
-        val activation = edit("Duo activation link", secret = true)
-        val mode =
-            labeledChoice(
-                "Passcode mode",
-                listOf("hotp" to "Counter-based codes (HOTP)", "totp" to "Time-based codes (TOTP)"),
-            )
-        val push = toggle("Enroll push credentials", true)
-        val replace = toggle("Replace existing enrollment")
-        button("Enroll Duo") {
-            val link = activation.text.toString().trim()
-            activation.text.clear()
-            confirm("Consume this activation link and enroll this item?") {
-                task({
-                    val enrollment =
-                        VaultCommands.duoEnroll(
-                            id,
-                            link,
-                            mode(),
-                            push.isChecked,
-                            replace.isChecked,
-                        )
-                    (Vault.command(enrollment) as String).also { afterToolChange() }
-                }) {
-                    label(it)
-                }
-            }
-        }
-        button("Check Duo Push requests") { duoInbox(listOf(id to ""), back = { duo(id) }) }
-        button("Remove local push credentials") {
-            confirm(
-                "Remove this item's local push credentials? Passcodes remain; remove the device in Duo separately."
-            ) {
-                change(VaultCommands.duoRemove(id)) { duo(id) }
-            }
-        }
-        button("Back to authenticator") { authenticator(id) }
-    }
-
-    /**
-     * Every pending push for [accounts] on one page. The card is the review, so Approve or
-     * Deny answers it in one tap; the buttons wake after a short pause so a tap meant for the
-     * previous screen cannot answer a request, and the server re-checks the request's
-     * fingerprint before responding.
-     */
     protected fun duoInbox(
         accounts: List<Pair<Long, String>>,
         back: () -> Unit,
         message: String = "",
-    ) {
-        task({
-            accounts.map { (id, name) ->
-                Triple(id, name, runCatching { Vault.command(VaultCommands.duoRequests(id)) as JSONArray })
-            }
-        }) { results ->
-            page("Duo Push")
-            pageBack = back
-            if (message.isNotBlank()) notice(message)
-            val now = System.currentTimeMillis() / 1000
-            val guarded = mutableListOf<Button>()
-            var pending = 0
-            for ((id, name, result) in results) {
-                val requests = result.getOrNull()
-                if (requests == null) {
-                    label("$name: ${result.exceptionOrNull()?.message ?: "Could not check requests"}")
-                    continue
-                }
-                for (i in 0 until requests.length()) {
-                    val request = requests.getJSONObject(i)
-                    val expires = request.getLong("expires_at")
-                    if (expires <= now) continue
-                    pending++
-                    section(request.getString("application").ifBlank { name.ifBlank { "Duo login" } })
-                    label(
-                        listOfNotNull(
-                            "Account: ${request.getString("username").ifBlank { "Not provided" }}",
-                            "Location: ${request.getString("location").ifBlank { "Not provided" }}",
-                            request.getString("summary").ifBlank { null },
-                            name.takeIf { it.isNotBlank() }?.let { "Saved login: $it" },
-                            "Expires ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(expires * 1000))}",
-                        ).joinToString("\n")
-                    )
-                    val unsupported = request.opt("unsupported") as? String
-                    val digits = (request.opt("code_digits") as? Number)?.toInt()
-                    val code =
-                        if (digits != null && unsupported == null)
-                            edit("$digits-digit code shown on the login page", secret = true).apply {
-                                inputType =
-                                    android.text.InputType.TYPE_CLASS_NUMBER or
-                                        android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
-                            }
-                        else null
-                    if (unsupported != null) notice("This request can't be approved here: $unsupported")
-                    fun respond(approve: Boolean) {
-                        val supplied = code?.text?.toString().orEmpty()
-                        if (approve && digits != null && !Regex("[0-9]{$digits}").matches(supplied)) {
-                            code?.requestFocus()
-                            error("Enter the $digits-digit code shown on the login page.")
-                        }
-                        code?.text?.clear()
-                        guarded.forEach { it.isEnabled = false }
-                        task({
-                            Vault.command(
-                                VaultCommands.duoRespond(
-                                    id,
-                                    request.getString("id"),
-                                    request.getString("fingerprint"),
-                                    approve,
-                                    if (approve) supplied else "",
-                                )
-                            ) as String
-                        }) { outcome -> duoInbox(accounts, back, outcome) }
-                    }
-                    val (approve, deny) =
-                        pairedActions("Approve", "Deny", { respond(true) }, { respond(false) })
-                    if (unsupported == null) guarded.add(approve) else approve.isEnabled = false
-                    guarded.add(deny)
-                }
-            }
-            if (pending == 0) {
-                label("No pending Duo Push requests.", 18f)
-                label("Start the login on your other device, then check again.", 13f)
-            } else label("Approve only a login you started.", 13f)
-            primary("Check again") { duoInbox(accounts, back) }
-            guarded.forEach { it.isEnabled = false }
-            ui.postDelayed({ guarded.forEach { it.isEnabled = true } }, DUO_INPUT_GUARD_MS)
-        }
-    }
+    ) = duoScreens.inbox(accounts, back, message)
 
     /** Duo-enrolled items, by name, from an item list response. */
-    protected fun duoAccounts(entries: JSONArray): List<Pair<Long, String>> =
-        (0 until entries.length())
-            .map(entries::getJSONObject)
-            .filter { it.optBoolean("has_duo") }
-            .map { it.getLong("id") to it.getString("name") }
+    protected fun duoAccounts(entries: JSONArray) = DuoScreens.enrolledAccounts(entries)
 
     protected fun generator(use: ((String) -> Unit)? = null, back: (() -> Unit)? = null) {
         task({ Vault.json("settings_get") }) { defaults ->
@@ -873,159 +746,7 @@ abstract class ManagementActivity : VaultActivity() {
         button("Back to tools") { tools() }
     }
 
-    protected fun preferences(back: (() -> Unit)? = null) {
-        task({ Vault.json("settings_get") }) { current ->
-            page("Mobile settings")
-            pageBack = back ?: { navigate("Settings") }
-            label("Tap a preference to see what it means and change its value.")
-            for ((title, keys) in
-                listOf(
-                    "Locking & clipboard" to setOf("unlock_seconds", "clipboard_seconds"),
-                    "History & recovery" to setOf("history_limit", "trash_days"),
-                    "Password generation" to setOf("generator_length", "passphrase_words"),
-                )) {
-                section(title)
-                for (field in MobilePreferences.fields.filter { it.key in keys }) actionRow(
-                    field.title,
-                    MobilePreferences.summary(field.key, current.getLong(field.key)),
-                ) {
-                    editPreference(field, current, back)
-                }
-            }
-            label(
-                "Preferences save as you change them. Autofill sessions are limited to five minutes on the same site.",
-                13f,
-            )
-            button("Reset mobile preferences") {
-                confirm(
-                    "Restore the default locking, clipboard, generator, history and trash preferences?"
-                ) {
-                    task({ Vault.json("settings_save", "settings" to JSONObject()) }) { saved ->
-                        updatePreferenceCache(saved)
-                        preferences(back)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun updatePreferenceCache(saved: JSONObject) {
-        settings
-            .edit()
-            .putLong("unlock_seconds", saved.getLong("unlock_seconds"))
-            .putInt("clipboard_seconds", saved.getInt("clipboard_seconds"))
-            .apply()
-        Vault.touch()
-    }
-
-    private fun editPreference(field: MobilePreference, current: JSONObject, back: (() -> Unit)?) {
-        val content =
-            LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                val pad = MobileUi.dp(this@ManagementActivity, 20)
-                setPadding(pad, pad, pad, 0)
-            }
-        content.addView(
-            MobileUi.text(this, field.help, 14f, muted = true).apply {
-                layoutParams = MobileUi.margins(this@ManagementActivity, 16)
-            }
-        )
-        val input =
-            MobileUi.field(
-                    this,
-                    content,
-                    "Value (${field.unit})",
-                    current.getLong(field.key).toString(),
-                    false,
-                )
-                .apply {
-                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                    setSingleLine(true)
-                }
-        val preview =
-            MobileUi.text(
-                this,
-                MobilePreferences.summary(field.key, current.getLong(field.key)),
-                14f,
-                bold = true,
-            )
-        content.addView(preview)
-        input.addTextChangedListener(
-            object : android.text.TextWatcher {
-                override fun beforeTextChanged(
-                    s: CharSequence?,
-                    start: Int,
-                    count: Int,
-                    after: Int,
-                ) {}
-
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    preview.text =
-                        s?.toString()
-                            ?.toLongOrNull()
-                            ?.takeIf { it in field.range }
-                            ?.let { MobilePreferences.summary(field.key, it) }
-                            ?: "Allowed: ${field.range.first}–${field.range.last} ${field.unit}"
-                }
-
-                override fun afterTextChanged(s: android.text.Editable?) {}
-            }
-        )
-        if (field.key == "unlock_seconds") {
-            val presets = LinearLayout(this)
-            for ((title, value) in listOf("1 min" to 60, "5 min" to 300, "15 min" to 900)) presets
-                .addView(
-                    MobileUi.button(this, title) { input.setText(value.toString()) }
-                        .apply {
-                            textSize = 12f
-                            setPadding(0, 0, 0, 0)
-                            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-                        }
-                )
-            content.addView(presets)
-        }
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle(field.title)
-                .setView(ScrollView(this).apply { addView(content) })
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Save", null)
-                .create()
-        track(dialog)
-        dialog.setOnShowListener {
-            input.requestFocus()
-            input.selectAll()
-            dialog.window?.setSoftInputMode(
-                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
-            )
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val value = input.text.toString().toLongOrNull()
-                if (value == null || value !in field.range) {
-                    input.error = "Enter ${field.range.first}–${field.range.last} ${field.unit}"
-                    input.requestFocus()
-                } else {
-                    val save = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                    save.isEnabled = false
-                    val body = JSONObject(current.toString()).put(field.key, value)
-                    task({ runCatching { Vault.json("settings_save", "settings" to body) } }) {
-                        result ->
-                        result.fold(
-                            { saved ->
-                                updatePreferenceCache(saved)
-                                dialog.dismiss()
-                                preferences()
-                            },
-                            { error ->
-                                save.isEnabled = true
-                                input.error = error.message ?: "Could not save"
-                            },
-                        )
-                    }
-                }
-            }
-        }
-        dialog.show()
-    }
+    protected fun preferences(back: (() -> Unit)? = null) = preferenceScreens.show(back)
 
     private fun syncControls() {
         task({ Vault.json("sync_status") }) { state ->
@@ -1066,7 +787,7 @@ abstract class ManagementActivity : VaultActivity() {
         }
     }
 
-    private fun destination(name: String, action: (Uri) -> Unit) {
+    internal fun destination(name: String, action: (Uri) -> Unit) {
         documentAction = action
         startActivityForResult(
             Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
@@ -1078,7 +799,7 @@ abstract class ManagementActivity : VaultActivity() {
         )
     }
 
-    private fun source(action: (Uri) -> Unit) {
+    internal fun source(action: (Uri) -> Unit) {
         documentAction = action
         startActivityForResult(
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -1089,301 +810,14 @@ abstract class ManagementActivity : VaultActivity() {
         )
     }
 
-    private fun read(uri: Uri): ByteArray =
-        contentResolver.openInputStream(uri)?.use { it.readBounded(MAX_TRANSFER) }
-            ?: error("Could not open selected file")
+    protected fun files() = fileScreens.show()
 
-    /** Reads [uri], passes it base64url-encoded to [use], and wipes the raw bytes. */
-    private fun <T> withEncodedFile(uri: Uri, use: (String) -> T): T {
-        val bytes = read(uri)
-        try {
-            return use(DeviceKeys.encode(bytes))
-        } finally {
-            bytes.fill(0)
-        }
-    }
+    protected fun restoreBackup() = fileScreens.restore()
 
-    /** Runs a native operation that returns file `data` and writes it to [uri]. */
-    private fun writeResult(uri: Uri, op: String, vararg args: Pair<String, Any?>) =
-        write(uri, DeviceKeys.decode(Vault.json(op, *args).getString("data")))
+    protected fun createKeyVault() = fileScreens.keyVault()
 
-    private fun write(uri: Uri, bytes: ByteArray) {
-        check(bytes.size <= MAX_TRANSFER) { "File exceeds the 16 MiB mobile transfer limit" }
-        try {
-            contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
-                ?: error("Could not write selected file")
-        } finally {
-            bytes.fill(0)
-        }
-    }
-
-    protected fun files() {
-        page("Files & backups")
-        label(
-            "Mobile transfers support files up to 16 MiB. Encrypted vault snapshots and complete backup containers preserve recovery data. JSON/CSV exports contain plaintext secrets; CSV omits rich metadata and cannot contain passkeys."
-        )
-        button("Export encrypted vault snapshot") {
-            destination("vault.enc") { uri ->
-                unlock({
-                    task({ writeResult(uri, "snapshot") }) { showHome() }
-                })
-            }
-        }
-        button("Create complete encrypted backup") {
-            destination("vault.pmbackup") { uri -> unlock({ backupForm(uri) }) }
-        }
-        button("Restore complete encrypted backup") { restoreBackup() }
-        button("Import CSV or JSON") { source { uri -> unlock({ importForm(uri) }) } }
-        for (format in listOf("json", "csv")) button("Export plaintext ${format.uppercase()}") {
-            confirm(
-                "Export plaintext secrets to a file outside the app? Anyone who can read that file can read its passwords. CSV also omits non-CSV metadata."
-            ) {
-                destination("vault.$format") { uri ->
-                    unlock({
-                        task({
-                            writeResult(
-                                uri,
-                                "export_items",
-                                "format" to format,
-                                "confirmed" to true,
-                            )
-                        }) {
-                            showHome()
-                        }
-                    })
-                }
-            }
-        }
-        button("Back to tools") { tools() }
-    }
-
-    private fun backupForm(uri: Uri) {
-        page("Protect backup")
-        pageBack = { files() }
-        label(
-            "Choose a dedicated backup password, or an existing external key file. Keep it separately; it is required for restore."
-        )
-        val password = edit("Backup password (at least 14 characters)", secret = true)
-        val confirmation = edit("Confirm backup password", secret = true)
-        button("Create password-protected backup") {
-            check(password.text.toString() == confirmation.text.toString()) {
-                "Passwords do not match"
-            }
-            val supplied = password.text.toString()
-            password.text.clear()
-            confirmation.text.clear()
-            task({ writeResult(uri, "backup_create", "password" to supplied) }) { showHome() }
-        }
-        button("Use existing backup key file") {
-            pickFile { key ->
-                // The file picker locks the vault; unlock again before creating the backup.
-                val encoded = DeviceKeys.encode(key)
-                key.fill(0)
-                unlock({
-                    task({ writeResult(uri, "backup_create", "key_file" to encoded) }) {
-                        showHome()
-                    }
-                })
-            }
-        }
-        button("Cancel") { showHome() }
-    }
-
-    protected fun restoreBackup() {
-        source { uri ->
-            page("Restore backup")
-            pageBack = { showHome() }
-            label(
-                "Restores into a separate vault with a new identity. Existing vaults are preserved."
-            )
-            val password = edit("Backup password", secret = true)
-            fun restore(key: ByteArray? = null) {
-                val supplied = password.text.toString()
-                password.text.clear()
-                val encoded = key?.let(DeviceKeys::encode)
-                key?.fill(0)
-                task({
-                    withEncodedFile(uri) { data ->
-                        Vault.json(
-                            "restore_backup",
-                            "data" to data,
-                            "password" to supplied,
-                            "key_file" to encoded,
-                        )
-                    }
-                }) {
-                    selectedVault = it.getString("vault")
-                    showHome()
-                }
-            }
-            button("Restore with password") { restore() }
-            button("Restore with key file") { pickFile { restore(it) } }
-            button("Cancel") { showHome() }
-        }
-    }
-
-    private fun importForm(uri: Uri) {
-        page("Import items")
-        pageBack = { files() }
-        val policy =
-            labeledChoice(
-                "When an item already exists",
-                listOf(
-                    "skip" to "Keep the existing item",
-                    "replace" to "Replace it with the imported item",
-                    "keep-both" to "Keep both",
-                ),
-            )
-        button("Preview import") {
-            val selected = policy()
-            task({
-                withEncodedFile(uri) { data ->
-                    Vault.json(
-                        "import_items",
-                        "data" to data,
-                        "preview" to true,
-                        "conflicts" to selected,
-                    )
-                }
-            }) { preview ->
-                page("Import preview")
-                pageBack = { importForm(uri) }
-                val report = preview.getJSONObject("report")
-                label("Duplicate policy: $selected")
-                for ((key, title) in
-                    listOf(
-                        "total" to "Source items",
-                        "added" to "Will add",
-                        "replaced" to "Will replace",
-                        "skipped" to "Will skip",
-                        "renamed" to "Will rename",
-                        "unsupported" to "Unsupported items",
-                    )) label("$title: ${report.getInt(key)}")
-                val losses = report.optJSONArray("losses") ?: JSONArray()
-                for (i in 0 until losses.length()) label(losses.getString(i))
-                button("Apply reviewed import") {
-                    task({
-                        withEncodedFile(uri) { data ->
-                            Vault.request(
-                                "import_items",
-                                "data" to data,
-                                "preview" to false,
-                                "conflicts" to selected,
-                                "review_token" to preview.getString("review_token"),
-                            )
-                        }
-                        afterToolChange()
-                    }) {
-                        showItems(it)
-                    }
-                }
-                button("Cancel") { showItems() }
-            }
-        }
-        button("Cancel") { showItems() }
-    }
-
-    protected fun createKeyVault() {
-        page("External-key vault")
-        pageBack = { showHome() }
-        label(
-            "First save a new key file, then select that saved file to create the vault. Cancelling the save does not create a vault."
-        )
-        button("Generate and save a new key file") {
-            destination("vault.key") { uri ->
-                task({ writeResult(uri, "new_key_file") }) { createKeyVault() }
-            }
-        }
-        button("Create vault using saved key file") {
-            pickFile { bytes ->
-                task({
-                    try {
-                        Vault.json("create_key", "key_file" to DeviceKeys.encode(bytes))
-                    } finally {
-                        bytes.fill(0)
-                    }
-                }) {
-                    selectedVault = it.getString("vault")
-                    showItems("Created external-key vault")
-                }
-            }
-        }
-        button("Back") { showHome() }
-    }
-
-    private fun credentials() {
-        page("Vault credentials")
-        label(
-            "Credential changes and vault deletion require an original password/key-file unlock. Create a backup first. Rekeying also preserves a local encrypted recovery snapshot; biometric unlock must be set up again afterward."
-        )
-        button("Change master password") { unlockOriginal { rekeyForm() } }
-        button("Change to an external key file") {
-            unlockOriginal {
-                page("Choose replacement key")
-                label(
-                    "Use a saved key file. Generate one from the home screen's External-key vault tools if needed."
-                )
-                button("Choose replacement key file") {
-                    pickFile { bytes ->
-                        val encoded = DeviceKeys.encode(bytes)
-                        bytes.fill(0)
-                        // Reauthenticate after returning from the key picker.
-                        unlockOriginal { performRekey("key_file", encoded) }
-                    }
-                }
-                button("Cancel") { showHome() }
-            }
-        }
-        button("Delete this vault from this phone") {
-            unlockOriginal {
-                confirm(
-                    "Permanently delete the selected local vault? This does not delete cloud or exported copies. Make sure you have a tested backup."
-                ) {
-                    val name = selectedVault
-                    task({
-                        check(Vault.primaryUnlock) { "Original password/key unlock required" }
-                        Vault.request("delete_vault", "confirmed" to true)
-                    }) {
-                        DeviceKeys.disable(this, name)
-                        selectedVault = ""
-                        Vault.lock()
-                        showHome()
-                    }
-                }
-            }
-        }
-        button("Back to tools") { tools() }
-    }
-
-    private fun rekeyForm() {
-        page("Change master password")
-        pageBack = { credentials() }
-        val password = edit("New master password", secret = true)
-        val confirmation = edit("Confirm new password", secret = true)
-        button("Change password") {
-            check(password.text.toString() == confirmation.text.toString()) {
-                "Passwords do not match"
-            }
-            val supplied = password.text.toString()
-            password.text.clear()
-            confirmation.text.clear()
-            confirm(
-                "Re-encrypt this vault with the new password and disable its biometric enrollment?"
-            ) {
-                performRekey("password", supplied)
-            }
-        }
-        button("Cancel") { showHome() }
-    }
-
-    private fun performRekey(key: String, value: String) {
-        check(Vault.primaryUnlock) { "Unlock with the original password or key file first" }
-        DeviceKeys.disable(this, selectedVault)
-        task({ Vault.request("rekey", key to value) }) {
-            Vault.lock()
-            showHome()
-        }
-    }
+    /** After a credential change, offers once to delete the old-credential recovery copy. */
+    protected fun offerRecoveryCleanup() = credentialScreens.offerRecoveryCleanup()
 
     override fun onDestroy() {
         documentAction = null
@@ -1404,9 +838,5 @@ abstract class ManagementActivity : VaultActivity() {
     private companion object {
         const val CREATE_DOCUMENT = 30
         const val OPEN_DOCUMENT = 31
-        /** Matches the Rust mobile transfer limit. */
-        const val MAX_TRANSFER = 16 * 1024 * 1024
-        /** Approve/Deny stay disabled this long after a Duo page appears. */
-        const val DUO_INPUT_GUARD_MS = 600L
     }
 }
