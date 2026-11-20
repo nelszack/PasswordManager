@@ -1,11 +1,12 @@
 //! RSA operations use the AWS-LC backend also used by rustls. Keep the wire
 //! format compatible with existing PKCS#8 PEM keys and SPKI enrollment keys.
 use super::{VaultError, invalid};
+pub(crate) use aws_lc_rs::signature::RsaKeyPair;
 use aws_lc_rs::{
     encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der},
     rand::SystemRandom,
     rsa::KeySize,
-    signature::{KeyPair, RSA_PKCS1_SHA512, RsaKeyPair},
+    signature::{KeyPair, RSA_PKCS1_SHA512},
 };
 use zeroize::Zeroizing;
 
@@ -43,8 +44,7 @@ pub(crate) fn load_key(pem: &str) -> Result<RsaKeyPair, VaultError> {
     }
     Ok(key)
 }
-pub(crate) fn sign(pem: &str, message: &[u8]) -> Result<Vec<u8>, VaultError> {
-    let key = load_key(pem)?;
+pub(crate) fn sign(key: &RsaKeyPair, message: &[u8]) -> Result<Vec<u8>, VaultError> {
     let mut signature = vec![0; key.public_modulus_len()];
     key.sign(
         &RSA_PKCS1_SHA512,

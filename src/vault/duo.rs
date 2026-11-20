@@ -109,7 +109,7 @@ impl Vault {
     }
     fn duo_record(&mut self, target: &Target) -> Result<&mut DuoRecord, VaultError> {
         let id = self.require_target(target)?.entry.id;
-        self.item_mut(id).unwrap().duo.as_mut().ok_or_else(|| {
+        self.duo_mut(id).unwrap().as_mut().ok_or_else(|| {
             VaultError::NotFound(
                 "item has no push credentials; enroll a fresh link using pm duo enroll".into(),
             )
@@ -391,6 +391,26 @@ mod tests {
                 .finish_duo_poll(&new_poll.review, &body, &key)
                 .is_err()
         );
+    }
+    #[test]
+    fn polling_keeps_derived_item_caches() {
+        let (mut vault, key) = fixture();
+        let item = vault.item(1).unwrap();
+        item.password_score();
+        item.search_metadata();
+        let poll = vault
+            .prepare_duo_poll(
+                DuoCommand::Requests {
+                    target: Target::Id(1),
+                },
+                &key,
+            )
+            .unwrap();
+        vault.finish_duo_poll(&poll.review, &body(), &key).unwrap();
+        let item = vault.item(1).unwrap();
+        assert!(item.duo.as_ref().unwrap().review_key.is_some());
+        assert!(item.strength.0.get().is_some());
+        assert!(item.search.0.get().is_some());
     }
     #[test]
     fn enrollment_rejects_stale_session_and_changed_or_deleted_item() {

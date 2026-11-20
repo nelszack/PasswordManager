@@ -447,6 +447,13 @@ impl Vault {
         item.search.0.take();
         Some(item)
     }
+    /// Mutable access to an item's runtime Duo state. Duo records feed none of
+    /// the derived strength, site, or search caches, so unlike `item_mut` this
+    /// keeps them.
+    fn duo_mut(&mut self, id: usize) -> Option<&mut Option<DuoRecord>> {
+        let item = self.data.items.get_mut(&ItemId::from_public(id).ok()?)?;
+        Some(&mut item.duo)
+    }
     fn active_items(&self) -> impl Iterator<Item = &Item> {
         self.data.items.values().filter(|i| i.active())
     }
