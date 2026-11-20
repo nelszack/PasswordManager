@@ -527,10 +527,7 @@ pub(crate) fn create_vault(
         let mut material = try_gen_master_key(credentials.supplied()?, true)?;
         material.zeroize();
     }
-    let mut data = VaultData {
-        vault_id: rand::random(),
-        ..VaultData::default()
-    };
+    let mut data = VaultData::with_random_id();
     let filename = loop {
         let name = format!("{}.enc", hex::encode(data.vault_id));
         if !data_dir().join(&name).exists() {

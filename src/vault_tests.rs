@@ -1531,3 +1531,34 @@ fn mutation_delta_budget_includes_url_encoding_overhead() {
         "large metadata must fall back to a full refresh"
     );
 }
+#[test]
+fn wiping_items_clears_entry_and_metadata_text() {
+    let mut vault = Vault::from_entries(
+        vec![VaultEntry {
+            id: 1,
+            name: "Account".into(),
+            username: Some("user".into()),
+            url: Some("https://example.test".into()),
+            ..Default::default()
+        }],
+        None,
+    );
+    vault.set_test_metadata(
+        1,
+        ItemKind::Login,
+        vec!["https://other.test".into()],
+        vec![CustomField {
+            name: "Recovery label".into(),
+            value: "1234".into(),
+            secret: true,
+        }],
+    );
+    let item = vault.data.items.values_mut().next().unwrap();
+    item.wipe();
+    assert!(item.entry.name.is_empty());
+    assert_eq!((&item.entry.username, &item.entry.url), (&None, &None));
+    assert!(item.metadata.additional_urls.is_empty());
+    assert!(item.metadata.custom_fields.is_empty());
+    vault.zeroize();
+    assert!(vault.data.items.is_empty());
+}

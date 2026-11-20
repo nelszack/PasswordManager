@@ -292,6 +292,12 @@ impl PartialEq for CachedStrength {
     }
 }
 impl Item {
+    /// Wipe the entry and metadata in place. History passwords, authenticator
+    /// configuration, and Duo records already wipe themselves on drop.
+    fn wipe(&mut self) {
+        self.entry.zeroize();
+        self.metadata.zeroize();
+    }
     fn urls(&self) -> impl Iterator<Item = &str> {
         self.entry
             .url
@@ -352,6 +358,27 @@ pub struct VaultData {
     vault_id: [u8; 16],
     next_item_id: u64,
     revision: u64,
+}
+impl VaultData {
+    fn with_random_id() -> Self {
+        let mut data = Self::default();
+        data.vault_id = rand::random();
+        data
+    }
+    /// Wipe item text that `SecretString` does not already cover (names,
+    /// usernames, URLs, custom-field names) before freeing the items.
+    fn wipe_items(&mut self) {
+        for item in self.items.values_mut() {
+            item.wipe();
+        }
+        self.items.clear();
+    }
+}
+// `VaultEntry` deliberately has no `Drop`: decoding and import move its fields.
+impl Drop for VaultData {
+    fn drop(&mut self) {
+        self.wipe_items();
+    }
 }
 impl Default for VaultData {
     fn default() -> Self {
@@ -415,10 +442,7 @@ impl Default for Vault {
 impl Vault {
     pub fn memory() -> Self {
         Self {
-            data: VaultData {
-                vault_id: rand::random(),
-                ..VaultData::default()
-            },
+            data: VaultData::with_random_id(),
             store: VaultStore::Memory,
             ..Self::default()
         }
@@ -678,7 +702,7 @@ fn password_is_stale_at(changed: &str, days: u64, now: jiff::Timestamp) -> bool 
 
 impl Zeroize for Vault {
     fn zeroize(&mut self) {
-        self.data.items.clear();
+        self.data.wipe_items();
         self.metadata.zeroize();
         self.data.next_item_id = 1;
         self.data.revision = 0;
