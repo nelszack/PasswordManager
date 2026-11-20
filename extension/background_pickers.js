@@ -121,7 +121,7 @@ const PasswordManagerBackgroundPickers = {
             if (
                 pendingPickers.get(token) !== pending ||
                 pending.expiresAt <= Date.now() ||
-                security.senderOrigin({ url: tab.url }) !== pending.topOrigin
+                security.urlOrigin(tab.url) !== pending.topOrigin
             ) {
                 discardPicker(token);
                 throw new Error("Secure picker expired; the destination changed");
@@ -147,7 +147,7 @@ const PasswordManagerBackgroundPickers = {
             }
             const tab = await chrome.tabs.get(tabId);
             if (epoch !== generation) throw new Error("Secure picker expired");
-            const topOrigin = security.senderOrigin({ url: tab.url });
+            const topOrigin = security.urlOrigin(tab.url);
             if (!topOrigin) throw new Error("Invalid top-level page origin");
 
             const token = crypto.randomUUID();
@@ -281,7 +281,7 @@ const PasswordManagerBackgroundPickers = {
                     );
                     if (filledLogin && epoch === generation)
                         onLoginSelected?.({
-                            sender: { tab: { id: pending.tabId }, url: pending.domain },
+                            sender: { tab: { id: pending.tabId }, origin: pending.domain },
                             accounts: [{ ...selected, sessionId: pending.sessionId }],
                         });
                 } catch (error) {

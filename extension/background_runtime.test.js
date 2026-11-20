@@ -82,7 +82,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
         setTimeout() { return 1; }, clearTimeout() {}, setInterval() {}, clearInterval() {}, queueMicrotask
     });
     loadWorker(context);
-    const sender = { url: origin, tab: { id: 7, url: origin }, frameId: 0, documentId: "original-document" };
+    const sender = { url: origin, origin, tab: { id: 7, url: origin }, frameId: 0, documentId: "original-document" };
     const pickerSender = { id: chrome.runtime.id, url: chrome.runtime.getURL("picker.html") };
     const message = (request, source = sender) => new Promise(resolve => listener(request, source, resolve));
     return {
@@ -192,9 +192,9 @@ test("changed credentials and other tabs, frames, or origins still open prompts"
         { name: "changed username", username: "bob" },
         { name: "other tab", sender: { tab: { id: 8 } } },
         { name: "other frame", sender: { frameId: 3 } },
-        { name: "other hostname", sender: { url: "https://other.example" } },
-        { name: "other scheme", sender: { url: "http://shop.example" } },
-        { name: "other port", sender: { url: "https://shop.example:8443" } },
+        { name: "other hostname", sender: { url: "https://other.example", origin: "https://other.example" } },
+        { name: "other scheme", sender: { url: "http://shop.example", origin: "http://shop.example" } },
+        { name: "other port", sender: { url: "https://shop.example:8443", origin: "https://shop.example:8443" } },
         { name: "expired selection", advance: 10 * 60_000 }
     ]) {
         await t.test(scenario.name, async () => {
@@ -262,7 +262,7 @@ test("locks and disconnects invalidate pending pickers and save prompts", async 
 
 test("embedded card autofill requires confirmation of the browser-derived origins", async () => {
     const env = securityEnvironment();
-    const sender = { ...env.sender, url: "https://embedded.example/form", frameId: 3 };
+    const sender = { ...env.sender, url: "https://embedded.example/form", origin: "https://embedded.example", frameId: 3 };
     const token = await env.open(sender, "payment-card");
     const data = await env.message({ action: "getSecurePickerData", token }, env.pickerSender);
     assert.equal(data.origin, "https://embedded.example");

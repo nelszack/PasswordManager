@@ -50,7 +50,7 @@ function environment(username = "alice", kind = "login") {
             return { success: true, sessionId: omitSession ? undefined : sessionId, data: [{id:1,revision,name:"Example",kind,has_totp:true}] };
         }
     });
-    const sender = { tab: { id: 1 }, frameId: 3, documentId: "original-document", url: "https://example.com" };
+    const sender = { tab: { id: 1 }, frameId: 3, documentId: "original-document", url: "https://example.com", origin: "https://example.com" };
     const popup = { id: chrome.runtime.id, url: chrome.runtime.getURL("picker.html") };
     return { service, sender, popup, deliveries, removed, timers, calls, logins, delivery,
         open: () => service.open({ kind }, sender),

@@ -4,7 +4,7 @@ const service = require("./background_duo.js");
 const detection = require("./duo_detection.js");
 
 function environment() {
-    const sender = { url: "https://login.example/duo", tab: { id: 7 }, frameId: 0, documentId: "doc-one" };
+    const sender = { url: "https://login.example/duo", origin: "https://login.example", tab: { id: 7 }, frameId: 0, documentId: "doc-one" };
     const popup = { id: "extension", url: "chrome-extension://extension/duo_prompt.html" };
     const created = [], removed = [], calls = [], timers = [];
     let active = true, origin = "https://login.example", locked = false, holdPoll, holdDecision, decisionError, holdTab;
@@ -178,7 +178,7 @@ test("a new login without Duo clears a previous account's redirect context", asy
     const env = environment();
     env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 1, has_duo: true, sessionId: "a".repeat(64) }] });
     env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 2, has_duo: false }] });
-    env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = "https://api-test.duosecurity.com";
+    env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = env.sender.origin = "https://api-test.duosecurity.com";
     await env.duo.observe({}, env.sender);
     assert.equal(env.created.length, 0);
     assert.equal(env.calls.some(call => call.action === "duoRequests"), false);
@@ -205,14 +205,14 @@ test("selected logins follow a same-tab Duo redirect, but never an unrelated hos
         env.duo.rememberLogin({ sender: env.sender, accounts: [{ id: 1, name: "Work", has_duo: true, sessionId: "a".repeat(64) }] });
         env.setItems([]);
         const url = allowed ? "https://api-test.duosecurity.com" : "https://other.example";
-        env.setOrigin(url); env.sender.url = url;
+        env.setOrigin(url); env.sender.url = env.sender.origin = url;
         await env.duo.observe({}, env.sender);
         assert.equal(env.created.length, allowed ? 1 : 0);
         if (allowed) assert.equal((await env.duo.data({ token: env.token() }, env.popup)).sourceOrigin, "https://login.example");
     }
     const env = environment();
     env.duo.rememberLogin({ sender: { ...env.sender, tab: { id: 99 } }, accounts: [{ id: 1, has_duo: true, sessionId: "a".repeat(64) }] });
-    env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = "https://api-test.duosecurity.com";
+    env.setItems([]); env.setOrigin("https://api-test.duosecurity.com"); env.sender.url = env.sender.origin = "https://api-test.duosecurity.com";
     await env.duo.observe({}, env.sender); assert.equal(env.created.length, 0);
 });
 
@@ -221,7 +221,7 @@ test("Duo-hosted challenges can find their enrolled issuer without a remembered 
         const env = environment();
         env.setItems([{ id: 2, has_duo: false }]);
         env.setIssuerItems([{ id: 1, name: "Example University", has_duo: true }]);
-        env.setOrigin(url); env.sender.url = url;
+        env.setOrigin(url); env.sender.url = env.sender.origin = url;
         await env.duo.observe({}, env.sender);
         const allowed = url === "https://api-test.duosecurity.com";
         assert.equal(env.created.length, allowed ? 1 : 0, url);
