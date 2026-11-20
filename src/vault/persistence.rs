@@ -273,6 +273,20 @@ impl VaultStore {
         )
     }
     /// Memory stores keep nothing durable; a detached handle cannot be written.
+    /// Confirm a later save could create its replacement file, without
+    /// rewriting the vault: a fresh encryption nonce would change the file
+    /// digest and make cloud sync see a local edit.
+    pub(super) fn check_writable(&self) -> Result<(), VaultError> {
+        match self {
+            Self::Memory => Ok(()),
+            Self::Detached => Err(VaultError::Persistence("vault has no durable store".into())),
+            Self::File { directory, .. } => run_blocking_io(|| {
+                NamedTempFile::new_in(directory).map(drop).map_err(|e| {
+                    VaultError::Persistence(format!("vault directory is not writable: {e}"))
+                })
+            }),
+        }
+    }
     fn persist(
         &self,
         data: &VaultData,
