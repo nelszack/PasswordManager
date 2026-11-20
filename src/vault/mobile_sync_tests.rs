@@ -21,6 +21,8 @@ struct Peer {
     url: String,
     state: Arc<Mutex<Remote>>,
     stopped: Arc<AtomicBool>,
+    /// Requests read so far, counted before the peer locks its state.
+    requests: Arc<std::sync::atomic::AtomicUsize>,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Drop for Peer {
@@ -40,6 +42,8 @@ impl Peer {
         let stopped = Arc::new(AtomicBool::new(false));
         let data = state.clone();
         let stop = stopped.clone();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = requests.clone();
         let thread = thread::spawn(move || {
             for connection in socket.incoming() {
                 if stop.load(Ordering::SeqCst) {
@@ -71,6 +75,7 @@ impl Peer {
                     .unwrap_or(0);
                 let mut body = vec![0; length];
                 stream.read_exact(&mut body).unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
                 let mut remote = data.lock().unwrap();
                 let (code, response) = match method {
                     "HEAD" | "GET" if remote.version == 0 => (404, vec![]),
@@ -119,10 +124,14 @@ impl Peer {
             url,
             state,
             stopped,
+            requests,
             thread: Some(thread),
         }
     }
     fn call(&self, api: &mut MobileVault, op: &str, extra: Value) -> Result<Value, String> {
+        self.call_shared(api, op, extra)
+    }
+    fn call_shared(&self, api: &MobileVault, op: &str, extra: Value) -> Result<Value, String> {
         let mut request = json!({"op":op,"server":self.url,"token":"1".repeat(64)});
         for (k, v) in extra.as_object().unwrap() {
             request[k] = v.clone();
@@ -260,4 +269,52 @@ fn network_waits_release_the_vault_and_the_lock_signal_interrupts_them() {
     assert!(api.call(r#"{"op":"status"}"#).is_err());
     api.call(r#"{"op":"lock"}"#).unwrap();
     assert_eq!(api.call(r#"{"op":"status"}"#).unwrap()["unlocked"], false);
+}
+
+#[test]
+fn background_syncs_finish_their_upload_after_the_app_locks() {
+    static CANCEL: Cancellation = Cancellation::new();
+    let peer = Peer::start();
+    let directory = tempfile::tempdir().unwrap();
+    let mut api = MobileVault::new(directory.path().into()).unwrap();
+    api.set_cancellation(&CANCEL);
+    let created = api
+        .call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+        .unwrap();
+    save(
+        &mut api,
+        "Example",
+        "alice",
+        "secret",
+        "https://example.com",
+    )
+    .unwrap();
+    let held = peer.state.lock().unwrap();
+    let api = &api;
+    thread::scope(|scope| {
+        let syncing = scope
+            .spawn(|| peer.call_shared(api, "sync", json!({"background":true,"if_enabled":true})));
+        // Wait until the snapshot was taken and the request reached the peer.
+        while peer.requests.load(Ordering::SeqCst) == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+        CANCEL.signal();
+        api.call(r#"{"op":"lock"}"#).unwrap();
+        drop(held);
+        assert_eq!(syncing.join().unwrap().unwrap()["synced"], true);
+    });
+    assert_eq!(peer.state.lock().unwrap().version, 1);
+    // A sync started after the lock is refused rather than run without a session.
+    assert!(
+        peer.call_shared(api, "sync", json!({"background":true}))
+            .is_err()
+    );
+    let id = created["vault"].as_str().unwrap();
+    assert!(
+        directory
+            .path()
+            .join(id)
+            .with_extension("sync.json")
+            .exists()
+    );
 }

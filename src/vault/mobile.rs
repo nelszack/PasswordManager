@@ -141,6 +141,11 @@ enum Request {
         /// instead of failing, so background syncs need no status read first.
         #[serde(default)]
         if_enabled: bool,
+        /// A follow-up sync after a change. It runs to completion even if the
+        /// app locks meanwhile: it can upload only the encrypted snapshot taken
+        /// while unlocked, and its apply step still needs that same session.
+        #[serde(default)]
+        background: bool,
     },
     SyncStatus,
     SyncCheck {
@@ -443,6 +448,18 @@ impl MobileVault {
             self.lock();
             return Err(LOCKED.into());
         }
+        // A background sync is not interrupted by the lock signal (see `Sync`).
+        let ticket = if matches!(
+            request,
+            Request::Sync {
+                background: true,
+                ..
+            }
+        ) {
+            Ticket::new(None)
+        } else {
+            ticket
+        };
         let opens_session = request.opens_session();
         let adoptions = self.state().adoptions;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -516,6 +533,7 @@ impl MobileVault {
                 server,
                 token,
                 if_enabled,
+                ..
             } => {
                 if if_enabled && !self.state().sync_enabled()? {
                     return Ok(json!({
