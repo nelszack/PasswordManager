@@ -87,12 +87,11 @@ jobs:
           key: fuzz-corpus-v1-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-v1-${{ matrix.target }}-
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
-        with:
-          tool: cargo-fuzz@0.13.2
-          # Not in install-action's own manifest: cargo-binstall fetches the
-          # rust-fuzz/cargo-fuzz release binary instead of compiling per leg.
-          fallback: cargo-binstall
+        # Built from crates.io (checksummed) rather than the release binary:
+        # that binary is a musl build and defaults fuzz builds to the musl
+        # target, which has no sanitizer support. rust-cache keeps ~/.cargo/bin,
+        # so a cached copy of this version is reused instead of recompiled.
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Verify fuzz dependency lockfile
         run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
       - name: Seed corpus
