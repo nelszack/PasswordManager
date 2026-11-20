@@ -270,6 +270,17 @@ fn one(response: RpcResponse) -> outcome::CommandOutcome {
     }
 }
 
+/// Stores `value` and wakes receivers only when it differs from the current one.
+fn publish<T: PartialEq>(sender: &watch::Sender<T>, value: T) {
+    sender.send_if_modified(|current| {
+        let changed = *current != value;
+        if changed {
+            *current = value;
+        }
+        changed
+    });
+}
+
 #[derive(Clone)]
 pub(super) struct VaultWorker {
     normal: mpsc::Sender<Job>,
@@ -279,8 +290,8 @@ pub(super) struct VaultWorker {
     cloud_warning: Arc<Mutex<Option<String>>>,
 }
 impl VaultWorker {
-    /// Session and vault-revision receivers. The worker publishes after every
-    /// job, so subscribers compare values instead of reacting to each wake.
+    /// Session and vault-revision receivers. The worker notifies only when a
+    /// value changes; warnings are observed by subscribers' periodic checks.
     pub(super) fn changes(
         &self,
     ) -> (
@@ -313,11 +324,11 @@ impl VaultWorker {
                             current.clear_results();
                             (current,result)
                         }).await;
-                        let Ok((returned,result))=result else { locked_tx.send_replace(None); break };
+                        let Ok((returned,result))=result else { publish(&locked_tx, None); break };
                         owner=Some(returned);
                         let warning=result.err().map(|e|format!("Automatic lock cleanup warning: {e}"));
                         *background.lock().await=warning;
-                        locked_tx.send_replace(None);
+                        publish(&locked_tx, None);
                         deadline=None;
                         continue;
                     },
@@ -340,12 +351,15 @@ impl VaultWorker {
                         ResponseCode::Failure,
                         "Vault worker failed; session discarded",
                     )));
-                    locked_tx.send_replace(None);
+                    publish(&locked_tx, None);
                     break;
                 };
-                revision_tx.send_replace(returned.session.vault().map(Vault::vault_revision));
+                publish(
+                    &revision_tx,
+                    returned.session.vault().map(Vault::vault_revision),
+                );
                 let locked = returned.session.is_locked();
-                locked_tx.send_replace(returned.session.session_id());
+                publish(&locked_tx, returned.session.session_id());
                 owner = Some(returned);
                 if locked {
                     deadline = None;
@@ -592,6 +606,25 @@ mod tests {
         assert!(!worker.is_locked());
     }
 
+    #[tokio::test]
+    async fn status_receivers_wake_only_when_session_or_revision_changes() {
+        let worker = VaultWorker::start(
+            live(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(None)),
+        );
+        let (mut sessions, mut revisions) = worker.changes();
+        sessions.mark_unchanged();
+        revisions.mark_unchanged();
+        worker.with_session(|_| ()).await.unwrap();
+        assert!(!sessions.has_changed().unwrap());
+        assert!(!revisions.has_changed().unwrap());
+        worker.with_session(VaultSession::lock).await.unwrap();
+        assert!(sessions.has_changed().unwrap());
+        assert!(revisions.has_changed().unwrap());
+        assert_eq!(*sessions.borrow_and_update(), None);
+        assert_eq!(*revisions.borrow_and_update(), None);
+    }
     #[tokio::test]
     async fn lock_deadline_is_not_extended_by_passive_jobs() {
         let worker = worker();
