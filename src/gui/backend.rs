@@ -615,13 +615,40 @@ pub(super) fn status_events(
     client.token_path = source.token_path.clone();
     iced::stream::channel(16, async move |output| {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || forward_status_events(&client, output, &stopped));
+        let current = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let connection = current.clone();
+        std::thread::spawn(move || forward_status_events(&client, output, &stopped, &connection));
         // Iced drops this future when the subscription ends (reconnect, token
-        // path change, server stop). That drops `stop`, which wakes the thread
-        // from its reconnect backoff at once instead of after the full delay.
-        let _stop = stop;
+        // path change, server stop). The guard then drops `stop`, which wakes
+        // the thread from its reconnect backoff, and closes the open connection,
+        // which wakes a blocked read, so the thread exits at once.
+        let _guard = SubscriptionGuard {
+            _stop: stop,
+            current,
+        };
         std::future::pending::<()>().await
     })
+}
+
+type CurrentConnection =
+    std::sync::Arc<std::sync::Mutex<Option<password_manager::client::StatusEventsShutdown>>>;
+
+struct SubscriptionGuard {
+    _stop: std::sync::mpsc::Sender<()>,
+    current: CurrentConnection,
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            connection.shutdown();
+        }
+    }
 }
 
 /// True once the subscription was dropped: its stop sender or output receiver is gone.
@@ -636,17 +663,25 @@ fn subscription_ended(
         )
 }
 
-/// Forward pushed status until the subscription is dropped. A blocked read is
-/// bounded by the server's 20-second heartbeat; every record and reconnect
-/// attempt first checks whether anyone still listens.
+/// Forward pushed status until the subscription is dropped. Dropping it closes
+/// the open connection (see [`SubscriptionGuard`]); every record and reconnect
+/// attempt also checks whether anyone still listens.
 fn forward_status_events(
     client: &AuthenticatedClient,
     mut output: iced::futures::channel::mpsc::Sender<super::Message>,
     stopped: &std::sync::mpsc::Receiver<()>,
+    current: &CurrentConnection,
 ) {
     let mut retry = std::time::Duration::from_secs(2);
     while !subscription_ended(&output, stopped) {
         if let Ok(mut events) = client.status_events() {
+            *current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = events.shutdown_handle().ok();
+            // The guard may have been dropped before the handle was stored.
+            if subscription_ended(&output, stopped) {
+                return;
+            }
             while events.recv().is_ok() {
                 if subscription_ended(&output, stopped) {
                     return;
@@ -693,7 +728,7 @@ mod status_event_tests {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let (done, finished) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            forward_status_events(&client, output, &stopped);
+            forward_status_events(&client, output, &stopped, &CurrentConnection::default());
             done.send(()).unwrap();
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
