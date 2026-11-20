@@ -128,7 +128,8 @@ impl App {
                     let editing = action.is_edit();
                     draft.secret_editor.perform(action);
                     if editing {
-                        draft.password = draft.secret_editor.text().into();
+                        let value = draft.secret_editor.text().into();
+                        draft.set_password(value);
                         draft.dirty = true;
                     }
                 }
@@ -154,7 +155,7 @@ impl App {
             }
             Message::Password(value) => {
                 if let Some(draft) = self.editor.as_mut() {
-                    draft.password = value;
+                    draft.set_password(value);
                     draft.replace_password = true;
                     draft.dirty = true;
                 }
@@ -169,7 +170,7 @@ impl App {
                 if let Some(draft) = self.editor.as_mut() {
                     draft.replace_password = value;
                     if !value {
-                        draft.password.zeroize();
+                        draft.clear_password();
                         draft.secret_editor = text_editor::Content::new();
                     }
                     draft.dirty = true;

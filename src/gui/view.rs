@@ -79,8 +79,7 @@ pub(super) fn tab_style(
 }
 
 /// Four-segment strength bar with a text rating, so color is never the only cue.
-pub(super) fn strength_meter<'a>(secret: &str) -> Element<'a, Message> {
-    let (score, rating) = password_manager::password::strength_rating(secret);
+pub(super) fn strength_meter<'a>((score, rating): model::Strength) -> Element<'a, Message> {
     let filled = usize::from(score.max(1));
     let mut bars = row![].spacing(4);
     for index in 0..4 {
@@ -1451,9 +1450,10 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
                 entry = entry.push(action("Generate", Message::Generate, enabled).padding([9, 10]));
             }
             secret = secret.push(entry);
-            if matches!(draft.kind, ItemKind::Login | ItemKind::Wifi) && !draft.password.is_empty()
+            if matches!(draft.kind, ItemKind::Login | ItemKind::Wifi)
+                && let Some(strength) = draft.password_strength
             {
-                secret = secret.push(strength_meter(draft.password.expose()));
+                secret = secret.push(strength_meter(strength));
             }
         }
         if matches!(draft.kind, ItemKind::SshKey | ItemKind::SecureNote) {
@@ -1970,7 +1970,10 @@ fn generator(app: &App) -> Element<'_, Message> {
                 text_input("Generated value", app.generation.value.expose())
                     .secure(!app.generation.value.visible())
                     .padding(12),
-                strength_meter(app.generation.value.expose()),
+                app.generation
+                    .value
+                    .strength()
+                    .map_or_else(|| column![].into(), strength_meter),
                 row![
                     primary(
                         "Copy",

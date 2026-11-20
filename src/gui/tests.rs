@@ -2101,3 +2101,33 @@ fn idle_ticks_follow_the_status_cadence_and_ignore_status_requests() {
     app.generation.value = "counting down".into();
     assert_eq!(app.tick_interval(), Duration::from_secs(1));
 }
+
+#[test]
+fn strength_is_scored_when_the_secret_changes_not_when_drawn() {
+    let mut app = unlocked();
+    assert_eq!(app.editor.as_ref().unwrap().password_strength, None);
+    let _ = app.update(Message::Password("correct horse battery staple 42!".into()));
+    let draft = app.editor.as_ref().unwrap();
+    assert_eq!(
+        draft.password_strength,
+        Some(password_manager::password::strength_rating(
+            "correct horse battery staple 42!"
+        ))
+    );
+    let _ = app.update(Message::ReplacePassword(false));
+    assert_eq!(app.editor.as_ref().unwrap().password_strength, None);
+    let _ = app.update(Message::Password("a".into()));
+    assert_eq!(
+        app.editor.as_ref().unwrap().password_strength,
+        Some((0, "Very weak"))
+    );
+
+    let generated = GeneratedSecret::from("generated-secret");
+    assert_eq!(
+        generated.strength(),
+        Some(password_manager::password::strength_rating(
+            "generated-secret"
+        ))
+    );
+    assert_eq!(GeneratedSecret::default().strength(), None);
+}

@@ -1,5 +1,5 @@
 //! State owned by one desktop workflow, independent of presentation flags.
-use super::{Draft, ItemDetail, Navigate, SecretString};
+use super::{Draft, ItemDetail, Navigate, SecretString, model::Strength};
 use password_manager::protocol::OperationReceipt;
 use std::time::{Duration, Instant};
 
@@ -136,16 +136,26 @@ pub(super) enum GeneratedSecret {
     Empty,
     Ready {
         value: SecretString,
+        /// Scored once on creation so redraws never rerun the estimator.
+        strength: Strength,
         until: Instant,
         visible: bool,
     },
 }
+
 impl GeneratedSecret {
     pub fn new(value: SecretString) -> Self {
         Self::Ready {
+            strength: password_manager::password::strength_rating(value.expose()),
             value,
             until: Instant::now() + Duration::from_secs(60),
             visible: false,
+        }
+    }
+    pub fn strength(&self) -> Option<Strength> {
+        match self {
+            Self::Empty => None,
+            Self::Ready { strength, .. } => Some(*strength),
         }
     }
     pub fn expose(&self) -> &str {
