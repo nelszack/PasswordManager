@@ -373,6 +373,24 @@ test.describe("extended credential flows", () => {
         expect(updateRequest.entryId).toBe(7);
     });
 
+    test("updating another account from an unmatched username keeps that account's username", async () => {
+        await page.goto(`${origin}/simple`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await page.locator("#username").fill("carol@example.com");
+        await page.locator("#password").fill("carol-password");
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
+        await expect(prompt.locator("#status")).toContainText("No saved account has this username");
+        await expect(prompt.locator("#update")).toHaveText("Update “Alice”");
+        await expect(prompt.locator("#updateNote")).toHaveText(
+            "Updating “Alice” changes only its password and keeps the username “alice@example.com”."
+        );
+        await prompt.locator("#update").click();
+        const update = await waitForNativeRequest(browser.nativeLog, request =>
+            request.action === "updateCredentials" && request.password === "carol-password"
+        );
+        expect(update).toMatchObject({ entryId: 7, username: "alice@example.com" });
+    });
+
     test("TOTP is fetched only after secure picker selection", async () => {
         await page.goto(`${origin}/totp`);
         const totpPicker = await openPicker(browser.context,

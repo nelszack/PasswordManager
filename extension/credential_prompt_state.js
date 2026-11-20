@@ -47,6 +47,14 @@
             : validAccounts.length
               ? "No saved account has this username. Update an existing account or save a new one."
               : "Would you like to save these credentials?";
+        const targetUsername = updateTarget ? accountUsername(updateTarget) : "";
+        // Updating a different account replaces only its password. Say so, because
+        // the captured username is hidden and would otherwise look like it applies.
+        const updateNote =
+            updateTarget && username && targetUsername !== username
+                ? `Updating “${String(updateTarget.name || targetUsername || "this login")}” changes only its password` +
+                  (targetUsername ? ` and keeps the username “${targetUsername}”.` : ".")
+                : "";
         return {
             message,
             site,
@@ -54,11 +62,13 @@
             suggestedName,
             username: String(username || ""),
             askForUsername: !username,
+            updateNote,
             updateTarget: updateTarget
                 ? {
                       id: updateTarget.id,
                       ...(updateTarget.revision === undefined ? {} : { revision: updateTarget.revision }),
                       name: String(updateTarget.name || ""),
+                      username: targetUsername,
                   }
                 : null,
         };
@@ -86,6 +96,12 @@
                 throw new Error("No credential is available to update");
             }
             delete fields.name;
+            // Keep the target's stored username unless the user explicitly entered
+            // a different one; a captured username for another account must never
+            // silently rename the account being updated.
+            const targetUsername = pending.data.updateTarget.username;
+            const captured = String(pending.username || "").trim();
+            if (typeof targetUsername === "string" && username === captured) fields.username = targetUsername;
             fields.entryId = entryId;
             fields.expectedRevision = pending.data.updateTarget.revision;
         }

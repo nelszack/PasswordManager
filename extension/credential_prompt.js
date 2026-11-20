@@ -6,6 +6,7 @@ const nameInput = document.getElementById("name");
 const usernameInput = document.getElementById("username");
 const usernameLabel = document.getElementById("usernameLabel");
 const updateButton = document.getElementById("update");
+const updateNote = document.getElementById("updateNote");
 let completing = false;
 let uncertain = false;
 
@@ -64,6 +65,8 @@ async function load() {
     if (data.updateTarget?.name) {
         updateButton.textContent = `Update “${data.updateTarget.name}”`;
     }
+    updateNote.textContent = data.updateNote || "";
+    updateNote.hidden = !data.hasAccounts || !data.updateNote;
     form.hidden = false;
     (data.askForUsername ? usernameInput : nameInput).focus();
 }

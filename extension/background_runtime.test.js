@@ -334,7 +334,7 @@ test("automatic prompts use summaries and never compare unselected vault passwor
         const sender = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "credential_prompt.html") };
         const data = await env.message({ action: "getCredentialPromptData", token: result.token }, sender);
         assert.equal(JSON.stringify(data).includes(password), false);
-        assert.deepEqual(JSON.parse(JSON.stringify(data.data.updateTarget)), { id: 1, revision: 1, name: "Personal" });
+        assert.deepEqual(JSON.parse(JSON.stringify(data.data.updateTarget)), { id: 1, revision: 1, name: "Personal", username: "alice" });
     }
     for (const response of [{ success: false, error: "Not found." }, { success: true, data: [] }]) {
         const env = securityEnvironment(); env.setCredentialResponse(response);

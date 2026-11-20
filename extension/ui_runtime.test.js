@@ -183,7 +183,7 @@ async function credentialPromptEnvironment(responses = {}) {
         ...responses
     });
     const env = environment([
-        "credentials", "site", "status", "name", "username", "usernameLabel", "reviewOutcome", "add", "update", "cancel", "never"
+        "credentials", "site", "status", "name", "username", "usernameLabel", "updateNote", "reviewOutcome", "add", "update", "cancel", "never"
     ], responses, "?token=prompt-token");
     execute("credential_prompt.js", env.context);
     await settle();
@@ -194,10 +194,25 @@ test("credential prompt runtime renders metadata and submits only trusted action
     const env = await credentialPromptEnvironment();
     assert.equal(env.elements.credentials.hidden, false);
     assert.equal(env.elements.update.textContent, "Update “Personal”");
+    assert.equal(env.elements.updateNote.hidden, true);
     env.elements.update.dispatch("click", { isTrusted: true });
     await settle();
     assert.equal(env.context.closed, true);
     assert.equal(env.messages.at(-1).selection.action, "update");
+});
+
+test("credential prompt explains that updating another account keeps its username", async () => {
+    const env = await credentialPromptEnvironment({
+        getCredentialPromptData: { success: true, data: {
+            site: "https://example.com", message: "No saved account has this username.", suggestedName: "Alice",
+            username: "bob", askForUsername: false, hasAccounts: true,
+            updateTarget: { name: "Alice", username: "alice" },
+            updateNote: "Updating “Alice” changes only its password and keeps the username “alice”."
+        } }
+    });
+    assert.equal(env.elements.updateNote.hidden, false);
+    assert.match(env.elements.updateNote.textContent, /keeps the username “alice”/);
+    assert.equal(env.elements.username.hidden, true);
 });
 
 test("credential prompt disables writes after an uncertain save and still allows dismissal", async () => {
