@@ -101,20 +101,9 @@ impl Vault {
             .checked_add(1)
             .ok_or_else(|| VaultError::InvalidInput("HOTP counter exhausted".into()))?;
         let code = Zeroizing::new(hotp.generate(counter).to_string());
-        let mut url =
-            url::Url::parse(&a.configuration).map_err(|e| VaultError::Validation(e.to_string()))?;
-        let pairs = Zeroizing::new(
-            url.query_pairs()
-                .filter(|(k, _)| k != "counter")
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect::<Vec<_>>(),
-        );
-        url.query_pairs_mut()
-            .clear()
-            .extend_pairs(pairs.iter())
-            .append_pair("counter", &next.to_string());
+        let mut updated = hotp_configuration_with_counter(&a.configuration, next)?;
         let mut configuration = a.clone();
-        configuration.configuration = url.to_string().into();
+        configuration.configuration = std::mem::take(&mut *updated).into();
         if let AuthenticatorState::Hotp { counter, .. } = &mut configuration.state {
             *counter = next;
         }
@@ -131,6 +120,41 @@ impl Vault {
         })
     }
 }
+/// The HOTP URI with its counter replaced by `counter` and every other
+/// parameter kept, serialized as `url::Url` would. Only the label prefix is
+/// parsed as a URL: the query holding the secret is decoded and re-encoded
+/// into wiped buffers sized so they never reallocate.
+fn hotp_configuration_with_counter(
+    configuration: &str,
+    counter: u64,
+) -> Result<Zeroizing<String>, VaultError> {
+    // Validated configurations have no credentials or fragment, so the
+    // first `?` starts the query.
+    let (prefix, query) = configuration.split_once('?').unwrap_or((configuration, ""));
+    // An empty query keeps trailing label characters internal, so they are
+    // encoded exactly as in the full URI rather than trimmed.
+    let prefix = url::Url::parse(&format!("{prefix}?"))
+        .map_err(|e| VaultError::Validation(e.to_string()))?;
+    let pairs = Zeroizing::new(
+        url::form_urlencoded::parse(query.as_bytes())
+            .filter(|(k, _)| k != "counter")
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect::<Vec<_>>(),
+    );
+    // Percent-encoding at most triples each byte.
+    let mut serialized = Zeroizing::new(String::with_capacity(
+        prefix.as_str().len() + query.len().saturating_mul(3) + 32,
+    ));
+    serialized.push_str(prefix.as_str());
+    let start = serialized.len();
+    let mut query =
+        url::form_urlencoded::Serializer::for_suffix(std::mem::take(&mut *serialized), start);
+    query
+        .extend_pairs(pairs.iter())
+        .append_pair("counter", &counter.to_string());
+    Ok(Zeroizing::new(query.finish()))
+}
+
 pub(super) fn is_otpauth_uri(value: &str) -> bool {
     value
         .get(.."otpauth://".len())
@@ -321,5 +345,65 @@ pub(super) fn parse_totp_configuration(value: &str) -> Result<Totp, VaultError> 
         let secret = TotpSecret::try_from_base32(value)
             .map_err(|error| format!("invalid Base32 TOTP secret: {error}"))?;
         compatible_totp_from_secret(secret)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The previous implementation, which round-tripped the secret through
+    /// `url::Url`: the replacement must serialize identically.
+    fn through_url(configuration: &str, counter: u64) -> String {
+        let mut url = url::Url::parse(configuration).unwrap();
+        let pairs = url
+            .query_pairs()
+            .filter(|(k, _)| k != "counter")
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect::<Vec<_>>();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(pairs.iter())
+            .append_pair("counter", &counter.to_string());
+        url.to_string()
+    }
+
+    #[test]
+    fn hotp_counter_rewrite_matches_url_serialization() {
+        for configuration in [
+            "otpauth://hotp/Duo?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+            "otpauth://hotp/Duo?counter=7&secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8",
+            "OTPAUTH://HOTP/Example%20Co:alice%40example.com?secret=GEZDGNBVGY3TQOJQ\
+             &issuer=Example+Co&counter=12&algorithm=SHA256",
+            "otpauth://hotp/caf\u{e9} label?issuer=Caf\u{e9} \"Q\"&secret=GEZDGNBVGY3TQOJQ\
+             &counter=3&note=a%2Bb%26c&flag&&empty=",
+            "otpauth://hotp/odd%zz?secret=GEZDGNBVGY3TQOJQ&counter=1&pct=100%&tilde=~*'()",
+            "otpauth://hotp/trailing space ?secret=GEZDGNBVGY3TQOJQ&counter=5",
+        ] {
+            for counter in [0, 1, 42, u64::MAX] {
+                assert_eq!(
+                    hotp_configuration_with_counter(configuration, counter)
+                        .unwrap()
+                        .as_str(),
+                    through_url(configuration, counter),
+                    "{configuration}"
+                );
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn hotp_counter_rewrite_matches_url_serialization_for_any_query(
+            label in "[a-zA-Z0-9 %:@.\u{e9}-]{1,16}",
+            query in "[ -\"$-~\u{e9}\u{1f510}]{0,48}",
+            counter: u64,
+        ) {
+            // Stored configurations are trimmed and contain no fragment.
+            let configuration = format!("otpauth://hotp/{label}?{query}");
+            proptest::prop_assume!(configuration.trim() == configuration);
+            let rewritten = hotp_configuration_with_counter(&configuration, counter).unwrap();
+            proptest::prop_assert_eq!(rewritten.as_str(), through_url(&configuration, counter));
+        }
     }
 }
