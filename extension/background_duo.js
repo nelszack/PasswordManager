@@ -4,7 +4,11 @@ const PasswordManagerBackgroundDuo = {
             tokens = new Map(),
             windows = new Map(),
             recentLogins = new Map(),
-            observers = new Map();
+            observers = new Map(),
+            // Documents whose origins have no Duo-enrolled login. Their content
+            // loop keeps reporting challenges; skip repeated vault lookups.
+            unenrolled = new Map();
+        const unenrolledLifetime = 60_000;
         let generation = 0;
         const lifetime = 5 * 60_000;
         const keyFor = sender => JSON.stringify([sender.tab.id, sender.frameId, sender.documentId]);
@@ -17,6 +21,8 @@ const PasswordManagerBackgroundDuo = {
                 .filter(item => item.has_duo === true && Number.isSafeInteger(item.id) && item.id > 0)
                 .map(({ id, name, sessionId }) => ({ id, name: String(name || ""), sessionId }));
             if (!Number.isInteger(sender?.tab?.id)) return;
+            // A new login context can enroll a Duo-hosted page in this tab.
+            for (const key of unenrolled.keys()) if (JSON.parse(key)[0] === sender.tab.id) unenrolled.delete(key);
             if (!items.length) {
                 recentLogins.delete(sender.tab.id);
                 return;
@@ -47,6 +53,7 @@ const PasswordManagerBackgroundDuo = {
             sessions.clear();
             recentLogins.clear();
             tokens.clear();
+            unenrolled.clear();
         }
         async function current(session) {
             if (sessions.get(session.key) !== session || session.expiresAt <= Date.now()) return false;
@@ -119,10 +126,15 @@ const PasswordManagerBackgroundDuo = {
                 !sender.documentId
             )
                 throw new Error("Invalid Duo page request");
+            const key = keyFor(sender);
+            const existing = sessions.get(key);
+            // While a Duo window is open it polls for itself; a failed decision
+            // waits for a new page. Either way the page loop has nothing to add.
+            if (existing && (existing.token || existing.decision.phase === "failed")) return { success: true };
+            if (unenrolled.get(key) > Date.now()) return { success: true };
             const epoch = generation;
             const status = await refreshStatus();
             if (epoch !== generation || !status.native || !status.running || status.locked) return { success: true };
-            const key = keyFor(sender);
             for (const other of sessions.values()) {
                 if (
                     other.tabId === sender.tab.id &&
@@ -182,6 +194,10 @@ const PasswordManagerBackgroundDuo = {
                 }
                 if (!session.items.length) {
                     discard(session);
+                    if (epoch === generation) {
+                        if (unenrolled.size >= 256) unenrolled.delete(unenrolled.keys().next().value);
+                        unenrolled.set(key, Date.now() + unenrolledLifetime);
+                    }
                     return { success: true };
                 }
                 const requests = await poll(session);
