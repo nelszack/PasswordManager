@@ -11,6 +11,11 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
+    ignore:
+      # cosmic-text pins skrifa 0.37; swash accepts 0.31-0.44. Moving skrifa
+      # alone would build a second skrifa/read-fonts/font-types stack. Bump it
+      # together with cosmic-text (and check `cargo tree -d`) instead.
+      - dependency-name: skrifa
     open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions
