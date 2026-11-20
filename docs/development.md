@@ -439,7 +439,9 @@ builds both supported ABIs, runs JVM tests/lint, and uploads a debug APK; it doe
 not run emulator or phone instrumentation tests.
 
 Management widgets live in `MobileUi.kt` and `MobileScaffold.kt`, workflows in
-`ManagementActivity.kt`, and vault/home/settings screens in `MainActivity.kt`.
+`ManagementActivity.kt` and its screen controllers (`DuoScreens.kt`,
+`PreferenceScreens.kt`, `FileScreens.kt`, `CredentialScreens.kt`), and
+vault/home/settings screens in `MainActivity.kt`.
 `FillActivity.kt` retains the separate compact secure autofill sheet. The root
 Rust library owns encryption, validation, persistence, history, import/backup,
 OTP/Duo, sync and passkey rules. Mobile preference defaults/ranges live in
@@ -447,8 +449,10 @@ OTP/Duo, sync and passkey rules. Mobile preference defaults/ranges live in
 
 `SecureActivity` invalidates results on background/lock and captures a screen
 revision so late callbacks cannot replace a newer page. Native cancellation
-bypasses the JNI mutex, interrupts network waits, and returns the owner to locked
-state at a safe boundary. Do not weaken these checks to make a UI test pass.
+bypasses the vault mutex, interrupts network waits, and returns the owner to locked
+state at a safe boundary; only a queued follow-up sync may finish uploading its
+already-encrypted snapshot, and its apply step still needs the original session.
+Do not weaken these checks to make a UI test pass.
 
 The JNI adapter caches its first storage directory for the process lifetime.
 Run each isolated test class in a separate instrumentation process with the

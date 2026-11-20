@@ -50,6 +50,17 @@ Linux shortcuts are platform-specific and do not need mobile equivalents.
 - [x] Unlock, vault selection, search, editing, generator, OTP and explicit lock UI.
 - [x] Backgrounding, screen lock, and inactivity clear the unlocked session, except the bounded same-site grant after a completed autofill handoff described below.
 - [x] Long-running encryption and network operations run off the main thread.
+- [x] Vault state has its own Rust mutex, held only for local steps. Sync, Duo push and
+  breach-check network transfers run between a snapshot/prepare step and an apply step that
+  re-checks the unlock session (and, for sync, the engine's file/checkpoint digest), so they
+  never block autofill or passkey requests. Autofill and credential-provider service requests
+  (including form parsing) use their own thread; asset-link checks use another.
+- [x] Passkey creation and saves from other apps return their result first; a coalescing
+  follow-up sync then runs on a separate thread. It snapshots the encrypted vault while still
+  unlocked and may finish that upload after the app locks; anything it would apply still needs
+  the same unlock session, so a download waits for the next unlock.
+- [ ] Verify on a device that autofill stays responsive during a slow sync and that a
+  follow-up sync after a passkey/password save reaches the server.
 - [x] Import an existing encrypted vault and external key through Android's file picker.
 - [x] Export encrypted backups and inspect all imported item types without data loss.
 
@@ -106,6 +117,11 @@ Linux shortcuts are platform-specific and do not need mobile equivalents.
 - [x] Android 14+ CredentialProviderService supports create/get password and public-key credentials.
 - [x] Obtain the final caller identity from Android; accept delegated browser origins only through a trusted signer allowlist.
 - [x] Validate native app to RP association through Digital Asset Links before passkey creation/use.
+  Verdicts are cached in memory (authorized for an hour, refused for three minutes; network
+  failures are not cached); signer digests are cached until the calling package's version or
+  install/update time changes; the trusted-browser list is parsed once per process.
+- [x] Listing and registration read only passkey identities (never private keys) and skip a
+  damaged record instead of failing; sign-in loads and fully validates only the selected record.
 - [x] User verification and explicit consent precede every passkey operation.
 - [x] Cancellation and excluded/unsupported credentials return the appropriate provider errors.
 - [x] List and delete passkeys without exposing private key material in the normal interface.
@@ -142,6 +158,15 @@ Linux shortcuts are platform-specific and do not need mobile equivalents.
 - [x] Import approvals bind file digest, local revision and policy, and expire when locked or consumed.
 - [x] Document destinations are selected before generating export contents; picker return reauthenticates before unlocked exports.
 - [x] Original-credential-gated credential changes/deletion; rekey preserves a local encrypted recovery copy and disables biometric enrollment through the UI.
+- [x] The rekey recovery copy is a complete vault still encrypted with the **old** password or
+  key file. After the first original-credential unlock with the new credentials, the app offers
+  once to delete it, warning that anyone with the old credentials can open it; Vault
+  credentials → "Delete old-password recovery copies" remains available. Copies made by earlier
+  builds are not attributed to a vault and are left alone. With sync, the server also keeps (by
+  default) two earlier snapshots per vault; ones uploaded before the change stay encrypted with
+  the old credentials until newer uploads replace them, or an administrator removes them.
+- [x] Deleting a local vault also removes its `<vault>.sync.json` checkpoint (server URL and
+  vault ID).
 - [x] Settings persist in app-private storage; auto-lock, clipboard, history and generator use configured values. Trash age-based purging requires an explicit action.
 - [x] Per-vault sync status/check, enable/disable, and comparison downloads; comparison and rekey-recovery copies require explicit sync enabling.
 - [ ] Complete the per-feature hardware and desktop round-trip acceptance in the matrix below.
@@ -365,8 +390,8 @@ including extension coverage, CLI/GUI tests, CLI integration and generated contr
 the final library and Clippy runs include that hardening. Seven Android JVM tests,
 Android lint, fresh ARM64 JNI/APK builds and test-APK packaging passed. The release
 manifest excludes the debug fixtures/provider and keeps Android backups disabled.
-Native lock signaling bypasses the JNI mutex, cancels pending network futures and
-checks cancellation between audit entries; host tests exercise interruption and
+Native lock signaling bypasses the vault mutex, wakes pending network futures through a
+notification (no polling) and checks cancellation between audit entries; host tests exercise interruption and
 session clearing. Remote changes may already have completed when interrupted,
 so uncertain operations must be inspected before retrying.
 

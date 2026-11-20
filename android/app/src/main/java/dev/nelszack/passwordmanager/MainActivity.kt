@@ -279,12 +279,13 @@ open class MainActivity : ManagementActivity() {
             if (settings.getString("server", "").isNullOrBlank()) ""
             else
                 runCatching {
-                    Vault.request("sync", *syncArgs())
-                    "Synchronized"
-                }
+                        val result = Vault.json("sync", *syncArgs(), "if_enabled" to true)
+                        if (result.optBoolean("disabled")) "" else "Synchronized"
+                    }
                     .getOrElse { "Using local vault. Sync pending: ${it.message}" }
         }) { message ->
             items(message = message)
+            offerRecoveryCleanup()
         }
     }
 
