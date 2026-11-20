@@ -22,7 +22,6 @@ const KDF_KEYFILE: u8 = 0;
 const KDF_ARGON2ID: u8 = 1;
 const HEADER_LEN: usize = 8 + 1 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
 pub(crate) const ENCRYPTED_FILE_OVERHEAD: usize = HEADER_LEN + 16;
-const SALT_CONTEXT: &str = "vault-password-salt-v1";
 
 #[derive(Clone, Copy)]
 pub(crate) struct KdfParameters {
@@ -224,34 +223,20 @@ fn master_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
 fn master_key_from_keyfile(keyfile_bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(keyfile_bytes).as_bytes()
 }
-pub fn try_gen_master_key(key_pass: &mut PasswordType, new: bool) -> Result<[u8; 32], String> {
-    let key = match key_pass {
-        PasswordType::Key(key) => {
-            let file_path = if new {
-                new_key_file_path(key)?
-            } else {
-                key_file_path(key)?
-            };
-            if new {
-                let bytes = Zeroizing::new(generate_key(&file_path)?);
-                master_key_from_keyfile(&*bytes)
-            } else {
-                let bytes = read_bounded_file(&file_path, MAX_KEY_FILE_BYTES)
-                    .map_err(|e| format!("could not read key file {}: {e}", file_path.display()))?;
-                master_key_from_keyfile(&bytes)
-            }
-        }
-        PasswordType::Password(pass) => master_key_from_password(
-            pass,
-            &blake3::derive_key(SALT_CONTEXT, pass.as_bytes())[..SALT_LEN],
-        ),
-    };
-    Ok(key)
-}
-
-#[cfg(test)]
-pub fn gen_master_key(key_pass: &mut PasswordType, new: bool) -> [u8; 32] {
-    try_gen_master_key(key_pass, new).expect("could not derive master key")
+/// Master key from the key file at `key` (resolved under the data directory).
+/// With `new`, a fresh random key file is created there first. Passwords are
+/// derived only with a vault's own random salt; see [`encryption_master`].
+pub fn try_keyfile_master_key(key: &str, new: bool) -> Result<[u8; 32], String> {
+    if new {
+        let file_path = new_key_file_path(key)?;
+        let bytes = Zeroizing::new(generate_key(&file_path)?);
+        Ok(master_key_from_keyfile(&*bytes))
+    } else {
+        let file_path = key_file_path(key)?;
+        let bytes = read_bounded_file(&file_path, MAX_KEY_FILE_BYTES)
+            .map_err(|e| format!("could not read key file {}: {e}", file_path.display()))?;
+        Ok(master_key_from_keyfile(&bytes))
+    }
 }
 
 fn encryption_key_from_master(master_key: &[u8; 32]) -> [u8; 32] {
@@ -264,13 +249,12 @@ pub(crate) fn credentials_from_keyfile_bytes(
     encrypted: &[u8],
     bytes: &[u8],
 ) -> Result<VaultCredentials, String> {
-    validate_vault_header(encrypted)?;
-    if encrypted[9] != KDF_KEYFILE || bytes.is_empty() || bytes.len() > MAX_KEY_FILE_BYTES as usize
-    {
+    let header = VaultHeader::parse(encrypted)?;
+    if header.kdf != KDF_KEYFILE || bytes.is_empty() || bytes.len() > MAX_KEY_FILE_BYTES as usize {
         return Err("This vault does not accept the supplied key file".into());
     }
     let master = Zeroizing::new(master_key_from_keyfile(bytes));
-    cached_credentials(encrypted, encryption_key_from_master(&master))
+    Ok(header.session(encryption_key_from_master(&master)))
 }
 
 /// New sandboxed vault/key change from document-picker key bytes; no filesystem path.
@@ -294,32 +278,21 @@ pub(crate) fn new_keyfile_credentials(bytes: &[u8]) -> Result<VaultCredentials, 
 /// unlocking does not read and hash the key file a second time. Returns
 /// `None` when the vault is not protected by a key file.
 pub(crate) fn keyfile_session(encrypted: &[u8], master: &[u8; 32]) -> Option<VaultCredentials> {
-    validate_vault_header(encrypted).ok()?;
-    if encrypted[9] != KDF_KEYFILE {
-        return None;
-    }
-    cached_credentials(encrypted, encryption_key_from_master(master)).ok()
+    let header = VaultHeader::parse(encrypted).ok()?;
+    (header.kdf == KDF_KEYFILE).then(|| header.session(encryption_key_from_master(master)))
 }
 
 pub(crate) fn cached_credentials(
     encrypted: &[u8],
     encryption_key: [u8; 32],
 ) -> Result<VaultCredentials, String> {
-    validate_vault_header(encrypted)?;
-    Ok(VaultCredentials::Session {
-        encryption_key,
-        salt: encrypted[22..38].try_into().map_err(|_| "Invalid salt")?,
-        kdf: encrypted[9],
-        memory_kib: u32::from_be_bytes(encrypted[10..14].try_into().map_err(|_| "Invalid KDF")?),
-        iterations: u32::from_be_bytes(encrypted[14..18].try_into().map_err(|_| "Invalid KDF")?),
-        parallelism: u32::from_be_bytes(encrypted[18..22].try_into().map_err(|_| "Invalid KDF")?),
-    })
+    Ok(VaultHeader::parse(encrypted)?.session(encryption_key))
 }
 
-fn encryption_master(key_pass: &mut PasswordType, salt: &[u8]) -> Result<[u8; 32], String> {
+fn encryption_master(key_pass: &PasswordType, salt: &[u8]) -> Result<[u8; 32], String> {
     match key_pass {
         PasswordType::Password(pass) => Ok(master_key_from_password(pass, salt)),
-        PasswordType::Key(_) => try_gen_master_key(key_pass, false),
+        PasswordType::Key(key) => try_keyfile_master_key(key, false),
     }
 }
 
@@ -456,80 +429,113 @@ pub fn encrypt_file(key_pass: &mut VaultCredentials, plaintext: &[u8]) -> Vec<u8
     try_encrypt_file(key_pass, plaintext).expect("could not encrypt vault")
 }
 
-/// Inspect untrusted format metadata without running the password KDF.
-pub fn validate_vault_header(encrypted: &[u8]) -> Result<(), &'static str> {
-    if encrypted.len() < HEADER_LEN + 16 || !encrypted.starts_with(VAULT_MAGIC) {
-        return Err("invalid or truncated encrypted vault header");
-    }
-    if encrypted[8] != VAULT_VERSION {
-        return Err("unsupported encrypted vault version");
-    }
-    let memory = u32::from_be_bytes(encrypted[10..14].try_into().unwrap());
-    let iterations = u32::from_be_bytes(encrypted[14..18].try_into().unwrap());
-    let parallelism = u32::from_be_bytes(encrypted[18..22].try_into().unwrap());
-    if !matches!(encrypted[9], KDF_KEYFILE | KDF_ARGON2ID)
-        || !(8 * 1024..=1024 * 1024).contains(&memory)
-        || !(1..=10).contains(&iterations)
-        || !(1..=16).contains(&parallelism)
-    {
-        return Err("unsupported or unsafe vault KDF parameters");
-    }
-    Ok(())
+/// The authenticated vault header: magic, version, KDF parameters, salt, and
+/// nonce, followed by the ciphertext and tag. Parsing validates untrusted
+/// metadata without running the password KDF.
+struct VaultHeader<'a> {
+    kdf: u8,
+    parameters: KdfParameters,
+    salt: [u8; SALT_LEN],
+    nonce: XNonce,
+    /// The complete header, authenticated as associated data.
+    header: &'a [u8],
+    ciphertext: &'a [u8],
 }
-
-pub fn decrypt_file(key_pass: &mut VaultCredentials, encrypted: &[u8]) -> Option<Vec<u8>> {
-    if validate_vault_header(encrypted).is_err() {
-        return None;
+impl<'a> VaultHeader<'a> {
+    fn parse(encrypted: &'a [u8]) -> Result<Self, &'static str> {
+        if encrypted.len() < HEADER_LEN + 16 || !encrypted.starts_with(VAULT_MAGIC) {
+            return Err("invalid or truncated encrypted vault header");
+        }
+        if encrypted[8] != VAULT_VERSION {
+            return Err("unsupported encrypted vault version");
+        }
+        let (header, ciphertext) = encrypted.split_at(HEADER_LEN);
+        let word = |at: usize| {
+            u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
+        let parameters = KdfParameters {
+            memory_kib: word(10),
+            iterations: word(14),
+            parallelism: word(18),
+        };
+        let kdf = header[9];
+        if !matches!(kdf, KDF_KEYFILE | KDF_ARGON2ID)
+            || !(8 * 1024..=1024 * 1024).contains(&parameters.memory_kib)
+            || !(1..=10).contains(&parameters.iterations)
+            || !(1..=16).contains(&parameters.parallelism)
+        {
+            return Err("unsupported or unsafe vault KDF parameters");
+        }
+        let (salt, nonce) = header[22..].split_at(SALT_LEN);
+        Ok(Self {
+            kdf,
+            parameters,
+            salt: salt.try_into().map_err(|_| "invalid vault salt")?,
+            nonce: XNonce::try_from(nonce).map_err(|_| "invalid vault nonce")?,
+            header,
+            ciphertext,
+        })
     }
-
-    // Versioned format: magic, version, KDF parameters, salt, nonce, ciphertext.
-    let kdf = encrypted[9];
-    let memory_kib = u32::from_be_bytes(encrypted[10..14].try_into().ok()?);
-    let iterations = u32::from_be_bytes(encrypted[14..18].try_into().ok()?);
-    let parallelism = u32::from_be_bytes(encrypted[18..22].try_into().ok()?);
-    if !(8 * 1024..=1024 * 1024).contains(&memory_kib)
-        || !(1..=10).contains(&iterations)
-        || !(1..=16).contains(&parallelism)
-    {
-        return None;
-    }
-    let salt = &encrypted[22..22 + SALT_LEN];
-    let nonce_start = 22 + SALT_LEN;
-    let nonce_end = nonce_start + NONCE_LEN;
-    let nonce = XNonce::try_from(&encrypted[nonce_start..nonce_end]).ok()?;
-    let cached_key = match &*key_pass {
+    /// Cached credentials binding `encryption_key` to this header.
+    fn session(&self, encryption_key: [u8; 32]) -> VaultCredentials {
         VaultCredentials::Session {
             encryption_key,
-            salt: cached_salt,
-            kdf: cached_kdf,
-            memory_kib: cached_memory_kib,
-            iterations: cached_iterations,
-            parallelism: cached_parallelism,
-        } if cached_salt.as_slice() == salt
-            && *cached_kdf == kdf
-            && *cached_memory_kib == memory_kib
-            && *cached_iterations == iterations
-            && *cached_parallelism == parallelism =>
-        {
-            Some(Zeroizing::new(*encryption_key))
+            salt: self.salt,
+            kdf: self.kdf,
+            memory_kib: self.parameters.memory_kib,
+            iterations: self.parameters.iterations,
+            parallelism: self.parameters.parallelism,
         }
-        _ => None,
-    };
+    }
+    /// Whether cached credentials were derived for exactly this header.
+    fn matches(&self, credentials: &VaultCredentials) -> Option<Zeroizing<[u8; 32]>> {
+        match credentials {
+            VaultCredentials::Session {
+                encryption_key,
+                salt,
+                kdf,
+                memory_kib,
+                iterations,
+                parallelism,
+            } if *salt == self.salt
+                && *kdf == self.kdf
+                && *memory_kib == self.parameters.memory_kib
+                && *iterations == self.parameters.iterations
+                && *parallelism == self.parameters.parallelism =>
+            {
+                Some(Zeroizing::new(*encryption_key))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Inspect untrusted format metadata without running the password KDF.
+pub fn validate_vault_header(encrypted: &[u8]) -> Result<(), &'static str> {
+    VaultHeader::parse(encrypted).map(|_| ())
+}
+
+pub fn decrypt_file(
+    key_pass: &mut VaultCredentials,
+    encrypted: &[u8],
+) -> Option<Zeroizing<Vec<u8>>> {
+    let header = VaultHeader::parse(encrypted).ok()?;
+    let cached_key = header.matches(key_pass);
     let mut enc_key = if let Some(key) = cached_key.as_ref() {
         **key
     } else {
-        let mut master = match (&*key_pass, kdf) {
+        let mut master = match (&*key_pass, header.kdf) {
             (VaultCredentials::Unlock(PasswordType::Password(password)), KDF_ARGON2ID) => {
                 master_key_from_password_with_params(
                     password,
-                    salt,
-                    memory_kib,
-                    iterations,
-                    parallelism,
+                    &header.salt,
+                    header.parameters.memory_kib,
+                    header.parameters.iterations,
+                    header.parameters.parallelism,
                 )?
             }
-            (VaultCredentials::Unlock(PasswordType::Key(_)), KDF_KEYFILE) => {
-                try_gen_master_key(key_pass.supplied().ok()?, false).ok()?
+            (VaultCredentials::Unlock(PasswordType::Key(key)), KDF_KEYFILE) => {
+                try_keyfile_master_key(key, false).ok()?
             }
             _ => return None,
         };
@@ -540,24 +546,19 @@ pub fn decrypt_file(key_pass: &mut VaultCredentials, encrypted: &[u8]) -> Option
     let session_key = Zeroizing::new(enc_key);
     let cipher = XChaCha20Poly1305::new((&enc_key).into());
     enc_key.zeroize();
-    let plaintext = cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: &encrypted[nonce_end..],
-                aad: &encrypted[..nonce_end],
-            },
-        )
-        .ok()?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                &header.nonce,
+                Payload {
+                    msg: header.ciphertext,
+                    aad: header.header,
+                },
+            )
+            .ok()?,
+    );
     if !matches!(key_pass, VaultCredentials::Session { .. }) {
-        *key_pass = VaultCredentials::Session {
-            encryption_key: *session_key,
-            salt: salt.try_into().ok()?,
-            kdf,
-            memory_kib,
-            iterations,
-            parallelism,
-        };
+        *key_pass = header.session(*session_key);
     }
     Some(plaintext)
 }

@@ -3,7 +3,7 @@ use crate::secret::{SecretBuffer, SecretString};
 use crate::types::{EntryUpdate, PasswordEntry};
 use crate::{
     encryption::{
-        decrypt_file, try_encrypt_file_in_place, try_gen_master_key, validate_new_password,
+        decrypt_file, try_encrypt_file_in_place, try_keyfile_master_key, validate_new_password,
     },
     file::{data_dir, key_file_path, new_key_file_path, set_private_perms, sync_parent},
     types::{
