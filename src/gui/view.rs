@@ -746,82 +746,10 @@ fn unlock(app: &App) -> Element<'_, Message> {
 }
 
 fn vault(app: &App) -> Element<'_, Message> {
-    let mut entries = Column::new().spacing(6);
-    use presentation::PAGE_SIZE;
-    let matching = app.matching_items();
-    let count = matching.len();
+    let entries = item_entries(app);
+    let count = app.matching_items().len();
     let window = presentation::Page::new(app.ui.item_page, count);
-    let pages = window.pages;
-    let page = window.index;
-    for offset in window.range {
-        let index = if app.ui.reverse_items {
-            count - 1 - offset
-        } else {
-            offset
-        };
-        let item = &app.items[matching[index]];
-        let selected = app
-            .item
-            .as_ref()
-            .is_some_and(|selected| selected.id == item.id);
-        let username = item
-            .username
-            .as_deref()
-            .filter(|username| !username.is_empty());
-        let kind = model::profile(item.kind).title;
-        let subtitle = username.map_or_else(
-            || kind.to_owned(),
-            |username| format!("{username} · {kind}"),
-        );
-        let entry_content = row![
-            avatar(&item.name, selected),
-            column![text(&item.name).size(16), text(subtitle).size(13)].spacing(3)
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
-        entries = entries.push(
-            button(entry_content)
-                .selected(selected)
-                .width(Fill)
-                .padding([10, 12])
-                .style(move |theme: &Theme, status| {
-                    let mut style = quiet_button(theme, status);
-                    if selected {
-                        let palette = theme.extended_palette();
-                        style.background = Some(palette.primary.weak.color.into());
-                        style.text_color = palette.primary.weak.text;
-                        style.border.color = palette.primary.base.color;
-                        style.border.width = 2.0;
-                    }
-                    style
-                })
-                .on_press_maybe(
-                    (!app.busy()).then_some(Message::Navigate(Navigate::Select(item.id))),
-                ),
-        );
-    }
-    if count == 0 {
-        entries = entries.push(
-            text(if app.items.is_empty() {
-                "Your first item starts here."
-            } else {
-                "No matching items. Try another search or clear the filters."
-            })
-            .size(15),
-        );
-        if !app.items.is_empty() {
-            entries = entries.push(action(
-                "Clear search",
-                Message::Search(String::new()),
-                !app.busy(),
-            ));
-            entries = entries.push(action(
-                "Show all types",
-                Message::FilterKind(None),
-                !app.busy(),
-            ));
-        }
-    }
+    let (pages, page) = (window.pages, window.index);
     let mut kinds = vec!["All types".to_owned()];
     kinds.extend(
         model::KINDS
@@ -897,130 +825,15 @@ fn vault(app: &App) -> Element<'_, Message> {
     .spacing(10)
     .height(Fill);
     if pages > 1 {
-        sidebar = sidebar
-            .push(
-                text(format!(
-                    "Page {} of {pages} · {PAGE_SIZE} per page",
-                    page + 1
-                ))
-                .size(13),
-            )
-            .push(
-                row![
-                    action(
-                        "Previous page",
-                        Message::ItemPage(page.saturating_sub(1)),
-                        !app.busy() && page > 0
-                    )
-                    .padding([7, 8]),
-                    action(
-                        "Next page",
-                        Message::ItemPage((page + 1).min(pages - 1)),
-                        !app.busy() && page + 1 < pages
-                    )
-                    .padding([7, 8])
-                ]
-                .spacing(8)
-                .wrap(),
-            )
-            .push(
-                row![
-                    text_input("Page number", &app.ui.page_input)
-                        .padding(8)
-                        .width(Fill)
-                        .on_input(Message::PageInput)
-                        .on_submit(Message::JumpItemPage),
-                    action(
-                        "Go",
-                        Message::JumpItemPage,
-                        !app.busy() && !app.ui.page_input.is_empty()
-                    )
-                    .padding([7, 8])
-                ]
-                .spacing(8),
-            );
+        sidebar = item_pager(sidebar, app, page, pages);
     }
-    let detail =
-        if let Some(draft) = app.editor.as_ref() {
-            editor(app, draft)
-        } else if let Some(item) = &app.item {
-            details(app, item)
-        } else {
-            column![
-                panel(
-                    column![
-                    text(if app.items.is_empty() {
-                        "Add your first item"
-                    } else {
-                        "Select an item"
-                    })
-                    .size(27),
-                    text(if app.items.is_empty() {
-                        "Save a login, private note, card, or another secret. You can also import \
-                         your passwords."
-                    } else {
-                        "Choose an item to copy its sign-in details, open a website, or make a \
-                         change."
-                    })
-                    .size(16),
-                    if app.items.is_empty() {
-                        row![
-                            primary(
-                                "Add your first item",
-                                Message::Navigate(Navigate::New),
-                                app.writes_allowed()
-                            ),
-                            action(
-                                "Import passwords",
-                                Message::OpenFileTool(workflows::FileOperation::Import),
-                                !app.busy()
-                            )
-                        ]
-                    } else {
-                        row![text(format!(
-                            "{command}+F searches · {command}+N adds an item",
-                            command = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }
-                        ))
-                        .size(14)]
-                    }
-                    .spacing(10)
-                    .wrap(),
-                ]
-                    .spacing(16)
-                )
-                .width(Fill),
-                panel(
-                    column![
-                        text("Keep your vault in good shape").size(19),
-                        text(format!(
-                            "{} items · Encrypted on this device",
-                            app.items.len()
-                        ))
-                        .size(14),
-                        row![
-                            action(
-                                "Check vault health",
-                                Message::OpenTools(workflows::Section::Audit),
-                                !app.busy()
-                            ),
-                            action(
-                                "Create a backup",
-                                Message::OpenFileTool(workflows::FileOperation::Backup),
-                                !app.busy()
-                            )
-                        ]
-                        .spacing(10)
-                        .wrap(),
-                    ]
-                    .spacing(12)
-                )
-                .width(Fill),
-            ]
-            .spacing(16)
-            .width(Fill)
-            .height(Fill)
-            .into()
-        };
+    let detail = if let Some(draft) = app.editor.as_ref() {
+        editor(app, draft)
+    } else if let Some(item) = &app.item {
+        details(app, item)
+    } else {
+        vault_welcome(app)
+    };
     let panes: Element<'_, Message> = if app.compact() {
         if app.editor.is_some() {
             detail
@@ -1050,6 +863,220 @@ fn vault(app: &App) -> Element<'_, Message> {
     };
     let body = column![].spacing(12).height(Fill);
     body.push(panes).into()
+}
+
+/// Empty detail pane: first-run actions or a hint to select an item.
+fn vault_welcome(app: &App) -> Element<'_, Message> {
+    column![
+        panel(
+            column![
+                text(if app.items.is_empty() {
+                    "Add your first item"
+                } else {
+                    "Select an item"
+                })
+                .size(27),
+                text(if app.items.is_empty() {
+                    "Save a login, private note, card, or another secret. You can also import \
+                         your passwords."
+                } else {
+                    "Choose an item to copy its sign-in details, open a website, or make a \
+                         change."
+                })
+                .size(16),
+                if app.items.is_empty() {
+                    row![
+                        primary(
+                            "Add your first item",
+                            Message::Navigate(Navigate::New),
+                            app.writes_allowed()
+                        ),
+                        action(
+                            "Import passwords",
+                            Message::OpenFileTool(workflows::FileOperation::Import),
+                            !app.busy()
+                        )
+                    ]
+                } else {
+                    row![
+                        text(format!(
+                            "{command}+F searches · {command}+N adds an item",
+                            command = if cfg!(target_os = "macos") {
+                                "Cmd"
+                            } else {
+                                "Ctrl"
+                            }
+                        ))
+                        .size(14)
+                    ]
+                }
+                .spacing(10)
+                .wrap(),
+            ]
+            .spacing(16)
+        )
+        .width(Fill),
+        panel(
+            column![
+                text("Keep your vault in good shape").size(19),
+                text(format!(
+                    "{} items · Encrypted on this device",
+                    app.items.len()
+                ))
+                .size(14),
+                row![
+                    action(
+                        "Check vault health",
+                        Message::OpenTools(workflows::Section::Audit),
+                        !app.busy()
+                    ),
+                    action(
+                        "Create a backup",
+                        Message::OpenFileTool(workflows::FileOperation::Backup),
+                        !app.busy()
+                    )
+                ]
+                .spacing(10)
+                .wrap(),
+            ]
+            .spacing(12)
+        )
+        .width(Fill),
+    ]
+    .spacing(16)
+    .width(Fill)
+    .height(Fill)
+    .into()
+}
+
+fn item_pager<'a>(
+    mut sidebar: Column<'a, Message>,
+    app: &'a App,
+    page: usize,
+    pages: usize,
+) -> Column<'a, Message> {
+    use presentation::PAGE_SIZE;
+    sidebar = sidebar
+        .push(
+            text(format!(
+                "Page {} of {pages} · {PAGE_SIZE} per page",
+                page + 1
+            ))
+            .size(13),
+        )
+        .push(
+            row![
+                action(
+                    "Previous page",
+                    Message::ItemPage(page.saturating_sub(1)),
+                    !app.busy() && page > 0
+                )
+                .padding([7, 8]),
+                action(
+                    "Next page",
+                    Message::ItemPage((page + 1).min(pages - 1)),
+                    !app.busy() && page + 1 < pages
+                )
+                .padding([7, 8])
+            ]
+            .spacing(8)
+            .wrap(),
+        )
+        .push(
+            row![
+                text_input("Page number", &app.ui.page_input)
+                    .padding(8)
+                    .width(Fill)
+                    .on_input(Message::PageInput)
+                    .on_submit(Message::JumpItemPage),
+                action(
+                    "Go",
+                    Message::JumpItemPage,
+                    !app.busy() && !app.ui.page_input.is_empty()
+                )
+                .padding([7, 8])
+            ]
+            .spacing(8),
+        );
+    sidebar
+}
+
+/// The current page of matching items, or guidance when nothing matches.
+fn item_entries(app: &App) -> Column<'_, Message> {
+    let mut entries = Column::new().spacing(6);
+    let matching = app.matching_items();
+    let count = matching.len();
+    let window = presentation::Page::new(app.ui.item_page, count);
+    for offset in window.range {
+        let index = if app.ui.reverse_items {
+            count - 1 - offset
+        } else {
+            offset
+        };
+        let item = &app.items[matching[index]];
+        let selected = app
+            .item
+            .as_ref()
+            .is_some_and(|selected| selected.id == item.id);
+        let username = item
+            .username
+            .as_deref()
+            .filter(|username| !username.is_empty());
+        let kind = model::profile(item.kind).title;
+        let subtitle = username.map_or_else(
+            || kind.to_owned(),
+            |username| format!("{username} · {kind}"),
+        );
+        let entry_content = row![
+            avatar(&item.name, selected),
+            column![text(&item.name).size(16), text(subtitle).size(13)].spacing(3)
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        entries = entries.push(
+            button(entry_content)
+                .selected(selected)
+                .width(Fill)
+                .padding([10, 12])
+                .style(move |theme: &Theme, status| {
+                    let mut style = quiet_button(theme, status);
+                    if selected {
+                        let palette = theme.extended_palette();
+                        style.background = Some(palette.primary.weak.color.into());
+                        style.text_color = palette.primary.weak.text;
+                        style.border.color = palette.primary.base.color;
+                        style.border.width = 2.0;
+                    }
+                    style
+                })
+                .on_press_maybe(
+                    (!app.busy()).then_some(Message::Navigate(Navigate::Select(item.id))),
+                ),
+        );
+    }
+    if count == 0 {
+        entries = entries.push(
+            text(if app.items.is_empty() {
+                "Your first item starts here."
+            } else {
+                "No matching items. Try another search or clear the filters."
+            })
+            .size(15),
+        );
+        if !app.items.is_empty() {
+            entries = entries.push(action(
+                "Clear search",
+                Message::Search(String::new()),
+                !app.busy(),
+            ));
+            entries = entries.push(action(
+                "Show all types",
+                Message::FilterKind(None),
+                !app.busy(),
+            ));
+        }
+    }
+    entries
 }
 
 fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
@@ -1307,6 +1334,332 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
     ]
     .spacing(4)
     .width(Fill);
+    let secret = editor_secret(app, draft, &profile, enabled);
+    let credentials: Element<'_, Message> =
+        if !app.compact() && app.ui.width >= 1120.0 && !draft.multiline {
+            row![owner, secret].spacing(14).into()
+        } else {
+            column![owner, secret].spacing(8).into()
+        };
+    let identity: Element<'_, Message> = if app.compact() {
+        column![name, kind].spacing(10).into()
+    } else {
+        row![name, kind].spacing(12).into()
+    };
+    let mut form = column![identity, credentials].spacing(8);
+    if app.editor.conflicted() {
+        let mut conflict = column![
+            text("This item changed in another client").size(19),
+            text(
+                "Your unsaved edits are kept and masked. Review the latest version, then reapply \
+                 only your changes. Nothing is saved automatically."
+            )
+            .size(14),
+            action("Review latest version", Message::ReviewConflict, enabled)
+        ]
+        .spacing(8);
+        if let Some(latest) = app.editor.latest() {
+            conflict = conflict
+                .push(
+                    text(format!(
+                        "Latest: {} · {}\nWebsites: {}\nRevision {} · {} custom fields. Stored \
+                         secrets stay hidden.",
+                        latest.name,
+                        latest.username.as_deref().unwrap_or("No username"),
+                        latest.urls.join(", "),
+                        latest.revision,
+                        latest.fields.len()
+                    ))
+                    .size(14),
+                )
+                .push(
+                    text(
+                        "Reapplying replaces fields you edited, including edits to the same \
+                         fields in the other client. Untouched fields keep their latest values.",
+                    )
+                    .size(14),
+                )
+                .push(primary(
+                    "Reapply my edits to this version",
+                    Message::ReapplyConflict,
+                    enabled,
+                ));
+            if let Some(original) = &app.item {
+                for comparison in draft.conflict_summary(original, latest) {
+                    conflict = conflict.push(text(comparison).size(14));
+                }
+            }
+        }
+        form = form.push(panel(conflict));
+    }
+    form = template_fields(form, draft, &profile, enabled);
+    let websites = editor_websites(draft, enabled);
+    form = form
+        .push(websites)
+        .push(
+            column![
+                label("Notes (optional)"),
+                text_editor(&draft.notes)
+                    .id("item-notes")
+                    .placeholder("Private notes")
+                    .height(88)
+                    .padding(10)
+                    .on_action(Message::Notes)
+            ]
+            .spacing(6),
+        )
+        .push(rule::horizontal(1))
+        .push(disclosure(
+            "Custom fields & advanced options",
+            app.ui.editor_advanced,
+            presentation::Disclosure::Editor,
+            enabled,
+        ));
+    if app.ui.editor_advanced {
+        form = editor_advanced(form, draft, &profile, &validation, enabled);
+    }
+    form = form.push(rule::horizontal(1)).push(disclosure(
+        "Authenticator & Duo enrollment",
+        app.ui.editor_authenticators,
+        presentation::Disclosure::Authenticators,
+        enabled,
+    ));
+    if app.ui.editor_authenticators {
+        form = form.push(app.workspace.authenticator_editor(app));
+    }
+    let footer = editor_footer(app, draft, &validation, enabled);
+    let heading = text(if draft.id.is_some() {
+        "Edit item"
+    } else {
+        "New item"
+    })
+    .size(24);
+    panel(
+        column![
+            scrollable(column![heading, form].spacing(8))
+                .id("credential-editor")
+                .spacing(8)
+                .height(Fill),
+            rule::horizontal(1),
+            footer
+        ]
+        .spacing(12),
+    )
+    .height(Fill)
+    .width(Fill)
+    .into()
+}
+
+/// Website and validation warnings above the Save and Cancel actions.
+fn editor_footer<'a>(
+    app: &'a App,
+    draft: &'a Draft,
+    validation: &model::Validation,
+    enabled: bool,
+) -> Column<'a, Message> {
+    let mut footer = column![].spacing(8);
+    for url in draft.urls.iter().filter(|url| !url.trim().is_empty()) {
+        if website::address(url).is_err() {
+            footer = footer.push(
+                text(
+                    "A website cannot be opened. Use an http:// or https:// address. Other values \
+                     can still be stored.",
+                )
+                .size(13),
+            );
+            break;
+        }
+    }
+    if draft.dirty
+        && let Some(message) = validation.error
+    {
+        footer = footer.push(error(message));
+    }
+    footer = footer.push(
+        row![
+            primary(
+                "Save item",
+                Message::Save,
+                app.writes_allowed() && !app.editor.conflicted() && validation.error.is_none()
+            ),
+            action("Cancel", Message::Navigate(Navigate::Close), enabled),
+            text(if draft.dirty {
+                "Unsaved changes"
+            } else {
+                "Save to keep changes"
+            })
+            .size(13)
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .wrap(),
+    );
+    footer
+}
+
+/// Copy policy, multiline toggle, and custom fields.
+fn editor_advanced<'a>(
+    mut form: Column<'a, Message>,
+    draft: &'a Draft,
+    profile: &model::Profile,
+    validation: &model::Validation,
+    enabled: bool,
+) -> Column<'a, Message> {
+    form = form.push(text(profile.guidance).size(14));
+    if draft.id.is_none() {
+        form = form
+            .push(label("Copy primary secret after saving"))
+            .push(
+                pick_list(
+                    model::ClipboardPolicy::ALL.as_slice(),
+                    Some(draft.copy_policy),
+                    Message::CopyPolicy,
+                )
+                .placeholder("Copy primary secret after saving")
+                .padding(12)
+                .width(Fill),
+            )
+            .push(text("A clipboard timeout of 0 disables copying.").size(14));
+    }
+    if draft.id.is_none() || draft.replace_password {
+        form = form.push(
+            checkbox(draft.multiline)
+                .label("Edit as a multiline secret (visible while editing)")
+                .on_toggle(Message::MultilineSecret),
+        );
+    }
+    form = form.push(text("Custom fields").size(18));
+    for (index, field) in draft.fields.iter().enumerate().filter(|(_, field)| {
+        !field.removed
+            && !profile
+                .suggested
+                .iter()
+                .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
+    }) {
+        let mut custom = column![
+            label("Field name"),
+            text_input("e.g. Account number", &field.name)
+                .id(format!("custom-field-{index}"))
+                .accessibility_label(format!("Custom field {} name", index + 1))
+                .padding(12)
+                .on_input_maybe(enabled.then_some(move |value| Message::FieldName(index, value))),
+            label("Field value"),
+            text_input(
+                if field.hidden && !field.value_edited {
+                    "Unchanged; enter a replacement to edit"
+                } else {
+                    "Value"
+                },
+                field.value.expose()
+            )
+            .secure(field.secret)
+            .accessibility_label(format!("Custom field {} value", index + 1))
+            .padding(12)
+            .on_input_maybe(
+                enabled.then_some(move |value: String| Message::FieldValue(index, value.into()))
+            ),
+            row![
+                checkbox(field.secret)
+                    .label("Keep value secret")
+                    .on_toggle_maybe(
+                        enabled.then_some(move |value| Message::FieldSecret(index, value))
+                    ),
+                action("Remove field", Message::RemoveField(index), enabled)
+            ]
+            .spacing(8)
+            .wrap(),
+        ]
+        .spacing(8);
+        if let Some(message) = validation.field_error(index) {
+            custom = custom.push(error(message));
+        }
+        form = form.push(panel(custom));
+    }
+    form = form
+        .push(action("Add custom field", Message::AddField, enabled))
+        .push(
+            text("Existing hidden values are preserved unless you explicitly replace them.")
+                .size(14),
+        );
+    form
+}
+
+fn editor_websites(draft: &Draft, enabled: bool) -> Column<'_, Message> {
+    let mut websites = column![
+        row![
+            label("Websites (optional)").width(Fill),
+            action("Add website", Message::AddUrl, enabled).padding([7, 10])
+        ]
+        .align_y(Alignment::Center)
+    ]
+    .spacing(6);
+    for (index, url) in draft.urls.iter().enumerate() {
+        websites = websites.push(
+            row![
+                text_input("https://example.com", url)
+                    .id(format!("website-{index}"))
+                    .accessibility_label(format!("Website {}", index + 1))
+                    .padding(10)
+                    .on_input_maybe(enabled.then_some(move |value| Message::Url(index, value))),
+                action("Remove", Message::RemoveUrl(index), enabled).padding([9, 10])
+            ]
+            .spacing(8),
+        );
+    }
+    websites
+}
+
+/// Suggested fields for the item type, shown as ordinary inputs.
+fn template_fields<'a>(
+    mut form: Column<'a, Message>,
+    draft: &'a Draft,
+    profile: &model::Profile,
+    enabled: bool,
+) -> Column<'a, Message> {
+    if !profile.suggested.is_empty() {
+        form = form.push(text(format!("{} details", profile.title)).size(19));
+        for &(name, secret) in profile.suggested {
+            let slot = draft
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, field)| !field.removed && field.name.eq_ignore_ascii_case(name));
+            let existing = slot.map(|(_, field)| field);
+            let value = existing.map(|field| field.value.expose()).unwrap_or("");
+            let hidden = existing.is_some_and(|field| field.hidden && !field.value_edited);
+            let input =
+                text_input(
+                    if hidden {
+                        "Unchanged; type a replacement to edit"
+                    } else {
+                        "Optional"
+                    },
+                    value,
+                )
+                .id(format!("template-{name}"))
+                .accessibility_label(name)
+                .secure(secret || existing.is_some_and(|field| field.secret))
+                .padding(12)
+                .on_input_maybe(enabled.then_some(move |value: String| {
+                    Message::TemplateValue(name, secret, value.into())
+                }));
+            let mut line = row![input].spacing(8).align_y(Alignment::Center);
+            if let Some((index, _)) = slot {
+                line = line.push(action("Clear", Message::RemoveField(index), enabled));
+            }
+            form = form.push(column![label(name), line].spacing(6));
+        }
+    }
+    form
+}
+
+/// The primary secret: single-line with show/generate, or multiline.
+fn editor_secret<'a>(
+    app: &'a App,
+    draft: &'a Draft,
+    profile: &model::Profile,
+    enabled: bool,
+) -> Column<'a, Message> {
     let mut secret = column![label(profile.secret)].spacing(4).width(Fill);
     if draft.id.is_some() {
         secret = secret.push(
@@ -1365,286 +1718,7 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
             );
         }
     }
-    let credentials: Element<'_, Message> =
-        if !app.compact() && app.ui.width >= 1120.0 && !draft.multiline {
-            row![owner, secret].spacing(14).into()
-        } else {
-            column![owner, secret].spacing(8).into()
-        };
-    let identity: Element<'_, Message> = if app.compact() {
-        column![name, kind].spacing(10).into()
-    } else {
-        row![name, kind].spacing(12).into()
-    };
-    let mut form = column![identity, credentials].spacing(8);
-    if app.editor.conflicted() {
-        let mut conflict = column![
-            text("This item changed in another client").size(19),
-            text(
-                "Your unsaved edits are kept and masked. Review the latest version, then reapply \
-                 only your changes. Nothing is saved automatically."
-            )
-            .size(14),
-            action("Review latest version", Message::ReviewConflict, enabled)
-        ]
-        .spacing(8);
-        if let Some(latest) = app.editor.latest() {
-            conflict = conflict
-                .push(
-                    text(format!(
-                        "Latest: {} · {}\nWebsites: {}\nRevision {} · {} custom fields. Stored \
-                         secrets stay hidden.",
-                        latest.name,
-                        latest.username.as_deref().unwrap_or("No username"),
-                        latest.urls.join(", "),
-                        latest.revision,
-                        latest.fields.len()
-                    ))
-                    .size(14),
-                )
-                .push(
-                    text(
-                        "Reapplying replaces fields you edited, including edits to the same \
-                         fields in the other client. Untouched fields keep their latest values.",
-                    )
-                    .size(14),
-                )
-                .push(primary(
-                    "Reapply my edits to this version",
-                    Message::ReapplyConflict,
-                    enabled,
-                ));
-            if let Some(original) = &app.item {
-                for comparison in draft.conflict_summary(original, latest) {
-                    conflict = conflict.push(text(comparison).size(14));
-                }
-            }
-        }
-        form = form.push(panel(conflict));
-    }
-    if !profile.suggested.is_empty() {
-        form = form.push(text(format!("{} details", profile.title)).size(19));
-        for &(name, secret) in profile.suggested {
-            let slot = draft
-                .fields
-                .iter()
-                .enumerate()
-                .find(|(_, field)| !field.removed && field.name.eq_ignore_ascii_case(name));
-            let existing = slot.map(|(_, field)| field);
-            let value = existing.map(|field| field.value.expose()).unwrap_or("");
-            let hidden = existing.is_some_and(|field| field.hidden && !field.value_edited);
-            let input =
-                text_input(
-                    if hidden {
-                        "Unchanged; type a replacement to edit"
-                    } else {
-                        "Optional"
-                    },
-                    value,
-                )
-                .id(format!("template-{name}"))
-                .accessibility_label(name)
-                .secure(secret || existing.is_some_and(|field| field.secret))
-                .padding(12)
-                .on_input_maybe(enabled.then_some(move |value: String| {
-                    Message::TemplateValue(name, secret, value.into())
-                }));
-            let mut line = row![input].spacing(8).align_y(Alignment::Center);
-            if let Some((index, _)) = slot {
-                line = line.push(action("Clear", Message::RemoveField(index), enabled));
-            }
-            form = form.push(column![label(name), line].spacing(6));
-        }
-    }
-    let mut websites = column![
-        row![
-            label("Websites (optional)").width(Fill),
-            action("Add website", Message::AddUrl, enabled).padding([7, 10])
-        ]
-        .align_y(Alignment::Center)
-    ]
-    .spacing(6);
-    for (index, url) in draft.urls.iter().enumerate() {
-        websites = websites.push(
-            row![
-                text_input("https://example.com", url)
-                    .id(format!("website-{index}"))
-                    .accessibility_label(format!("Website {}", index + 1))
-                    .padding(10)
-                    .on_input_maybe(enabled.then_some(move |value| Message::Url(index, value))),
-                action("Remove", Message::RemoveUrl(index), enabled).padding([9, 10])
-            ]
-            .spacing(8),
-        );
-    }
-    form = form
-        .push(websites)
-        .push(
-            column![
-                label("Notes (optional)"),
-                text_editor(&draft.notes)
-                    .id("item-notes")
-                    .placeholder("Private notes")
-                    .height(88)
-                    .padding(10)
-                    .on_action(Message::Notes)
-            ]
-            .spacing(6),
-        )
-        .push(rule::horizontal(1))
-        .push(disclosure(
-            "Custom fields & advanced options",
-            app.ui.editor_advanced,
-            presentation::Disclosure::Editor,
-            enabled,
-        ));
-    if app.ui.editor_advanced {
-        form = form.push(text(profile.guidance).size(14));
-        if draft.id.is_none() {
-            form = form
-                .push(label("Copy primary secret after saving"))
-                .push(
-                    pick_list(
-                        model::ClipboardPolicy::ALL.as_slice(),
-                        Some(draft.copy_policy),
-                        Message::CopyPolicy,
-                    )
-                    .placeholder("Copy primary secret after saving")
-                    .padding(12)
-                    .width(Fill),
-                )
-                .push(text("A clipboard timeout of 0 disables copying.").size(14));
-        }
-        if draft.id.is_none() || draft.replace_password {
-            form = form.push(
-                checkbox(draft.multiline)
-                    .label("Edit as a multiline secret (visible while editing)")
-                    .on_toggle(Message::MultilineSecret),
-            );
-        }
-        form = form.push(text("Custom fields").size(18));
-        for (index, field) in draft.fields.iter().enumerate().filter(|(_, field)| {
-            !field.removed
-                && !profile
-                    .suggested
-                    .iter()
-                    .any(|(name, _)| field.name.eq_ignore_ascii_case(name))
-        }) {
-            let mut custom = column![
-                label("Field name"),
-                text_input("e.g. Account number", &field.name)
-                    .id(format!("custom-field-{index}"))
-                    .accessibility_label(format!("Custom field {} name", index + 1))
-                    .padding(12)
-                    .on_input_maybe(
-                        enabled.then_some(move |value| Message::FieldName(index, value))
-                    ),
-                label("Field value"),
-                text_input(
-                    if field.hidden && !field.value_edited {
-                        "Unchanged; enter a replacement to edit"
-                    } else {
-                        "Value"
-                    },
-                    field.value.expose()
-                )
-                .secure(field.secret)
-                .accessibility_label(format!("Custom field {} value", index + 1))
-                .padding(12)
-                .on_input_maybe(
-                    enabled
-                        .then_some(move |value: String| Message::FieldValue(index, value.into()))
-                ),
-                row![
-                    checkbox(field.secret)
-                        .label("Keep value secret")
-                        .on_toggle_maybe(
-                            enabled.then_some(move |value| Message::FieldSecret(index, value))
-                        ),
-                    action("Remove field", Message::RemoveField(index), enabled)
-                ]
-                .spacing(8)
-                .wrap(),
-            ]
-            .spacing(8);
-            if let Some(message) = validation.field_error(index) {
-                custom = custom.push(error(message));
-            }
-            form = form.push(panel(custom));
-        }
-        form = form
-            .push(action("Add custom field", Message::AddField, enabled))
-            .push(
-                text("Existing hidden values are preserved unless you explicitly replace them.")
-                    .size(14),
-            );
-    }
-    form = form.push(rule::horizontal(1)).push(disclosure(
-        "Authenticator & Duo enrollment",
-        app.ui.editor_authenticators,
-        presentation::Disclosure::Authenticators,
-        enabled,
-    ));
-    if app.ui.editor_authenticators {
-        form = form.push(app.workspace.authenticator_editor(app));
-    }
-    let mut footer = column![].spacing(8);
-    for url in draft.urls.iter().filter(|url| !url.trim().is_empty()) {
-        if website::address(url).is_err() {
-            footer = footer.push(
-                text(
-                    "A website cannot be opened. Use an http:// or https:// address. Other values \
-                     can still be stored.",
-                )
-                .size(13),
-            );
-            break;
-        }
-    }
-    if draft.dirty
-        && let Some(message) = validation.error
-    {
-        footer = footer.push(error(message));
-    }
-    footer = footer.push(
-        row![
-            primary(
-                "Save item",
-                Message::Save,
-                app.writes_allowed() && !app.editor.conflicted() && validation.error.is_none()
-            ),
-            action("Cancel", Message::Navigate(Navigate::Close), enabled),
-            text(if draft.dirty {
-                "Unsaved changes"
-            } else {
-                "Save to keep changes"
-            })
-            .size(13)
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .wrap(),
-    );
-    let heading = text(if draft.id.is_some() {
-        "Edit item"
-    } else {
-        "New item"
-    })
-    .size(24);
-    panel(
-        column![
-            scrollable(column![heading, form].spacing(8))
-                .id("credential-editor")
-                .spacing(8)
-                .height(Fill),
-            rule::horizontal(1),
-            footer
-        ]
-        .spacing(12),
-    )
-    .height(Fill)
-    .width(Fill)
-    .into()
+    secret
 }
 
 fn generator(app: &App) -> Element<'_, Message> {
@@ -1941,220 +2015,14 @@ fn generator(app: &App) -> Element<'_, Message> {
 }
 
 fn settings(app: &App) -> Element<'_, Message> {
-    use password_manager::config::Appearance;
     use presentation::SettingsSection;
-    let field = |name: &'static str, value: &str, field: SettingsField| {
-        let mut control = column![
-            label(name),
-            text_input("", value)
-                .accessibility_label(name)
-                .padding(12)
-                .on_input_maybe(
-                    (!app.busy()).then_some(move |value| Message::SettingChanged(field, value))
-                )
-        ]
-        .spacing(6);
-        if let Some(message) = app.settings.field_error(field, value) {
-            control = control.push(error(message));
-        }
-        control
-    };
     let mut form = column![].spacing(14);
     form = match app.ui.settings_section {
-        SettingsSection::Appearance => form
-            .push(
-                column![
-                    label("Color theme"),
-                    pick_list(
-                        [
-                            Appearance::Dark,
-                            Appearance::Light,
-                            Appearance::HighContrast
-                        ],
-                        Some(app.settings.appearance),
-                        Message::Appearance
-                    )
-                    .placeholder("Color theme")
-                    .padding(10)
-                    .width(Fill)
-                ]
-                .spacing(6),
-            )
-            .push(
-                column![
-                    label("Text and control size"),
-                    pick_list(
-                        [100_u16, 115, 130].map(presentation::ScaleChoice),
-                        Some(presentation::ScaleChoice(app.settings.scale)),
-                        |choice| Message::InterfaceScale(choice.0)
-                    )
-                    .placeholder("Text and control size")
-                    .padding(10)
-                    .width(Fill)
-                ]
-                .spacing(6),
-            )
-            .push(text("Changes preview immediately. Save settings to keep them.").size(14)),
-        SettingsSection::Passwords => form
-            .push(field(
-                "Default password length (1–255)",
-                &app.settings.length,
-                SettingsField::Length,
-            ))
-            .push(
-                checkbox(app.settings.stats)
-                    .label("Show generated password strength and statistics")
-                    .on_toggle(|value| {
-                        Message::SettingToggled(SettingsToggle::GeneratorStats, value)
-                    }),
-            )
-            .push(
-                checkbox(app.settings.generator_copy)
-                    .label("Copy generated passwords automatically")
-                    .on_toggle(|value| {
-                        Message::SettingToggled(SettingsToggle::GeneratorCopy, value)
-                    }),
-            )
-            .push(
-                checkbox(app.settings.password_copy)
-                    .label("Copy newly added login passwords automatically")
-                    .on_toggle(|value| {
-                        Message::SettingToggled(SettingsToggle::PasswordCopy, value)
-                    }),
-            ),
-        SettingsSection::Security => {
-            let mut choices = vec![vault_names::Choice {
-                id: String::new(),
-                label: "Automatic selection".into(),
-            }];
-            choices.extend(app.vault_choices());
-            if !app.settings.default_vault.is_empty()
-                && !choices
-                    .iter()
-                    .any(|choice| choice.id == app.settings.default_vault)
-            {
-                choices.push(vault_names::Choice {
-                    id: app.settings.default_vault.clone(),
-                    label: "Unavailable vault".into(),
-                });
-            }
-            let selected = choices
-                .iter()
-                .find(|choice| choice.id == app.settings.default_vault)
-                .cloned();
-            form.push(field(
-                "Clear clipboard after seconds (0 disables copying)",
-                &app.settings.clipboard_timeout,
-                SettingsField::ClipboardTimeout,
-            ))
-            .push(field(
-                "Lock after inactivity (15m, 1h, seconds; 0 disables)",
-                &app.settings.unlock_timeout,
-                SettingsField::UnlockTimeout,
-            ))
-            .push(label("Default vault"))
-            .push(
-                pick_list(choices, selected, |choice: vault_names::Choice| {
-                    Message::SettingChanged(SettingsField::DefaultVault, choice.id)
-                })
-                .placeholder("Default vault")
-                .width(Fill)
-                .padding(12),
-            )
-            .push(text("The lock timeout applies on the next unlock.").size(14))
-            .push(action(
-                "Vault credentials & security tools",
-                Message::OpenTools(workflows::Section::Security),
-                !app.busy(),
-            ))
-        }
-        SettingsSection::Recovery => form
-            .push(field(
-                "Previous passwords kept per item (0 disables history)",
-                &app.settings.history_limit,
-                SettingsField::HistoryLimit,
-            ))
-            .push(field(
-                "Purge trash after days (0 keeps it indefinitely)",
-                &app.settings.trash_retention,
-                SettingsField::TrashRetention,
-            ))
-            .push(text("Restart the local service after changing recovery settings.").size(14))
-            .push(action(
-                "Open deleted items",
-                Message::OpenTools(workflows::Section::Trash),
-                !app.busy(),
-            ))
-            .push(action(
-                "Create encrypted backup",
-                Message::OpenFileTool(workflows::FileOperation::Backup),
-                !app.busy(),
-            )),
-        SettingsSection::Connection => {
-            form = form.push(
-                text(if app.connection.running {
-                    "The local service is running. It keeps your vault available to the CLI and \
-                     browser extension when this window closes."
-                } else {
-                    "The local service is stopped."
-                })
-                .size(15),
-            );
-            form = if app.connection.running {
-                form.push(
-                    action(
-                        "Stop local service…",
-                        Message::ConfirmStop(true),
-                        !app.busy() && app.recovery.id().is_none(),
-                    )
-                    .style(button_style::danger),
-                )
-            } else {
-                form.push(primary(
-                    "Start local service",
-                    Message::Connect,
-                    !app.busy(),
-                ))
-            };
-            if app.ui.confirm_stop {
-                form = form.push(panel(
-                    column![
-                        text("Stop the local service?").size(18),
-                        text(
-                            "This locks the vault, discards any open item draft, and disconnects \
-                             the browser extension and CLI until you start it again."
-                        )
-                        .size(14),
-                        row![
-                            primary("Keep running", Message::ConfirmStop(false), !app.busy()),
-                            action(
-                                "Stop service",
-                                Message::Stop,
-                                !app.busy() && app.recovery.id().is_none()
-                            )
-                            .style(button_style::danger)
-                        ]
-                        .spacing(8)
-                        .wrap(),
-                    ]
-                    .spacing(12),
-                ));
-            }
-            form.push(cloud_settings(app))
-                .push(rule::horizontal(1))
-                .push(field(
-                    "Saved service port (1–65535)",
-                    &app.settings.server_port,
-                    SettingsField::ServerPort,
-                ))
-                .push(text("Stop the service before changing its saved port.").size(14))
-                .push(connection_controls(app))
-                .push(action(
-                    "Browser integration",
-                    Message::OpenTools(workflows::Section::Browser),
-                    !app.busy(),
-                ))
-        }
+        SettingsSection::Appearance => appearance_settings(app, form),
+        SettingsSection::Passwords => passwords_settings(app, form),
+        SettingsSection::Security => security_settings(app, form),
+        SettingsSection::Recovery => recovery_settings(app, form),
+        SettingsSection::Connection => connection_settings(app, form),
     };
     if app.ui.settings_section == SettingsSection::Security && app.connection.vault.is_some() {
         form = form
@@ -2172,6 +2040,44 @@ fn settings(app: &App) -> Element<'_, Message> {
                 app.writes_allowed() && !app.ui.vault_name.trim().is_empty(),
             ));
     }
+    let footer = settings_footer(app);
+    let options = column![
+        SettingsSection::ALL
+            .into_iter()
+            .fold(row![].spacing(6), |sections, section| {
+                let selected = app.ui.settings_section == section;
+                sections.push(
+                    button(text(section.to_string()).size(15))
+                        .selected(selected)
+                        .padding([8, 12])
+                        .style(tab_style(selected))
+                        .on_press_maybe((!app.busy()).then_some(Message::SettingsSection(section))),
+                )
+            })
+            .wrap(),
+        rule::horizontal(1),
+        form,
+    ]
+    .spacing(14);
+    container(
+        panel(
+            column![
+                scrollable(options).id("page-form").height(Fill).spacing(10),
+                rule::horizontal(1),
+                footer,
+            ]
+            .spacing(12),
+        )
+        .max_width(800)
+        .height(Fill),
+    )
+    .center_x(Fill)
+    .height(Fill)
+    .into()
+}
+
+/// Validation, reset confirmation, and save state for the whole settings form.
+fn settings_footer(app: &App) -> Column<'_, Message> {
     let mut footer = column![].spacing(10);
     if let Err(message) = app.settings.changes() {
         footer = footer.push(error(message));
@@ -2211,39 +2117,238 @@ fn settings(app: &App) -> Element<'_, Message> {
         })
         .size(14),
     );
-    let options = column![
-        SettingsSection::ALL
-            .into_iter()
-            .fold(row![].spacing(6), |sections, section| {
-                let selected = app.ui.settings_section == section;
-                sections.push(
-                    button(text(section.to_string()).size(15))
-                        .selected(selected)
-                        .padding([8, 12])
-                        .style(tab_style(selected))
-                        .on_press_maybe((!app.busy()).then_some(Message::SettingsSection(section))),
-                )
-            })
-            .wrap(),
-        rule::horizontal(1),
-        form,
+    footer
+}
+
+/// A labeled settings input with its validation message.
+fn settings_field<'a>(
+    app: &App,
+    name: &'static str,
+    value: &str,
+    field: SettingsField,
+) -> Column<'a, Message> {
+    let mut control = column![
+        label(name),
+        text_input("", value)
+            .accessibility_label(name)
+            .padding(12)
+            .on_input_maybe(
+                (!app.busy()).then_some(move |value| Message::SettingChanged(field, value))
+            )
     ]
-    .spacing(14);
-    container(
-        panel(
+    .spacing(6);
+    if let Some(message) = app.settings.field_error(field, value) {
+        control = control.push(error(message));
+    }
+    control
+}
+
+/// Theme and interface scale.
+fn appearance_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, Message> {
+    use password_manager::config::Appearance;
+    form.push(
+        column![
+            label("Color theme"),
+            pick_list(
+                [
+                    Appearance::Dark,
+                    Appearance::Light,
+                    Appearance::HighContrast
+                ],
+                Some(app.settings.appearance),
+                Message::Appearance
+            )
+            .placeholder("Color theme")
+            .padding(10)
+            .width(Fill)
+        ]
+        .spacing(6),
+    )
+    .push(
+        column![
+            label("Text and control size"),
+            pick_list(
+                [100_u16, 115, 130].map(presentation::ScaleChoice),
+                Some(presentation::ScaleChoice(app.settings.scale)),
+                |choice| Message::InterfaceScale(choice.0)
+            )
+            .placeholder("Text and control size")
+            .padding(10)
+            .width(Fill)
+        ]
+        .spacing(6),
+    )
+    .push(text("Changes preview immediately. Save settings to keep them.").size(14))
+}
+
+/// Generator and clipboard defaults.
+fn passwords_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, Message> {
+    form.push(settings_field(
+        app,
+        "Default password length (1–255)",
+        &app.settings.length,
+        SettingsField::Length,
+    ))
+    .push(
+        checkbox(app.settings.stats)
+            .label("Show generated password strength and statistics")
+            .on_toggle(|value| Message::SettingToggled(SettingsToggle::GeneratorStats, value)),
+    )
+    .push(
+        checkbox(app.settings.generator_copy)
+            .label("Copy generated passwords automatically")
+            .on_toggle(|value| Message::SettingToggled(SettingsToggle::GeneratorCopy, value)),
+    )
+    .push(
+        checkbox(app.settings.password_copy)
+            .label("Copy newly added login passwords automatically")
+            .on_toggle(|value| Message::SettingToggled(SettingsToggle::PasswordCopy, value)),
+    )
+}
+
+/// Lock timeout and default vault.
+fn security_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, Message> {
+    let mut choices = vec![vault_names::Choice {
+        id: String::new(),
+        label: "Automatic selection".into(),
+    }];
+    choices.extend(app.vault_choices());
+    if !app.settings.default_vault.is_empty()
+        && !choices
+            .iter()
+            .any(|choice| choice.id == app.settings.default_vault)
+    {
+        choices.push(vault_names::Choice {
+            id: app.settings.default_vault.clone(),
+            label: "Unavailable vault".into(),
+        });
+    }
+    let selected = choices
+        .iter()
+        .find(|choice| choice.id == app.settings.default_vault)
+        .cloned();
+    form.push(settings_field(
+        app,
+        "Clear clipboard after seconds (0 disables copying)",
+        &app.settings.clipboard_timeout,
+        SettingsField::ClipboardTimeout,
+    ))
+    .push(settings_field(
+        app,
+        "Lock after inactivity (15m, 1h, seconds; 0 disables)",
+        &app.settings.unlock_timeout,
+        SettingsField::UnlockTimeout,
+    ))
+    .push(label("Default vault"))
+    .push(
+        pick_list(choices, selected, |choice: vault_names::Choice| {
+            Message::SettingChanged(SettingsField::DefaultVault, choice.id)
+        })
+        .placeholder("Default vault")
+        .width(Fill)
+        .padding(12),
+    )
+    .push(text("The lock timeout applies on the next unlock.").size(14))
+    .push(action(
+        "Vault credentials & security tools",
+        Message::OpenTools(workflows::Section::Security),
+        !app.busy(),
+    ))
+}
+
+/// Backup and history retention.
+fn recovery_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, Message> {
+    form.push(settings_field(
+        app,
+        "Previous passwords kept per item (0 disables history)",
+        &app.settings.history_limit,
+        SettingsField::HistoryLimit,
+    ))
+    .push(settings_field(
+        app,
+        "Purge trash after days (0 keeps it indefinitely)",
+        &app.settings.trash_retention,
+        SettingsField::TrashRetention,
+    ))
+    .push(text("Restart the local service after changing recovery settings.").size(14))
+    .push(action(
+        "Open deleted items",
+        Message::OpenTools(workflows::Section::Trash),
+        !app.busy(),
+    ))
+    .push(action(
+        "Create encrypted backup",
+        Message::OpenFileTool(workflows::FileOperation::Backup),
+        !app.busy(),
+    ))
+}
+
+/// Local service, cloud sync, and connection details.
+fn connection_settings<'a>(app: &'a App, mut form: Column<'a, Message>) -> Column<'a, Message> {
+    form = form.push(
+        text(if app.connection.running {
+            "The local service is running. It keeps your vault available to the CLI and \
+             browser extension when this window closes."
+        } else {
+            "The local service is stopped."
+        })
+        .size(15),
+    );
+    form = if app.connection.running {
+        form.push(
+            action(
+                "Stop local service…",
+                Message::ConfirmStop(true),
+                !app.busy() && app.recovery.id().is_none(),
+            )
+            .style(button_style::danger),
+        )
+    } else {
+        form.push(primary(
+            "Start local service",
+            Message::Connect,
+            !app.busy(),
+        ))
+    };
+    if app.ui.confirm_stop {
+        form = form.push(panel(
             column![
-                scrollable(options).id("page-form").height(Fill).spacing(10),
-                rule::horizontal(1),
-                footer,
+                text("Stop the local service?").size(18),
+                text(
+                    "This locks the vault, discards any open item draft, and disconnects \
+                     the browser extension and CLI until you start it again."
+                )
+                .size(14),
+                row![
+                    primary("Keep running", Message::ConfirmStop(false), !app.busy()),
+                    action(
+                        "Stop service",
+                        Message::Stop,
+                        !app.busy() && app.recovery.id().is_none()
+                    )
+                    .style(button_style::danger)
+                ]
+                .spacing(8)
+                .wrap(),
             ]
             .spacing(12),
-        )
-        .max_width(800)
-        .height(Fill),
-    )
-    .center_x(Fill)
-    .height(Fill)
-    .into()
+        ));
+    }
+    form.push(cloud_settings(app))
+        .push(rule::horizontal(1))
+        .push(settings_field(
+            app,
+            "Saved service port (1–65535)",
+            &app.settings.server_port,
+            SettingsField::ServerPort,
+        ))
+        .push(text("Stop the service before changing its saved port.").size(14))
+        .push(connection_controls(app))
+        .push(action(
+            "Browser integration",
+            Message::OpenTools(workflows::Section::Browser),
+            !app.busy(),
+        ))
 }
 
 fn cloud_settings(app: &App) -> Element<'_, Message> {
