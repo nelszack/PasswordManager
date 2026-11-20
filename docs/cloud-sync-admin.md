@@ -115,14 +115,18 @@ conflicts**. The desktop shows local and cloud labels side by side. Choose all
 local, all cloud, or select a side for each differing field, then choose **Apply
 selected values and sync**. Save or discard unfinished item edits first.
 
-Names, usernames, URLs, creation times, and deletion states are shown; passwords,
+Names, usernames, URLs, and deletion states are shown; passwords,
 notes, and protected groups remain redacted. Metadata (item type, additional
 URLs, and custom fields), password history, authenticators,
 and Duo credentials are selected as complete groups. The password-change time
 follows the selected primary secret. No choice is preselected.
 When an item exists on only one side, choosing the absent side removes it from
-the resolved vault. Independently created items can share a numeric ID; review
-creation times and item labels carefully. There is no automatic three-way merge.
+the resolved vault. Two devices that add items while offline can assign the same
+numeric ID to unrelated items. Because an item's creation time never changes,
+items that share an ID but differ in creation time are treated as separate: the
+review lists them without choices, and resolution keeps both, giving the cloud
+item the next free ID (shown in the review). Delete either one afterwards if it
+is unwanted. There is no automatic three-way merge.
 
 The CLI exposes the same review and choices:
 
@@ -134,8 +138,10 @@ pm sync resolve --review REVIEW_TOKEN \
 
 Use the exact field names and token printed by `conflicts`, supplying one
 `--choose ITEM_ID:FIELD:local|remote` for every reported difference. The example
-assumes only those three fields differ. If no fields differ but ciphertexts do,
-`pm sync resolve --review REVIEW_TOKEN` reconciles them without field choices.
+assumes only those three fields differ. Items reported with an empty `fields`
+list are kept on both sides and need no choice. If no fields differ but
+ciphertexts do, `pm sync resolve --review REVIEW_TOKEN` reconciles them without
+field choices.
 
 Resolution rejects stale reviews if either snapshot, the unlock session, or
 connection changed. Refresh the review and choose again. Before applying,

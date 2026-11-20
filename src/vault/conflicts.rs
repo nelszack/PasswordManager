@@ -37,13 +37,6 @@ fn fields(a: &Item, b: &Item) -> Vec<ConflictField> {
         a.entry.url.clone().unwrap_or_default(),
         b.entry.url.clone().unwrap_or_default()
     );
-    field!(
-        "created",
-        a.entry.created,
-        b.entry.created,
-        a.entry.created.to_string(),
-        b.entry.created.to_string()
-    );
     macro_rules! protected {
         ($name:literal, $a:expr, $b:expr) => {
             field!(
@@ -119,7 +112,37 @@ fn label(item: Option<&Item>) -> String {
         },
     )
 }
+/// Item IDs come from a per-vault counter, so two offline devices can assign
+/// the same ID to unrelated new items. Creation times never change after an
+/// item is created, so differing ones identify independent items. Both are kept:
+/// each such cloud item receives a fresh ID instead of a field-by-field merge.
+fn separate_ids(local: &VaultData, remote: &VaultData) -> Result<BTreeMap<ItemId, ItemId>, String> {
+    // Never reuse an ID present on either side, even if a counter lags.
+    let mut next = local
+        .items
+        .keys()
+        .chain(remote.items.keys())
+        .map(|id| id.0.saturating_add(1))
+        .fold(local.next_item_id.max(remote.next_item_id), u64::max);
+    let mut separate = BTreeMap::new();
+    for (id, b) in &remote.items {
+        if local
+            .items
+            .get(id)
+            .is_some_and(|a| a.entry.created != b.entry.created)
+        {
+            separate.insert(
+                *id,
+                ItemId::try_from(next).map_err(|_| "Item IDs exhausted".to_owned())?,
+            );
+            next = next.saturating_add(1);
+        }
+    }
+    Ok(separate)
+}
 fn compare(local: &VaultData, remote: &VaultData) -> Vec<ConflictItem> {
+    // A vault at the ID limit cannot add items; review it field by field.
+    let separate = separate_ids(local, remote).unwrap_or_default();
     let ids: std::collections::BTreeSet<_> = local
         .items
         .keys()
@@ -130,6 +153,19 @@ fn compare(local: &VaultData, remote: &VaultData) -> Vec<ConflictItem> {
         .filter_map(|id| {
             let a = local.items.get(&id);
             let b = remote.items.get(&id);
+            if let Some(new_id) = separate.get(&id) {
+                // Informational: nothing to choose, both items are kept.
+                return Some(ConflictItem {
+                    id: id.0,
+                    local: label(a),
+                    remote: format!(
+                        "{} · separate item created independently; kept as item {}",
+                        label(b),
+                        new_id.0
+                    ),
+                    fields: vec![],
+                });
+            }
             let fields = match (a, b) {
                 (Some(a), Some(b)) => fields(a, b),
                 _ => vec![ConflictField {
@@ -167,14 +203,31 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
     }
     let revision =
         next_revision(local.revision.max(remote.revision)).ok_or("Vault revision exhausted")?;
+    let separate = separate_ids(local, remote)?;
     let mut data = VaultData {
         items: local.items.clone(),
         vault_id: local.vault_id,
         next_item_id: local.next_item_id.max(remote.next_item_id),
         revision,
     };
+    for (id, new_id) in &separate {
+        let mut item = remote.items[id].clone();
+        item.entry.id = new_id.public().map_err(|e| e.to_string())?;
+        item.strength = CachedStrength::default();
+        item.sites = browser::CachedSites::default();
+        item.search = query::CachedSearch::default();
+        if let Some(duo) = &mut item.duo {
+            duo.review_key = None;
+        }
+        data.items.insert(*new_id, item);
+        data.next_item_id = data.next_item_id.max(new_id.0 + 1);
+    }
     for row in review {
         let id = ItemId::try_from(row.id).map_err(str::to_owned)?;
+        if separate.contains_key(&id) {
+            // The local item keeps this ID unchanged; the cloud item moved above.
+            continue;
+        }
         // Freeze the selected secret's effective age before independently
         // selecting a creation date or the other side's general metadata.
         if let Some(item) = data.items.get_mut(&id) {
@@ -203,7 +256,6 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
                     }
                     "url" => dest.entry.url = src.entry.url.clone(),
                     "notes" => dest.entry.notes = src.entry.notes.clone(),
-                    "created" => dest.entry.created = src.entry.created.clone(),
                     "metadata" => {
                         let changed = dest.metadata.password_changed.clone();
                         dest.metadata = src.metadata.clone();
@@ -400,10 +452,11 @@ mod tests {
             let new = Timestamp::parse("2026-01-01T00:00:00Z").unwrap();
             let item = local.data.items.get_mut(&ItemId(1)).unwrap();
             item.entry.created = old.clone();
-            item.metadata.password_changed = explicit_date.then_some(old);
+            item.metadata.password_changed = explicit_date.then_some(old.clone());
+            // The same item (same creation time); only the local date may be implicit.
             let item = remote.data.items.get_mut(&ItemId(1)).unwrap();
-            item.entry.created = new.clone();
-            item.metadata.password_changed = explicit_date.then_some(new);
+            item.entry.created = old.clone();
+            item.metadata.password_changed = Some(new);
             item.metadata
                 .additional_urls
                 .push("https://cloud.example".into());
@@ -437,6 +490,55 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn independently_created_items_sharing_an_id_are_both_kept() {
+        let (local, _) = pair();
+        let mut remote = local.data.clone();
+        remote.revision += 1;
+        // Another device created an unrelated item with the same counter value.
+        let item = remote.items.get_mut(&ItemId(1)).unwrap();
+        item.entry.name = "Unrelated cloud item".into();
+        item.entry.password = "cloud-secret".into();
+        item.entry.created = Timestamp::parse("2030-01-01T00:00:00Z").unwrap();
+        let review = compare(&local.data, &remote);
+        assert_eq!(review.len(), 1);
+        assert!(review[0].fields.is_empty(), "nothing to choose");
+        assert!(
+            review[0].remote.contains("kept as item 2"),
+            "{}",
+            review[0].remote
+        );
+        assert!(
+            !serde_json::to_string(&review)
+                .unwrap()
+                .contains("cloud-secret")
+        );
+        let merged = merge(&local.data, &remote, &[]).unwrap();
+        assert_eq!(merged.items.len(), 2);
+        assert_eq!(merged.items[&ItemId(1)], local.data.items[&ItemId(1)]);
+        let moved = &merged.items[&ItemId(2)];
+        assert_eq!(moved.entry.id, 2);
+        assert_eq!(moved.entry.name, "Unrelated cloud item");
+        assert_eq!(moved.entry.password.expose(), "cloud-secret");
+        assert_eq!(merged.next_item_id, 3);
+        // Choices for an informational row are rejected as unknown.
+        let stray = [Choice {
+            id: 1,
+            field: "name".into(),
+            side: Side::Remote,
+        }];
+        assert!(merge(&local.data, &remote, &stray).is_err());
+        // An existing item is never overwritten, even if both counters lag.
+        let mut local = local.data.clone();
+        let mut extra = local.items[&ItemId(1)].clone();
+        extra.entry.id = 2;
+        local.items.insert(ItemId(2), extra.clone());
+        remote.items.insert(ItemId(2), extra);
+        let merged = merge(&local, &remote, &[]).unwrap();
+        assert_eq!(merged.items.len(), 3);
+        assert_eq!(merged.items[&ItemId(3)].entry.name, "Unrelated cloud item");
+        assert_eq!(merged.next_item_id, 4);
     }
     #[test]
     fn equivalent_contents_can_reconcile_without_arbitrary_field_choices() {
