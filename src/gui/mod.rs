@@ -729,44 +729,11 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        if matches!(
-            &message,
-            Message::Name(_)
-                | Message::Username(_)
-                | Message::Kind(_)
-                | Message::Password(_)
-                | Message::ReplacePassword(_)
-                | Message::AddField
-                | Message::FieldName(..)
-                | Message::FieldValue(..)
-                | Message::TemplateValue(..)
-                | Message::FieldSecret(..)
-                | Message::RemoveField(_)
-                | Message::MultilineSecret(_)
-                | Message::SecretEdit(_)
-                | Message::Url(..)
-                | Message::AddUrl
-                | Message::RemoveUrl(_)
-                | Message::Notes(_)
-                | Message::Generate
-        ) && self.editor.is_some()
-            && !self.busy()
-        {
+        if edits_draft(&message) && self.editor.is_some() && !self.busy() {
             self.workspace.prepared = None;
         }
         match message {
-            Message::CloseRequested(id) => {
-                if self.busy()
-                    || self.editor.as_ref().is_some_and(|draft| draft.dirty)
-                    || self.settings.is_dirty()
-                {
-                    self.ui.confirm_close = Some(id);
-                    self.hide_secrets();
-                    return iced::widget::operation::focus("keep-window-open");
-                } else {
-                    return iced::window::close(id);
-                }
-            }
+            Message::CloseRequested(id) => return self.request_close(id),
             Message::CancelClose => self.ui.confirm_close = None,
             Message::ConfirmClose => {
                 if let Some(id) = self.ui.confirm_close.take() {
@@ -780,99 +747,10 @@ impl App {
             | Message::CloudToken(..)
             | Message::CloudVault(..)
             | Message::SaveCloudToken) => return self.update_cloud(message),
-            Message::Finished(serial, job, result) => {
-                if serial != self.serial {
-                    return Task::none();
-                }
-                self.request_state = RequestState::Idle;
-                let result = Arc::try_unwrap(result).unwrap_or_else(|shared| (*shared).clone());
-                return match result {
-                    Ok(reply) => self.complete(job, reply),
-                    Err(error) => {
-                        if job == Job::SavedList {
-                            self.ui.saved_item = None;
-                        }
-                        if matches!(job, Job::Create | Job::Unlock) {
-                            self.connection.creation = None;
-                        }
-                        self.report_error(error.message);
-                        if matches!(job, Job::Workflow(_)) {
-                            self.stop_tool_watches();
-                        }
-                        if let Some(id) = error.uncertain_operation {
-                            self.recovery = Recovery::AwaitingOutcome(id);
-
-                            self.notice.push_str(
-                                " The change may have completed. Check its outcome before making \
-                                 another change.",
-                            );
-                            self.editor = Editor::Closed;
-                            self.hide_secrets();
-                        }
-                        if matches!(job, Job::Connect | Job::Attach | Job::Status) {
-                            self.connection.running = false;
-                            self.clear_vault();
-                        }
-                        if job == Job::DiscoverVaults && self.connection.connect_after_discovery {
-                            self.connection.connect_after_discovery = false;
-                            return self.connect();
-                        }
-                        Task::none()
-                    }
-                };
-            }
-            Message::StatusPushed(true) => {
-                self.connection.subscribed = true;
-                if self.connection.running && !self.busy() && !self.polling() {
-                    return self.status();
-                }
-                // Refresh once the current request finishes (next tick).
-                self.connection.status_stale = true;
-            }
+            Message::Finished(serial, job, result) => return self.finish(serial, job, result),
+            Message::StatusPushed(true) => return self.status_pushed(),
             Message::StatusPushed(false) => self.connection.subscribed = false,
-            Message::Tick(now) => {
-                if self
-                    .workspace
-                    .result_until
-                    .is_some_and(|deadline| now >= deadline)
-                {
-                    self.workspace.result = None;
-                    self.workspace.result_until = None;
-                }
-                if self.reveal_until.is_some_and(|deadline| now >= deadline) {
-                    self.hide_secrets();
-                }
-                if self.generation.value.expire(now) {
-                    self.generation.stats.clear();
-                    self.ui.transfer_generated = false;
-                    if self.notice.starts_with("New secret ready.") {
-                        self.notice = "Generated secret cleared after 60 seconds. Generate \
-                                       another when you need it."
-                            .into();
-                    }
-                }
-                if !self.busy()
-                    && !self.polling()
-                    && now.saturating_duration_since(self.connection.last_status)
-                        < Duration::from_secs(2)
-                {
-                    let task = self.poll_tool_watches(now);
-                    if self.polling() || self.busy() {
-                        return task;
-                    }
-                }
-                // Allow timer jitter so an idle tick at the poll cadence is not skipped.
-                let interval = self.status_interval();
-                if self.connection.running
-                    && !self.busy()
-                    && !self.polling()
-                    && (self.connection.status_stale
-                        || now.duration_since(self.connection.last_status)
-                            >= interval - Duration::from_millis(250))
-                {
-                    return self.status();
-                }
-            }
+            Message::Tick(now) => return self.tick(now),
             Message::Lock if self.connection.running => {
                 // Invalidate older completions immediately, even if a request is in flight.
                 self.clear_vault();
@@ -912,23 +790,7 @@ impl App {
                 self.ui.notice_error = false;
             }
             _ if self.busy() => return Task::none(),
-            Message::Disclosure(section) => {
-                use presentation::Disclosure;
-                let expanded = match section {
-                    Disclosure::Unlock => &mut self.ui.unlock_advanced,
-                    Disclosure::Editor => &mut self.ui.editor_advanced,
-                    Disclosure::Authenticators => &mut self.ui.editor_authenticators,
-                    Disclosure::Generator => &mut self.ui.generator_advanced,
-                    Disclosure::Shortcuts => &mut self.ui.shortcuts,
-                };
-                *expanded = !*expanded;
-                if !*expanded {
-                    if matches!(section, Disclosure::Unlock) {
-                        self.connection.key_path.zeroize();
-                    }
-                    self.hide_secrets();
-                }
-            }
+            Message::Disclosure(section) => self.toggle_disclosure(section),
             message @ (Message::CancelDelete
             | Message::ConfirmDelete
             | Message::Copy
@@ -960,28 +822,13 @@ impl App {
             | Message::CancelResetSettings
             | Message::ConfirmResetSettings) => return self.update_settings(message),
             Message::FocusSearch if self.connection.session.is_some() => {
-                self.tab = Tab::Vault;
-                self.hide_secrets();
-                if self.compact() && (self.editor.is_some() || self.item.is_some()) {
-                    return self
-                        .navigate(Navigate::Close)
-                        .chain(iced::widget::operation::focus("vault-search"));
-                }
-                return iced::widget::operation::focus("vault-search");
+                return self.focus_search();
             }
             Message::OpenFileTool(operation) => {
-                self.ui.undo_trash = None;
-                self.hide_secrets();
-                self.cancel_passive_read();
-                self.tab = Tab::Tools;
-                return self.workflow(workflows::Event::FileOperation(operation));
+                return self.open_tools(workflows::Event::FileOperation(operation));
             }
             Message::OpenTools(section) => {
-                self.ui.undo_trash = None;
-                self.hide_secrets();
-                self.cancel_passive_read();
-                self.tab = Tab::Tools;
-                return self.workflow(workflows::Event::Section(section));
+                return self.open_tools(workflows::Event::Section(section));
             }
             Message::Workflow(workflows::Event::Run(action))
                 if matches!(
@@ -1011,24 +858,7 @@ impl App {
                 self.tab = Tab::Vault;
                 return self.navigate(Navigate::Select(id));
             }
-            Message::OpenItemTools(id) => {
-                self.ui.undo_trash = None;
-                self.hide_secrets();
-                self.cancel_passive_read();
-                self.tab = Tab::Tools;
-                self.workspace.section = workflows::Section::Recovery;
-                self.workspace.selected =
-                    self.items
-                        .iter()
-                        .find(|item| item.id == id)
-                        .map(|item| workflows::Choice {
-                            id,
-                            label: format!("{} · {}", item.id, item.name),
-                        });
-                self.workspace.result = None;
-                self.workspace.prepared = None;
-                return workflows::show_form();
-            }
+            Message::OpenItemTools(id) => return self.open_item_tools(id),
             message @ (Message::Connect
             | Message::RefreshVaults
             | Message::ReloadSettings
@@ -1044,35 +874,7 @@ impl App {
             | Message::Unlock
             | Message::Create
             | Message::Stop) => return self.update_connection(message),
-            Message::Tab(tab) => {
-                if tab != self.tab {
-                    self.ui.undo_trash = None;
-                }
-                self.hide_secrets();
-                self.cancel_passive_read();
-                self.workspace.prepared = None;
-                self.tab = tab;
-                if tab == Tab::Generator && self.generation.value.is_empty() {
-                    self.preview_generated();
-                }
-                if tab == Tab::Vault && self.editor.is_none() {
-                    if let Some(item) = &self.item {
-                        self.workspace.selected = Some(workflows::Choice {
-                            id: item.id,
-                            label: format!("{} · {}", item.id, item.name),
-                        });
-                    }
-                    return self.fetch_selected_duo();
-                }
-                if tab == Tab::Settings {
-                    if self.ui.settings_section == presentation::SettingsSection::Security
-                        && let Some(id) = &self.connection.vault
-                    {
-                        self.ui.vault_name = self.names.label(id, &self.connection.vaults);
-                    }
-                    return self.launch(Job::OpenSettings, backend::reload_settings);
-                }
-            }
+            Message::Tab(tab) => return self.switch_tab(tab),
             Message::Discard => {
                 let destination = self.editor.take_deferred();
                 self.editor = Editor::Closed;
@@ -1145,6 +947,216 @@ impl App {
                 }
             }
             _ => {}
+        }
+        Task::none()
+    }
+
+    /// Ask before closing over a request in flight or unsaved edits.
+    fn request_close(&mut self, id: iced::window::Id) -> Task<Message> {
+        if self.busy()
+            || self.editor.as_ref().is_some_and(|draft| draft.dirty)
+            || self.settings.is_dirty()
+        {
+            self.ui.confirm_close = Some(id);
+            self.hide_secrets();
+            iced::widget::operation::focus("keep-window-open")
+        } else {
+            iced::window::close(id)
+        }
+    }
+
+    /// Apply the reply of the latest request; older completions are ignored.
+    fn finish(
+        &mut self,
+        serial: u64,
+        job: Job,
+        result: Arc<Result<Reply, Failure>>,
+    ) -> Task<Message> {
+        if serial != self.serial {
+            return Task::none();
+        }
+        self.request_state = RequestState::Idle;
+        let result = Arc::try_unwrap(result).unwrap_or_else(|shared| (*shared).clone());
+        match result {
+            Ok(reply) => self.complete(job, reply),
+            Err(error) => {
+                if job == Job::SavedList {
+                    self.ui.saved_item = None;
+                }
+                if matches!(job, Job::Create | Job::Unlock) {
+                    self.connection.creation = None;
+                }
+                self.report_error(error.message);
+                if matches!(job, Job::Workflow(_)) {
+                    self.stop_tool_watches();
+                }
+                if let Some(id) = error.uncertain_operation {
+                    self.recovery = Recovery::AwaitingOutcome(id);
+
+                    self.notice.push_str(
+                        " The change may have completed. Check its outcome before making \
+                         another change.",
+                    );
+                    self.editor = Editor::Closed;
+                    self.hide_secrets();
+                }
+                if matches!(job, Job::Connect | Job::Attach | Job::Status) {
+                    self.connection.running = false;
+                    self.clear_vault();
+                }
+                if job == Job::DiscoverVaults && self.connection.connect_after_discovery {
+                    self.connection.connect_after_discovery = false;
+                    return self.connect();
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// A pushed status record refreshes now, or after the request in flight.
+    fn status_pushed(&mut self) -> Task<Message> {
+        self.connection.subscribed = true;
+        if self.connection.running && !self.busy() && !self.polling() {
+            return self.status();
+        }
+        // Refresh once the current request finishes (next tick).
+        self.connection.status_stale = true;
+        Task::none()
+    }
+
+    /// Expire timed values, poll watches, and check server status.
+    fn tick(&mut self, now: Instant) -> Task<Message> {
+        if self
+            .workspace
+            .result_until
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.workspace.result = None;
+            self.workspace.result_until = None;
+        }
+        if self.reveal_until.is_some_and(|deadline| now >= deadline) {
+            self.hide_secrets();
+        }
+        if self.generation.value.expire(now) {
+            self.generation.stats.clear();
+            self.ui.transfer_generated = false;
+            if self.notice.starts_with("New secret ready.") {
+                self.notice = "Generated secret cleared after 60 seconds. Generate \
+                               another when you need it."
+                    .into();
+            }
+        }
+        if !self.busy()
+            && !self.polling()
+            && now.saturating_duration_since(self.connection.last_status) < Duration::from_secs(2)
+        {
+            let task = self.poll_tool_watches(now);
+            if self.polling() || self.busy() {
+                return task;
+            }
+        }
+        // Allow timer jitter so an idle tick at the poll cadence is not skipped.
+        let interval = self.status_interval();
+        if self.connection.running
+            && !self.busy()
+            && !self.polling()
+            && (self.connection.status_stale
+                || now.duration_since(self.connection.last_status)
+                    >= interval - Duration::from_millis(250))
+        {
+            return self.status();
+        }
+        Task::none()
+    }
+
+    /// Collapsing a section hides secrets it may have shown.
+    fn toggle_disclosure(&mut self, section: presentation::Disclosure) {
+        use presentation::Disclosure;
+        let expanded = match section {
+            Disclosure::Unlock => &mut self.ui.unlock_advanced,
+            Disclosure::Editor => &mut self.ui.editor_advanced,
+            Disclosure::Authenticators => &mut self.ui.editor_authenticators,
+            Disclosure::Generator => &mut self.ui.generator_advanced,
+            Disclosure::Shortcuts => &mut self.ui.shortcuts,
+        };
+        *expanded = !*expanded;
+        if !*expanded {
+            if matches!(section, Disclosure::Unlock) {
+                self.connection.key_path.zeroize();
+            }
+            self.hide_secrets();
+        }
+    }
+
+    /// Move to the vault search, closing a compact detail pane first.
+    fn focus_search(&mut self) -> Task<Message> {
+        self.tab = Tab::Vault;
+        self.hide_secrets();
+        if self.compact() && (self.editor.is_some() || self.item.is_some()) {
+            return self
+                .navigate(Navigate::Close)
+                .chain(iced::widget::operation::focus("vault-search"));
+        }
+        iced::widget::operation::focus("vault-search")
+    }
+
+    /// Leave the current screen for a Tools section or file operation.
+    fn open_tools(&mut self, event: workflows::Event) -> Task<Message> {
+        self.ui.undo_trash = None;
+        self.hide_secrets();
+        self.cancel_passive_read();
+        self.tab = Tab::Tools;
+        self.workflow(event)
+    }
+
+    /// Open password recovery for one item.
+    fn open_item_tools(&mut self, id: usize) -> Task<Message> {
+        self.ui.undo_trash = None;
+        self.hide_secrets();
+        self.cancel_passive_read();
+        self.tab = Tab::Tools;
+        self.workspace.section = workflows::Section::Recovery;
+        self.workspace.selected =
+            self.items
+                .iter()
+                .find(|item| item.id == id)
+                .map(|item| workflows::Choice {
+                    id,
+                    label: format!("{} · {}", item.id, item.name),
+                });
+        self.workspace.result = None;
+        self.workspace.prepared = None;
+        workflows::show_form()
+    }
+
+    /// Switching tabs hides secrets and cancels reads for the old tab.
+    fn switch_tab(&mut self, tab: Tab) -> Task<Message> {
+        if tab != self.tab {
+            self.ui.undo_trash = None;
+        }
+        self.hide_secrets();
+        self.cancel_passive_read();
+        self.workspace.prepared = None;
+        self.tab = tab;
+        if tab == Tab::Generator && self.generation.value.is_empty() {
+            self.preview_generated();
+        }
+        if tab == Tab::Vault && self.editor.is_none() {
+            if let Some(item) = &self.item {
+                self.workspace.selected = Some(workflows::Choice {
+                    id: item.id,
+                    label: format!("{} · {}", item.id, item.name),
+                });
+            }
+            return self.fetch_selected_duo();
+        }
+        if tab == Tab::Settings {
+            if self.ui.settings_section == presentation::SettingsSection::Security
+                && let Some(id) = &self.connection.vault
+            {
+                self.ui.vault_name = self.names.label(id, &self.connection.vaults);
+            }
+            return self.launch(Job::OpenSettings, backend::reload_settings);
         }
         Task::none()
     }
@@ -1461,6 +1473,31 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         view::view(self)
     }
+}
+
+/// Draft edits invalidate a prepared Tools operation that was reviewed against the old draft.
+fn edits_draft(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::Name(_)
+            | Message::Username(_)
+            | Message::Kind(_)
+            | Message::Password(_)
+            | Message::ReplacePassword(_)
+            | Message::AddField
+            | Message::FieldName(..)
+            | Message::FieldValue(..)
+            | Message::TemplateValue(..)
+            | Message::FieldSecret(..)
+            | Message::RemoveField(_)
+            | Message::MultilineSecret(_)
+            | Message::SecretEdit(_)
+            | Message::Url(..)
+            | Message::AddUrl
+            | Message::RemoveUrl(_)
+            | Message::Notes(_)
+            | Message::Generate
+    )
 }
 
 #[cfg(test)]
