@@ -182,6 +182,25 @@ This protects each client against rollback below what it has already seen; a
 device that has never synchronized (for example, a fresh `pm sync pull`) still
 trusts whatever the server returns, and a server can always withhold updates.
 
+## Transfers and timeouts
+
+A sync normally takes one request. Without local changes the client asks for the
+vault only if its version differs from the last one synchronized
+(`If-None-Match`; an unchanged vault answers `304 Not Modified`). With local
+changes it uploads directly against the last synchronized version (`If-Match`);
+if the cloud moved on, the server answers `412` without replacing anything and
+the client downloads the current version to compare. Uploads larger than
+192 KiB first check the cloud version, so a stale upload is not transferred.
+
+Request headers must arrive within 10 seconds and ordinary requests finish
+within 60 seconds. Vault uploads and downloads instead fail only after 60
+seconds without progress (or after a size-based limit that assumes at least
+32 KiB/s), so large vaults work over slow links. Clients apply the same rule:
+small requests have a 35-second limit, transfers a 35-second idle limit.
+A failed upload reports its cause: `413` for a vault over the 128 MiB limit,
+`507` when the quota or the server's disk is full, `408` when the client
+stopped sending, and `400` for an interrupted or empty body.
+
 ## Storage and recovery
 
 The default quota is 256 MiB across vault files, retained snapshots, and upload

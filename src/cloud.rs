@@ -18,6 +18,38 @@ pub use pm_contracts::cloud::{
 };
 
 pub const MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// Total deadline for small requests (metadata, acknowledgements, events).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+/// A vault transfer fails only when no progress is made for this long, so a
+/// large vault on a slow link is not cut off by a fixed total deadline.
+const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(35);
+/// Uploads cannot observe write progress, so their deadline grows with size.
+const MIN_UPLOAD_BYTES_PER_SECOND: u64 = 32 * 1024;
+/// Bodies up to this size are sent with their precondition in one request.
+/// Larger uploads check the cloud version first, so a body that would be
+/// rejected as stale is not transferred (and servers that close early cannot
+/// lose the rejection).
+pub(crate) const DIRECT_UPLOAD_BYTES: usize = 192 * 1024;
+
+/// A conditional download.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Fetched {
+    /// The cloud version still equals the one supplied.
+    NotModified,
+    Missing,
+    Snapshot {
+        version: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// A conditional upload.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Uploaded {
+    Committed(String),
+    /// The cloud version no longer matches the base; nothing was replaced.
+    Stale,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -204,8 +236,9 @@ impl CloudClient {
         let http = if let Some(http) = HTTP.get() {
             http.clone()
         } else {
+            // Deadlines are per request: small requests have a total limit,
+            // transfers an idle limit (see `transfer` and `upload_deadline`).
             let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(35))
                 .connect_timeout(Duration::from_secs(5))
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()
@@ -221,6 +254,10 @@ impl CloudClient {
         })
     }
     fn request(&self, method: reqwest::Method, suffix: &str) -> reqwest::RequestBuilder {
+        self.transfer(method, suffix).timeout(REQUEST_TIMEOUT)
+    }
+    /// A request whose caller bounds it with `idle` (download) or a size-based deadline.
+    fn transfer(&self, method: reqwest::Method, suffix: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}{suffix}", self.url))
             .bearer_auth(self.token.as_str())
@@ -233,7 +270,9 @@ impl CloudClient {
                 "Sync conflict: another device uploaded changes; both copies have been preserved"
                     .into(),
             ),
-            507 => Err("Sync server storage quota reached".into()),
+            408 => Err("Sync server timed out waiting for the upload".into()),
+            413 => Err("Vault exceeds the sync server's size limit".into()),
+            507 => Err("Sync server storage is full or its quota is reached".into()),
             code => Err(format!("Sync server returned HTTP {code}")),
         }
     }
@@ -242,7 +281,7 @@ impl CloudClient {
             return Err("Sync response exceeds size limit".into());
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+        while let Some(chunk) = idle(response.chunk()).await? {
             if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
                 return Err("Sync response exceeds size limit".into());
             }
@@ -307,19 +346,35 @@ impl CloudClient {
         }))
     }
     pub async fn download(&self, id: &str) -> Result<(String, Vec<u8>), String> {
-        if !valid_id(id) {
+        match self.fetch(id, None).await? {
+            Fetched::Snapshot { version, bytes } => Ok((version, bytes)),
+            Fetched::Missing => Err("Sync server returned HTTP 404".into()),
+            Fetched::NotModified => Err("Unexpected cloud response".into()),
+        }
+    }
+    /// Downloads the current snapshot and its version in one response, unless
+    /// it still equals `known` (If-None-Match).
+    pub(crate) async fn fetch(&self, id: &str, known: Option<&str>) -> Result<Fetched, String> {
+        if !valid_id(id) || known.is_some_and(|v| !valid_id(v)) {
             return Err("Invalid cloud vault ID".into());
         }
-        let response = Self::checked(
-            self.request(reqwest::Method::GET, &format!("/v1/vaults/{id}"))
-                .send()
-                .await
-                .map_err(transport_error)?,
-        )?;
+        let mut request = self.transfer(reqwest::Method::GET, &format!("/v1/vaults/{id}"));
+        if let Some(known) = known {
+            request = request.header(reqwest::header::IF_NONE_MATCH, format!("\"{known}\""));
+        }
+        let response = idle(request.send()).await?;
+        match response.status() {
+            reqwest::StatusCode::NOT_FOUND => return Ok(Fetched::Missing),
+            reqwest::StatusCode::NOT_MODIFIED if known.is_some() => {
+                return Ok(Fetched::NotModified);
+            }
+            _ => {}
+        }
+        let response = Self::checked(response)?;
         let version = Self::response_version(&response)?;
         let bytes = Self::read(response, MAX_BYTES).await?;
         crate::encryption::validate_vault_header(&bytes).map_err(str::to_owned)?;
-        Ok((version, bytes))
+        Ok(Fetched::Snapshot { version, bytes })
     }
     pub async fn upload(
         &self,
@@ -327,24 +382,46 @@ impl CloudClient {
         version: Option<&str>,
         bytes: Vec<u8>,
     ) -> Result<String, String> {
+        match self.try_upload(id, version, bytes).await? {
+            Uploaded::Committed(version) => Ok(version),
+            Uploaded::Stale => Err(
+                "Sync conflict: another device uploaded changes; both copies have been preserved"
+                    .into(),
+            ),
+        }
+    }
+    /// Replaces the snapshot only if the cloud version still equals `version`
+    /// (or, without one, if no snapshot exists yet).
+    pub(crate) async fn try_upload(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<Uploaded, String> {
         if !valid_id(id) || bytes.len() as u64 > MAX_BYTES || version.is_some_and(|v| !valid_id(v))
         {
             return Err("Invalid sync upload".into());
         }
-        let mut request = self.request(reqwest::Method::PUT, &format!("/v1/vaults/{id}"));
+        let mut request = self
+            .transfer(reqwest::Method::PUT, &format!("/v1/vaults/{id}"))
+            .timeout(upload_deadline(bytes.len()));
         request = if let Some(version) = version {
             request.header(reqwest::header::IF_MATCH, format!("\"{version}\""))
         } else {
             request.header(reqwest::header::IF_NONE_MATCH, "*")
         };
-        let response = Self::checked(request.body(bytes).send().await.map_err(transport_error)?)?;
+        let response = request.body(bytes).send().await.map_err(transport_error)?;
+        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Ok(Uploaded::Stale);
+        }
+        let response = Self::checked(response)?;
         let value: serde_json::Value = serde_json::from_slice(&Self::read(response, 4096).await?)
             .map_err(|e| e.to_string())?;
         value
             .get("version")
             .and_then(|v| v.as_str())
             .filter(|v| valid_id(v))
-            .map(str::to_owned)
+            .map(|v| Uploaded::Committed(v.to_owned()))
             .ok_or("Invalid upload acknowledgement".into())
     }
     pub async fn events(&self, since: &str) -> Result<String, String> {
@@ -366,6 +443,20 @@ impl CloudClient {
             .map(str::to_owned)
             .ok_or("Invalid change notification".into())
     }
+}
+
+/// Fails a transfer step that makes no progress within the idle limit.
+async fn idle<T>(
+    step: impl std::future::Future<Output = Result<T, reqwest::Error>>,
+) -> Result<T, String> {
+    tokio::time::timeout(TRANSFER_IDLE_TIMEOUT, step)
+        .await
+        .map_err(|_| "Sync request timed out: no progress from the server".to_owned())?
+        .map_err(transport_error)
+}
+
+fn upload_deadline(len: usize) -> Duration {
+    REQUEST_TIMEOUT + Duration::from_secs(len as u64 / MIN_UPLOAD_BYTES_PER_SECOND)
 }
 
 /// A new download never overwrites an existing local vault. Its encrypted

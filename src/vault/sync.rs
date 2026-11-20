@@ -241,3 +241,227 @@ mod tests {
     }
 }
 
+/// The shared engine against a scripted peer that honors conditional requests.
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+    use crate::cloud::{
+        CloudClient, binding,
+        engine::{self, Bind, Snapshot, Stuck, SyncHost},
+    };
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Default)]
+    struct Remote {
+        bytes: Vec<u8>,
+        version: u64,
+        log: Vec<String>,
+    }
+    fn tag(version: u64) -> String {
+        format!("\"{version:032x}\"")
+    }
+    fn serve(remote: Arc<Mutex<Remote>>) -> String {
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", socket.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in socket.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap().to_lowercase();
+                let header = |name: &str| {
+                    head.lines()
+                        .find_map(|l| l.strip_prefix(&format!("{name}: ")))
+                        .map(str::to_owned)
+                };
+                let length = header("content-length").map_or(0, |v| v.parse().unwrap());
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let method = head.split_whitespace().next().unwrap().to_uppercase();
+                let mut remote = remote.lock().unwrap();
+                let current = tag(remote.version);
+                let condition = header("if-match")
+                    .map(|v| format!(" if-match {v}"))
+                    .or_else(|| header("if-none-match").map(|v| format!(" if-none-match {v}")))
+                    .unwrap_or_default();
+                remote.log.push(format!("{method}{condition}"));
+                let (code, response) = match method.as_str() {
+                    "HEAD" | "GET" if remote.version == 0 => (404, vec![]),
+                    "GET" if header("if-none-match") == Some(current.clone()) => (304, vec![]),
+                    "HEAD" | "GET" => (200, remote.bytes.clone()),
+                    "PUT" => {
+                        let allowed = if remote.version == 0 {
+                            header("if-none-match").as_deref() == Some("*")
+                        } else {
+                            header("if-match") == Some(current)
+                        };
+                        if allowed {
+                            remote.bytes = body;
+                            remote.version += 1;
+                            let ack = format!("{{\"version\":\"{:032x}\"}}", remote.version);
+                            (200, ack.into_bytes())
+                        } else {
+                            (412, vec![])
+                        }
+                    }
+                    _ => (405, vec![]),
+                };
+                let reply = format!(
+                    "HTTP/1.1 {code} Reply\r\nConnection: close\r\nContent-Length: {}\r\nETag: \
+                     {}\r\n\r\n",
+                    response.len(),
+                    tag(remote.version)
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                if method != "HEAD" {
+                    let _ = stream.write_all(&response);
+                }
+            }
+        });
+        url
+    }
+
+    struct Host {
+        url: String,
+        vault: Mutex<(Vault, VaultCredentials)>,
+    }
+    impl SyncHost for Host {
+        fn client(&self) -> impl std::future::Future<Output = Result<CloudClient, String>> + Send {
+            let client = CloudClient::with_token(&self.url, Zeroizing::new("1".repeat(64)));
+            async move { client }
+        }
+        fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot, String>> + Send {
+            let guard = self.vault.lock().unwrap();
+            let snapshot = guard.0.sync_path().and_then(|path| {
+                Ok(Snapshot {
+                    bytes: fs::read(&path).map_err(|e| e.to_string())?,
+                    state: binding(&path)?,
+                    id: hex::encode(guard.0.vault_id()),
+                    session: "session".into(),
+                    path,
+                })
+            });
+            async move { snapshot }
+        }
+        fn with_unlocked<T: Send + 'static>(
+            &self,
+            _: String,
+            apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
+        ) -> impl std::future::Future<Output = Result<T, String>> + Send {
+            let mut guard = self.vault.lock().unwrap();
+            let (vault, credentials) = &mut *guard;
+            let result = apply(vault, credentials);
+            async move { result }
+        }
+        fn directory(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+    }
+
+    fn encrypt(data: &VaultData, credentials: &VaultCredentials) -> Vec<u8> {
+        let plaintext = persistence::encode_document(data, None).unwrap();
+        try_encrypt_file_in_place(&mut credentials.clone(), plaintext.to_vec()).unwrap()
+    }
+    /// Another device publishes `data` as the next cloud version.
+    fn publish(remote: &Mutex<Remote>, bytes: Vec<u8>) -> String {
+        let mut remote = remote.lock().unwrap();
+        remote.bytes = bytes;
+        remote.version += 1;
+        format!("{:032x}", remote.version)
+    }
+    fn requests(remote: &Mutex<Remote>) -> Vec<String> {
+        std::mem::take(&mut remote.lock().unwrap().log)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_conditional_request_per_sync_and_rollback_needs_review() {
+        let vault = Vault::from_entries(
+            vec![VaultEntry {
+                id: 1,
+                name: "Original".into(),
+                ..Default::default()
+            }],
+            None,
+        );
+        let (_directory, vault, credentials) =
+            crate::vault::test::persist_fixture(vault, "engine.enc");
+        let remote = Arc::new(Mutex::new(Remote::default()));
+        let host = Host {
+            url: serve(remote.clone()),
+            vault: Mutex::new((vault, credentials.clone())),
+        };
+        engine::sync(&host, None, Bind::Enable).await.unwrap();
+        assert_eq!(requests(&remote), ["PUT if-none-match *"]);
+        // Nothing changed locally: a conditional download answered 304.
+        assert_eq!(
+            engine::sync(&host, None, Bind::Existing).await.unwrap(),
+            "Vault is up to date"
+        );
+        assert_eq!(requests(&remote), [format!("GET if-none-match {}", tag(1))]);
+
+        // A newer cloud snapshot arrives with its version in the same response.
+        let mut newer = host.vault.lock().unwrap().0.data.clone();
+        newer.revision += 1;
+        newer.items.get_mut(&ItemId(1)).unwrap().entry.name = "Cloud edit".into();
+        publish(&remote, encrypt(&newer, &credentials));
+        engine::sync(&host, None, Bind::Existing).await.unwrap();
+        assert_eq!(requests(&remote), [format!("GET if-none-match {}", tag(1))]);
+        assert_eq!(host.vault.lock().unwrap().0.data, newer);
+
+        // A replayed older snapshot is not applied and is reported as stuck.
+        let path = host.vault.lock().unwrap().0.sync_path().unwrap();
+        let local_file = fs::read(&path).unwrap();
+        let mut older = newer.clone();
+        older.revision -= 1;
+        let version = publish(&remote, encrypt(&older, &credentials));
+        let error = engine::sync_checked(&host, None, Bind::Existing)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.starts_with(ROLLBACK_PREFIX),
+            "{}",
+            error.message
+        );
+        let stuck = error.stuck.expect("rollback waits for a change");
+        assert_eq!(
+            stuck,
+            Stuck {
+                remote: Some(version),
+                local: crate::cloud::digest(&local_file),
+            }
+        );
+        assert_eq!(host.vault.lock().unwrap().0.data, newer);
+        assert_eq!(fs::read(&path).unwrap(), local_file);
+        requests(&remote);
+        assert!(engine::still_stuck(&host, &stuck).await.unwrap());
+        assert_eq!(requests(&remote), ["HEAD"], "no full download while stuck");
+
+        // Local and cloud both change: one rejected upload, one comparison download.
+        let mut local = newer.clone();
+        local.revision += 5;
+        local.items.get_mut(&ItemId(1)).unwrap().entry.name = "Local edit".into();
+        fs::write(&path, encrypt(&local, &credentials)).unwrap();
+        assert!(!engine::still_stuck(&host, &stuck).await.unwrap());
+        requests(&remote);
+        let error = engine::sync_checked(&host, None, Bind::Existing)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("conflict"), "{}", error.message);
+        assert!(error.stuck.is_some());
+        assert_eq!(
+            requests(&remote),
+            [format!("PUT if-match {}", tag(2)), "GET".to_owned()]
+        );
+        assert_eq!(
+            binding(&path).unwrap().unwrap().version,
+            Some(format!("{:032x}", 2))
+        );
+    }
+}
