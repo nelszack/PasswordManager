@@ -1749,7 +1749,7 @@ mod tests {
                 .any(|w| w == b"private_key")
         );
         let mut key = api.state().credentials.clone();
-        let plain = Zeroizing::new(decrypt_file(&mut key, &raw).unwrap());
+        let plain = decrypt_file(&mut key, &raw).unwrap();
         let document = persistence::decode_document(&plain).unwrap();
         assert_eq!(document.items.len(), 1);
         let record = document.items.values().next().unwrap();

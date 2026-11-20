@@ -296,8 +296,8 @@ impl Vault {
         bytes: &[u8],
     ) -> Result<VaultData, String> {
         let mut key = credentials.clone();
-        let plaintext = Zeroizing::new(decrypt_file(&mut key, bytes).ok_or(
-            "Cannot decrypt cloud copy with this session key. Download a comparison copy and unlock with its current credentials; both copies preserved.")?);
+        let plaintext = decrypt_file(&mut key, bytes).ok_or(
+            "Cannot decrypt cloud copy with this session key. Download a comparison copy and unlock with its current credentials; both copies preserved.")?;
         let data = persistence::decode_document(&plaintext).map_err(|e| e.to_string())?;
         if data.vault_id != self.vault_id() {
             return Err("Cloud copy has the wrong vault identity".into());
