@@ -115,33 +115,255 @@ pub fn set_private_dir_perms(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Replaces the DACL of `path` with a protected one granting full control to
+/// the current user only, so inherited grants and explicit grants to other
+/// principals are both removed, then reads it back and verifies it.
+/// Directories' single ACE is inherited by new children (container and object
+/// inherit, no propagation limits).
 #[cfg(target_os = "windows")]
 fn set_windows_acl(path: &Path, directory: bool) -> std::io::Result<()> {
-    // Pass paths as environment data rather than interpolating PowerShell code.
-    // Build a fresh protected DACL so explicit grants to other principals are
-    // removed as well as inherited grants, then read back and verify it.
-    let output = hidden_windows_command("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            include_str!("windows_private_acl.ps1"),
-        ])
-        .env("PM_PRIVATE_ACL_PATH", std::path::absolute(path)?)
-        .env(
-            "PM_PRIVATE_ACL_DIRECTORY",
-            if directory { "1" } else { "0" },
+    windows_acl::protect(path, directory).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not protect ACL for {}: {error}", path.display()),
         )
-        .output()?;
-    if output.status.success() {
+    })
+}
+
+#[cfg(target_os = "windows")]
+mod windows_acl {
+    use std::{io, os::windows::ffi::OsStrExt, path::Path, ptr};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree},
+        Security::{
+            ACCESS_ALLOWED_ACE, ACE_FLAGS, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
+            AclSizeInformation, AddAccessAllowedAceEx,
+            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW},
+            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+            GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, InitializeAcl,
+            IsValidSid, OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        },
+        Storage::FileSystem::FILE_ALL_ACCESS,
+        System::{
+            SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+
+    pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
+        let mut name: Vec<u16> = std::path::absolute(path)?
+            .as_os_str()
+            .encode_wide()
+            .collect();
+        if name.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains a NUL character",
+            ));
+        }
+        name.push(0);
+        let user = CurrentUser::query()?;
+        let flags = if directory {
+            CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+        } else {
+            0
+        };
+        let mut acl = single_ace_acl(user.sid(), flags)?;
+        // SAFETY: `name` is NUL-terminated UTF-16 that outlives the call, and
+        // `acl` is an initialized ACL buffer that outlives it. Null owner,
+        // group, and SACL pointers are permitted because only the DACL is
+        // selected by the security-information flags.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl.as_mut_ptr().cast::<ACL>(),
+                ptr::null(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        verify(&name, user.sid(), flags)
+    }
+
+    /// The current process token's user SID, in an aligned owned buffer.
+    struct CurrentUser(Vec<u64>);
+    impl CurrentUser {
+        fn query() -> io::Result<Self> {
+            let mut token: HANDLE = ptr::null_mut();
+            // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
+            // closing; `token` is a valid out pointer.
+            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            struct Token(HANDLE);
+            impl Drop for Token {
+                fn drop(&mut self) {
+                    // SAFETY: the handle came from a successful
+                    // OpenProcessToken and is closed exactly once.
+                    unsafe { CloseHandle(self.0) };
+                }
+            }
+            let token = Token(token);
+            let mut length = 0u32;
+            // SAFETY: a null buffer with zero length only asks for the
+            // required size, which is written to `length`.
+            unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut length) };
+            if (length as usize) < size_of::<TOKEN_USER>() {
+                return Err(io::Error::last_os_error());
+            }
+            // u64 storage satisfies TOKEN_USER's pointer alignment.
+            let mut buffer = vec![0u64; (length as usize).div_ceil(size_of::<u64>())];
+            // SAFETY: `buffer` is writable for at least `length` bytes and
+            // suitably aligned; `length` receives the size actually used.
+            if unsafe {
+                GetTokenInformation(
+                    token.0,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    length,
+                    &mut length,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let user = Self(buffer);
+            // SAFETY: the SID pointer refers into `user.0`, which the token
+            // information call filled with a TOKEN_USER and its SID.
+            if unsafe { IsValidSid(user.sid()) } == 0 {
+                return Err(io::Error::other("current user SID is invalid"));
+            }
+            Ok(user)
+        }
+        /// Valid while `self` is alive; the SID is stored inside the buffer.
+        fn sid(&self) -> PSID {
+            // SAFETY: the buffer starts with an initialized, aligned TOKEN_USER.
+            unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        }
+    }
+
+    /// A DACL containing one full-control allow ACE for `sid`.
+    fn single_ace_acl(sid: PSID, flags: ACE_FLAGS) -> io::Result<Vec<u32>> {
+        // SAFETY: `sid` was validated with IsValidSid.
+        let sid_length = unsafe { GetLengthSid(sid) } as usize;
+        let size =
+            size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>() + sid_length;
+        let size = size.next_multiple_of(size_of::<u32>());
+        let size_u32 = u32::try_from(size).map_err(|_| io::Error::other("ACL is too large"))?;
+        // u32 storage gives the DWORD alignment an ACL requires.
+        let mut acl = vec![0u32; size / size_of::<u32>()];
+        // SAFETY: `acl` is writable for `size` bytes and DWORD aligned.
+        if unsafe { InitializeAcl(acl.as_mut_ptr().cast(), size_u32, ACL_REVISION) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `acl` was initialized above with room for exactly this ACE,
+        // and `sid` is valid.
+        if unsafe {
+            AddAccessAllowedAceEx(
+                acl.as_mut_ptr().cast(),
+                ACL_REVISION,
+                flags,
+                FILE_ALL_ACCESS,
+                sid,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(acl)
+    }
+
+    /// Reads the DACL back: it must be protected and contain exactly one
+    /// explicit full-control allow ACE for `sid` with the requested flags.
+    fn verify(name: &[u16], sid: PSID, flags: ACE_FLAGS) -> io::Result<()> {
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `name` is NUL-terminated; out pointers are valid. On
+        // success, `descriptor` owns the memory `dacl` points into.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        struct Descriptor(PSECURITY_DESCRIPTOR);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                // SAFETY: allocated by GetNamedSecurityInfoW, freed once.
+                unsafe { LocalFree(self.0) };
+            }
+        }
+        let descriptor = Descriptor(descriptor);
+        let failed = |reason: &str| {
+            Err(io::Error::other(format!(
+                "private ACL verification failed: {reason}"
+            )))
+        };
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        // SAFETY: the descriptor is valid until dropped; out pointers are valid.
+        if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A null DACL would grant everyone full access.
+        if dacl.is_null() || control & SE_DACL_PROTECTED == 0 {
+            return failed("DACL is missing or not protected");
+        }
+        let mut size = ACL_SIZE_INFORMATION::default();
+        // SAFETY: `dacl` points into the live descriptor; `size` is a
+        // correctly sized ACL_SIZE_INFORMATION.
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                (&raw mut size).cast(),
+                size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if size.AceCount != 1 {
+            return failed("unexpected access rules");
+        }
+        let mut ace: *mut core::ffi::c_void = ptr::null_mut();
+        // SAFETY: index 0 exists (AceCount is 1); `ace` receives a pointer
+        // into the live DACL.
+        if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: every ACE begins with an ACE_HEADER.
+        let header = unsafe { *ace.cast::<windows_sys::Win32::Security::ACE_HEADER>() };
+        if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE
+            || u32::from(header.AceFlags) != flags
+            || usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>()
+        {
+            return failed("unexpected principal or rights");
+        }
+        let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+        // SAFETY: the header identifies an ACCESS_ALLOWED_ACE of sufficient
+        // size; its SID begins at `SidStart` within the ACE.
+        let (mask, ace_sid) = unsafe { ((*allowed).Mask, (&raw mut (*allowed).SidStart).cast()) };
+        // SAFETY: both SIDs are valid for the duration of the call.
+        if mask != FILE_ALL_ACCESS || unsafe { EqualSid(ace_sid, sid) } == 0 {
+            return failed("unexpected principal or rights");
+        }
         Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "could not protect ACL for {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))
     }
 }
 
