@@ -58,9 +58,11 @@ pub use persistence::VaultStore;
 pub(crate) use persistence::unlock_selected_vault;
 #[cfg(test)]
 pub(crate) use persistence::with_write_fault;
+#[cfg(test)]
+use persistence::write_vault;
+use persistence::write_vault_with_key;
 pub(crate) use persistence::{create_vault, delete_vault};
 pub use persistence::{list_vaults, validate_vault_filename};
-use persistence::{write_vault, write_vault_with_key};
 mod transaction;
 use transaction::TransactionScope;
 

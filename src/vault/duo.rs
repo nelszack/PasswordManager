@@ -57,7 +57,7 @@ impl Vault {
             ));
         }
         let (id, revision) = (item.entry.id, item.revision);
-        write_vault(self, key)?;
+        self.store.check_writable()?;
         let review_key = self.metadata.duo_session.get_or_insert_with(rand::random);
         let session = *blake3::hash(review_key).as_bytes();
         Ok(PreparedDuoEnrollment {
@@ -481,6 +481,23 @@ mod tests {
                 .is_err()
         );
         assert!(vault.metadata.duo_session.is_none());
+    }
+    #[test]
+    fn enrollment_preflight_does_not_rewrite_the_vault_file() {
+        let (mut vault, mut key) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        vault.store = VaultStore::File {
+            directory: directory.path().to_path_buf(),
+            filename: "vault.enc".into(),
+        };
+        write_vault(&vault, &mut key).unwrap();
+        let path = directory.path().join("vault.enc");
+        let before = fs::read(&path).unwrap();
+        vault
+            .prepare_duo_enrollment(enroll(), false, &mut key)
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
     #[test]
     fn enrollment_stores_complete_item_and_review_keys_never_enter_document_or_export() {
