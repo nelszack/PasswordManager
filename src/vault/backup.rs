@@ -81,9 +81,9 @@ pub(super) fn decode_backup(
             "unsupported encrypted backup format or size".into(),
         ));
     }
-    let plaintext = Zeroizing::new(decrypt_file(key, &bytes[9..]).ok_or_else(|| {
+    let plaintext = decrypt_file(key, &bytes[9..]).ok_or_else(|| {
         VaultError::Validation("wrong backup password/key or modified backup".into())
-    })?);
+    })?;
     let mut data = persistence::decode_document(&plaintext)?;
     data.vault_id = rand::random();
     let filename = format!("{}.enc", hex::encode(data.vault_id));

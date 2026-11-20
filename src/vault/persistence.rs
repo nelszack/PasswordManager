@@ -318,7 +318,7 @@ impl Vault {
     pub fn rekey(
         &mut self,
         credentials: &mut VaultCredentials,
-        mut new_key: PasswordType,
+        new_key: PasswordType,
     ) -> Result<(), VaultError> {
         if !matches!(self.store, VaultStore::Memory) && credentials.is_locked() {
             return Err(VaultError::Locked);
@@ -334,8 +334,10 @@ impl Vault {
             if path.exists() {
                 return Err(VaultError::Conflict("new key file already exists".into()));
             }
-            let mut material = try_gen_master_key(&mut new_key, true)?;
-            material.zeroize();
+            if let PasswordType::Key(key) = &new_key {
+                let mut material = try_keyfile_master_key(key, true)?;
+                material.zeroize();
+            }
         }
         let result = self.rekey_credentials(credentials, VaultCredentials::from(new_key));
         if result.as_ref().is_err_and(|e| !e.committed())
@@ -409,9 +411,9 @@ pub(super) fn lookup_vault_in(
 ) -> Result<Option<(String, Vault)>, VaultError> {
     // Read the key file before the vault so its errors stay specific; the
     // derived key is reused for decryption instead of reading the file again.
-    let keyfile_master = if matches!(key_pass, VaultCredentials::Unlock(PasswordType::Key(_))) {
+    let keyfile_master = if let VaultCredentials::Unlock(PasswordType::Key(key)) = &*key_pass {
         Some(Zeroizing::new(
-            try_gen_master_key(key_pass.supplied()?, false).map_err(VaultError::Persistence)?,
+            try_keyfile_master_key(key, false).map_err(VaultError::Persistence)?,
         ))
     } else {
         None
@@ -455,9 +457,9 @@ pub(super) fn lookup_vault_in(
         .as_ref()
         .and_then(|master| crate::encryption::keyfile_session(&contents, master))
         .unwrap_or_else(|| key_pass.clone());
-    let plaintext = Zeroizing::new(decrypt_file(&mut candidate, &contents).ok_or_else(|| {
+    let plaintext = decrypt_file(&mut candidate, &contents).ok_or_else(|| {
         VaultError::Validation("incorrect password/key or modified encrypted contents".into())
-    })?);
+    })?;
     let data = decode_document(&plaintext)?;
     crate::cloud::verify_identity(&path, data.vault_id).map_err(VaultError::Validation)?;
     *key_pass = candidate;
@@ -523,8 +525,10 @@ pub(crate) fn create_vault(
         VaultCredentials::Unlock(PasswordType::Key(path)) => Some(new_key_file_path(path)?),
         _ => None,
     };
-    if generated.is_some() {
-        let mut material = try_gen_master_key(credentials.supplied()?, true)?;
+    if generated.is_some()
+        && let VaultCredentials::Unlock(PasswordType::Key(key)) = &*credentials
+    {
+        let mut material = try_keyfile_master_key(key, true)?;
         material.zeroize();
     }
     let mut data = VaultData::with_random_id();
@@ -953,8 +957,7 @@ mod tests {
         assert!(key_path.exists());
         let after = fs::read(directory.path().join("vault.enc")).unwrap();
         assert!(decrypt_file(&mut session(42), &after).is_none());
-        let plaintext =
-            Zeroizing::new(decrypt_file(&mut replacement.clone().into(), &after).unwrap());
+        let plaintext = decrypt_file(&mut replacement.clone().into(), &after).unwrap();
         assert_eq!(decode_document(&plaintext).unwrap(), vault.data);
         assert!(decrypt_file(&mut credentials, &after).is_some());
         write_vault(&vault, &mut credentials).unwrap();

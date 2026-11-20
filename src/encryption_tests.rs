@@ -132,7 +132,9 @@ fn session_rewrites_preserve_the_parameters_that_derived_the_key() {
 
     let mut fresh_password = VaultCredentials::from(PasswordType::Password(password.into()));
     assert_eq!(
-        decrypt_file(&mut fresh_password, &rewritten).as_deref(),
+        decrypt_file(&mut fresh_password, &rewritten)
+            .as_deref()
+            .map(Vec::as_slice),
         Some(b"rewritten".as_slice())
     );
     assert!(matches!(fresh_password, VaultCredentials::Session { .. }));
@@ -181,8 +183,9 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
     crate::file::init_test_data_dir();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("vault.key");
-    let key_file = || VaultCredentials::from(PasswordType::Key(path.to_str().unwrap().into()));
-    gen_master_key(key_file().supplied().unwrap(), true);
+    let key = path.to_str().unwrap();
+    let key_file = || VaultCredentials::from(PasswordType::Key(key.into()));
+    try_keyfile_master_key(key, true).unwrap();
     for (label, bytes) in [
         ("generated key", fs::read(&path).unwrap()),
         (
@@ -192,14 +195,16 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
     ] {
         fs::write(&path, &bytes).unwrap();
         assert_eq!(
-            try_gen_master_key(key_file().supplied().unwrap(), false).unwrap(),
+            try_keyfile_master_key(key, false).unwrap(),
             master_key_from_keyfile(&bytes),
             "{label}"
         );
         let plaintext = b"this is a test";
         let encrypted = encrypt_file(&mut key_file(), plaintext);
         assert_eq!(
-            decrypt_file(&mut key_file(), &encrypted).unwrap(),
+            decrypt_file(&mut key_file(), &encrypted)
+                .unwrap()
+                .as_slice(),
             plaintext,
             "{label}"
         );
@@ -211,17 +216,14 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
         .set_len(MAX_KEY_FILE_BYTES + 1)
         .unwrap();
     assert!(
-        try_gen_master_key(key_file().supplied().unwrap(), false)
+        try_keyfile_master_key(key, false)
             .unwrap_err()
             .contains("byte limit")
     );
     assert!(
-        try_gen_master_key(
-            &mut PasswordType::Key(directory.path().to_str().unwrap().into()),
-            false
-        )
-        .unwrap_err()
-        .contains("regular file")
+        try_keyfile_master_key(directory.path().to_str().unwrap(), false)
+            .unwrap_err()
+            .contains("regular file")
     );
 }
 
@@ -234,7 +236,10 @@ fn in_place_encryption_reuses_a_sufficiently_sized_buffer() {
     let mut pass = VaultCredentials::from(PasswordType::Password("test123".into()));
     let encrypted = try_encrypt_file_in_place(&mut pass, plaintext).unwrap();
     assert_eq!(encrypted.as_ptr(), allocation);
-    assert_eq!(decrypt_file(&mut pass, &encrypted).unwrap(), expected);
+    assert_eq!(
+        decrypt_file(&mut pass, &encrypted).unwrap().as_slice(),
+        expected
+    );
 }
 #[test]
 fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonces() {
@@ -268,7 +273,7 @@ fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonc
             VaultCredentials::from(PasswordType::Password("test123".into())),
         ] {
             assert_eq!(
-                decrypt_file(&mut credential, &encrypted).unwrap(),
+                *decrypt_file(&mut credential, &encrypted).unwrap(),
                 plaintext,
                 "{label}"
             );
@@ -320,4 +325,41 @@ fn decryption_rejects_wrong_credentials_invalid_headers_and_modified_ciphertext(
             "unsafe memory limit {memory_kib}"
         );
     }
+}
+
+#[test]
+fn parsed_header_matches_the_written_header_and_its_session() {
+    let mut credentials = VaultCredentials::Session {
+        encryption_key: [9; 32],
+        salt: [3; SALT_LEN],
+        kdf: KDF_ARGON2ID,
+        memory_kib: 9 * 1024,
+        iterations: 2,
+        parallelism: 3,
+    };
+    let encrypted = encrypt_file(&mut credentials, b"synthetic");
+    let header = VaultHeader::parse(&encrypted).unwrap();
+    assert_eq!(header.kdf, KDF_ARGON2ID);
+    assert_eq!(
+        (
+            header.parameters.memory_kib,
+            header.parameters.iterations,
+            header.parameters.parallelism
+        ),
+        (9 * 1024, 2, 3)
+    );
+    assert_eq!(header.salt, [3; SALT_LEN]);
+    assert_eq!(header.header, &encrypted[..HEADER_LEN]);
+    assert_eq!(header.ciphertext.len(), b"synthetic".len() + 16);
+    assert!(header.matches(&credentials).is_some());
+    let VaultCredentials::Session { encryption_key, .. } =
+        cached_credentials(&encrypted, [5; 32]).unwrap()
+    else {
+        panic!("cached credentials must be a session")
+    };
+    assert_eq!(encryption_key, [5; 32]);
+    assert!(header.matches(&header.session([5; 32])).is_some());
+    let plaintext: zeroize::Zeroizing<Vec<u8>> =
+        decrypt_file(&mut credentials, &encrypted).unwrap();
+    assert_eq!(plaintext.as_slice(), b"synthetic");
 }
