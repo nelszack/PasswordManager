@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{
-        Mutex, MutexGuard, OnceLock,
+        Mutex, MutexGuard, OnceLock, TryLockError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -31,6 +31,9 @@ mod tools;
 const LOCKED: &str = "Vault is locked";
 const INTERRUPTED: &str = "Operation interrupted; vault locked. A remote change may have \
                            completed; inspect before retrying";
+const SYNC_BUSY: &str = "A background sync is still running; try again shortly";
+/// How long a request from the app waits for a running background sync.
+const SYNC_TURN_WAIT: Duration = Duration::from_secs(15);
 /// Largest request accepted over the FFI boundary (encoded imports and backups).
 const MAX_REQUEST_BYTES: usize = 180 * 1024 * 1024;
 /// Largest encrypted vault handed back to the app as a snapshot.
@@ -410,11 +413,30 @@ impl MobileVault {
     }
 
     /// Held for one sync-engine operation; never while holding the vault state.
-    fn sync_turn(&self) -> MutexGuard<'_, ()> {
-        self.sync.lock().unwrap_or_else(|poisoned| {
-            self.sync.clear_poison();
-            poisoned.into_inner()
-        })
+    /// A background sync can hold it for a long upload and ignores the lock
+    /// signal, so a request from the app stops waiting at the lock signal or
+    /// after [`SYNC_TURN_WAIT`] instead of blocking its request thread. A
+    /// background sync (`patient`) waits for the turn however long it takes.
+    fn sync_turn(&self, ticket: &Ticket<'_>, patient: bool) -> Result<MutexGuard<'_, ()>, String> {
+        let deadline = (!patient).then(|| Instant::now() + SYNC_TURN_WAIT);
+        loop {
+            match self.sync.try_lock() {
+                Ok(turn) => return Ok(turn),
+                Err(TryLockError::Poisoned(poisoned)) => {
+                    self.sync.clear_poison();
+                    return Ok(poisoned.into_inner());
+                }
+                Err(TryLockError::WouldBlock) => {
+                    if ticket.cancelled() {
+                        return Err(INTERRUPTED.into());
+                    }
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        return Err(SYNC_BUSY.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        }
     }
 
     /// JSON is only a process-local FFI envelope. Never log requests or results.
@@ -504,6 +526,12 @@ impl MobileVault {
                 }
                 self.cloud_request(request, ticket)
             }
+            // A sync running alongside would write the deleted vault's
+            // checkpoint back, so deletion waits for the sync turn.
+            request @ (Request::DeleteVault { .. } | Request::DeleteRekeyRecovery { .. }) => {
+                let _turn = self.sync_turn(ticket, false)?;
+                self.state().dispatch(request)
+            }
             request => self.state().dispatch(request),
         }
     }
@@ -520,7 +548,7 @@ impl MobileVault {
                 id,
                 copy,
             } => {
-                let _turn = self.sync_turn();
+                let _turn = self.sync_turn(ticket, false)?;
                 let download =
                     self.run_sync(ticket, Some(client(&server, token)?), async |host| {
                         engine::download(host, &id, copy).await
@@ -533,7 +561,7 @@ impl MobileVault {
                 server,
                 token,
                 if_enabled,
-                ..
+                background,
             } => {
                 if if_enabled && !self.state().sync_enabled()? {
                     return Ok(json!({
@@ -542,7 +570,7 @@ impl MobileVault {
                         "message": "Sync is disabled for this vault",
                     }));
                 }
-                let _turn = self.sync_turn();
+                let _turn = self.sync_turn(ticket, background)?;
                 let message =
                     self.run_sync(ticket, Some(client(&server, token)?), async |host| {
                         engine::sync(host, None, Bind::CreateIfMissing).await
@@ -560,7 +588,7 @@ impl MobileVault {
             } => {
                 let client = client(&server, token)?;
                 {
-                    let _turn = self.sync_turn();
+                    let _turn = self.sync_turn(ticket, false)?;
                     self.run_sync(ticket, Some(client.clone()), async |host| {
                         engine::set_enabled(host, None, enabled, Bind::Enable).await
                     })?;
@@ -568,7 +596,7 @@ impl MobileVault {
                 self.sync_status(ticket, Some(client), false)
             }
             Request::CloudConflicts { server, token } => {
-                let _turn = self.sync_turn();
+                let _turn = self.sync_turn(ticket, false)?;
                 let review =
                     self.run_sync(ticket, Some(client(&server, token)?), async |host| {
                         engine::review(host, None).await
@@ -585,7 +613,7 @@ impl MobileVault {
                     token: review_token,
                     choices,
                 };
-                let _turn = self.sync_turn();
+                let _turn = self.sync_turn(ticket, false)?;
                 let resolved =
                     self.run_sync(ticket, Some(client(&server, token)?), async |host| {
                         engine::resolve(host, None, resolution).await
@@ -1582,6 +1610,29 @@ mod sync_tests;
 #[cfg(test)]
 mod tests {
     use super::test_support::*;
+
+    #[test]
+    fn waiting_for_a_background_sync_ends_at_the_lock_signal() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let api = MobileVault::new(temp.path().into()).unwrap();
+        let flag: &'static Cancellation = Box::leak(Box::new(Cancellation::new()));
+        // A background sync holds the turn through a long upload.
+        let _background = api.sync.lock().unwrap();
+        let ticket = Ticket::new(Some(flag));
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                flag.signal();
+            });
+            assert_eq!(
+                api.sync_turn(&ticket, false).err().as_deref(),
+                Some(INTERRUPTED)
+            );
+        });
+        assert!(started.elapsed() < SYNC_TURN_WAIT);
+    }
 
     #[test]
     fn website_otp_supports_code_only_items_and_rejects_wrong_origins_and_hotp() {
