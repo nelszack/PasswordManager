@@ -298,16 +298,18 @@ impl MobileState {
 
     /// This vault's recovery copies from earlier credential changes. Copies
     /// from builds that did not record the vault identity are not attributed.
+    /// The open vault is never listed, even when it is itself a recovery copy
+    /// unlocked with the old credentials.
     fn rekey_recovery_paths(&self) -> Result<Vec<PathBuf>, String> {
-        let prefix = format!(
-            "{REKEY_RECOVERY_PREFIX}{}-",
-            hex::encode(self.vault()?.vault_id())
-        );
+        let vault = self.vault()?;
+        let prefix = format!("{REKEY_RECOVERY_PREFIX}{}-", hex::encode(vault.vault_id()));
+        let open = vault.sync_path()?;
         Ok(self
             .vault_names()?
             .into_iter()
             .filter(|name| name.starts_with(&prefix))
             .map(|name| self.directory.join(name))
+            .filter(|path| path.file_name() != open.file_name())
             .collect())
     }
 
@@ -488,6 +490,28 @@ mod tests {
         // The copy still opens with the old password until it is deleted.
         let mut old = VaultCredentials::from(PasswordType::Password(PASSWORD.into()));
         assert!(decrypt_file(&mut old, &fs::read(&copy).unwrap()).is_some());
+        // While the copy itself is the open vault, it is never listed or deleted.
+        let copy_name = copy.file_name().unwrap().to_str().unwrap();
+        request(
+            &mut api,
+            json!({"op":"unlock","vault":copy_name,"password":PASSWORD}),
+        );
+        assert_eq!(
+            request(&mut api, json!({"op":"rekey_recovery"}))["copies"],
+            0
+        );
+        assert_eq!(
+            request(
+                &mut api,
+                json!({"op":"delete_rekey_recovery","confirmed":true})
+            )["deleted"],
+            0
+        );
+        assert!(copy.exists());
+        request(
+            &mut api,
+            json!({"op":"unlock","vault":name,"password":"Replacement-Mobile-Tools-9274!"}),
+        );
         assert_eq!(
             request(
                 &mut api,
