@@ -672,10 +672,71 @@ impl State {
                 "This item changed. Refresh and reopen it before changing authenticators.".into(),
             );
         }
-        let target = || Target::Id(item.expect("validated item selection").id);
         let mut confirmation = None;
-        let mut revision = needs_item.then(|| item.unwrap().revision);
+        let revision = needs_item.then(|| item.unwrap().revision);
         let command = match action {
+            Action::OperationStatus
+            | Action::History
+            | Action::RestorePassword(_)
+            | Action::Trash
+            | Action::RestoreTrash(_)
+            | Action::Purge(_)
+            | Action::Audit => self.recovery_command(action, app, item, &mut confirmation)?,
+            Action::Backup
+            | Action::RestoreBackup
+            | Action::PreviewImport
+            | Action::Import
+            | Action::Export => self.files_command(action, app, &mut confirmation)?,
+            Action::SetOtp
+            | Action::ShowOtp(_)
+            | Action::WatchOtp
+            | Action::CopyWatchedOtp
+            | Action::RemoveOtp
+            | Action::EnrollPasscodes
+            | Action::EnrollDuo
+            | Action::Requests
+            | Action::Respond(..)
+            | Action::RemoveDuo => {
+                self.authenticator_command(action, app, item, &mut confirmation)?
+            }
+            Action::Rekey | Action::NewVault | Action::DeleteVault => {
+                self.vault_command(action, app, &mut confirmation)?
+            }
+            Action::Search => self.search_command()?,
+            Action::InstallHost | Action::UpdateHost | Action::Shortcut | Action::Completions => {
+                return Err("This is a local desktop action.".into());
+            }
+        };
+        if command.is_mutation() && app.recovery.id().is_some() {
+            return Err(
+                "Review the previous uncertain operation before making another change.".into(),
+            );
+        }
+        if command.is_mutation() && app.editor.as_ref().is_some_and(|draft| draft.dirty) {
+            return Err(
+                "Save or discard the unsaved item edits before changing authenticators or using \
+                 Tools."
+                    .into(),
+            );
+        }
+        Ok(Prepared {
+            action,
+            command,
+            revision,
+            session: app.connection.session.clone(),
+            confirmation,
+        })
+    }
+    /// Operation status, password history, trash, and vault health.
+    fn recovery_command(
+        &self,
+        action: Action,
+        app: &App,
+        item: Option<&ItemSummary>,
+        confirmation: &mut Option<String>,
+    ) -> Result<ServerCommand, String> {
+        let target = || Target::Id(item.expect("validated item selection").id);
+        Ok(match action {
             Action::OperationStatus => {
                 let id = self.utilities.operation_id.trim();
                 if id.is_empty()
@@ -701,7 +762,7 @@ impl State {
                 if index == 0 || index > page.history.len() {
                     return Err("Choose a saved password revision.".into());
                 }
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Replace the current password of {} with revision {index} from {}?",
                     item.unwrap().name,
                     page.history[index - 1]
@@ -722,7 +783,7 @@ impl State {
                     .find(|entry| entry.id == id)
                     .ok_or("The trash entry is no longer listed.")?;
                 if matches!(action, Action::Purge(_)) {
-                    confirmation = Some(format!(
+                    *confirmation = Some(format!(
                         "Permanently erase {} from trash? This cannot be undone.",
                         entry.name
                     ));
@@ -735,7 +796,7 @@ impl State {
                 if !matches!(&self.result, Some(ResponsePayload::Trash(_))) {
                     return Err("Load the trash first.".into());
                 }
-                confirmation =
+                *confirmation =
                     Some("Permanently erase every item in trash? This cannot be undone.".into());
                 ServerCommand::PurgeTrash(None)
             }
@@ -744,6 +805,18 @@ impl State {
                 check_breaches: self.audit.breaches,
                 require_totp: self.audit.require_otp,
             }),
+            _ => unreachable!("not a recovery action"),
+        })
+    }
+
+    /// Backups, imports, and exports.
+    fn files_command(
+        &self,
+        action: Action,
+        app: &App,
+        confirmation: &mut Option<String>,
+    ) -> Result<ServerCommand, String> {
+        Ok(match action {
             Action::Backup | Action::RestoreBackup => {
                 if action == Action::RestoreBackup && app.connection.session.is_some() {
                     return Err("Lock the vault before restoring a backup.".into());
@@ -753,7 +826,7 @@ impl State {
                     key_pass: self.credentials.value(action == Action::Backup)?,
                     force: self.files.force,
                 };
-                confirmation = Some(if action == Action::Backup {
+                *confirmation = Some(if action == Action::Backup {
                     format!(
                         "Create an encrypted backup at {}{}?",
                         request.path,
@@ -766,7 +839,7 @@ impl State {
                 } else {
                     format!(
                         "Restore {} as a separate vault? Unlock it with its backup password or \
-                         key.",
+                             key.",
                         request.path
                     )
                 });
@@ -791,7 +864,7 @@ impl State {
                     password_history_limit: app.conf.recovery.password_history_limit,
                 };
                 if !preview {
-                    confirmation = Some(format!(
+                    *confirmation = Some(format!(
                         "Import {} into {} using '{}'?",
                         request.path,
                         if request.new {
@@ -806,9 +879,9 @@ impl State {
             }
             Action::Export => {
                 let path = absolute(&self.files.path)?;
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Export plaintext secrets to {path}{}? Anyone who can read this file can read \
-                     its passwords. JSON preserves richer data than CSV.",
+                         its passwords. JSON preserves richer data than CSV.",
                     if self.files.force {
                         ", replacing any existing file"
                     } else {
@@ -820,11 +893,25 @@ impl State {
                     force: self.files.force,
                 }
             }
+            _ => unreachable!("not a files action"),
+        })
+    }
+
+    /// One-time passwords and Duo for the selected item.
+    fn authenticator_command(
+        &self,
+        action: Action,
+        app: &App,
+        item: Option<&ItemSummary>,
+        confirmation: &mut Option<String>,
+    ) -> Result<ServerCommand, String> {
+        let target = || Target::Id(item.expect("validated item selection").id);
+        Ok(match action {
             Action::SetOtp => {
                 if self.authenticator.configuration.is_empty() {
                     return Err("Enter a Base32 secret or otpauth URI.".into());
                 }
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Set or replace the authenticator for {}?",
                     item.unwrap().name
                 ));
@@ -860,7 +947,7 @@ impl State {
                     .map(Some)?,
             }),
             Action::RemoveOtp => {
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Remove the authenticator from {}?",
                     item.unwrap().name
                 ));
@@ -870,7 +957,7 @@ impl State {
                 if self.authenticator.activation.is_empty() {
                     return Err("Enter a fresh Duo activation link.".into());
                 }
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Consume this Duo activation link and enroll {}{}?",
                     item.unwrap().name,
                     if action == Action::EnrollDuo && self.authenticator.replace_duo {
@@ -942,21 +1029,33 @@ impl State {
                 })
             }
             Action::RemoveDuo => {
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Remove local Duo Push credentials for {}? Remove the device separately in \
-                     Duo.",
+                         Duo.",
                     item.unwrap().name
                 ));
                 ServerCommand::Duo(DuoCommand::Remove { target: target() })
             }
+            _ => unreachable!("not a authenticator action"),
+        })
+    }
+
+    /// Credential changes and vault lifecycle.
+    fn vault_command(
+        &self,
+        action: Action,
+        app: &App,
+        confirmation: &mut Option<String>,
+    ) -> Result<ServerCommand, String> {
+        Ok(match action {
             Action::Rekey | Action::NewVault => {
-                confirmation = Some(if action == Action::Rekey {
+                *confirmation = Some(if action == Action::Rekey {
                     "Re-encrypt the unlocked vault with these new credentials? Keep a verified \
-                     backup of the current vault and retain existing external keys."
+                         backup of the current vault and retain existing external keys."
                         .into()
                 } else {
                     "Create a new vault using these credentials? A new key path must be outside \
-                     application data and must not already exist."
+                         application data and must not already exist."
                         .into()
                 });
                 let credentials = self.credentials.value(true)?;
@@ -977,9 +1076,9 @@ impl State {
                     .vault
                     .as_ref()
                     .ok_or("Select the vault to delete on the Vault tab.")?;
-                confirmation = Some(format!(
+                *confirmation = Some(format!(
                     "Permanently delete vault {filename}{}? All its entries and recovery data \
-                     will be lost.",
+                         will be lost.",
                     if self.credentials.use_key && !self.credentials.keep_key {
                         " AND its external key file"
                     } else {
@@ -992,48 +1091,28 @@ impl State {
                     vault_file: Some(filename.clone()),
                 })
             }
-            Action::Search => {
-                revision = None;
-                let nonempty = |value: &String| (!value.is_empty()).then(|| value.clone());
-                ServerCommand::List(SearchFilter {
-                    query: nonempty(&self.search.query),
-                    name: nonempty(&self.search.name),
-                    username: nonempty(&self.search.username),
-                    url: nonempty(&self.search.url),
-                    notes: (!self.search.notes.is_empty()).then(|| self.search.notes.clone()),
-                    list: ListOptions {
-                        kind: self.search.kind,
-                        has_totp: self.search.has_otp,
-                        weak: self.search.weak,
-                        stale_days: optional_number(&self.audit.stale_days)?,
-                        sort: self.search.sort,
-                        descending: self.search.descending,
-                    },
-                })
-            }
-            Action::InstallHost | Action::UpdateHost | Action::Shortcut | Action::Completions => {
-                return Err("This is a local desktop action.".into());
-            }
-        };
-        if command.is_mutation() && app.recovery.id().is_some() {
-            return Err(
-                "Review the previous uncertain operation before making another change.".into(),
-            );
-        }
-        if command.is_mutation() && app.editor.as_ref().is_some_and(|draft| draft.dirty) {
-            return Err(
-                "Save or discard the unsaved item edits before changing authenticators or using \
-                 Tools."
-                    .into(),
-            );
-        }
-        Ok(Prepared {
-            action,
-            command,
-            revision,
-            session: app.connection.session.clone(),
-            confirmation,
+            _ => unreachable!("not a vault action"),
         })
+    }
+
+    /// Advanced item search.
+    fn search_command(&self) -> Result<ServerCommand, String> {
+        let nonempty = |value: &String| (!value.is_empty()).then(|| value.clone());
+        Ok(ServerCommand::List(SearchFilter {
+            query: nonempty(&self.search.query),
+            name: nonempty(&self.search.name),
+            username: nonempty(&self.search.username),
+            url: nonempty(&self.search.url),
+            notes: (!self.search.notes.is_empty()).then(|| self.search.notes.clone()),
+            list: ListOptions {
+                kind: self.search.kind,
+                has_totp: self.search.has_otp,
+                weak: self.search.weak,
+                stale_days: optional_number(&self.audit.stale_days)?,
+                sort: self.search.sort,
+                descending: self.search.descending,
+            },
+        }))
     }
     fn observe_otp(&mut self, code: &password_manager::protocol::AuthenticatorResponse) -> bool {
         let changed = self.otp.previous != code.code;
