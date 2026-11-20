@@ -1,36 +1,59 @@
 // Detection only asks the background to check. Request details and decisions
 // stay in extension pages; verification numbers are never extracted from this page.
 const PasswordManagerDuoDetection = require("./duo_detection.js");
-module.exports.create = function create() {
+const inactive = { enabled: false, mutated() {}, dispose() {} };
+module.exports.create = function create({
+    flushMutations = () => {},
+    alive = () => true,
+    enabled = window === window.top || PasswordManagerDuoDetection.duoOrigin(location.href),
+} = {}) {
+    // Duo challenges appear in the top-level page or a Duo-hosted frame. Other
+    // embedded frames (ads, widgets) never poll.
+    if (!enabled) return inactive;
     let activeSince = 0,
         checking = false,
-        timer,
+        timer = null,
         disposed = false;
     let dirty = true,
         cached = false,
         scannedUrl;
-    // Mutation bursts only invalidate; the existing poll interval coalesces reads.
-    // Authorization requests always inspect the live rendered page instead.
-    const observer = new MutationObserver(() => {
+    // Mutations reach this module through the content observer and only mark the
+    // cached result stale; the poll interval coalesces reads. Authorization
+    // requests always inspect the live rendered page instead.
+    function mutated() {
         dirty = true;
-    });
-    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    }
+    function scan() {
+        const body = document.body;
+        if (!body) return false;
+        const url = location.href;
+        // textContent needs no layout. Outside Duo's own pages a challenge always
+        // names Duo, so skip the rendered-text read for every other page.
+        if (!PasswordManagerDuoDetection.duoOrigin(url) && !/duo/i.test(body.textContent || "")) return false;
+        return PasswordManagerDuoDetection.challenge(body.innerText, url);
+    }
     function active(fresh = false) {
         if (disposed || document.visibilityState === "hidden") return false;
-        if (observer.takeRecords().length) dirty = true;
+        flushMutations();
         if (fresh || dirty || scannedUrl !== location.href) {
-            cached = PasswordManagerDuoDetection.challenge(document.body?.innerText, location.href);
+            cached = scan();
             scannedUrl = location.href;
             dirty = false;
         }
         return cached;
     }
-    function check() {
-        if (disposed) return;
+    function schedule() {
         clearTimeout(timer);
+        timer = disposed || document.visibilityState === "hidden" ? null : setTimeout(check, 5000);
+    }
+    function check() {
+        clearTimeout(timer);
+        timer = null;
+        // Hidden pages stop polling; becoming visible starts a new check.
+        if (disposed || !alive() || document.visibilityState === "hidden") return;
         if (!active()) {
             activeSince = 0;
-            timer = setTimeout(check, 5000);
+            schedule();
             return;
         }
         if (!activeSince) activeSince = Date.now();
@@ -40,7 +63,7 @@ module.exports.create = function create() {
         chrome.runtime.sendMessage({ action: "observeDuoChallenge" }, () => {
             void chrome.runtime.lastError;
             checking = false;
-            if (!disposed) timer = setTimeout(check, 5000);
+            schedule();
         });
     }
     const listener = (message, _sender, respond) => {
@@ -52,16 +75,15 @@ module.exports.create = function create() {
         check();
     };
     document.addEventListener("visibilitychange", visibilityChanged);
-    const pagehide = () => clearTimeout(timer);
-    window.addEventListener("pagehide", pagehide);
     check();
     return {
+        enabled: true,
+        mutated,
         dispose() {
             disposed = true;
-            observer.disconnect();
             clearTimeout(timer);
+            timer = null;
             document.removeEventListener("visibilitychange", visibilityChanged);
-            window.removeEventListener("pagehide", pagehide);
             chrome.runtime.onMessage.removeListener(listener);
         },
     };

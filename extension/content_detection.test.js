@@ -174,7 +174,7 @@ test("saving a shared form captures the selected login pair rather than another 
     const credentials = require("./content_credentials.js").create();
     credentials.lastInput = secondPassword;
     assert.deepEqual(credentials.findLoginCredentials(form), {
-        username: "second", password: "second-secret", scope: form
+        username: "second", password: "second-secret", passwordField: secondPassword, scope: form
     });
 });
 
@@ -250,4 +250,48 @@ test("form-less credential scopes walk up to the nearest container with both rol
     } finally {
         global.getComputedStyle = original;
     }
+});
+
+test("password visibility toggles are recognized from their descriptors", () => {
+    const control = (attributes = {}, text = "") => ({
+        id: attributes.id || "",
+        textContent: text,
+        getAttribute: name => attributes[name] ?? null,
+        hasAttribute: name => name in attributes,
+    });
+    for (const [label, candidate] of [
+        ["aria label", control({ "aria-label": "Show password" })],
+        ["title", control({ title: "Hide password" })],
+        ["class", control({ class: "btn password-reveal" })],
+        ["camel-case id", control({ id: "passwordEye" })],
+        ["eye icon class", control({ class: "eye-icon" })],
+        ["pressed state", control({ "aria-pressed": "false" })],
+        ["text", control({}, "Show")],
+        ["test id", control({ "data-testid": "toggle-visibility" })],
+    ]) {
+        assert.equal(detection.isVisibilityToggle(candidate), true, label);
+    }
+    const input = new FakeInput("button");
+    input.value = "Unmask";
+    input.hasAttribute = () => false;
+    input.textContent = "";
+    assert.equal(detection.isVisibilityToggle(input), true, "input value");
+    for (const [label, candidate] of [
+        ["sign in", control({ class: "btn primary" }, "Sign in")],
+        ["next", control({ id: "next" }, "Next")],
+        ["keyed class", control({ class: "keyed-submit" }, "Continue")],
+        ["long text mentioning show", control({}, "Continue to the dashboard and show my account overview now")],
+        ["missing", null],
+    ]) {
+        assert.equal(detection.isVisibilityToggle(candidate), false, label);
+    }
+});
+
+test("extension UI is recognized by registration, not by page-controlled names", () => {
+    const host = {};
+    assert.equal(detection.isExtensionUi(host), false);
+    assert.equal(detection.markExtensionUi(host), host);
+    assert.equal(detection.isExtensionUi(host), true);
+    assert.equal(detection.isExtensionUi({ className: "my-extension-ui", localName: "pm-field-control" }), false);
+    assert.equal(detection.isExtensionUi(null), false);
 });

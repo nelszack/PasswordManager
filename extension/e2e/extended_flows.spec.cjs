@@ -46,6 +46,21 @@ function fixture(pathname, port) {
         login.addEventListener("submit", event => { event.preventDefault();
             login.dispatchEvent(new Event("duplicate-attempt")); });`);
     if (pathname === "/totp") return html(`<input id="totp" autocomplete="one-time-code">`);
+    if (pathname === "/eye-toggle") return html(`
+        <form id="login"><input id="username" autocomplete="username">
+        <input id="password" type="password" autocomplete="current-password">
+        <button id="eye" type="button" aria-label="Show password">&#128065;</button>
+        <button id="plainToggle" type="button">&#9680;</button>
+        <button id="submit" type="submit">Sign in</button></form>`, `
+        const toggle = () => { password.type = password.type === "password" ? "text" : "password"; };
+        eye.onclick = toggle;
+        plainToggle.onclick = toggle;
+        login.addEventListener("submit", event => { event.preventDefault(); document.body.dataset.submitted = "yes"; });`);
+    if (pathname === "/div-signin") return html(`
+        <main><label>Email <input id="username" autocomplete="username"></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+        <div id="signin" tabindex="0">Sign in</div></main>`, `
+        signin.onclick = () => location.assign("/totp");`);
     if (pathname === "/changing-role") return html(`
         <form><label>Address <input id="changing" autocomplete="street-address"></label></form>`, `
         window.changeToLogin = () => {
@@ -262,13 +277,13 @@ test.describe("extended credential flows", () => {
                 <input id="secondUsername" autocomplete="username">
                 <input id="secondPassword" type="password" autocomplete="current-password">`);
         });
-        const picker = await openPicker(browser.context, page.locator("#secondUsername + button"));
+        const picker = await openPicker(browser.context, page.locator("#secondUsername + pm-field-control").getByRole("button"));
         await picker.getByRole("button", { name: /Alice/ }).click();
         await expect(page.locator("#secondUsername")).toHaveValue("alice@example.com");
         await expect(page.locator("#secondPassword")).toHaveValue("saved-password");
         await expect(page.locator("#username")).toHaveValue("");
         await expect(page.locator("#password")).toHaveValue("");
-        const second = await openPicker(browser.context, page.locator("#secondPassword + button"));
+        const second = await openPicker(browser.context, page.locator("#secondPassword + pm-field-control").getByRole("button"));
         await second.getByRole("button", { name: /Bob/ }).click();
         await expect(page.locator("#secondUsername")).toHaveValue("bob@example.com");
         await expect(page.locator("#secondPassword")).toHaveValue("bob-password");
@@ -410,6 +425,39 @@ test.describe("extended credential flows", () => {
         await expect(page.locator("#totp")).toBeVisible();
         await expect(spaPrompt.locator("#username")).toHaveValue("spa@example.com");
         await spaPrompt.locator("#cancel").click();
+    });
+
+    test("show-password toggles do not open the save prompt before the real submit", async () => {
+        await page.goto(`${origin}/eye-toggle`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await browser.context.serviceWorkers()[0].evaluate(() => { globalThis.lastAutomaticPromptResult = null; });
+        await page.locator("#username").fill("eve@example.com");
+        await page.locator("#password").fill("half-typ");
+        // A labelled eye toggle is excluded outright; an unlabelled one is never
+        // confirmed because the password field stays on the page.
+        for (const toggle of ["#eye", "#eye", "#plainToggle", "#plainToggle"]) await page.locator(toggle).click();
+        await expect(page.locator("#password")).toHaveAttribute("type", "password");
+        await page.waitForTimeout(1000);
+        expect(await browser.context.serviceWorkers()[0].evaluate(() => globalThis.lastAutomaticPromptResult)).toBeNull();
+        expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
+        await page.locator("#password").fill("half-typed-then-finished");
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
+        await expect(prompt.locator("#credentials")).toBeVisible();
+        await expect(prompt.locator("#username")).toHaveValue("eve@example.com");
+        await prompt.locator("#cancel").click();
+    });
+
+    test("a login that navigates from a scripted div is captured on real page hide", async () => {
+        await page.goto(`${origin}/div-signin`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await page.locator("#username").fill("dana@example.com");
+        await page.locator("#password").fill("div-password");
+        // The browser dispatches a trusted pagehide; no submit or button click happens.
+        const prompt = await openPrompt(browser.context, page.locator("#signin"));
+        await expect(page).toHaveURL(`${origin}/totp`);
+        await expect(prompt.locator("#credentials")).toBeVisible();
+        await expect(prompt.locator("#username")).toHaveValue("dana@example.com");
+        await prompt.locator("#cancel").click();
     });
 
     test("registration captures the primary password once", async () => {
@@ -578,7 +626,7 @@ test.describe("extended credential flows", () => {
                 </select>`;
         });
         const picker = await openPicker(browser.context,
-            page.locator("#shipName + button"));
+            page.locator("#shipName + pm-field-control").getByRole("button"));
         await picker.getByRole("button", { name: "Home identity" }).click();
         await expect(page.locator("#shipName")).toHaveValue("Alice");
         await expect(page.locator("#shipLast")).toHaveValue("Example");
@@ -617,12 +665,12 @@ test.describe("extended credential flows", () => {
                 </select>
                 <select id="unmatched" autocomplete="address-line1"><option value="keep">Keep</option></select>`;
         });
-        const picker = await openPicker(browser.context, page.locator("#address + button"));
+        const picker = await openPicker(browser.context, page.locator("#address + pm-field-control").getByRole("button"));
         await picker.getByRole("button", { name: "Home identity" }).click();
         await expect(page.locator("#firstName")).toHaveValue("Alice");
         await expect(page.locator("#nameSelect")).toHaveValue("example");
         await expect(page.locator("#unmatched")).toHaveValue("keep");
-        const next = await openPicker(browser.context, page.locator("#nameSelect + button"));
+        const next = await openPicker(browser.context, page.locator("#nameSelect + pm-field-control").getByRole("button"));
         await next.getByRole("button", { name: "Home identity" }).click();
         await expect(page.locator("#nameSelect")).toHaveValue("example");
     });

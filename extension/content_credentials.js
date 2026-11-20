@@ -44,6 +44,7 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         return {
             username: usernameField ? usernameField.value.trim() : "",
             password: passwordField.value,
+            passwordField,
             scope,
         };
     }

@@ -4,19 +4,31 @@
 const modules = {
 "content_entry.js": (module, exports, require) => {
 "use strict";
-const { create } = require("content.js");
-let controller;
+const { create, runtimeAvailable } = require("content.js");
+let controller = null;
 function mount() {
     controller?.dispose();
+    controller = null;
+    // A script left behind by an extension update or reload stays inert.
+    if (!runtimeAvailable()) return;
     controller = create();
     controller.start().catch(error => console.log("Password Manager error:", error));
 }
-window.addEventListener("pagehide", () =>
-    queueMicrotask(() => {
-        controller?.dispose();
-        controller = null;
-    })
-);
+// One listener captures credentials and then disposes. Browsers run microtasks
+// between listeners of a dispatched event, so a separate deferred disposal
+// registered first would tear down the controller before it could capture.
+// Untrusted events come from page scripts and neither capture nor dispose.
+window.addEventListener("pagehide", event => {
+    if (!event.isTrusted) return;
+    const current = controller;
+    controller = null;
+    if (!current) return;
+    try {
+        current.handlePageHide(event);
+    } finally {
+        current.dispose();
+    }
+});
 window.addEventListener("pageshow", event => {
     if (event.persisted) mount();
 });
@@ -34,13 +46,36 @@ const controlsModule = require("content_controls.js");
 const generatorModule = require("content_generator.js");
 const observerModule = require("content_observer.js");
 const duoModule = require("content_duo.js");
-module.exports.create = function create() {
-    const { USERNAME_INPUT_TYPES, isCredentialInput, credentialScope } = detection;
-    const lifecycle = new AbortController();
+
+const ADVANCE_CONTROLS = "button, input[type='button'], input[type='submit'], input[type='image'], [role='button']";
+
+// After an extension update or reload, scripts from the old version keep running
+// with a runtime that can no longer deliver messages.
+function runtimeAvailable() {
+    try {
+        return Boolean(chrome.runtime?.id);
+    } catch (_) {
+        return false;
+    }
+}
+module.exports.runtimeAvailable = runtimeAvailable;
+
+module.exports.create = function create({ contextValid = runtimeAvailable } = {}) {
+    const {
+        USERNAME_INPUT_TYPES,
+        isCredentialInput,
+        credentialScope,
+        isElementVisible,
+        isExtensionUi,
+        isVisibilityToggle,
+        scopeInputs,
+        withVisibilityCache,
+    } = detection;
     const rootControllers = new Map();
     const handledEvents = new WeakSet();
     let disposed = false;
-    const bridge = bridgeModule.create();
+    let pendingAdvance = null;
+    const bridge = bridgeModule.create({ onInvalidated: () => dispose() });
     const credentials = credentialsModule.create({ roots: () => rootControllers.keys() });
     const {
         restoreUsernameFromPreviousStep,
@@ -52,24 +87,54 @@ module.exports.create = function create() {
         resolveUsername,
     } = credentials;
     const { openCredentialPrompt } = bridge;
+    const credentialAttempt = PasswordManagerFormSubmission.createCredentialAttempt(captured => {
+        if (captured.username) rememberUsernameAcrossNavigation(captured.username);
+        return openCredentialPrompt(resolveUsername(captured.username), captured.password);
+    });
+    function attemptCredentials(captured) {
+        return disposed ? Promise.resolve() : credentialAttempt.run(captured);
+    }
+    let credentialUserIntent = false;
     const autofill = autofillModule.create({ bridge });
     const controls = controlsModule.create({ bridge, credentials, autofill });
     const generator = generatorModule.create({ controls, bridge, credentials });
-    const observer = observerModule.create({
+    // Created before the observer, which dispatches page mutations to it.
+    let observer = null;
+    let duo = null;
+    duo = duoModule.create({ flushMutations: () => observer?.flush(), alive });
+    // Its first check can find the extension context already gone.
+    if (disposed) duo.dispose();
+    observer = observerModule.create({
         controls,
         generator,
         autofill,
         onRoot: registerRoot,
         onRemoveRoot: unregisterRoot,
+        observeText: duo.enabled,
+        onMutations(mutations) {
+            if (!alive()) return;
+            duo.mutated();
+            if (mutations.some(mutation => mutation.type !== "characterData")) controls.layoutChanged();
+        },
     });
-    const duo = duoModule.create();
+
+    // Dispose instead of acting once the extension context is gone.
+    function alive() {
+        if (disposed) return false;
+        if (contextValid()) return true;
+        dispose();
+        return false;
+    }
+
     function listen(root, type, handler) {
         root.addEventListener(
             type,
             event => {
                 if (handledEvents.has(event)) return;
                 handledEvents.add(event);
-                handler(event);
+                if (!alive()) return;
+                // Each event is one synchronous read phase; share visibility reads.
+                withVisibilityCache(() => handler(event));
             },
             { capture: true, signal: rootControllers.get(root).signal }
         );
@@ -78,6 +143,38 @@ module.exports.create = function create() {
         rootControllers.get(root)?.abort();
         rootControllers.delete(root);
     }
+
+    // Has the page left the password step captured by a non-submit click?
+    // Clearing, hiding or removing the password field counts; a show/hide toggle
+    // that swaps it for a text copy of the same value does not.
+    function leftPasswordStep(snapshot) {
+        const { passwordField: field, password, scope } = snapshot;
+        if (!field) return false;
+        return withVisibilityCache(() => {
+            if (field.isConnected && field.value && isElementVisible(field)) return false;
+            const scopeConnected = scope && (scope === document || scope.isConnected);
+            return !(
+                scopeConnected &&
+                scopeInputs(scope).some(
+                    input => input !== field && input.isConnected && input.value === password && isElementVisible(input)
+                )
+            );
+        });
+    }
+
+    function submitsImmediately(control, input) {
+        if (control instanceof HTMLButtonElement || control instanceof HTMLInputElement) {
+            const explicit = String(control.getAttribute("type") || "").toLowerCase();
+            // A button's default type is submit, but outside a form it submits nothing.
+            if (["submit", "image"].includes(control.type) && (control.form || ["submit", "image"].includes(explicit)))
+                return true;
+        }
+        // A button outside the password's form cannot be that form's own control,
+        // such as its show-password toggle.
+        const form = input?.form;
+        return Boolean(form && control.form !== form && !form.contains(control));
+    }
+
     function registerRoot(root) {
         if (disposed || rootControllers.has(root)) return;
         rootControllers.set(root, new AbortController());
@@ -126,9 +223,10 @@ module.exports.create = function create() {
         // Multi-step login pages frequently use a type=button or a scripted
         // control to swap the password step for TOTP without submitting a form or
         // navigating. Capture the credential snapshot before that handler clears
-        // or removes the password input, then defer just long enough for a normal
-        // submit event to take ownership when one exists.
-        const handlePossibleAdvance = source => {
+        // or removes the password input. Submit controls and Enter prompt after a
+        // microtask, so a normal submit event can take ownership; other buttons
+        // prompt only once the page leaves the password step.
+        const handlePossibleAdvance = (source, immediate) => {
             const input =
                 source instanceof HTMLInputElement && isCredentialInput(source) ? source : credentials.lastInput;
             const scope =
@@ -139,7 +237,8 @@ module.exports.create = function create() {
             credentialUserIntent = true;
             const username = usernameFromScope(scope);
             const snapshot = credentialsFromScope(scope);
-            PasswordManagerFormSubmission.scheduleCredentialAdvance(
+            pendingAdvance?.cancel();
+            pendingAdvance = PasswordManagerFormSubmission.scheduleCredentialAdvance(
                 {
                     username: username || snapshot.username,
                     password: snapshot.password,
@@ -147,6 +246,7 @@ module.exports.create = function create() {
                 {
                     remember: rememberUsernameAcrossNavigation,
                     shouldIgnore: () => disposed || !credentialAttempt.idle,
+                    advanced: immediate ? null : () => !disposed && leftPasswordStep(snapshot),
                     prompt: captured => {
                         attemptCredentials(captured).catch(error =>
                             console.log("Password Manager credential prompt error:", error)
@@ -158,30 +258,20 @@ module.exports.create = function create() {
 
         listen(root, "click", event => {
             const target = event.composedPath?.()[0] || event.target;
-            if (!event.isTrusted || !(target instanceof Element)) return;
-            const control = target.closest(
-                "button, input[type='button'], input[type='submit'], input[type='image'], [role='button']"
-            );
-            if (!control || control.classList.contains("my-extension-ui")) return;
-            handlePossibleAdvance(control);
+            if (!event.isTrusted || !(target instanceof Element) || isExtensionUi(target)) return;
+            const control = target.closest(ADVANCE_CONTROLS);
+            if (!control || isExtensionUi(control) || isVisibilityToggle(control)) return;
+            const input = credentials.lastInput;
+            handlePossibleAdvance(control, submitsImmediately(control, input));
         });
 
         listen(root, "keydown", event => {
             if (!event.isTrusted || event.key !== "Enter" || event.isComposing) return;
             const target = event.composedPath?.()[0] || event.target;
             if (!(target instanceof HTMLInputElement) || !isCredentialInput(target)) return;
-            handlePossibleAdvance(target);
+            handlePossibleAdvance(target, true);
         });
     }
-    const credentialAttempt = PasswordManagerFormSubmission.createCredentialAttempt(captured => {
-        if (captured.username) rememberUsernameAcrossNavigation(captured.username);
-        return openCredentialPrompt(resolveUsername(captured.username), captured.password);
-    });
-    function attemptCredentials(captured) {
-        return disposed ? Promise.resolve() : credentialAttempt.run(captured);
-    }
-    let credentialUserIntent = false;
-
     // ===============================
     // Request credentials from background
     // ===============================
@@ -192,50 +282,56 @@ module.exports.create = function create() {
         // Do not place plaintext vault credentials in every matching page at load.
         // Only the secure picker delivers a selected vault secret.
         observer.observeInputs();
+        // Page changes before observation began are not in any mutation record.
+        duo.mutated();
+    }
 
-        // Catch logins that navigate/redirect without a form submit event
-        // (e.g. fetch + window.location, or form.submit() in JS). The extension
-        // window and background-owned operation survive the page being destroyed.
-        window.addEventListener(
-            "pagehide",
-            event => {
-                if (!event.isTrusted || !credentialUserIntent) return;
-                if (!credentialAttempt.idle) return;
+    // Catch logins that navigate/redirect without a form submit event (e.g. fetch
+    // + window.location, a scripted <div> "Sign in", or form.submit() in JS). The
+    // extension window and background-owned operation survive the page being
+    // destroyed. The entry point calls this before disposing the controller.
+    function handlePageHide(event) {
+        if (disposed || !event?.isTrusted) return;
+        const advance = pendingAdvance?.pending ? pendingAdvance : null;
+        pendingAdvance = null;
+        advance?.cancel();
+        if (!credentialUserIntent || !credentialAttempt.idle || !contextValid()) return;
+        withVisibilityCache(() => {
+            // A click that has not yet been confirmed as a login step is confirmed
+            // by leaving the page; use what it captured before its handler ran.
+            const { username: rawUsername, password } = advance?.credentials.password
+                ? advance.credentials
+                : findLoginCredentials();
+            if (!password) {
+                const username = credentials.lastInput ? usernameFromScope(credentialScope(credentials.lastInput)) : "";
+                if (username) rememberUsernameAcrossNavigation(username);
+                return;
+            }
+            const username = resolveUsername(rawUsername);
+            if (rawUsername) storeUsernameForLater(rawUsername);
 
-                const { username: rawUsername, password } = findLoginCredentials();
-                if (!password) {
-                    const username = credentials.lastInput
-                        ? usernameFromScope(credentialScope(credentials.lastInput))
-                        : "";
-                    if (username) rememberUsernameAcrossNavigation(username);
-                    return;
-                }
-                const username = resolveUsername(rawUsername);
-                if (rawUsername) storeUsernameForLater(rawUsername);
-
-                if (!credentialAttempt.reserve()) return;
-                chrome.runtime.sendMessage(
-                    { action: "openCredentialPrompt", username, password },
-                    () => void chrome.runtime.lastError
-                );
-            },
-            { signal: lifecycle.signal }
-        );
+            if (!credentialAttempt.reserve()) return;
+            chrome.runtime.sendMessage(
+                { action: "openCredentialPrompt", username, password },
+                () => void chrome.runtime.lastError
+            );
+        });
     }
 
     function dispose() {
         if (disposed) return;
         disposed = true;
+        pendingAdvance?.cancel();
+        pendingAdvance = null;
         credentialAttempt.dispose();
-        lifecycle.abort();
-        observer.dispose();
+        observer?.dispose();
         generator.dispose();
         controls.dispose();
         bridge.dispose();
-        duo.dispose();
+        duo?.dispose();
         credentials.dispose();
     }
-    return { start, dispose, roots: () => [...rootControllers.keys()] };
+    return { start, dispose, handlePageHide, roots: () => [...rootControllers.keys()] };
 };
 
 },
@@ -361,12 +457,15 @@ module.exports.create = function create() {
         if (explicitScope) return explicitScope;
         let candidate = input.parentElement;
         while (candidate && candidate !== document.body) {
-            const fields = Array.from(candidate.querySelectorAll("input")).filter(isUsableInput);
-            if (
-                fields.some(field => field.type === "password") &&
-                fields.some(field => USERNAME_INPUT_TYPES.has(field.type) && !hasSearchHint(field))
-            ) {
-                return candidate;
+            // Check cheap type tests first and stop as soon as both roles are
+            // present; visibility checks read computed styles up the tree.
+            let password = false;
+            let username = false;
+            for (const field of candidate.querySelectorAll("input")) {
+                if (!password && field.type === "password") password = isUsableInput(field);
+                else if (!username && USERNAME_INPUT_TYPES.has(field.type))
+                    username = !hasSearchHint(field) && isUsableInput(field);
+                if (password && username) return candidate;
             }
             candidate = candidate.parentElement;
         }
@@ -433,8 +532,40 @@ module.exports.create = function create() {
         return hasUsernameHint(input) || isUsernameBeforePassword(input, formUsernames);
     }
 
+    // Buttons that only reveal or mask a password are not login steps.
+    const VISIBILITY_TOGGLE_RE = /show|hide|reveal|unmask|toggle|visib|(?<![a-z])eye|eye(?![a-z])/i;
+    function isVisibilityToggle(control) {
+        if (!control?.getAttribute) return false;
+        if (control.hasAttribute?.("aria-pressed")) return true;
+        const text = String(control.textContent || "").trim();
+        return [
+            control.id,
+            control.getAttribute("class"),
+            control.getAttribute("name"),
+            control.getAttribute("title"),
+            control.getAttribute("aria-label"),
+            control.getAttribute("data-testid"),
+            control instanceof HTMLInputElement ? control.value : "",
+            text.length <= 40 ? text : "",
+        ].some(value => value && VISIBILITY_TOGGLE_RE.test(String(value)));
+    }
+
+    // Hosts of the extension's in-page controls. A registry rather than a class
+    // name or tag, so pages cannot make their own elements look like ours.
+    const extensionUi = new WeakSet();
+    function markExtensionUi(element) {
+        extensionUi.add(element);
+        return element;
+    }
+    function isExtensionUi(node) {
+        return Boolean(node) && extensionUi.has(node);
+    }
+
     return {
         USERNAME_INPUT_TYPES,
+        isExtensionUi,
+        isVisibilityToggle,
+        markExtensionUi,
         autocompleteTokens,
         credentialFields,
         credentialScope,
@@ -514,12 +645,52 @@ module.exports.create = function create() {
         return { onSubmit };
     }
 
+    // Submit controls and Enter advance a login at once. Other buttons also open
+    // menus or reveal passwords, so with options.advanced the snapshot is offered
+    // only once the page leaves the password step (options.advanced() returns true)
+    // within the confirmation window. The caller confirms or cancels the returned
+    // watch on page hide.
     function scheduleCredentialAdvance(credentials, options) {
         if (credentials.username) options.remember(credentials.username);
-        if (!credentials.password) return;
-        (options.defer || queueMicrotask)(() => {
+        if (!credentials.password) return null;
+        const prompt = () => {
             if (!options.shouldIgnore()) options.prompt(credentials);
-        });
+        };
+        if (!options.advanced) {
+            (options.defer || queueMicrotask)(prompt);
+            return null;
+        }
+        const {
+            setTimeout: schedule = globalThis.setTimeout,
+            clearTimeout: unschedule = globalThis.clearTimeout,
+            now = Date.now,
+            confirmWithinMs = 500,
+            intervalMs = 50,
+        } = options;
+        const deadline = now() + confirmWithinMs;
+        let timer = null;
+        let settled = false;
+        function finish(confirmed) {
+            if (settled) return;
+            settled = true;
+            unschedule(timer);
+            if (confirmed) prompt();
+        }
+        function poll() {
+            if (settled) return;
+            if (options.advanced()) finish(true);
+            else if (now() >= deadline) finish(false);
+            else timer = schedule(poll, intervalMs);
+        }
+        timer = schedule(poll, 0);
+        return {
+            credentials,
+            get pending() {
+                return !settled;
+            },
+            confirm: () => finish(true),
+            cancel: () => finish(false),
+        };
     }
 
     return { createCredentialAttempt, createSubmissionCoordinator, scheduleCredentialAdvance };
@@ -532,7 +703,13 @@ const { isUsableInput } = require("content_detection.js");
 
 const { setControlValue } = require("content_value.js");
 
-module.exports.create = function create({} = {}) {
+// An extension update or reload leaves this script running with a dead runtime.
+function contextInvalidated(error) {
+    return /extension context invalidated/i.test(String(error?.message || error || ""));
+}
+module.exports.contextInvalidated = contextInvalidated;
+
+module.exports.create = function create({ onInvalidated = () => {} } = {}) {
     let disposed = false;
     // Use the native value setter and input/change events to synchronize form frameworks.
     function fillInput(input, value) {
@@ -594,6 +771,7 @@ module.exports.create = function create({} = {}) {
                     });
                 } catch (error) {
                     request.finish(null, error);
+                    if (contextInvalidated(error)) onInvalidated();
                 }
             });
         }
@@ -702,6 +880,7 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         return {
             username: usernameField ? usernameField.value.trim() : "",
             password: passwordField.value,
+            passwordField,
             scope,
         };
     }
@@ -1092,9 +1271,11 @@ if (typeof module !== "undefined") module.exports = PasswordManagerContentFields
 "content_controls.js": (module, exports, require) => {
 "use strict";
 const {
-    isUsableInput,
     credentialFields,
     credentialScope,
+    isElementVisible,
+    isExtensionUi = () => false,
+    markExtensionUi = element => element,
     withVisibilityCache = action => action(),
 } = require("content_detection.js");
 module.exports.create = function create({ bridge, credentials, autofill }) {
@@ -1102,13 +1283,14 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     const { storeUsernameForLater } = credentials;
     const { fillTypedItem, typedFillContext } = autofill;
     const lifecycle = new AbortController();
-    let layoutObserver;
     // Reposition secure picker and generator buttons as the page layout changes.
     const positionedControls = new Set();
-    let layoutObserverStarted = false;
+    let listenersStarted = false;
     let disposed = false;
-    let schedulePosition = () => {};
     let repositionScheduled = false;
+    // Scrolling moves controls with their fields; only layout changes can move a
+    // site's own icon over a field, so only they repeat the overlay hit test.
+    let layoutPending = false;
     let controlResizeObserver = null;
 
     function registerPositionedControl(input, button, position, onRemove = () => {}) {
@@ -1126,63 +1308,48 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             },
         };
         positionedControls.add(record);
-        startLayoutObserver();
+        startListeners();
         controlResizeObserver?.observe(input);
         schedulePosition();
         return record.remove;
     }
 
-    function startLayoutObserver() {
-        if (layoutObserverStarted) return;
-        layoutObserverStarted = true;
-
-        const reposition = () => {
-            if (disposed || repositionScheduled) return;
-            repositionScheduled = true;
-            requestAnimationFrame(() => {
-                repositionScheduled = false;
-                if (disposed) return;
-                const writes = [];
-                withVisibilityCache(() => {
-                    for (const control of positionedControls) {
-                        if (!control.input.isConnected) {
-                            control.remove();
-                            continue;
-                        }
-                        if (control.position.measure) writes.push(control.position.measure());
-                        else writes.push(control.position);
+    function reposition(layout) {
+        if (disposed || !positionedControls.size) return;
+        layoutPending ||= layout;
+        if (repositionScheduled) return;
+        repositionScheduled = true;
+        requestAnimationFrame(() => {
+            repositionScheduled = false;
+            const full = layoutPending;
+            layoutPending = false;
+            if (disposed) return;
+            const writes = [];
+            withVisibilityCache(() => {
+                for (const control of positionedControls) {
+                    if (!control.input.isConnected) {
+                        control.remove();
+                        continue;
                     }
-                });
-                for (const write of writes) write();
+                    if (control.position.measure) writes.push(control.position.measure(full));
+                    else writes.push(control.position);
+                }
             });
-        };
+            for (const write of writes) write();
+        });
+    }
+    const schedulePosition = () => reposition(true);
 
-        schedulePosition = reposition;
-        window.addEventListener("load", reposition, { signal: lifecycle.signal });
-        window.addEventListener("scroll", reposition, { capture: true, signal: lifecycle.signal });
-        window.addEventListener("resize", reposition, { signal: lifecycle.signal });
-
-        controlResizeObserver = new ResizeObserver(reposition);
+    // Page mutations reach controls through the content observer, which watches
+    // the document and every registered open shadow root.
+    function startListeners() {
+        if (listenersStarted) return;
+        listenersStarted = true;
+        window.addEventListener("load", schedulePosition, { signal: lifecycle.signal });
+        window.addEventListener("scroll", () => reposition(false), { capture: true, signal: lifecycle.signal });
+        window.addEventListener("resize", schedulePosition, { signal: lifecycle.signal });
+        controlResizeObserver = new ResizeObserver(schedulePosition);
         for (const control of positionedControls) controlResizeObserver.observe(control.input);
-
-        // Ancestor visibility/layout changes can move or hide controls without
-        // changing the inputs themselves. Ignore our own style writes to avoid
-        // scheduling another layout frame after every reposition.
-        layoutObserver = new MutationObserver(mutations => {
-            if (
-                mutations.some(
-                    mutation =>
-                        mutation.type !== "attributes" || !mutation.target.classList?.contains("my-extension-ui")
-                )
-            )
-                reposition();
-        });
-        layoutObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ["class", "style", "hidden", "open"],
-        });
     }
 
     const securePickerControls = new WeakMap();
@@ -1199,12 +1366,12 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         }
         existing?.remove();
 
-        const button = controlButton(icon, title);
+        const { host, button } = controlButton(icon, title);
         // Keep keyboard traversal beside the field the control belongs to.
-        if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
-        const positionButton = positionedButton(input, button, CONTROL_OFFSET);
+        if (!input.insertAdjacentElement?.("afterend", host)) document.body.appendChild(host);
+        const positionButton = positionedButton(input, host, CONTROL_OFFSET);
         const control = { kind, remove: null };
-        control.remove = registerPositionedControl(input, button, positionButton, () => {
+        control.remove = registerPositionedControl(input, host, positionButton, () => {
             if (securePickerControls.get(input) === control) {
                 securePickerControls.delete(input);
             }
@@ -1278,7 +1445,6 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     function dispose() {
         disposed = true;
         lifecycle.abort();
-        layoutObserver?.disconnect();
         controlResizeObserver?.disconnect();
         for (const control of positionedControls) control.remove();
     }
@@ -1289,7 +1455,8 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         createSecureTypedButton,
         removeSecurePickerButton,
         registerPositionedControl,
-        schedulePosition: () => schedulePosition(),
+        schedulePosition,
+        layoutChanged: schedulePosition,
         accountUsername,
         dispose,
     };
@@ -1300,13 +1467,22 @@ const CONTROL_OFFSET = 30;
 // Feather-style outline icons (24×24, stroke = currentColor) so controls look the
 // same on every OS instead of depending on emoji fonts.
 const ICONS = {
-    key: ["M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"],
+    key: [
+        "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4",
+    ],
     clock: ["M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z", "M12 6v6l4 2"],
     card: ["M3 4h18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M1 10h22"],
     person: ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"],
-    sparkle: ["M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z", "M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"],
+    sparkle: [
+        "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z",
+        "M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z",
+    ],
     check: ["M20 6L9 17l-5-5"],
-    warning: ["M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z", "M12 9v4", "M12 17h.01"],
+    warning: [
+        "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z",
+        "M12 9v4",
+        "M12 17h.01",
+    ],
 };
 function setIcon(button, name) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -1331,64 +1507,86 @@ function setIcon(button, name) {
     button.replaceChildren(svg);
     button.dataset.icon = name;
 }
+// In-page UI lives in a closed shadow root under an autonomous custom element:
+// it stays out of form.elements and page selectors, and page styles cannot
+// restyle the button. Browser tests set the hook below from a test-only content
+// script so Playwright can reach the controls; pages cannot set content-script
+// globals.
+const UI_TAG = "pm-field-control";
+// Important :host rules beat page !important rules on the host. They must not
+// declare display/left/top/pointer-events: those are written inline (also
+// !important), and a shadow-context !important rule would override them.
+const HOST_STYLE =
+    ":host{position:fixed!important;right:auto!important;bottom:auto!important;width:auto!important;height:auto!important;margin:0!important;padding:0!important;border:0!important;float:none!important;transform:none!important;filter:none!important;clip-path:none!important;opacity:1!important;visibility:visible!important;z-index:2147483647!important;}";
+const BUTTON_STYLE = `button{all:initial;box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:${CONTROL_SIZE}px;height:${CONTROL_SIZE}px;padding:0;margin:0;border:1px solid #c7d3f5;border-radius:6px;background:#eef2fd;color:#2850be;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12);}button:hover{background:#dbe4fb;}button:focus-visible{outline:2px solid #2850be;outline-offset:2px;}svg{display:block;pointer-events:none;}`;
+const TOAST_STYLE =
+    "div{max-width:320px;padding:8px 12px;border-radius:8px;background:#1f2a44;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);}";
+function setImportantStyles(element, values) {
+    for (const [key, value] of Object.entries(values)) {
+        if (element.style.getPropertyValue(key) !== value || element.style.getPropertyPriority(key) !== "important")
+            element.style.setProperty(key, value, "important");
+    }
+}
+function uiHost(css) {
+    const host = document.createElement(UI_TAG);
+    markExtensionUi(host);
+    const root = host.attachShadow({ mode: globalThis.__pmTestOpenShadowRoots === true ? "open" : "closed" });
+    const style = document.createElement("style");
+    style.textContent = HOST_STYLE + css;
+    root.appendChild(style);
+    setImportantStyles(host, { display: "none" });
+    return { host, root };
+}
 // A small branded chip that reads clearly on light and dark fields.
 function controlButton(icon, title) {
+    const { host, root } = uiHost(BUTTON_STYLE);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "my-extension-ui";
     button.title = title;
     button.setAttribute("aria-label", title);
-    Object.assign(button.style, {
-        position: "fixed",
-        display: "none",
-        alignItems: "center",
-        justifyContent: "center",
-        boxSizing: "border-box",
-        width: CONTROL_SIZE + "px",
-        height: CONTROL_SIZE + "px",
-        minWidth: CONTROL_SIZE + "px",
-        minHeight: CONTROL_SIZE + "px",
-        padding: "0",
-        margin: "0",
-        border: "1px solid #c7d3f5",
-        borderRadius: "6px",
-        background: "#eef2fd",
-        color: "#2850be",
-        cursor: "pointer",
-        zIndex: "2147483647",
-        boxShadow: "0 1px 2px rgba(0,0,0,.12)",
-    });
-    button.addEventListener("mouseenter", () => (button.style.background = "#dbe4fb"));
-    button.addEventListener("mouseleave", () => (button.style.background = "#eef2fd"));
     setIcon(button, icon);
-    return button;
+    root.appendChild(button);
+    return { host, button };
+}
+// A brief status message, announced politely to screen readers.
+function toastHost(message, left, top) {
+    const { host, root } = uiHost(TOAST_STYLE);
+    const toast = document.createElement("div");
+    toast.setAttribute("role", "status");
+    toast.textContent = message;
+    root.appendChild(toast);
+    setImportantStyles(host, { display: "block", left: left + "px", top: top + "px", "pointer-events": "none" });
+    return host;
 }
 // Sites often place their own icon (show password, clear) at the field's right
 // edge. When something other than the field is on top there, step left of it.
+// Returns null when the probe point is off screen, where no hit test is possible.
 function overlayShift(input, left, top) {
-    const hits = globalThis.document?.elementsFromPoint?.(left + CONTROL_SIZE / 2, top + CONTROL_SIZE / 2);
-    const hit = hits?.find(element => !element.classList?.contains("my-extension-ui"));
+    const x = left + CONTROL_SIZE / 2;
+    const y = top + CONTROL_SIZE / 2;
+    const { innerWidth = Infinity, innerHeight = Infinity } = globalThis.window || {};
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+    const hits = globalThis.document?.elementsFromPoint?.(x, y);
+    const hit = hits?.find(element => !isExtensionUi(element));
     if (!hit || hit === input || hit.contains?.(input) || input.getRootNode?.()?.host === hit) return 0;
     return CONTROL_SIZE + 4;
 }
 
 // Return deferred writes so callers can finish all style/geometry reads first.
-function positionedButton(input, button, offset) {
-    const { isElementVisible } = require("content_detection.js");
-    const measure = () => {
+// The overlay hit test is cached and repeated only for layout changes.
+function positionedButton(input, host, offset) {
+    let shift = null;
+    const measure = (layout = true) => {
         const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
         let values = { display: "none" };
         if (rect?.width && rect?.height) {
             const top = rect.top + rect.height / 2 - CONTROL_SIZE / 2;
             const left = rect.right - offset;
-            const shifted = Math.max(rect.left ?? -Infinity, left - overlayShift(input, left, top));
-            values = { display: "flex", left: shifted + "px", top: top + "px" };
+            if (layout || shift === null) shift = overlayShift(input, left, top);
+            const shifted = Math.max(rect.left ?? -Infinity, left - (shift ?? 0));
+            values = { display: "block", left: shifted + "px", top: top + "px" };
         }
-        return () => {
-            for (const [key, value] of Object.entries(values)) {
-                if (button.style[key] !== value) button.style[key] = value;
-            }
-        };
+        return () => setImportantStyles(host, values);
     };
     const position = () => measure()();
     position.measure = measure;
@@ -1396,31 +1594,40 @@ function positionedButton(input, button, offset) {
 }
 module.exports.positionedButton = positionedButton;
 module.exports.controlButton = controlButton;
+module.exports.toastHost = toastHost;
 module.exports.setIcon = setIcon;
 module.exports.CONTROL_OFFSET = CONTROL_OFFSET;
 
 },
 "content_generator.js": (module, exports, require) => {
 "use strict";
-const { positionedButton, controlButton, setIcon, CONTROL_OFFSET } = require("content_controls.js");
+const { positionedButton, controlButton, toastHost, setIcon, CONTROL_OFFSET } = require("content_controls.js");
 const PasswordManagerGenerator = require("password_generator.js");
 const { scopeInputs, credentialScope, isNewPasswordInput } = require("content_detection.js");
 module.exports.create = function create({ controls, bridge, credentials }) {
     const { registerPositionedControl } = controls;
     const { fillInput } = bridge;
     let pageGeneratorSettings = PasswordManagerGenerator.defaults;
-    let pageGeneratorStorage = {};
-    chrome.storage.local.get(["pmGenerator", "pmGeneratorsByOrigin"], result => {
-        pageGeneratorStorage = result;
-        pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
-    });
+    let pageGeneratorStorage = null;
+    let disposed = false;
     const storageChanged = (changes, area) => {
-        if (area !== "local") return;
+        if (area !== "local" || !pageGeneratorStorage) return;
         for (const key of ["pmGenerator", "pmGeneratorsByOrigin"])
             if (changes[key]) pageGeneratorStorage[key] = changes[key].newValue;
         pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
     };
-    chrome.storage.onChanged.addListener(storageChanged);
+    // Most frames never show a generator. Read site settings only once one does.
+    function loadSettings() {
+        if (pageGeneratorStorage || disposed) return;
+        pageGeneratorStorage = {};
+        chrome.storage.onChanged.addListener(storageChanged);
+        chrome.storage.local.get(["pmGenerator", "pmGeneratorsByOrigin"], result => {
+            if (disposed) return;
+            // Changes reported while the read was pending are newer than its result.
+            pageGeneratorStorage = { ...result, ...pageGeneratorStorage };
+            pageGeneratorSettings = PasswordManagerGenerator.settingsForSite(pageGeneratorStorage, location.href);
+        });
+    }
     function generatePagePassword(length) {
         return PasswordManagerGenerator.generate(
             length === undefined ? pageGeneratorSettings : { ...pageGeneratorSettings, length }
@@ -1439,18 +1646,23 @@ module.exports.create = function create({ controls, bridge, credentials }) {
             controls.schedulePosition();
             return;
         }
+        loadSettings();
 
-        const button = controlButton("sparkle", "Generate a strong password");
-        if (!input.insertAdjacentElement?.("afterend", button)) document.body.appendChild(button);
+        const { host, button } = controlButton("sparkle", "Generate a strong password");
+        if (!input.insertAdjacentElement?.("afterend", host)) document.body.appendChild(host);
 
-        const positionButton = positionedButton(input, button, CONTROL_OFFSET);
+        const positionButton = positionedButton(input, host, CONTROL_OFFSET);
 
         button.addEventListener("click", event => {
             if (!event.isTrusted) return;
             event.preventDefault();
             event.stopPropagation();
             const password = generatePagePassword();
-            const fields = scopeInputs(credentialScope(input)).filter(isNewPasswordInput);
+            // Descriptor hints such as "confirm" also appear on email fields; fill only
+            // password inputs.
+            const fields = scopeInputs(credentialScope(input)).filter(
+                field => field.type === "password" && isNewPasswordInput(field)
+            );
             const targets = fields.length > 0 ? fields : [input];
             targets.forEach(field => fillInput(field, password));
             credentials.lastInput = input;
@@ -1462,7 +1674,7 @@ module.exports.create = function create({ controls, bridge, credentials }) {
         });
 
         const control = { remove: null };
-        control.remove = registerPositionedControl(input, button, positionButton, () => {
+        control.remove = registerPositionedControl(input, host, positionButton, () => {
             if (generatorControls.get(input) === control) generatorControls.delete(input);
         });
         generatorControls.set(input, control);
@@ -1471,30 +1683,15 @@ module.exports.create = function create({ controls, bridge, credentials }) {
     // Brief confirmation under the field; announced politely to screen readers.
     function showToast(input, message) {
         const rect = input.getBoundingClientRect();
-        const toast = document.createElement("div");
-        toast.className = "my-extension-ui";
-        toast.setAttribute("role", "status");
-        toast.textContent = message;
-        Object.assign(toast.style, {
-            position: "fixed",
-            left: Math.max(8, rect.left) + "px",
-            top: rect.bottom + 6 + "px",
-            maxWidth: "320px",
-            padding: "8px 12px",
-            borderRadius: "8px",
-            background: "#1f2a44",
-            color: "#ffffff",
-            font: "13px/1.4 system-ui, sans-serif",
-            boxShadow: "0 4px 14px rgba(0,0,0,.25)",
-            zIndex: "2147483647",
-            pointerEvents: "none",
-        });
+        const toast = toastHost(message, Math.max(8, rect.left), rect.bottom + 6);
         document.body.appendChild(toast);
         setTimeout(() => toast.remove(), 3500);
     }
 
     function dispose() {
-        chrome.storage.onChanged.removeListener(storageChanged);
+        if (disposed) return;
+        disposed = true;
+        if (pageGeneratorStorage) chrome.storage.onChanged.removeListener(storageChanged);
     }
 
     return { createGeneratorButton, removeGeneratorButton, dispose };
@@ -1622,14 +1819,26 @@ const {
     isCredentialInput,
     isUsableInput,
     isNewPasswordInput,
+    isExtensionUi = () => false,
     withVisibilityCache = action => action(),
 } = require("content_detection.js");
-module.exports.create = function create({ controls, generator, autofill, onRoot = () => {}, onRemoveRoot = () => {} }) {
+// The one subtree observer per frame. Discovery uses it directly; other page
+// mutations (control layout, Duo text) are dispatched through onMutations.
+module.exports.create = function create({
+    controls,
+    generator,
+    autofill,
+    onRoot = () => {},
+    onRemoveRoot = () => {},
+    onMutations = () => {},
+    observeText = false,
+}) {
     const { createSecureTotpButton, createSecureTypedButton, createSecureCredentialButton, removeSecurePickerButton } =
         controls;
     const { createGeneratorButton, removeGeneratorButton } = generator;
     const { typedAutofillKind } = autofill;
     let observer;
+    let handleMutations = () => {};
     let scan = () => {};
     let disposed = false;
     const registeredRoots = new Set();
@@ -1663,7 +1872,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     }
     function attachInput(input, formUsernames, typedContext) {
         // Ignore extension UI elements
-        if (!isFormControl(input) || input.classList.contains("my-extension-ui")) return;
+        if (!isFormControl(input) || isExtensionUi(input)) return;
         const typedKind = typedAutofillKind(input, typedContext);
         if (isTotpInput(input)) {
             createSecureTotpButton(input);
@@ -1720,13 +1929,15 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
     function observeInputs() {
         const pendingRoots = new Set();
         let attachScheduled = false;
-        observer = new MutationObserver(mutations => {
-            const ownUI = node => node?.nodeType === 1 && node.classList?.contains("my-extension-ui");
+        handleMutations = mutations => {
+            // Ignore the extension's own controls being added, removed or moved.
             mutations = mutations.filter(mutation => {
+                if (mutation.type === "attributes") return !isExtensionUi(mutation.target);
                 if (mutation.type !== "childList") return true;
                 const changed = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
-                return !changed.length || !changed.every(ownUI);
+                return !changed.length || !changed.every(isExtensionUi);
             });
+            if (!mutations.length) return;
             for (const mutation of mutations) {
                 if (mutation.type !== "childList") continue;
                 // Mutation targets invalidate ancestor snapshots, including across shadow hosts.
@@ -1756,7 +1967,6 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
             }
             for (const mutation of mutations) {
                 if (mutation.type === "attributes") {
-                    if (mutation.target.classList?.contains("my-extension-ui")) continue;
                     if (
                         isFormControl(mutation.target) ||
                         ["class", "style", "hidden", "open"].includes(mutation.attributeName)
@@ -1764,11 +1974,13 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
                         scheduleAttach(mutation.target);
                     }
                 }
-                for (const node of mutation.addedNodes) {
+                for (const node of mutation.addedNodes || []) {
                     if (node.nodeType === 1) scheduleAttach(node);
                 }
             }
-        });
+            onMutations(mutations);
+        };
+        observer = new MutationObserver(records => handleMutations(records));
         const observationOptions = {
             childList: true,
             subtree: true,
@@ -1788,6 +2000,7 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
                 "aria-label",
                 "role",
             ],
+            ...(observeText ? { characterData: true } : {}),
         };
         const observeRoot = root => {
             if (disposed || (root !== document && !root.host) || registeredRoots.has(root)) return;
@@ -1821,7 +2034,13 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
         scan(document);
     }
 
-    return { attachToInputs, coveredByPendingRoot, observeInputs, dispose, scan: root => scan(root) };
+    // Deliver queued records now, for readers that must not use stale state.
+    function flush() {
+        const records = observer?.takeRecords?.() || [];
+        if (records.length) handleMutations(records);
+    }
+
+    return { attachToInputs, coveredByPendingRoot, observeInputs, dispose, flush, scan: root => scan(root) };
 };
 
 },
@@ -1829,36 +2048,59 @@ module.exports.create = function create({ controls, generator, autofill, onRoot 
 // Detection only asks the background to check. Request details and decisions
 // stay in extension pages; verification numbers are never extracted from this page.
 const PasswordManagerDuoDetection = require("duo_detection.js");
-module.exports.create = function create() {
+const inactive = { enabled: false, mutated() {}, dispose() {} };
+module.exports.create = function create({
+    flushMutations = () => {},
+    alive = () => true,
+    enabled = window === window.top || PasswordManagerDuoDetection.duoOrigin(location.href),
+} = {}) {
+    // Duo challenges appear in the top-level page or a Duo-hosted frame. Other
+    // embedded frames (ads, widgets) never poll.
+    if (!enabled) return inactive;
     let activeSince = 0,
         checking = false,
-        timer,
+        timer = null,
         disposed = false;
     let dirty = true,
         cached = false,
         scannedUrl;
-    // Mutation bursts only invalidate; the existing poll interval coalesces reads.
-    // Authorization requests always inspect the live rendered page instead.
-    const observer = new MutationObserver(() => {
+    // Mutations reach this module through the content observer and only mark the
+    // cached result stale; the poll interval coalesces reads. Authorization
+    // requests always inspect the live rendered page instead.
+    function mutated() {
         dirty = true;
-    });
-    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    }
+    function scan() {
+        const body = document.body;
+        if (!body) return false;
+        const url = location.href;
+        // textContent needs no layout. Outside Duo's own pages a challenge always
+        // names Duo, so skip the rendered-text read for every other page.
+        if (!PasswordManagerDuoDetection.duoOrigin(url) && !/duo/i.test(body.textContent || "")) return false;
+        return PasswordManagerDuoDetection.challenge(body.innerText, url);
+    }
     function active(fresh = false) {
         if (disposed || document.visibilityState === "hidden") return false;
-        if (observer.takeRecords().length) dirty = true;
+        flushMutations();
         if (fresh || dirty || scannedUrl !== location.href) {
-            cached = PasswordManagerDuoDetection.challenge(document.body?.innerText, location.href);
+            cached = scan();
             scannedUrl = location.href;
             dirty = false;
         }
         return cached;
     }
-    function check() {
-        if (disposed) return;
+    function schedule() {
         clearTimeout(timer);
+        timer = disposed || document.visibilityState === "hidden" ? null : setTimeout(check, 5000);
+    }
+    function check() {
+        clearTimeout(timer);
+        timer = null;
+        // Hidden pages stop polling; becoming visible starts a new check.
+        if (disposed || !alive() || document.visibilityState === "hidden") return;
         if (!active()) {
             activeSince = 0;
-            timer = setTimeout(check, 5000);
+            schedule();
             return;
         }
         if (!activeSince) activeSince = Date.now();
@@ -1868,7 +2110,7 @@ module.exports.create = function create() {
         chrome.runtime.sendMessage({ action: "observeDuoChallenge" }, () => {
             void chrome.runtime.lastError;
             checking = false;
-            if (!disposed) timer = setTimeout(check, 5000);
+            schedule();
         });
     }
     const listener = (message, _sender, respond) => {
@@ -1880,16 +2122,15 @@ module.exports.create = function create() {
         check();
     };
     document.addEventListener("visibilitychange", visibilityChanged);
-    const pagehide = () => clearTimeout(timer);
-    window.addEventListener("pagehide", pagehide);
     check();
     return {
+        enabled: true,
+        mutated,
         dispose() {
             disposed = true;
-            observer.disconnect();
             clearTimeout(timer);
+            timer = null;
             document.removeEventListener("visibilitychange", visibilityChanged);
-            window.removeEventListener("pagehide", pagehide);
             chrome.runtime.onMessage.removeListener(listener);
         },
     };

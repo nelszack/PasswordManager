@@ -26,12 +26,20 @@ class Input extends Element {
     }
 }
 
-function environment(children = []) {
+const ownUi = new WeakSet();
+function extensionHost() {
+    const host = new Element();
+    ownUi.add(host);
+    return host;
+}
+
+function environment(children = [], { observeText = false } = {}) {
     const document = new Element(children);
     const frames = [];
     const controls = [];
     const observed = [];
-    let notify, disconnects = 0;
+    let notify, disconnects = 0, queued = [];
+    const dispatched = [];
     const registered = [], removed = [];
     const context = {
         module: { exports: {} },
@@ -42,6 +50,7 @@ function environment(children = []) {
         MutationObserver: class {
             constructor(callback) { notify = callback; }
             observe(root, options) { observed.push({ root, options }); }
+            takeRecords() { const records = queued; queued = []; return records; }
             disconnect() { disconnects++; }
         },
         requestAnimationFrame: callback => frames.push(callback),
@@ -50,6 +59,7 @@ function environment(children = []) {
         isCredentialInput: input => input.kind === "login",
         isUsableInput: input => input.isConnected && !input.disabled,
         isNewPasswordInput: () => false,
+        isExtensionUi: node => ownUi.has(node),
         createSecureTotpButton: input => controls.push([input, "totp"]),
         createSecureTypedButton: input => controls.push([input, "card"]),
         createSecureCredentialButton: input => controls.push([input, "login"]),
@@ -59,11 +69,15 @@ function environment(children = []) {
     };
     context.require = () => context;
     loadScript("content_observer.js", context);
-    Object.assign(context, context.module.exports.create({ controls: context, generator: context, autofill: context, onRoot: root => registered.push(root), onRemoveRoot: root => removed.push(root) }));
+    Object.assign(context, context.module.exports.create({ controls: context, generator: context, autofill: context, onRoot: root => registered.push(root), onRemoveRoot: root => removed.push(root),
+        onMutations: mutations => dispatched.push(mutations), observeText }));
     context.observeInputs();
     return {
         document, controls, observed, frames, registered, removed, dispose: context.dispose, disconnects: () => disconnects,
         notify: mutations => notify(mutations),
+        queue: mutations => { queued.push(...mutations); },
+        flushRecords: () => context.flush(),
+        dispatched,
         flush: () => frames.shift()()
     };
 }
@@ -135,10 +149,16 @@ test("ancestor visibility changes rescan descendants and ignore extension style 
         assert.equal(env.frames.length, 1);
         env.flush();
         assert.deepEqual(env.controls, [[input, "login"]]);
-        const extensionButton = new Element();
-        extensionButton.classList = { contains: value => value === "my-extension-ui" };
+        const extensionButton = extensionHost();
+        const lookalike = new Element();
+        lookalike.classList = { contains: value => value === "my-extension-ui" };
+        env.dispatched.length = 0;
         env.notify([{ type: "attributes", target: extensionButton, attributeName: "style", addedNodes: [] }]);
         assert.equal(env.frames.length, 0);
+        assert.deepEqual(env.dispatched, [], "own style writes reach no other subscriber either");
+        env.notify([{ type: "attributes", target: lookalike, attributeName: "style", addedNodes: [] }]);
+        assert.equal(env.frames.length, 1, "page elements cannot opt out by copying a class name");
+        assert.equal(env.dispatched.length, 1);
     }
 });
 
@@ -190,7 +210,7 @@ test("extension child mutations preserve snapshots and unrelated subtree edits k
     const attribute = root => ({ type: "attributes", target: root, attributeName: "class", addedNodes: [] });
     env.notify([attribute(left), attribute(right)]); env.flush();
     const leftScans = left.scans, rightScans = right.scans;
-    const own = new Element(); own.classList = { contains: name => name === "my-extension-ui" };
+    const own = extensionHost();
     env.notify([{ type: "childList", target: left, addedNodes: [own], removedNodes: [] }]);
     assert.equal(env.frames.length, 0);
     env.notify([attribute(left)]); env.flush();
@@ -215,4 +235,23 @@ test("reinserting a subtree discovers controls changed while it was detached", (
     env.controls.length=0;
     env.notify([{type:"childList",target:env.document,addedNodes:[subtree],removedNodes:[]}]); env.flush();
     assert.deepEqual(env.controls,[[replacement,"totp"]]);
+});
+
+test("one observer dispatches page mutations, including text when requested, and flushes queued records", () => {
+    const input = new Input();
+    const container = new Element([input]);
+    const env = environment([container], { observeText: true });
+    assert.equal(env.observed[0].options.characterData, true);
+    assert.equal(environment().observed[0].options.characterData, undefined, "text is observed only on request");
+    const text = { type: "characterData", target: container, addedNodes: [] };
+    env.notify([text]);
+    assert.deepEqual(env.dispatched, [[text]]);
+    assert.equal(env.frames.length, 0, "text changes never rerun discovery");
+    env.queue([text]);
+    env.flushRecords();
+    assert.equal(env.dispatched.length, 2);
+    env.flushRecords();
+    assert.equal(env.dispatched.length, 2, "an empty queue dispatches nothing");
+    env.notify([{ type: "childList", target: container, addedNodes: [extensionHost()], removedNodes: [] }]);
+    assert.equal(env.dispatched.length, 2, "adding the extension's own controls is not a page change");
 });

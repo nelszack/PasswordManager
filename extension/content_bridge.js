@@ -3,7 +3,13 @@ const { isUsableInput } = require("./content_detection.js");
 
 const { setControlValue } = require("./content_value.js");
 
-module.exports.create = function create({} = {}) {
+// An extension update or reload leaves this script running with a dead runtime.
+function contextInvalidated(error) {
+    return /extension context invalidated/i.test(String(error?.message || error || ""));
+}
+module.exports.contextInvalidated = contextInvalidated;
+
+module.exports.create = function create({ onInvalidated = () => {} } = {}) {
     let disposed = false;
     // Use the native value setter and input/change events to synchronize form frameworks.
     function fillInput(input, value) {
@@ -65,6 +71,7 @@ module.exports.create = function create({} = {}) {
                     });
                 } catch (error) {
                     request.finish(null, error);
+                    if (contextInvalidated(error)) onInvalidated();
                 }
             });
         }

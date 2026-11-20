@@ -57,12 +57,52 @@
         return { onSubmit };
     }
 
+    // Submit controls and Enter advance a login at once. Other buttons also open
+    // menus or reveal passwords, so with options.advanced the snapshot is offered
+    // only once the page leaves the password step (options.advanced() returns true)
+    // within the confirmation window. The caller confirms or cancels the returned
+    // watch on page hide.
     function scheduleCredentialAdvance(credentials, options) {
         if (credentials.username) options.remember(credentials.username);
-        if (!credentials.password) return;
-        (options.defer || queueMicrotask)(() => {
+        if (!credentials.password) return null;
+        const prompt = () => {
             if (!options.shouldIgnore()) options.prompt(credentials);
-        });
+        };
+        if (!options.advanced) {
+            (options.defer || queueMicrotask)(prompt);
+            return null;
+        }
+        const {
+            setTimeout: schedule = globalThis.setTimeout,
+            clearTimeout: unschedule = globalThis.clearTimeout,
+            now = Date.now,
+            confirmWithinMs = 500,
+            intervalMs = 50,
+        } = options;
+        const deadline = now() + confirmWithinMs;
+        let timer = null;
+        let settled = false;
+        function finish(confirmed) {
+            if (settled) return;
+            settled = true;
+            unschedule(timer);
+            if (confirmed) prompt();
+        }
+        function poll() {
+            if (settled) return;
+            if (options.advanced()) finish(true);
+            else if (now() >= deadline) finish(false);
+            else timer = schedule(poll, intervalMs);
+        }
+        timer = schedule(poll, 0);
+        return {
+            credentials,
+            get pending() {
+                return !settled;
+            },
+            confirm: () => finish(true),
+            cancel: () => finish(false),
+        };
     }
 
     return { createCredentialAttempt, createSubmissionCoordinator, scheduleCredentialAdvance };

@@ -43,6 +43,15 @@ async function launchExtension(options = {}) {
         if (options.allowHttp !== false) {
             testManifest.content_scripts[0].matches.push("http://*/*");
         }
+        // In-page controls use closed shadow roots, which Playwright cannot reach.
+        // A test-only content script runs first in the extension's isolated world
+        // and opts the copied extension into open roots; page scripts cannot set
+        // content-script globals, and the production manifest has no such script.
+        fs.writeFileSync(
+            path.join(testExtensionPath, "e2e_test_hooks.js"),
+            "globalThis.__pmTestOpenShadowRoots = true;\n"
+        );
+        testManifest.content_scripts[0].js.unshift("e2e_test_hooks.js");
         fs.writeFileSync(testManifestPath, JSON.stringify(testManifest, null, 2));
         const testHome = path.join(temporaryRoot, "home");
         const profile = path.join(temporaryRoot, "profile");
