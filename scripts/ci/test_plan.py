@@ -68,14 +68,44 @@ class SelectionTests(unittest.TestCase):
             git("add", ".")
             git("commit", "-m", "advance main")
             advanced = git("rev-parse", "HEAD")
+            pr = {"pull_request": {"base": {"sha": advanced}, "head": {"sha": head}}}
             original_git = plan.git
-            with patch.object(plan, "git", side_effect=lambda *args: original_git("-C", directory, *args)):
-                pr = {"pull_request": {"base": {"sha": advanced}, "head": {"sha": head}}}
+
+            def in_repository(repository):
+                return patch.object(plan, "git", side_effect=lambda *args, **kwargs:
+                                    original_git("-C", repository, *args, **kwargs))
+
+            # Full history, HEAD is not a test merge: compare from the merge base.
+            with in_repository(directory):
                 self.assertEqual(set(plan.changed_paths("pull_request", pr)), {"original.rs", "new.rs"})
                 self.assertEqual(set(plan.changed_paths("push", {"before": base, "after": before})), {"original.rs", "renamed.rs"})
                 self.assertEqual(set(plan.changed_paths("push", {"before": before, "after": head})), {"renamed.rs", "new.rs"})
                 self.assertIsNone(plan.changed_paths("push", {"before": "0" * 40, "after": head}))
                 self.assertIsNone(plan.changed_paths("schedule", {}))
+
+            # CI checks out GitHub's test merge with depth 2 and fetches only
+            # missing push endpoints by ID.
+            git("merge", "--no-ff", "-m", "test merge", "pr")
+            git("branch", "test-merge")
+            git("config", "uploadpack.allowAnySHA1InWant", "true")
+            clone = str(Path(directory) / "clone")
+            subprocess.check_call(["git", "clone", "--quiet", "--depth", "2", "--branch", "test-merge",
+                                   f"file://{directory}", clone], stderr=subprocess.DEVNULL)
+
+            def has(commit):
+                return subprocess.run(["git", "-C", clone, "cat-file", "-e", f"{commit}^{{commit}}"],
+                                      stderr=subprocess.DEVNULL).returncode == 0
+            self.assertFalse(has(base))
+            with in_repository(clone):
+                self.assertEqual(set(plan.changed_paths("pull_request", pr)), {"original.rs", "new.rs"})
+                self.assertEqual(set(plan.changed_paths("push", {"before": base, "after": before})), {"original.rs", "renamed.rs"})
+            self.assertTrue(has(base))
+
+    def test_planner_self_tests_run_only_for_planner_or_workflow_changes(self):
+        self.assertTrue(plan.planner_changed(None))
+        self.assertTrue(plan.planner_changed(["src/main.rs", "scripts/ci/plan.py"]))
+        self.assertTrue(plan.planner_changed([".github/workflows/ci.yml"]))
+        self.assertFalse(plan.planner_changed(["src/main.rs", "scripts/validate.cjs"]))
 
 
 class ReuseTests(unittest.TestCase):
@@ -170,6 +200,7 @@ class ReuseTests(unittest.TestCase):
             self.assertEqual(values["reused"], "false")
             self.assertEqual(values["rust"], "true")
             self.assertEqual(values["browser"], "true")
+            self.assertEqual(values["self_test"], "false")
 
 
     def test_planner_reuse_full_fallback_and_manual_full_run(self):
@@ -197,6 +228,7 @@ class ReuseTests(unittest.TestCase):
                 values = dict(line.split("=") for line in output.read_text().splitlines())
                 self.assertEqual({key for key in plan.SUITES if values[key] == "true"}, expected)
                 self.assertEqual(values["reused"], str(bool(prior)).lower())
+                self.assertEqual(values["self_test"], str(not isinstance(paths, list)).lower())
                 if event_name != "push":
                     reuse.assert_not_called()
 

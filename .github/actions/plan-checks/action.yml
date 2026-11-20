@@ -1,5 +1,5 @@
 name: Select checks
-description: Test suite selection safeguards and select checks for this workflow.
+description: Select checks for this workflow, testing the planner when it changed.
 inputs:
   workflow:
     description: Workflow identity
@@ -35,9 +35,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Test CI selection and reuse safeguards
-      shell: bash
-      run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
     - name: Select suites or reuse successful PR result
       id: plan
       shell: bash
@@ -45,3 +42,10 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         CHECK_WORKFLOW: ${{ inputs.workflow }}
       run: python3 scripts/ci/plan.py --workflow "$CHECK_WORKFLOW"
+    # Unchanged planner code was tested when it last changed. Planner/workflow
+    # changes select every suite and run these tests; a failure fails the plan job
+    # and therefore the required result check.
+    - name: Test CI selection, reuse and packaging safeguards
+      if: steps.plan.outputs.self_test == 'true'
+      shell: bash
+      run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'

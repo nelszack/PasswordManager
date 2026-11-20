@@ -37,7 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
+          # The planner diffs the PR test merge against its first parent (or a
+          # push's endpoints, fetching a missing one by ID): no history needed.
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: |
+            .github
+            scripts/ci
       - uses: ./.github/actions/plan-checks
         id: plan
         with:
@@ -49,9 +55,10 @@ jobs:
     if: needs.plan.outputs.rust_audit == 'true'
     name: RustSec dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: ./.github/actions/rust-toolchain
       - name: Install cargo-audit
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
@@ -67,11 +74,12 @@ jobs:
     if: needs.plan.outputs.npm_audit == 'true'
     name: Browser test dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
       - run: npm ci
       - run: npm audit --audit-level=high
@@ -81,6 +89,7 @@ jobs:
     needs: plan
     if: github.event_name == 'pull_request' && (needs.plan.outputs.rust_audit == 'true' || needs.plan.outputs.npm_audit == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: write
@@ -98,6 +107,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The tree ID still covers the whole commit.
+          sparse-checkout: |
+            .github
+            scripts/ci
       - uses: ./.github/actions/finish-checks
         with:
           workflow: security

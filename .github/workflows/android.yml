@@ -3,13 +3,42 @@ name: Android
 on:
   push:
     branches: [main]
-    paths: ['android/**', 'src/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'scripts/build_android.py', '.github/workflows/android.yml']
+    paths:
+      - 'android/**'
+      - 'src/**'
+      # The desktop GUI belongs to the pm binary (src/main.rs), not the library
+      # pm-mobile links with default features off, so it cannot reach the APK.
+      - '!src/gui/**'
+      - '!src/desktop.rs'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/build_android.py'
+      - '.github/workflows/android.yml'
+      - '.github/actions/rust-toolchain/**'
   pull_request:
-    paths: ['android/**', 'src/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'scripts/build_android.py', '.github/workflows/android.yml']
+    paths:
+      - 'android/**'
+      - 'src/**'
+      - '!src/gui/**'
+      - '!src/desktop.rs'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/build_android.py'
+      - '.github/workflows/android.yml'
+      - '.github/actions/rust-toolchain/**'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: android-${{ github.event.pull_request.number || github.run_id }}
+  # Preserve checks for earlier direct pushes; PR updates may cancel old PR runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   apk:
@@ -21,7 +50,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: aarch64-linux-android,x86_64-linux-android
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2

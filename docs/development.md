@@ -185,7 +185,9 @@ including deletions and both sides of renames:
   planner's conservative rules; for example, `assets/` selects Rust and an
   unrecognized path selects all suites. Generated command references run Rust
   validation. The separate Android workflow has its own path filters.
-- GUI/assets changes run Rust tests, coverage, and platform checks.
+- GUI/assets changes run Rust tests, coverage, and platform checks; the Android
+  workflow ignores `src/gui/` and `src/desktop.rs`, which only the desktop
+  binary compiles.
 - Shared Rust, integration-test, and vendor changes also run browser, cloud,
   and fuzz integration checks.
 - Extension changes run extension validation and browser integration. Generated
@@ -198,8 +200,17 @@ including deletions and both sides of renames:
 
 `npm run validate` still runs the complete local validation. CI splits it into
 `npm run validate -- rust` on each platform and
-`npm run validate -- extension` once on Linux. Browser integration builds the
-CLI/native host with `--no-default-features`, without the desktop renderer.
+`npm run validate -- extension` once on Linux. The Linux leg sets
+`PM_RUST_COVERAGE_LCOV` so its all-features test run is instrumented and
+enforces the Rust coverage gate in the same build; the macOS leg also checks the
+Intel target. One job builds the CLI/native host with `--no-default-features`
+(without the desktop renderer) and hands `target/debug/pm` to the cloud-sync
+and browser integration jobs.
+
+The planner checks out only the commit and its parents: for a PR it diffs
+GitHub's test merge against the base parent, and for a push it fetches the
+previous head by ID if needed. The planner's own tests run only when
+`.github/` or `scripts/ci/` changes (or on full runs).
 
 A successful PR workflow uploads the exact checked-out Git tree as a small
 artifact. A push to `main` reuses that result only for a merged PR from this
@@ -243,7 +254,9 @@ crates are workspace members for their upstream tests; the application remains
 the default workspace member. `npm run validate` runs those tests on Linux along
 with the Unix adapter's wire-signature and serialization checks. Registry audits
 do not cover path sources, so local ports still need source review and native
-validation when updated. The actual DBus codec/transport and XML parser remain
+validation when updated. If a dependency update moves past a vendored version,
+Cargo silently builds the unpatched registry crate and records `[[patch.unused]]`
+in `Cargo.lock`; `npm run validate` fails in that case. The actual DBus codec/transport and XML parser remain
 maintained registry dependencies checked by the dependency audit.
 
 On Linux with Orca, GTK3, PyGObject, AT-SPI, and DBus installed, run
@@ -287,8 +300,8 @@ the dialog dependency. Selection fills the unlock path without reading the key
 or unlocking automatically.
 
 CI validates the default desktop build on Linux, Windows, and macOS, checks a
-CLI-only build on each platform, and checks both Intel and Apple Silicon macOS
-targets. Relevant pull requests and pushes to `main` select these suites;
+CLI-only build on each platform, and checks the Intel macOS target from the
+Apple Silicon job. Relevant pull requests and pushes to `main` select these suites;
 feature-branch pushes alone do not trigger them. Native visual
 and file-dialog smoke tests still need a desktop session on each OS.
 
@@ -324,7 +337,12 @@ npm run validate
 ```
 
 The extension coverage and shared validation commands require Node.js 26.7 or
-newer. CI and release validation use Node 26; browser end-to-end tests use Node 22.
+newer; every CI, security and release job uses Node 26.
+
+`rust-toolchain.toml` pins the stable Rust release (with clippy, rustfmt, and the
+LLVM tools coverage needs) that CI and releases install, and rustup selects it
+automatically in this repository. Fuzzing overrides it with its own nightly.
+Bump the pin deliberately in its own change.
 Extension unit coverage enforces individual thresholds for the background
 services, including native request and pending-credential lifecycles.
 
@@ -347,12 +365,15 @@ The coverage command writes reports under `test-results/e2e-coverage`; use
 profiles and synthetic vaults. Most fixtures enable HTTP in a temporary extension
 copy; production injection remains HTTPS-only.
 
-For Rust coverage, install the LLVM tools and coverage runner first:
+For Rust coverage, install the coverage runner first (the pinned toolchain
+already includes the LLVM tools). Either run it directly, or let the shared
+validation instrument its own test run and write an lcov report, as CI does on
+Linux:
 
 ```bash
-rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov --locked
 cargo llvm-cov --locked --all-features -p password_manager -p pm-contracts -p pm-client -p pm-platform --fail-under-lines 65
+PM_RUST_COVERAGE_LCOV=rust-lcov.info npm run validate -- rust
 ```
 
 After changing CLI commands or flags, regenerate and verify the browser command
@@ -368,7 +389,8 @@ encrypted backup recovery and tamper detection, hostile encryption parameters,
 secret redaction, vault recovery state, TOTP vectors, URL matching, and
 plaintext import/export compatibility. GitHub Actions runs the full test and
 strict-lint suite on Linux, macOS, and Windows for pushes to `main` and pull
-requests. Browser end-to-end and coverage jobs run separately on Linux.
+requests. Browser end-to-end tests run separately on Linux; Rust coverage is
+measured by the Linux test job.
 Rust build caches are saved on `main` and restored by pull requests, reducing
 duplicate cache storage without skipping checks. Default-feature builds remain
 covered by the browser integration and release jobs.

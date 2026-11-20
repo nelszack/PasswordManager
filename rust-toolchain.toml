@@ -1,0 +1,8 @@
+# CI and release builds install exactly this toolchain through
+# .github/actions/rust-toolchain, which reads `channel` and `components` below.
+# Update it deliberately (one line) when adopting a new stable release.
+# Fuzzing uses its own pinned nightly; see fuzz/README.md.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "llvm-tools", "rustfmt"]
+profile = "minimal"
