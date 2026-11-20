@@ -218,3 +218,36 @@ test("typed identity context is shared per scan and refreshed on the next scan",
     assert.equal(typedAutofillKind(email, new WeakMap()), null);
     assert.equal(scans, 2);
 });
+
+test("form-less credential scopes walk up to the nearest container with both roles and stop early", () => {
+    const original = global.getComputedStyle;
+    let reads = 0;
+    global.getComputedStyle = element => {
+        reads++;
+        return original(element);
+    };
+    try {
+        const container = (inputs, parentElement = null) => ({
+            parentElement,
+            querySelectorAll: selector => {
+                assert.equal(selector, "input");
+                return inputs;
+            },
+        });
+        const search = new FakeInput("search", { placeholder: "Search" });
+        const username = new FakeInput("email", { autocomplete: "username" });
+        const password = new FakeInput("password");
+        const trailing = Array.from({ length: 50 }, () => new FakeInput("text"));
+        const outer = container([search, username, password, ...trailing]);
+        const inner = container([password], outer);
+        password.parentElement = inner;
+        const scope = detection.withVisibilityCache(() => detection.credentialScope(password));
+        assert.equal(scope, outer);
+        // The password's style is read once per scan; the search field fails its
+        // type check without a style read; trailing inputs are never inspected.
+        assert.equal(reads, 2);
+        assert.equal(detection.credentialScope(Object.assign(new FakeInput("password"), { parentElement: null })), document);
+    } finally {
+        global.getComputedStyle = original;
+    }
+});
