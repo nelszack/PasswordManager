@@ -28,9 +28,9 @@ impl Vault {
         bytes: &[u8],
     ) -> Result<(), String> {
         let mut key = credentials.clone();
-        let plaintext = Zeroizing::new(decrypt_file(&mut key, bytes).ok_or(
+        let plaintext = decrypt_file(&mut key, bytes).ok_or(
             "Cannot decrypt cloud update with this session key; the password/key may have changed on another device. Download a comparison copy with the new credentials; local vault preserved.",
-        )?);
+        )?;
         let data = persistence::decode_document(&plaintext).map_err(|e| e.to_string())?;
         if data.vault_id != self.vault_id() {
             return Err("Cloud update has the wrong encrypted vault identity".into());
@@ -233,8 +233,7 @@ mod tests {
                     fs::read(directory.path().join("test.enc")).unwrap(),
                     expected_file
                 );
-                let decoded =
-                    Zeroizing::new(decrypt_file(&mut credentials, &expected_file).unwrap());
+                let decoded = decrypt_file(&mut credentials, &expected_file).unwrap();
                 assert_eq!(persistence::decode_document(&decoded).unwrap(), expected);
             }
         }
