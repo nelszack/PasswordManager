@@ -11,10 +11,13 @@ const PasswordManagerBackgroundStatus = {
         clearInterval = globalThis.clearInterval,
         closeIdle = () => {},
         protocolVersion,
+        now = Date.now,
     }) {
         const STATUS_POLL_ALARM = "status-poll";
         const LIVE_STATUS_POLL_MS = 2000;
         let cachedStatus = null;
+        let lastStatus = null;
+        let lastStatusAt = -Infinity;
         let statusRefresh = null;
         let liveTimer = null;
         const views = new Set();
@@ -41,7 +44,15 @@ const PasswordManagerBackgroundStatus = {
         });
 
         function startStatusMonitoring() {
-            chrome.alarms.create(STATUS_POLL_ALARM, { periodInMinutes: 1 });
+            // Re-creating an existing alarm restarts its period, so a worker that
+            // restarts more often than once a minute would never reach the alarm.
+            const create = () => chrome.alarms.create(STATUS_POLL_ALARM, { periodInMinutes: 1 });
+            if (typeof chrome.alarms.get !== "function") create();
+            else
+                chrome.alarms.get(STATUS_POLL_ALARM, alarm => {
+                    void chrome.runtime.lastError;
+                    if (alarm?.periodInMinutes !== 1) create();
+                });
             refreshStatus();
         }
 
@@ -63,19 +74,27 @@ const PasswordManagerBackgroundStatus = {
             return state.equal(left, right);
         }
 
+        function available(status) {
+            return Boolean(status?.native && status.running && !status.locked);
+        }
+
         function publishStatus(status) {
+            lastStatus = status;
+            lastStatusAt = now();
+            const previous = cachedStatus;
+            // Invalidate only when the vault becomes unavailable or the unlock session
+            // changes. A picker opened while already locked stays open with its
+            // unlock guidance instead of being closed by every later refresh.
             if (
-                !status.native ||
-                !status.running ||
-                status.locked ||
-                (cachedStatus?.sessionId && cachedStatus.sessionId !== status.sessionId)
+                (!available(status) && (previous === null || available(previous))) ||
+                (previous?.sessionId && previous.sessionId !== status.sessionId)
             ) {
                 invalidate();
             }
-            setBadge(status);
-            if (sameStatus(cachedStatus, status)) return;
+            if (sameStatus(previous, status)) return;
 
             cachedStatus = status;
+            setBadge(status);
             chrome.storage.local.set({ pmStatus: status });
             chrome.runtime.sendMessage({ action: "statusChanged", status }, () => void chrome.runtime.lastError);
         }
@@ -136,7 +155,13 @@ const PasswordManagerBackgroundStatus = {
             startStatusMonitoring();
         }
 
-        return { refresh: refreshStatus, start };
+        // Reuse a recent result for frequent background checks, such as Duo page polls.
+        function recentStatus(maxAgeMs) {
+            if (lastStatus && now() - lastStatusAt < maxAgeMs) return Promise.resolve(lastStatus);
+            return refreshStatus();
+        }
+
+        return { refresh: refreshStatus, recent: recentStatus, start };
     },
 };
 
