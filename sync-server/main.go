@@ -37,6 +37,66 @@ const maxVault = 128 << 20
 // Upper bound for the JSON head (32 hex version characters and a bounded size).
 const maxHeadBytes = 64
 
+// Requests get a short deadline; vault transfers instead fail only after a
+// period without progress (or a size-based cap), so large vaults on slow
+// links complete while stalled clients are still disconnected.
+// Variables only so tests can shorten them.
+var (
+	requestTimeout = 60 * time.Second
+	transferIdle   = 60 * time.Second
+)
+
+const minTransferRate = 32 << 10 // bytes per second assumed for absolute caps
+
+func transferDeadline(size int64) time.Time {
+	return time.Now().Add(requestTimeout + time.Duration(size/minTransferRate)*time.Second)
+}
+
+// progressReader extends the read deadline after each read that makes progress.
+type progressReader struct {
+	io.Reader
+	rc  *http.ResponseController
+	cap time.Time
+}
+
+func (r progressReader) Read(p []byte) (int, error) {
+	deadline := time.Now().Add(transferIdle)
+	if deadline.After(r.cap) {
+		deadline = r.cap
+	}
+	_ = r.rc.SetReadDeadline(deadline)
+	return r.Reader.Read(p)
+}
+
+// diskWriter records write failures so they are not reported as client errors.
+type diskWriter struct {
+	f   *os.File
+	err error
+}
+
+func (w *diskWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	if err != nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// uploadFailure maps a failed body transfer to a status code: storage errors
+// are the server's, read errors and timeouts the client's.
+func uploadFailure(disk, err error) (int, string) {
+	switch {
+	case errors.Is(disk, syscall.ENOSPC) || errors.Is(disk, syscall.EDQUOT):
+		return 507, "server storage is full"
+	case disk != nil:
+		return 500, "could not save upload"
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return 408, "upload timed out"
+	default:
+		return 400, "upload interrupted"
+	}
+}
+
 type snapshot struct {
 	Version string `json:"version"`
 	Size    int64  `json:"size"`
@@ -199,6 +259,11 @@ func (s *server) head(id string) (snapshot, error) {
 	return h, err
 }
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The server has no fixed body timeouts; every request sets its own.
+	// Errors mean the writer does not support deadlines (as in tests).
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(requestTimeout))
+	_ = rc.SetWriteDeadline(time.Now().Add(requestTimeout))
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == "GET" && r.URL.Path == "/v1/health" {
 		writeJSON(w, versionInfo())
@@ -302,6 +367,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Snapshots are immutable. An open descriptor remains valid if a later
 		// commit prunes its directory entry while this client is downloading.
 		unlock()
+		_ = rc.SetWriteDeadline(transferDeadline(h.Size))
 		http.ServeContent(w, r, "vault", time.Time{}, f)
 	case "PUT":
 		if !uploadMatches(r, h, exists) {
@@ -315,14 +381,20 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage unavailable", 500)
 			return
 		}
-		available := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
-		if available <= 0 {
+		limit := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
+		if r.ContentLength > maxVault {
+			s.mu.Unlock()
+			http.Error(w, "upload exceeds the vault size limit", 413)
+			return
+		}
+		if limit <= 0 || r.ContentLength > limit {
 			s.mu.Unlock()
 			http.Error(w, "storage quota reached", 507)
 			return
 		}
+		available := limit
 		if r.ContentLength > 0 {
-			available = min(available, r.ContentLength)
+			available = r.ContentLength
 		}
 		reservation := available + maxHeadBytes
 		s.reserved += reservation
@@ -341,10 +413,31 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer os.Remove(f.Name())
-		n, err := io.Copy(f, io.LimitReader(r.Body, available+1))
-		if err != nil || n == 0 || n > available {
+		finish := transferDeadline(maxVault)
+		_ = rc.SetWriteDeadline(finish)
+		disk := &diskWriter{f: f}
+		n, err := io.Copy(disk, io.LimitReader(progressReader{r.Body, rc, finish}, available+1))
+		// The reply itself gets an ordinary deadline from here on.
+		_ = rc.SetReadDeadline(time.Time{})
+		_ = rc.SetWriteDeadline(time.Now().Add(requestTimeout))
+		if err != nil {
 			f.Close()
-			http.Error(w, "upload exceeds storage or size limit", 413)
+			code, message := uploadFailure(disk.err, err)
+			http.Error(w, message, code)
+			return
+		}
+		if n == 0 {
+			f.Close()
+			http.Error(w, "empty upload", 400)
+			return
+		}
+		if n > available {
+			f.Close()
+			if limit >= maxVault {
+				http.Error(w, "upload exceeds the vault size limit", 413)
+			} else {
+				http.Error(w, "storage quota reached", 507)
+			}
 			return
 		}
 		if err = f.Sync(); err != nil {
@@ -536,7 +629,8 @@ func main() {
 	if err := s.initializeUsage(); err != nil {
 		log.Fatal(err)
 	}
-	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16 << 10}
+	// Body deadlines are per request (see ServeHTTP); headers stay short.
+	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16 << 10}
 	log.Printf("Encrypted vault sync listening on %s", *listen)
 	log.Fatal(srv.ListenAndServe())
 }

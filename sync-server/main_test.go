@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -121,7 +123,7 @@ func TestInterruptedUploadReleasesQuotaAndRemovesItsStagingFile(t *testing.T) {
 	requestHeaders(r, token, "*")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
-	if w.Code != 413 {
+	if w.Code != 400 {
 		t.Fatalf("interrupted upload: %d", w.Code)
 	}
 	if s.reserved != 0 {
@@ -539,4 +541,136 @@ func TestSlowCommitResponseDoesNotHoldVaultOrQuota(t *testing.T) {
 	}
 	w.release <- struct{}{}
 	await(t, done)
+}
+
+func TestUploadFailuresReportTheirCause(t *testing.T) {
+	s, h, token := fixture(t)
+	path := "/v1/vaults/" + strings.Repeat("c", 32)
+	r := httptest.NewRequest("PUT", path, strings.NewReader("small"))
+	r.ContentLength = maxVault + 1
+	requestHeaders(r, token, "*")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 413 {
+		t.Fatalf("oversized upload: %d", w.Code)
+	}
+	s.mu.Lock()
+	s.budget = 1024
+	s.mu.Unlock()
+	if res := request(t, h, token, "PUT", path, "*", strings.Repeat("x", 2048)); res.StatusCode != 507 {
+		t.Fatalf("quota: %s", res.Status)
+	}
+	if res := request(t, h, token, "PUT", path, "*", ""); res.StatusCode != 400 {
+		t.Fatalf("empty upload: %s", res.Status)
+	}
+	if s.reserved != 0 {
+		t.Fatalf("leaked reservation: %d", s.reserved)
+	}
+	full := &os.PathError{Op: "write", Path: "upload", Err: syscall.ENOSPC}
+	for _, c := range []struct {
+		disk, read error
+		code       int
+	}{
+		{full, full, 507},
+		{syscall.EDQUOT, syscall.EDQUOT, 507},
+		{syscall.EIO, syscall.EIO, 500},
+		{nil, fmt.Errorf("read: %w", os.ErrDeadlineExceeded), 408},
+		{nil, io.ErrUnexpectedEOF, 400},
+	} {
+		if code, _ := uploadFailure(c.disk, c.read); code != c.code {
+			t.Errorf("%v/%v: %d, want %d", c.disk, c.read, code, c.code)
+		}
+	}
+}
+
+func TestConditionalDownloadReturnsNotModified(t *testing.T) {
+	_, h, token := fixture(t)
+	path := "/v1/vaults/" + strings.Repeat("d", 32)
+	if res := request(t, h, token, "PUT", path, "*", "encrypted"); res.StatusCode != 200 {
+		t.Fatal(res.Status)
+	}
+	head := request(t, h, token, "HEAD", path, "", "")
+	version := head.Header.Get("ETag")
+	get := func(tag string) *http.Response {
+		req, _ := http.NewRequest("GET", h.URL+path, nil)
+		requestHeaders(req, token, "")
+		req.Header.Set("If-None-Match", tag)
+		res, err := h.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { res.Body.Close() })
+		return res
+	}
+	if res := get(version); res.StatusCode != 304 {
+		t.Fatalf("current version: %s", res.Status)
+	}
+	res := get(`"` + strings.Repeat("0", 32) + `"`)
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 || string(body) != "encrypted" || res.Header.Get("ETag") != version {
+		t.Fatalf("changed version: %s %q", res.Status, body)
+	}
+}
+
+// trickle writes chunks with pauses, then optionally stalls until released.
+func trickle(w *io.PipeWriter, chunks int, pause time.Duration, stall <-chan struct{}) {
+	for i := 0; i < chunks; i++ {
+		if _, err := w.Write([]byte("chunk")); err != nil {
+			return
+		}
+		time.Sleep(pause)
+	}
+	if stall != nil {
+		<-stall
+	}
+	w.Close()
+}
+
+func TestTransfersExtendDeadlinesOnlyWhileMakingProgress(t *testing.T) {
+	previous, previousIdle := requestTimeout, transferIdle
+	requestTimeout, transferIdle = 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { requestTimeout, transferIdle = previous, previousIdle })
+	s, h, token := fixture(t)
+	put := func(id string, body io.Reader) (*http.Response, error) {
+		req, _ := http.NewRequest("PUT", h.URL+"/v1/vaults/"+strings.Repeat(id, 32), body)
+		requestHeaders(req, token, "*")
+		return h.Client().Do(req)
+	}
+	// Slower in total than any fixed deadline, but never idle for long.
+	reader, writer := io.Pipe()
+	go trickle(writer, 10, 100*time.Millisecond, nil)
+	res, err := put("e", reader)
+	if err != nil || res.StatusCode != 200 {
+		t.Fatalf("progressing upload: %v %v", res, err)
+	}
+	res.Body.Close()
+	// A stalled body is cut off by the idle deadline and commits nothing.
+	reader, writer = io.Pipe()
+	release := make(chan struct{})
+	defer close(release)
+	go trickle(writer, 1, 0, release)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res, err := put("f", reader)
+		if err == nil {
+			defer res.Body.Close()
+			if res.StatusCode != 408 {
+				t.Errorf("stalled upload: %s", res.Status)
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled upload was not timed out")
+	}
+	if _, err := os.Stat(filepath.Join(s.root, "vaults", strings.Repeat("f", 32))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stalled upload committed: %v", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reserved != 0 {
+		t.Fatalf("leaked reservation: %d", s.reserved)
+	}
 }
