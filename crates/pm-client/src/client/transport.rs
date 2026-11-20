@@ -267,6 +267,8 @@ pub struct StatusEvents {
 
 /// Closes a [`StatusEvents`] connection from another thread, so a blocked
 /// [`StatusEvents::recv`] returns at once instead of at the next heartbeat.
+/// Linux wakes the read directly. Windows does not, but the server ends a
+/// subscription when its client closes the send side, and that close wakes it.
 pub struct StatusEventsShutdown(TcpStream);
 
 impl StatusEventsShutdown {
@@ -347,8 +349,12 @@ mod tests {
     fn shutdown_handle_wakes_a_blocked_status_read() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let connection = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        // The server side stays open and silent, as between heartbeats.
-        let (_server, _) = listener.accept().unwrap();
+        // Like the real server: silent between heartbeats, but it ends the
+        // subscription once the client closes its side.
+        let (mut server, _) = listener.accept().unwrap();
+        let server = thread::spawn(move || {
+            let _ = server.read(&mut [0u8; 1]);
+        });
         let mut events = StatusEvents {
             connection,
             response_key: Zeroizing::new([0; 32]),
@@ -368,6 +374,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(reader.join().unwrap().is_err());
+        server.join().unwrap();
     }
 
     fn fixture(
