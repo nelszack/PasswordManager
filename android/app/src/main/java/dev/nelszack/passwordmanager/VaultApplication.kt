@@ -8,6 +8,7 @@ import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
 object NativeBridge {
@@ -23,7 +24,18 @@ object NativeBridge {
 object Vault {
     const val LOCKED = "dev.nelszack.passwordmanager.LOCKED"
     lateinit var context: Context
+    /** Screen work. Native calls may run on several threads; Rust serializes vault access. */
     val worker = Executors.newSingleThreadExecutor()
+    /**
+     * Autofill and credential-provider service requests, including form parsing, so a long screen
+     * task never delays Android's fill timeout.
+     */
+    val services = Executors.newSingleThreadExecutor()
+    /** Caller verification that may wait on the network, such as asset-link fetches. */
+    val lookups = Executors.newSingleThreadExecutor()
+    /** Follow-up syncs, after the caller already has its result. */
+    private val syncer = Executors.newSingleThreadExecutor()
+    private val syncQueued = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
     private val expire = Runnable { lock() }
     private var lastNativeTouch = 0L
@@ -110,6 +122,28 @@ object Vault {
         confirmed: Boolean = false,
     ) = command(command, expectedRevision, confirmed) as JSONObject
 
+    /**
+     * Queues one sync after a change, coalescing changes made while it waits. Rust snapshots the
+     * encrypted vault as soon as the sync starts and may finish uploading it after the app locks;
+     * anything it would apply still needs the session that saved the change.
+     */
+    fun queueSync() {
+        val server = settings.getString("server", "").orEmpty()
+        if (server.isBlank() || !syncQueued.compareAndSet(false, true)) return
+        syncer.execute {
+            syncQueued.set(false)
+            runCatching {
+                request(
+                    "sync",
+                    "server" to server,
+                    "token" to DeviceKeys.token(context),
+                    "if_enabled" to true,
+                    "background" to true,
+                )
+            }
+        }
+    }
+
     fun lock() {
         runCatching { NativeBridge.invalidate() }
         autofillSession.clear()
@@ -159,8 +193,8 @@ abstract class SecureActivity : FragmentActivity() {
                     onSessionLocked()
             }
         }
-    protected val ui
-        get() = Handler(Looper.getMainLooper())
+    /** One handler, so callbacks posted through it can also be removed through it. */
+    internal val ui = Handler(Looper.getMainLooper())
 
     override fun onCreate(state: android.os.Bundle?) {
         super.onCreate(state)
@@ -201,6 +235,7 @@ abstract class SecureActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
         unregisterReceiver(lockReceiver)
         super.onDestroy()
     }
@@ -242,13 +277,25 @@ abstract class SecureActivity : FragmentActivity() {
         }
     }
 
-    protected fun <T> task(action: () -> T, done: (T) -> Unit) = taskDiscarding(action, {}, done)
+    internal fun <T> task(action: () -> T, done: (T) -> Unit) = taskDiscarding(action, {}, done)
 
-    protected fun <T> taskDiscarding(action: () -> T, onDiscard: (T) -> Unit, done: (T) -> Unit) {
+    protected fun <T> taskDiscarding(action: () -> T, onDiscard: (T) -> Unit, done: (T) -> Unit) =
+        runTask(Vault.worker, action, onDiscard, done)
+
+    /** Like [task], on [Vault.lookups], for caller checks that may wait on the network. */
+    protected fun <T> lookupTask(action: () -> T, done: (T) -> Unit) =
+        runTask(Vault.lookups, action, {}, done)
+
+    private fun <T> runTask(
+        executor: java.util.concurrent.Executor,
+        action: () -> T,
+        onDiscard: (T) -> Unit,
+        done: (T) -> Unit,
+    ) {
         val ticket = generation
         val screen = uiRevision()
         onWorkStarted()
-        Vault.worker.execute {
+        executor.execute {
             if (!active || ticket != generation || screen != uiRevision()) {
                 ui.post { if (ticket == generation) onWorkFinished() }
                 return@execute

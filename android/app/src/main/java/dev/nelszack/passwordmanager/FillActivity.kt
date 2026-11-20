@@ -263,7 +263,8 @@ class FillActivity : VaultActivity() {
                         else
                             VaultCommands.update(id, title, username, password, listOf(savedOrigin))
                     )
-                    syncAfterChange()
+                    // The browser gets its result without waiting for sync.
+                    Vault.queueSync()
                 }) {
                     setResult(RESULT_OK)
                     finish()

@@ -82,8 +82,8 @@ class CredentialActivity : VaultActivity() {
             is CreatePublicKeyCredentialRequest -> {
                 val options = JSONObject(request.requestJson)
                 val rp = options.getJSONObject("rp").getString("id")
-                task({ CallerIdentity.passkeyOrigin(this, provider.callingAppInfo, rp) }) { origin
-                    ->
+                lookupTask({ CallerIdentity.passkeyOrigin(this, provider.callingAppInfo, rp) }) {
+                    origin ->
                     page("Create passkey")
                     label(
                         "Website: $rp\nRequested by: $origin\nAccount: ${options.getJSONObject("user").getString("name")}"
@@ -97,7 +97,8 @@ class CredentialActivity : VaultActivity() {
                                     "request" to options,
                                     "client_hash" to clientHash(origin, request.clientDataHash),
                                 ) as JSONObject
-                            syncAfterChange()
+                            // The calling app gets its passkey without waiting for sync.
+                            Vault.queueSync()
                             response
                         }) { response ->
                             val result = Intent()
@@ -128,7 +129,7 @@ class CredentialActivity : VaultActivity() {
                                     listOf(origin),
                                 )
                             )
-                            syncAfterChange()
+                            Vault.queueSync()
                         }) {
                             val result = Intent()
                             PendingIntentHandler.setCreateCredentialResponse(
@@ -166,7 +167,7 @@ class CredentialActivity : VaultActivity() {
         if (publicKey != null) {
             val options = JSONObject(publicKey.requestJson)
             val rp = options.getString("rpId")
-            task({
+            lookupTask({
                 val origin = CallerIdentity.passkeyOrigin(this, provider.callingAppInfo, rp)
                 val keys = Vault.request("passkeys", "request" to options) as JSONArray
                 check((0 until keys.length()).any { keys.getJSONObject(it).getLong("id") == id }) {
