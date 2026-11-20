@@ -147,6 +147,10 @@ fn compare(local: &VaultData, remote: &VaultData) -> Vec<ConflictItem> {
         })
         .collect()
 }
+/// Whether two snapshots hold the same reviewable contents.
+pub(super) fn equivalent(local: &VaultData, remote: &VaultData) -> bool {
+    compare(local, remote).is_empty()
+}
 fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<VaultData, String> {
     let review = compare(local, remote);
     let mut selected = BTreeMap::new();
