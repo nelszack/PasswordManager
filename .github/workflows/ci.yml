@@ -38,7 +38,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
+          # The planner diffs the PR test merge against its first parent (or a
+          # push's endpoints, fetching a missing one by ID): no history needed.
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: |
+            .github
+            scripts/ci
       - uses: ./.github/actions/plan-checks
         id: plan
         with:
@@ -49,7 +55,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rust == 'true'
     name: Test (${{ matrix.os }})
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -61,9 +67,10 @@ jobs:
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: ./.github/actions/rust-toolchain
         with:
-          components: rustfmt, clippy
+          # The Apple Silicon runner also checks the Intel macOS target.
+          targets: ${{ matrix.os == 'macos-latest' && 'x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # Scheduled/manual main runs refresh shared caches; PRs only restore.
@@ -71,10 +78,28 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 26
+      - name: Install coverage runner
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov
       - name: Validate release sources
+        env:
+          # Linux runs the Rust tests instrumented, enforcing the coverage gate
+          # without a second build and test run.
+          PM_RUST_COVERAGE_LCOV: ${{ runner.os == 'Linux' && 'rust-lcov.info' || '' }}
         run: npm run validate -- rust
+      - name: Upload Rust coverage
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: coverage-reports
+          path: rust-lcov.info
+          if-no-files-found: error
       - name: Check CLI-only build
         run: cargo check --locked --no-default-features --all-targets
+      - name: Check Intel macOS target
+        if: runner.os == 'macOS'
+        # Debug profile: reuses this job's host proc-macros and build scripts.
+        run: cargo check --locked --target x86_64-apple-darwin
 
   extension:
     name: Extension unit tests and generated bundles
@@ -91,72 +116,78 @@ jobs:
       - run: npm ci
       - run: npm run validate -- extension
 
-  cloud-sync:
+  # Cloud sync and browser integration both run the same CLI-only debug binary.
+  cli-build:
     needs: plan
+    if: needs.plan.outputs.cloud == 'true' || needs.plan.outputs.browser == 'true'
+    name: Build CLI client
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build CLI client and native host
+        run: cargo build --locked --no-default-features
+      - name: Bundle executable
+        # Artifacts drop permission bits; the tarball keeps pm executable.
+        run: tar -cf pm-cli.tar -C target/debug pm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pm-cli
+          path: pm-cli.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  cloud-sync:
+    needs: [plan, cli-build]
     if: needs.plan.outputs.cloud == 'true'
     name: Cloud sync server and two-device integration
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: sync-server/go.mod
           cache: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Validate Go server
         working-directory: sync-server
         run: |
           go test -race ./...
           go vet ./...
-      - name: Build CLI client
-        run: cargo build --locked --no-default-features
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pm-cli
+      - name: Restore CLI client
+        run: mkdir -p target/debug && tar -xf pm-cli.tar -C target/debug && rm pm-cli.tar
       - name: Exercise two independent devices
         run: python3 scripts/test_cloud_sync.py
 
-  mac-architectures:
-    needs: plan
-    if: needs.plan.outputs.rust == 'true'
-    name: Build macOS (${{ matrix.target }})
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: ${{ matrix.target }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check release target
-        run: cargo check --release --locked --target ${{ matrix.target }}
-
   browser-e2e:
-    needs: plan
+    needs: [plan, cli-build]
     if: needs.plan.outputs.browser == 'true'
     name: Browser end-to-end
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - name: Build native host and server
-        run: cargo build --locked --no-default-features
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pm-cli
+      - name: Restore native host and server
+        # The real-stack tests require target/debug/pm and skip without it.
+        run: |
+          mkdir -p target/debug && tar -xf pm-cli.tar -C target/debug && rm pm-cli.tar
+          test -x target/debug/pm
       - name: Run browser end-to-end tests
         run: npm run test:e2e:coverage
       - name: Upload browser coverage
@@ -176,39 +207,19 @@ jobs:
             test-results/
           if-no-files-found: ignore
 
-  coverage:
-    needs: plan
-    if: needs.plan.outputs.rust == 'true'
-    name: Rust coverage baseline
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install Linux desktop build dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov
-      - name: Measure Rust coverage
-        # Cover the application and extracted libraries, excluding vendored protocol tests.
-        run: cargo llvm-cov --locked --all-features -p password_manager -p pm-contracts -p pm-client -p pm-platform --lcov --output-path rust-lcov.info --fail-under-lines 65
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: coverage-reports
-          path: rust-lcov.info
-          if-no-files-found: error
-
   result:
     name: CI result
     if: always()
-    needs: [plan, test, extension, cloud-sync, mac-architectures, browser-e2e, coverage]
+    needs: [plan, test, extension, cli-build, cloud-sync, browser-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The tree ID still covers the whole commit.
+          sparse-checkout: |
+            .github
+            scripts/ci
       - uses: ./.github/actions/finish-checks
         with:
           workflow: ci

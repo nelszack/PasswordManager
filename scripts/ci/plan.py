@@ -58,20 +58,46 @@ def select(paths):
     return selected
 
 
-def git(*args):
-    return subprocess.check_output(["git", *args])
+def git(*args, quiet=False):
+    return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL if quiet else None)
+
+
+def ensure_commits(*revisions):
+    """Fetch only the endpoint commits a shallow checkout lacks; no history is needed."""
+    missing = []
+    for revision in revisions:
+        try:
+            git("cat-file", "-e", f"{revision}^{{commit}}", quiet=True)
+        except subprocess.CalledProcessError:
+            missing.append(revision)
+    if missing:
+        git("fetch", "--no-tags", "--depth=1", "origin", *missing)
 
 
 def changed_paths(event_name, event):
     if event_name == "pull_request":
         pr = event["pull_request"]
-        revisions = f'{pr["base"]["sha"]}...{pr["head"]["sha"]}'
+        # A pull_request checkout is GitHub's test merge of the head into the
+        # current base. Its first-parent diff is exactly what the PR changes in
+        # the tested tree, and needs only a depth-2 checkout.
+        parents = git("rev-list", "--parents", "-n", "1", "HEAD").decode().split()[1:]
+        if len(parents) == 2 and parents[1] == pr["head"]["sha"]:
+            revisions = [parents[0], "HEAD"]
+        else:
+            # Other checkouts compare from the merge base, which needs history.
+            revisions = [f'{pr["base"]["sha"]}...{pr["head"]["sha"]}']
     elif event_name == "push" and event.get("before", "").strip("0"):
-        revisions = f'{event["before"]}..{event["after"]}'
+        ensure_commits(event["before"], event["after"])
+        revisions = [event["before"], event["after"]]
     else:
         return None
     # Include both sides of renames and all deletions, without API pagination limits.
-    return git("diff", "--no-renames", "--name-only", "-z", revisions).decode().split("\0")[:-1]
+    return git("diff", "--no-renames", "--name-only", "-z", *revisions).decode().split("\0")[:-1]
+
+
+def planner_changed(paths):
+    """Whether the selection code or workflows changed, so their own tests must run."""
+    return paths is None or any(path.startswith((".github/", "scripts/ci/")) for path in paths)
 
 
 class ArtifactRedirect(urllib.request.HTTPRedirectHandler):
@@ -128,9 +154,12 @@ def reusable_run(api, repo, sha, tree, run_id, workflow, required):
     return None
 
 
+# Jobs each selected suite requires. Shared helper jobs (such as the CI CLI
+# build) are not listed: their failure still fails the result job, and their
+# dependents would then be unexpectedly skipped.
 WORKFLOW_JOBS = {
     "ci": {"test": "rust", "extension": "extension", "cloud-sync": "cloud",
-           "mac-architectures": "rust", "browser-e2e": "browser", "coverage": "rust"},
+           "browser-e2e": "browser"},
     "security": {"rustsec": "rust_audit", "npm-audit": "npm_audit"},
     "fuzz": {"fuzz": "fuzz"},
 }
@@ -178,6 +207,7 @@ def main():
         selected = select(paths) if paths is not None else set(SUITES)
     except (subprocess.CalledProcessError, KeyError, UnicodeError) as error:
         print(f"Could not determine changed files; running all suites: {error}")
+        paths = None
         selected = set(SUITES)
     reused = None
     if event_name == "push" and os.environ["GITHUB_REF"] == "refs/heads/main":
@@ -193,6 +223,7 @@ def main():
         selected.clear()
     outputs = {suite: str(suite in selected).lower() for suite in SUITES}
     outputs["reused"] = str(bool(reused)).lower()
+    outputs["self_test"] = str(planner_changed(paths)).lower()
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         for key, value in outputs.items():
             output.write(f"{key}={value}\n")
