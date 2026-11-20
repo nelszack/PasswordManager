@@ -614,19 +614,43 @@ pub(super) fn status_events(
     let mut client = AuthenticatedClient::new(source.port);
     client.token_path = source.token_path.clone();
     iced::stream::channel(16, async move |output| {
-        std::thread::spawn(move || forward_status_events(&client, output));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || forward_status_events(&client, output, &stopped));
+        // Iced drops this future when the subscription ends (reconnect, token
+        // path change, server stop). That drops `stop`, which wakes the thread
+        // from its reconnect backoff at once instead of after the full delay.
+        let _stop = stop;
         std::future::pending::<()>().await
     })
 }
 
+/// True once the subscription was dropped: its stop sender or output receiver is gone.
+fn subscription_ended(
+    output: &iced::futures::channel::mpsc::Sender<super::Message>,
+    stopped: &std::sync::mpsc::Receiver<()>,
+) -> bool {
+    output.is_closed()
+        || matches!(
+            stopped.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        )
+}
+
+/// Forward pushed status until the subscription is dropped. A blocked read is
+/// bounded by the server's 20-second heartbeat; every record and reconnect
+/// attempt first checks whether anyone still listens.
 fn forward_status_events(
     client: &AuthenticatedClient,
     mut output: iced::futures::channel::mpsc::Sender<super::Message>,
+    stopped: &std::sync::mpsc::Receiver<()>,
 ) {
     let mut retry = std::time::Duration::from_secs(2);
-    loop {
+    while !subscription_ended(&output, stopped) {
         if let Ok(mut events) = client.status_events() {
             while events.recv().is_ok() {
+                if subscription_ended(&output, stopped) {
+                    return;
+                }
                 retry = std::time::Duration::from_secs(2);
                 // A full queue already holds a pending refresh.
                 if output
@@ -644,10 +668,51 @@ fn forward_status_events(
         {
             return;
         }
-        std::thread::sleep(retry);
-        retry = (retry * 2).min(std::time::Duration::from_secs(60));
-        if output.is_closed() {
-            return;
+        match stopped.recv_timeout(retry) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            _ => return,
         }
+        retry = (retry * 2).min(std::time::Duration::from_secs(60));
+    }
+}
+
+#[cfg(test)]
+mod status_event_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_subscription_stops_the_reconnect_thread_without_waiting_out_backoff() {
+        // A port nobody listens on: every subscription attempt fails at once.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let client = AuthenticatedClient::new(port);
+        let (output, mut messages) = iced::futures::channel::mpsc::channel(16);
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            forward_status_events(&client, output, &stopped);
+            done.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match messages.try_recv() {
+                Ok(super::super::Message::StatusPushed(false)) => break,
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => panic!("no refusal was reported"),
+            }
+        }
+        // The receiver stays open, as when Iced still holds the stream briefly;
+        // dropping the stop sender alone must end the 2-second backoff early.
+        drop(stop);
+        finished
+            .recv_timeout(std::time::Duration::from_millis(1500))
+            .expect("the subscription thread should exit promptly once dropped");
+        drop(messages);
     }
 }
