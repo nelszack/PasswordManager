@@ -385,17 +385,25 @@ impl AuditSnapshot {
                 .push(entry);
             identities.entry(&entry.identity).or_default().push(entry);
         }
-        let reused: Vec<_> = passwords
-            .values()
-            .filter(|entries| entries.len() > 1)
-            .collect();
+        // Map iteration order is random; report groups by their lowest ID.
+        fn groups<'a>(
+            groups: impl Iterator<Item = Vec<&'a AuditEntrySnapshot>>,
+        ) -> Vec<Vec<&'a AuditEntrySnapshot>> {
+            let mut groups: Vec<_> = groups
+                .filter(|entries| entries.len() > 1)
+                .map(|mut entries| {
+                    entries.sort_by_key(|entry| entry.id);
+                    entries
+                })
+                .collect();
+            groups.sort_by_key(|entries| entries[0].id);
+            groups
+        }
+        let reused = groups(passwords.into_values());
         for entries in &reused {
             unhealthy.extend(entries.iter().map(|entry| entry.id));
         }
-        let duplicates: Vec<_> = identities
-            .values()
-            .filter(|entries| entries.len() > 1)
-            .collect();
+        let duplicates = groups(identities.into_values());
         for entries in &duplicates {
             unhealthy.extend(entries.iter().map(|entry| entry.id));
         }
@@ -481,6 +489,50 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
+
+    #[test]
+    fn reused_and_duplicate_groups_are_ordered_by_id() {
+        let entry = |id: usize, password: &str, identity: &str| AuditEntrySnapshot {
+            id,
+            name: format!("Item {id}"),
+            username: None,
+            password_hash: password.into(),
+            weak: false,
+            stale: false,
+            password_changed: String::new(),
+            missing_totp: false,
+            identity: (identity.into(), String::new()),
+        };
+        let snapshot = AuditSnapshot {
+            entries: vec![
+                entry(9, "b", "z"),
+                entry(2, "a", "y"),
+                entry(7, "a", "x"),
+                entry(4, "b", "x"),
+                entry(5, "c", "y"),
+                entry(1, "c", "w"),
+                entry(8, "d", "w"),
+                entry(3, "d", "v"),
+            ],
+        };
+        let ids = |groups: &[Vec<AuditLabel>]| -> Vec<Vec<usize>> {
+            groups
+                .iter()
+                .map(|group| group.iter().map(|label| label.id).collect())
+                .collect()
+        };
+        for _ in 0..8 {
+            let report = snapshot.findings(None, None);
+            assert_eq!(
+                ids(&report.reused),
+                [vec![1, 5], vec![2, 7], vec![3, 8], vec![4, 9]]
+            );
+            assert_eq!(
+                ids(&report.duplicates),
+                [vec![1, 8], vec![2, 5], vec![4, 7]]
+            );
+        }
+    }
 
     #[test]
     fn range_parser_retains_only_target_hashes_and_ignores_padding() {
