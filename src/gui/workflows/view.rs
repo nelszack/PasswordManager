@@ -1,5 +1,6 @@
 use super::*;
 use crate::gui::Message as AppMessage;
+use crate::gui::styles::{self, quiet_button, quiet_danger};
 use crate::gui::widgets::{button, checkbox, pick_list, scrollable, text_input};
 use iced::widget::button as button_style;
 use iced::{
@@ -10,30 +11,29 @@ use iced::{
 fn event(value: Event) -> AppMessage {
     AppMessage::Workflow(value)
 }
+/// Workflow actions share the main view's button styling; data-moving and
+/// review actions are primary.
 fn action<'a>(label: &'a str, value: Action, enabled: bool) -> crate::gui::widgets::Button<'a> {
-    button(label)
-        .padding([11, 14])
-        .style(
-            if matches!(
-                value,
-                Action::Trash
-                    | Action::History
-                    | Action::RestoreTrash(_)
-                    | Action::Audit
-                    | Action::Search
-                    | Action::Backup
-                    | Action::PreviewImport
-                    | Action::Export
-                    | Action::NewVault
-                    | Action::RestoreBackup
-                    | Action::Import
-            ) {
-                button_style::primary
-            } else {
-                crate::gui::view::quiet_button
-            },
-        )
-        .on_press_maybe(enabled.then_some(event(Event::Run(value))))
+    let primary = matches!(
+        value,
+        Action::Trash
+            | Action::History
+            | Action::RestoreTrash(_)
+            | Action::Audit
+            | Action::Search
+            | Action::Backup
+            | Action::PreviewImport
+            | Action::Export
+            | Action::NewVault
+            | Action::RestoreBackup
+            | Action::Import
+    );
+    let message = event(Event::Run(value));
+    if primary {
+        styles::primary(label, message, enabled)
+    } else {
+        styles::action(label, message, enabled)
+    }
 }
 fn field<'a>(
     label: &'a str,
@@ -43,7 +43,7 @@ fn field<'a>(
     enabled: bool,
 ) -> Element<'a, AppMessage> {
     column![
-        text(label).size(14),
+        styles::label(label),
         text_input(label, value)
             .secure(secret)
             .padding(10)
@@ -68,17 +68,14 @@ fn path<'a>(
     enabled: bool,
 ) -> Element<'a, AppMessage> {
     column![
-        text(label).size(14),
+        styles::label(label),
         row![
             text_input("Choose or enter a file path", value)
                 .padding(10)
                 .on_input_maybe(
                     enabled.then_some(move |value: String| event(Event::Field(key, value.into())))
                 ),
-            button("Browse…")
-                .padding([11, 14])
-                .style(crate::gui::view::quiet_button)
-                .on_press_maybe(enabled.then_some(event(Event::Pick(key, save))))
+            styles::action("Browse…", event(Event::Pick(key, save)), enabled)
         ]
         .spacing(8)
     ]
@@ -143,20 +140,17 @@ pub(super) fn confirmation<'a>(state: &'a State, app: &'a App) -> Column<'a, App
             )
             .push(
                 row![
-                    button("Cancel")
-                        .padding([11, 14])
-                        .on_press_maybe(enabled.then_some(event(Event::Cancel))),
-                    button(prepared.action.confirm_label())
-                        .padding([11, 14])
-                        .style(if prepared.action.dangerous(state.files.force) {
-                            button_style::danger
-                        } else {
-                            button_style::primary
-                        })
-                        .on_press_maybe(
-                            (enabled && app.recovery.id().is_none())
-                                .then_some(event(Event::Confirm))
-                        ),
+                    styles::primary("Cancel", event(Event::Cancel), enabled),
+                    styles::action(
+                        prepared.action.confirm_label(),
+                        event(Event::Confirm),
+                        enabled && app.recovery.id().is_none()
+                    )
+                    .style(if prepared.action.dangerous(state.files.force) {
+                        button_style::danger
+                    } else {
+                        button_style::primary
+                    }),
                 ]
                 .spacing(10)
                 .wrap(),
@@ -354,9 +348,7 @@ pub(super) fn account_authenticators<'a>(
             row![
                 action("Show code", Action::ShowOtp(false), writes),
                 action("Copy code", Action::ShowOtp(true), writes && copy_enabled),
-                button("Hide code")
-                    .padding([11, 14])
-                    .on_press_maybe(code.is_some().then_some(AppMessage::HideSecrets)),
+                styles::primary("Hide code", AppMessage::HideSecrets, code.is_some()),
             ]
             .spacing(8)
             .wrap(),
@@ -445,11 +437,11 @@ pub(super) fn authenticator_editor<'a>(state: &'a State, app: &'a App) -> Column
                 text("Save your item changes before changing its authenticator or Duo enrollment.")
                     .size(14),
             )
-            .push(
-                button("Save changes & continue editing")
-                    .padding([11, 14])
-                    .on_press_maybe(app.writes_allowed().then_some(AppMessage::SaveAndEdit)),
-            );
+            .push(styles::primary(
+                "Save changes & continue editing",
+                AppMessage::SaveAndEdit,
+                app.writes_allowed(),
+            ));
     }
     form = form
         .push(
@@ -563,10 +555,11 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
         return overview(app);
     }
     let header = row![
-        button("All tools")
-            .padding([11, 14])
-            .style(crate::gui::view::quiet_button)
-            .on_press_maybe(enabled.then_some(event(Event::Section(Section::Overview)))),
+        styles::action(
+            "All tools",
+            event(Event::Section(Section::Overview)),
+            enabled
+        ),
         text(if state.section == Section::Files {
             state.files.file_operation.to_string()
         } else {
@@ -588,25 +581,24 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
                 .id("vault-tools")
                 .height(Fill),
         );
-        return container(crate::gui::view::panel(frame).max_width(900).height(Fill))
+        return container(styles::panel(frame).max_width(900).height(Fill))
             .center_x(Fill)
             .height(Fill)
             .into();
     }
     if state.show_results && state.result.is_some() {
         frame = frame.push(results(state, app));
-        return container(crate::gui::view::panel(frame).max_width(900).height(Fill))
+        return container(styles::panel(frame).max_width(900).height(Fill))
             .center_x(Fill)
             .height(Fill)
             .into();
     }
     if state.result.is_some() {
-        frame = frame.push(
-            button("View last result")
-                .padding([11, 14])
-                .style(crate::gui::view::quiet_button)
-                .on_press_maybe(enabled.then_some(event(Event::ShowResults(true)))),
-        );
+        frame = frame.push(styles::action(
+            "View last result",
+            event(Event::ShowResults(true)),
+            enabled,
+        ));
     }
     let mut form = column![].spacing(16);
     if state.section == Section::Recovery {
@@ -1062,7 +1054,7 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
             )),
     };
     frame = frame.push(scrollable(form).spacing(12).id("vault-tools").height(Fill));
-    container(crate::gui::view::panel(frame).max_width(900).height(Fill))
+    container(styles::panel(frame).max_width(900).height(Fill))
         .center_x(Fill)
         .height(Fill)
         .into()
@@ -1117,7 +1109,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
                         row![
                             action("Restore", Action::RestoreTrash(entry.id), writes),
                             action("Erase permanently…", Action::Purge(Some(entry.id)), writes)
-                                .style(crate::gui::view::quiet_danger)
+                                .style(quiet_danger)
                         ]
                         .spacing(10)
                     ]
@@ -1129,7 +1121,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             } else {
                 form = form.push(
                     action("Empty trash permanently…", Action::Purge(None), writes)
-                        .style(crate::gui::view::quiet_danger),
+                        .style(quiet_danger),
                 );
             }
         }
@@ -1182,7 +1174,7 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
                     )
                     .padding(12)
                     .width(Fill)
-                    .style(crate::gui::view::quiet_button)
+                    .style(quiet_button)
                     .on_press_maybe(enabled.then_some(AppMessage::OpenToolItem(entry.id))),
                 );
             }
@@ -1240,18 +1232,9 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
         navigation,
         rule::horizontal(1),
         row![
-            button("Back to options")
-                .padding([11, 14])
-                .style(crate::gui::view::quiet_button)
-                .on_press_maybe(enabled.then_some(event(Event::ShowResults(false)))),
-            button("Clear result")
-                .padding([11, 14])
-                .style(crate::gui::view::quiet_button)
-                .on_press(event(Event::ClearResult)),
-            button("View your items")
-                .padding([11, 14])
-                .style(crate::gui::view::quiet_button)
-                .on_press_maybe(enabled.then_some(AppMessage::Tab(Tab::Vault))),
+            styles::action("Back to options", event(Event::ShowResults(false)), enabled),
+            styles::action("Clear result", event(Event::ClearResult), true),
+            styles::action("View your items", AppMessage::Tab(Tab::Vault), enabled),
         ]
         .spacing(10)
         .wrap(),
@@ -1328,7 +1311,7 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
             } else {
                 195.0
             }))
-            .style(crate::gui::view::quiet_button)
+            .style(quiet_button)
             .on_press_maybe((!app.busy()).then_some(event(value)))
     };
     let recovery = row![
