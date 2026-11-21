@@ -207,6 +207,9 @@ fn performance_benchmarks() {
             items: vault
                 .active_items()
                 .map(|item| PortableItem {
+                    tags: vec![],
+                    favorite: false,
+                    attachments: vec![],
                     id: item.entry.id,
                     name: item.entry.name.clone(),
                     username: item.entry.username.clone(),

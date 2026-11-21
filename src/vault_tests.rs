@@ -58,19 +58,27 @@ pub(super) fn persist_fixture(
     (directory, vault, credentials)
 }
 fn update(id: usize, password: &str) -> TypedUpdate {
-    TypedUpdate {
-        entry: EntryUpdate {
-            target: Target::Id(id),
-            update: EntryChanges::default(),
-            password: Some(password.into()),
+    TypedUpdate::from(EntryUpdate {
+        target: Target::Id(id),
+        update: EntryChanges::default(),
+        password: Some(password.into()),
+    })
+}
+fn typed(name: &str, url: Option<&str>) -> TypedEntry {
+    TypedEntry {
+        entry: PasswordEntry {
+            name: name.into(),
+            username: None,
+            password: "synthetic-secret".into(),
+            url: url.map(Into::into),
+            notes: None,
+            copy: false,
         },
-        kind: None,
-        add_url: vec![],
-        remove_url: vec![],
-        clear_urls: false,
-        set_fields: vec![],
-        remove_fields: vec![],
-        clear_fields: false,
+        kind: ItemKind::Login,
+        additional_urls: vec![],
+        custom_fields: vec![],
+        tags: vec![],
+        favorite: false,
     }
 }
 fn hotp(counter: u64) -> String {
@@ -575,6 +583,24 @@ fn portable_round_trip_remaps_ids_and_keeps_typed_item_metadata_history_and_hotp
     source
         .update_typed_entry_with_limit(update(1, "changed"), &mut key, 10)
         .unwrap();
+    let mut organize = TypedUpdate::from(EntryUpdate {
+        target: Target::Id(1),
+        update: EntryChanges::default(),
+        password: None,
+    });
+    organize.add_tags = vec!["Travel".into()];
+    organize.favorite = Some(true);
+    source
+        .update_typed_entry_with_limit(organize, &mut key, 10)
+        .unwrap();
+    source
+        .add_attachment(
+            &Target::Id(1),
+            "passport.png",
+            Zeroizing::new(vec![0, 159, 146, 150, 255]),
+            &mut key,
+        )
+        .unwrap();
     source.export(path.display().to_string(), false).unwrap();
     let mut destination = Vault::from_entries(vec![entry(42, "existing", "existing-secret")], None);
     let report = destination
@@ -595,6 +621,9 @@ fn portable_round_trip_remaps_ids_and_keeps_typed_item_metadata_history_and_hotp
         imported.authenticator,
         source.item(1).unwrap().authenticator
     );
+    assert_eq!(imported.attachments, source.item(1).unwrap().attachments);
+    assert_eq!(imported.metadata.tags, ["Travel"]);
+    assert!(imported.metadata.favorite);
 }
 #[test]
 fn import_preview_conflicts_and_same_batch_replacements_share_a_plan() {
@@ -847,10 +876,129 @@ fn native_document_has_independent_schema_and_no_runtime_keys_or_paths() {
     let json: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(json["schema_version"], 2);
     assert!(json.get("vault_id").is_some());
-    for key in ["filename", "duo_session", "review_key", "keypass"] {
+    for key in [
+        "filename",
+        "duo_session",
+        "review_key",
+        "keypass",
+        "tags",
+        "favorite",
+    ] {
         assert!(!format!("{json:?}").contains(key));
     }
     assert_eq!(persistence::decode_document(&bytes).unwrap(), vault.data);
+}
+#[test]
+fn organization_upgrades_the_document_schema_and_round_trips() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    let mut entry = typed("Organized", None);
+    entry.tags = vec![" Work ".into(), "work".into(), "Finance  Team".into()];
+    entry.favorite = true;
+    assert!(vault.add_typed_entry(entry, &mut key).unwrap());
+    let id = vault
+        .entry_id(&Target::Name("Organized".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(vault.metadata(id).unwrap().tags, ["Work", "Finance Team"]);
+    let bytes = persistence::encode_document(&vault.data, None).unwrap();
+    let json: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(json["schema_version"], 3);
+    assert_eq!(persistence::decode_document(&bytes).unwrap(), vault.data);
+
+    // Untagging everything returns the vault to the baseline schema.
+    let mut change = TypedUpdate::from(EntryUpdate {
+        target: Target::Id(id),
+        update: EntryChanges::default(),
+        password: None,
+    });
+    change.clear_tags = true;
+    change.favorite = Some(false);
+    assert!(
+        vault
+            .update_typed_entry_with_limit(change, &mut key, 10)
+            .unwrap()
+    );
+    let bytes = persistence::encode_document(&vault.data, None).unwrap();
+    let json: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(json["schema_version"], 2);
+}
+#[test]
+fn tag_edits_filter_and_search() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    for (name, tags, favorite) in [
+        ("Alpha", vec!["Work", "Cloud"], true),
+        ("Beta", vec!["work"], false),
+        ("Gamma", vec![], false),
+    ] {
+        let mut entry = typed(name, None);
+        entry.tags = tags.into_iter().map(Into::into).collect();
+        entry.favorite = favorite;
+        assert!(vault.add_typed_entry(entry, &mut key).unwrap());
+    }
+    let names = |vault: &Vault, list: ListOptions, query: Option<&str>| {
+        vault
+            .management_list(SearchFilter {
+                query: query.map(Into::into),
+                list,
+                ..SearchFilter::default()
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.name)
+            .collect::<Vec<_>>()
+    };
+    let tagged = |tags: &[&str]| ListOptions {
+        tags: tags.iter().map(|t| (*t).into()).collect(),
+        ..ListOptions::default()
+    };
+    assert_eq!(names(&vault, tagged(&["WORK"]), None), ["Alpha", "Beta"]);
+    assert_eq!(names(&vault, tagged(&["work", "cloud"]), None), ["Alpha"]);
+    let favorites = ListOptions {
+        favorite: Some(true),
+        ..ListOptions::default()
+    };
+    assert_eq!(names(&vault, favorites, None), ["Alpha"]);
+    assert_eq!(
+        names(&vault, ListOptions::default(), Some("clou")),
+        ["Alpha"]
+    );
+
+    let beta = vault
+        .entry_id(&Target::Name("Beta".into()))
+        .unwrap()
+        .unwrap();
+    let mut change = TypedUpdate::from(EntryUpdate {
+        target: Target::Id(beta),
+        update: EntryChanges::default(),
+        password: None,
+    });
+    change.remove_tags = vec![" WORK ".into()];
+    change.add_tags = vec!["Home".into(), "home".into()];
+    assert!(
+        vault
+            .update_typed_entry_with_limit(change, &mut key, 10)
+            .unwrap()
+    );
+    assert_eq!(vault.management_item(beta, false).unwrap().tags, ["Home"]);
+
+    for bad in [
+        "",
+        "a,b",
+        "x\u{7}",
+        &"t".repeat(item_rules::MAX_TAG_BYTES + 1),
+    ] {
+        let mut entry = typed("Invalid", None);
+        entry.tags = vec![bad.into()];
+        assert!(vault.add_typed_entry(entry, &mut key).is_err(), "{bad:?}");
+    }
+    let mut entry = typed("Too many", None);
+    entry.tags = (0..=item_rules::MAX_TAGS)
+        .map(|i| format!("t{i}"))
+        .collect();
+    assert!(vault.add_typed_entry(entry, &mut key).is_err());
 }
 
 proptest! {
@@ -1561,4 +1709,51 @@ fn wiping_items_clears_entry_and_metadata_text() {
     assert!(item.metadata.custom_fields.is_empty());
     vault.zeroize();
     assert!(vault.data.items.is_empty());
+}
+#[test]
+fn the_first_save_that_needs_the_new_schema_is_reported_once() {
+    let mut vault = memory();
+    let mut key = VaultCredentials::default();
+    assert!(
+        vault
+            .add_typed_entry(typed("Plain", None), &mut key)
+            .unwrap()
+    );
+    assert!(!vault.metadata.schema_upgraded);
+    let mut tagged = typed("Tagged", None);
+    tagged.tags = vec!["work".into()];
+    assert!(vault.add_typed_entry(tagged, &mut key).unwrap());
+    assert!(vault.metadata.schema_upgraded);
+    vault.metadata.schema_upgraded = false;
+    let mut more = typed("More", None);
+    more.favorite = true;
+    assert!(vault.add_typed_entry(more, &mut key).unwrap());
+    assert!(
+        !vault.metadata.schema_upgraded,
+        "already upgraded; not reported again"
+    );
+    let mut responses = Vec::new();
+    let mut another = typed("Another", None);
+    another.tags = vec!["x".into()];
+    let mut fresh = memory();
+    crate::operations::execute_unlocked(
+        &mut responses,
+        crate::types::ServerCommand::Add {
+            entry: another,
+            copy_timeout: 0,
+        },
+        &mut fresh,
+        &mut key,
+        10,
+    );
+    assert!(
+        responses[0]
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("older versions"))
+    );
+    assert!(
+        !fresh.metadata.schema_upgraded,
+        "the notice is delivered once"
+    );
 }

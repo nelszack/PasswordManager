@@ -29,6 +29,7 @@ function renderStatus(status) {
     element("statusText").innerText = presentation.text;
     lockButton.disabled = !presentation.canLock;
     element("nativeHint").textContent = PasswordManagerPopupState.hint(status);
+    element("openDesktopBtn").textContent = PasswordManagerPopupState.desktopLabel(status);
 }
 
 async function refreshStatus() {

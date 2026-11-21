@@ -19,6 +19,9 @@ pub(super) fn app() -> App {
 
 fn item() -> ItemDetail {
     ItemDetail {
+        attachments: vec![],
+        tags: vec![],
+        favorite: false,
         id: 1,
         revision: 3,
         name: "Example".into(),
@@ -458,6 +461,8 @@ fn hotp_generation_refreshes_the_revision_before_the_next_item_action() {
     vault
         .add_typed_entry(
             TypedEntry {
+                tags: vec![],
+                favorite: false,
                 entry: PasswordEntry {
                     name: "Synthetic account".into(),
                     username: None,
@@ -573,6 +578,8 @@ fn opening_the_generator_previews_a_value_without_copying_and_options_refresh_it
 
 fn editor_summary(item: &ItemDetail) -> ItemSummary {
     ItemSummary {
+        tags: vec![],
+        favorite: false,
         id: item.id,
         revision: item.revision,
         name: item.name.clone(),
@@ -2130,4 +2137,166 @@ fn strength_is_scored_when_the_secret_changes_not_when_drawn() {
         ))
     );
     assert_eq!(GeneratedSecret::default().strength(), None);
+}
+
+#[test]
+fn attachment_removal_needs_confirmation_and_stale_picks_are_ignored() {
+    let mut app = unlocked();
+    app.editor = Editor::Closed;
+    let mut detail = item();
+    detail.attachments = vec![password_manager::vault::AttachmentInfo {
+        name: "codes.pdf".into(),
+        size: 2048,
+        added: String::new(),
+    }];
+    app.item = Some(detail);
+    let _ = app.update(Message::RemoveAttachment(0));
+    assert_eq!(app.remove_attachment.as_deref(), Some("codes.pdf"));
+    assert!(!app.busy(), "the first click only asks for confirmation");
+    let _ = app.update(Message::CancelRemoveAttachment);
+    assert!(app.remove_attachment.is_none());
+    let _ = app.update(Message::RemoveAttachment(0));
+    let _ = app.update(Message::ConfirmRemoveAttachment);
+    assert!(app.busy());
+    assert!(app.remove_attachment.is_none());
+
+    // A chooser result for an item that is no longer open sends nothing.
+    let mut app = unlocked();
+    app.editor = Editor::Closed;
+    let _ = app.attachment_picked(99, None, "/tmp/file".into());
+    assert!(!app.busy());
+    let _ = app.attachment_picked(1, Some(5), "/tmp/out".into());
+    assert!(!app.busy(), "an unknown attachment index is ignored");
+    let _ = app.attachment_picked(1, None, "/tmp/file".into());
+    assert!(app.busy());
+}
+
+#[test]
+fn favorite_toggle_sends_a_request_without_opening_the_editor() {
+    let mut app = unlocked();
+    app.editor = Editor::Closed;
+    let _ = app.update(Message::ToggleFavorite);
+    assert!(app.busy());
+    assert!(app.editor.is_none());
+}
+
+#[test]
+fn tag_and_favorite_filters_narrow_the_item_list() {
+    let mut app = unlocked();
+    let summary = |id: usize, tags: &[&str], favorite: bool| ItemSummary {
+        tags: tags.iter().map(|t| (*t).into()).collect(),
+        favorite,
+        id,
+        revision: 1,
+        name: format!("Item {id}"),
+        username: None,
+        kind: ItemKind::Login,
+        urls: vec![],
+        has_totp: false,
+        has_duo: false,
+    };
+    app.query.clear();
+    app.replace_items(vec![
+        summary(1, &["Work"], true),
+        summary(2, &["work", "Home"], false),
+        summary(3, &[], false),
+    ]);
+    assert_eq!(app.matching_items().len(), 3);
+    let _ = app.update(Message::FilterTag(Some("WORK".into())));
+    assert_eq!(*app.matching_items(), vec![0, 1]);
+    let _ = app.update(Message::FilterFavorites(true));
+    assert_eq!(*app.matching_items(), vec![0]);
+    let _ = app.update(Message::FilterTag(None));
+    let _ = app.update(Message::FilterFavorites(false));
+    let _ = app.update(Message::Search("home".into()));
+    assert_eq!(*app.matching_items(), vec![1], "search matches tags");
+}
+
+/// A status reply for the unlocked session the tests use.
+fn unlocked_status(status: ServerStatus) -> Reply {
+    reply(ResponsePayload::Status(status), Some(&"a".repeat(64)))
+}
+
+#[test]
+fn ssh_requests_from_status_can_be_answered_from_the_desktop() {
+    let mut app = unlocked();
+    app.editor = Editor::Closed;
+    let mut status = ServerStatus::new(false, None);
+    status.ssh_requests = vec![password_manager::protocol::SshRequest {
+        id: "1a2b3c4d5e6f".into(),
+        key: "Production".into(),
+        host: "git.example.com (SHA256:abc)".into(),
+    }];
+    let _ = app.complete(Job::Status, unlocked_status(status));
+    assert_eq!(app.ui.ssh_requests.len(), 1);
+    let _ = app.update(Message::SshDecision("1a2b3c4d5e6f".into(), true));
+    assert!(app.busy());
+    let _ = app.complete(Job::Status, unlocked_status(ServerStatus::new(false, None)));
+    assert!(app.ui.ssh_requests.is_empty());
+}
+
+#[test]
+fn a_format_upgrade_notice_stays_until_dismissed() {
+    let mut app = unlocked();
+    let mut response = RpcResponse::success(ResponsePayload::Message("Item updated.".into()));
+    response.session_id = Some("a".repeat(64));
+    response.notice = Some("This vault now uses features older versions cannot open.".into());
+    let _ = app.complete(Job::Save, server_reply(response));
+    assert!(
+        app.ui
+            .format_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("older versions"))
+    );
+    let _ = app.update(Message::DismissFormatNotice);
+    assert!(app.ui.format_notice.is_none());
+}
+
+#[test]
+fn passkey_requests_are_confirmed_in_the_desktop_without_keeping_the_secret() {
+    let waiting = || {
+        let mut app = unlocked();
+        app.editor = Editor::Closed;
+        let mut status = ServerStatus::new(false, None);
+        status.passkey_pin = true;
+        status.passkey_requests = vec![password_manager::protocol::PasskeyRequest {
+            id: "1a2b3c4d5e6f".into(),
+            site: "https://login.example.com".into(),
+        }];
+        let _ = app.complete(Job::Status, unlocked_status(status));
+        app
+    };
+    let mut app = waiting();
+    assert_eq!(app.ui.passkey_requests.len(), 1);
+    assert!(app.ui.passkey_pin);
+    let _ = app.update(Message::PasskeyDecision("1a2b3c4d5e6f".into(), true));
+    assert!(!app.busy(), "confirming needs the master password or PIN");
+    let _ = app.update(Message::PasskeySecret("135790".to_string().into()));
+    let _ = app.update(Message::PasskeyDecision("1a2b3c4d5e6f".into(), true));
+    assert!(app.busy());
+    assert!(
+        app.ui.passkey_secret.expose().is_empty(),
+        "the secret is not kept"
+    );
+    let mut app = waiting();
+    let _ = app.update(Message::PasskeyDecision("1a2b3c4d5e6f".into(), false));
+    assert!(app.busy(), "refusing needs nothing typed");
+    // The request disappears from the next status, and the field is cleared.
+    let mut app = waiting();
+    let _ = app.update(Message::PasskeySecret("half-typed".to_string().into()));
+    let _ = app.complete(Job::Status, unlocked_status(ServerStatus::new(false, None)));
+    assert!(app.ui.passkey_requests.is_empty());
+    assert!(app.ui.passkey_secret.expose().is_empty());
+
+    // PINs must match before they are sent.
+    let mut app = waiting();
+    let _ = app.update(Message::PinNew("135790".to_string().into()));
+    let _ = app.update(Message::PinConfirm("135791".to_string().into()));
+    let _ = app.update(Message::SavePasskeyPin(true));
+    assert!(!app.busy());
+    let _ = app.update(Message::PinNew("135790".to_string().into()));
+    let _ = app.update(Message::PinConfirm("135790".to_string().into()));
+    let _ = app.update(Message::SavePasskeyPin(true));
+    assert!(app.busy());
+    assert!(app.ui.pin_new.expose().is_empty() && app.ui.pin_confirm.expose().is_empty());
 }

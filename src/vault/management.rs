@@ -10,6 +10,8 @@ impl Vault {
             urls: item.urls().map(str::to_owned).collect(),
             has_totp: item.authenticator.is_some(),
             has_duo: item.duo.is_some(),
+            tags: item.metadata.tags.clone(),
+            favorite: item.metadata.favorite,
         }
     }
     pub fn management_list(&self, filter: SearchFilter) -> Result<ItemPage, VaultError> {
@@ -52,6 +54,9 @@ impl Vault {
                 AuthenticatorState::Hotp { .. } => crate::types::OtpMode::Hotp,
             }),
             is_passkey: item.is_passkey(),
+            tags: item.metadata.tags.clone(),
+            favorite: item.metadata.favorite,
+            attachments: item.attachments.iter().map(Attachment::info).collect(),
             created: e.created.to_string(),
             modified: e.modified.to_string(),
         })

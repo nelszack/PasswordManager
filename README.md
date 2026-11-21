@@ -1,19 +1,24 @@
 # Password Manager
 
 A local-first password manager with an Iced desktop GUI, a Rust CLI, a
-Chrome/Chromium browser extension, and a native Android app. One desktop `pm`
+Chrome/Chromium/Firefox browser extension, and a native Android app. One desktop `pm`
 executable provides the GUI, CLI, and independent background server. The Android
 APK embeds the same Rust vault library. Vaults use Argon2id key derivation and
 XChaCha20-Poly1305 encryption.
 
 - Store logins, secure notes, payment cards, identities, Wi-Fi credentials,
-  software licenses, SSH keys, and API secrets, with multiple URLs and custom fields.
+  software licenses, SSH keys, and API secrets, with multiple URLs and custom fields;
+  organize them with tags and favorites, and attach small encrypted files.
 - Generate passwords or passphrases; search, filter, and audit for weak, reused,
   duplicate, stale, or breached passwords and missing authenticators.
 - Use TOTP/HOTP codes and experimental Duo passcode and manual Push enrollment.
+- Serve Ed25519 SSH keys to `ssh` and `git` through a built-in SSH agent
+  (Linux and macOS, opt-in).
+- Create and use passkeys from the browser extension (ES256, shared with Android).
 - Autofill logins, cards, identities, and OTP codes; generate signup passwords
   and save credentials through site-scoped desktop browser prompts. Manage vaults
-  in the desktop app, CLI, or Android app; Android autofills passwords and TOTP.
+  in the desktop app, CLI, or Android app; Android autofills passwords, TOTP,
+  payment cards, and identities.
 - Recover password history and deleted entries; import/export CSV or portable
   JSON, preview import conflicts and data loss, and create encrypted full-vault backups.
 - Keep stable entry IDs, timed clipboard cleanup, and inactivity/system-event locking.
@@ -26,7 +31,7 @@ Android development: [private APK build and setup](android/README.md) ·
 [mobile/passkey implementation and device acceptance checklist](docs/mobile-implementation.md).
 Android supports 64-bit Android 9+ with Vault/Tools/Settings navigation, live
 search, typed editing, recovery tools, encrypted sync, optional fingerprint
-unlock, and native password/TOTP autofill. Its passkey provider requires Android
+unlock, and native password/TOTP/card/identity autofill. Its passkey provider requires Android
 14+. Install privately by APK; no store publication is needed. iPhone support
 remains planned. See the checklist for implemented features and remaining device
 acceptance checks.
@@ -156,6 +161,10 @@ separately, issue a credential per device, and connect with
 ## Browser extension
 
 1. Load `extension/` as an unpacked extension in Chrome, Chromium, or Helium.
+   For Firefox 128+, build `extension-firefox/` with
+   `node scripts/package_extension.cjs --browser firefox DIR` (release archives
+   include it), load it, and run `pm native-host install --browser firefox`;
+   see [Firefox setup](docs/user-guide.md#firefox).
 2. Copy its ID from `chrome://extensions`, then register the native host:
 
    ```bash
@@ -164,9 +173,10 @@ separately, issue a credential per device, and connect with
 
    Use `--browser chromium` or `--browser helium` as appropriate, then reload
    the extension. On Windows, fully exit and reopen Helium after registration.
-3. Start and unlock the server. Use the key button beside a login field to
-   choose an account. Unlock and edit vaults in the desktop app or CLI.
-   The popup shows status, locks the vault, and reviews uncertain operation outcomes.
+3. Start the server and unlock a vault in the desktop app or CLI. Use the key
+   button beside a login field, or `Ctrl+Shift+L`, to choose an account. Edit
+   vaults in the desktop app or CLI. The popup shows status, opens the desktop
+   app to unlock, locks, and reviews uncertain operation outcomes.
 
 Autofill and save prompts operate on HTTPS pages. Credentials match saved
 origins, including scheme and port; subdomain sharing requires an explicit

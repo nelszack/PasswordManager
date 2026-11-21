@@ -11,7 +11,7 @@ function loadWorker(context) {
 }
 
 function securityEnvironment({ orphanWindows = [] } = {}) {
-    let listener, nativeListener, disconnect;
+    let listener, nativeListener, disconnect, commandListener;
     let now = Date.now();
     let deliveryError = null;
     let locked = false;
@@ -28,6 +28,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
     const chrome = {
         action: { setBadgeText(value) { badge.push(value); }, setBadgeBackgroundColor() {}, setTitle() {} },
         alarms: { create() {}, onAlarm: event() },
+        commands: { onCommand: event(fn => commandListener = fn) },
         runtime: {
             id: "abcdefghijklmnopabcdefghijklmnop", lastError: null,
             getManifest: () => ({ version: "1.6", version_name: "0.1.0" }),
@@ -100,6 +101,7 @@ function securityEnvironment({ orphanWindows = [] } = {}) {
         holdLogin() { holdLogin = true; },
         releaseLogin() { nativeListener(heldLoginResponse); },
         disconnect() { disconnect(); },
+        command(name, tab) { commandListener(name, tab); },
         async open(source = sender, kind = "login") {
             await new Promise(resolve => setImmediate(resolve));
             const response = await message({ action: "openSecurePicker", kind }, source);
@@ -408,4 +410,32 @@ test("only the extension popup can launch the desktop app", async () => {
     assert.equal((await env.message({ action: "openDesktop" }, popup)).success, true);
     assert.equal(env.requests.at(-1).action, "openDesktop");
     assert.equal(env.requests.at(-1).operationId, undefined);
+});
+
+test("the extension cannot unlock or switch vaults", async () => {
+    const env = securityEnvironment();
+    await new Promise(resolve => setImmediate(resolve));
+    const runtime = env.context.chrome.runtime;
+    const popup = { id: runtime.id, url: runtime.getURL("popup.html") };
+    const before = env.requests.length;
+    for (const request of [
+        { action: "unlockVault", password: "synthetic-master" },
+        { action: "listVaults" },
+        { action: "switchVault", vaultFile: "a.enc" },
+    ]) {
+        assert.equal((await env.message(request, popup)).success, false, JSON.stringify(request));
+    }
+    assert.equal(env.requests.length, before, "nothing reaches the native host");
+});
+
+test("the fill shortcut asks only the active tab to open its login picker", async () => {
+    const env = securityEnvironment();
+    await new Promise(resolve => setImmediate(resolve));
+    env.command("fill-login", { id: 12 });
+    env.command("other-command", { id: 13 });
+    env.command("fill-login", {});
+    env.command("fill-login", undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    const shortcuts = env.deliveries.filter(delivery => delivery.message.action === "pmShortcutFill");
+    assert.deepEqual(shortcuts.map(delivery => delivery.tab), [12]);
 });

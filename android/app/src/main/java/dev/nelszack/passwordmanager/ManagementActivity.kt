@@ -297,6 +297,18 @@ abstract class ManagementActivity : VaultActivity() {
         val notes = edit("Notes", entry?.opt("notes") as? String ?: "", true)
         notes.isSingleLine = false
         notes.minLines = 3
+        val tags =
+            edit(
+                "Tags (comma-separated)",
+                entry?.let { VaultCommands.tags(it).joinToString(", ") }.orEmpty(),
+            )
+        val favorite =
+            CheckBox(this).apply {
+                text = "Favorite"
+                isChecked = entry?.optBoolean("favorite") ?: false
+                minHeight = MobileUi.dp(this@ManagementActivity, 48)
+            }
+        layout.addView(favorite)
         label("Custom fields")
         data class Field(
             val name: EditText,
@@ -344,6 +356,8 @@ abstract class ManagementActivity : VaultActivity() {
                 password.text.toString(),
                 websites.text.toString(),
                 notes.text.toString(),
+                tags.text.toString(),
+                favorite.isChecked.toString(),
                 rows.joinToString("\u0000") {
                     "${it.name.text}\u0001${it.value.text}\u0001${it.secret.isChecked}\u0001${it.removed.isChecked}"
                 },
@@ -382,6 +396,8 @@ abstract class ManagementActivity : VaultActivity() {
                             notes.text.toString(),
                             itemKind,
                             savedFields,
+                            VaultCommands.parseTags(tags.text.toString()),
+                            favorite.isChecked,
                         )
                     else
                         VaultCommands.update(
@@ -394,6 +410,8 @@ abstract class ManagementActivity : VaultActivity() {
                             itemKind,
                             savedFields,
                             replaceDetails = true,
+                            tags = VaultCommands.parseTags(tags.text.toString()),
+                            favorite = favorite.isChecked,
                         )
                 saving = true
                 save.isEnabled = false

@@ -13,6 +13,8 @@ impl Vault {
                 kind: ItemKind::Login,
                 additional_urls: vec![],
                 custom_fields: vec![],
+                tags: vec![],
+                favorite: false,
             },
             key,
         )
@@ -23,7 +25,9 @@ impl Vault {
         key: &mut VaultCredentials,
     ) -> Result<bool, VaultError> {
         let mut request = request;
-        if let Err(error) = item_rules::normalize_new_fields(&mut request.custom_fields) {
+        if let Err(error) = item_rules::normalize_new_fields(&mut request.custom_fields)
+            .and_then(|()| item_rules::normalize_tags(&mut request.tags))
+        {
             request.zeroize();
             return Err(error);
         }
@@ -63,6 +67,8 @@ impl Vault {
             kind,
             additional_urls,
             custom_fields,
+            tags,
+            favorite,
         } = request;
         let mut info = Zeroizing::new(info);
         if self
@@ -93,6 +99,8 @@ impl Vault {
                 additional_urls: urls,
                 password_changed: (!info.password.is_empty()).then(|| now.clone()),
                 custom_fields,
+                tags,
+                favorite,
             };
             let entry = VaultEntry {
                 id,
@@ -174,6 +182,7 @@ impl Vault {
             for url in change.entry.update.url.iter().chain(&change.add_url) {
                 item_rules::check_url(url)?;
             }
+            item_rules::normalize_tags(&mut change.add_tags)?;
             item_rules::normalize_new_fields(&mut change.set_fields)
         })();
         if let Err(error) = checked {
@@ -195,6 +204,10 @@ impl Vault {
             set_fields,
             remove_fields,
             clear_fields,
+            add_tags,
+            remove_tags,
+            clear_tags,
+            favorite,
         } = change;
         let mut change = Zeroizing::new(change);
         let changed_password = change
@@ -221,6 +234,10 @@ impl Vault {
             id,
             MetadataUpdate {
                 kind,
+                add_tags: &add_tags,
+                remove_tags: &remove_tags,
+                clear_tags,
+                favorite,
                 add_urls: &add_url,
                 remove_urls: &remove_url,
                 clear_urls,
@@ -244,6 +261,23 @@ impl Vault {
         let before = record.clone();
         if let Some(kind) = update.kind {
             record.kind = kind;
+        }
+        if update.clear_tags {
+            record.tags.clear();
+        }
+        record.tags.retain(|t| {
+            !update
+                .remove_tags
+                .iter()
+                .any(|r| t.eq_ignore_ascii_case(r.trim()))
+        });
+        for tag in update.add_tags {
+            if !record.has_tag(tag) {
+                record.tags.push(tag.clone());
+            }
+        }
+        if let Some(favorite) = update.favorite {
+            record.favorite = favorite;
         }
         if update.clear_urls {
             record.additional_urls.clear();
@@ -352,6 +386,8 @@ mod tests {
                     kind: ItemKind::Login,
                     additional_urls: vec!["https://additional.test".into()],
                     custom_fields: vec![],
+                    tags: vec![],
+                    favorite: false,
                 },
                 &mut credentials,
             )

@@ -27,6 +27,18 @@ impl App {
                     draft.dirty = true;
                 }
             }
+            Message::Tags(value) => {
+                if let Some(draft) = self.editor.as_mut() {
+                    draft.tags = value;
+                    draft.dirty = true;
+                }
+            }
+            Message::Favorite(value) => {
+                if let Some(draft) = self.editor.as_mut() {
+                    draft.favorite = value;
+                    draft.dirty = true;
+                }
+            }
             Message::TemplateValue(name, secret, value) => {
                 if let Some(draft) = self.editor.as_mut() {
                     if let Some(field) = draft

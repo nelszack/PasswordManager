@@ -15,9 +15,56 @@ proptest! {
 
 #[test]
 fn validates_chrome_extension_ids() {
-    assert!(validate_extension_id("abcdefghijklmnopabcdefghijklmnop").is_ok());
-    assert!(validate_extension_id("too-short").is_err());
-    assert!(validate_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
+    let chrome = NativeBrowser::Chrome;
+    assert!(validate_extension_id("abcdefghijklmnopabcdefghijklmnop", chrome).is_ok());
+    assert!(validate_extension_id("too-short", chrome).is_err());
+    assert!(validate_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", chrome).is_err());
+    assert!(validate_extension_id(FIREFOX_EXTENSION_ID, chrome).is_err());
+}
+
+#[test]
+fn validates_firefox_add_on_ids_and_uses_firefox_allow_lists() {
+    let firefox = NativeBrowser::Firefox;
+    for valid in [
+        FIREFOX_EXTENSION_ID,
+        "my-addon@example.org",
+        "{12345678-90ab-cdef-1234-567890abcdef}",
+    ] {
+        assert!(validate_extension_id(valid, firefox).is_ok(), "{valid}");
+    }
+    for invalid in [
+        "abcdefghijklmnopabcdefghijklmnop",
+        "@example.org",
+        "name@",
+        "bad name@example.org",
+        "{12345678-90ab-cdef-1234-567890abcdeg}",
+        "{12345678090ab-cdef-1234-567890abcdef}",
+    ] {
+        assert!(
+            validate_extension_id(invalid, firefox).is_err(),
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        manifest_allow_list(FIREFOX_EXTENSION_ID, firefox),
+        ("allowed_extensions", json!([FIREFOX_EXTENSION_ID]))
+    );
+    assert_eq!(
+        manifest_allow_list("abcdefghijklmnopabcdefghijklmnop", NativeBrowser::Helium),
+        (
+            "allowed_origins",
+            json!(["chrome-extension://abcdefghijklmnopabcdefghijklmnop/"])
+        )
+    );
+    assert_eq!(
+        manifest_file_name(firefox),
+        format!("{HOST_NAME}.firefox.json")
+    );
+    assert_eq!(
+        manifest_file_name(NativeBrowser::Chrome),
+        format!("{HOST_NAME}.json")
+    );
+    assert!(install(None, NativeBrowser::Chrome).is_err());
 }
 
 #[test]
@@ -56,7 +103,13 @@ fn native_manifest_directories_cover_all_platforms_and_current_platform_dispatch
                 },
             );
             assert_eq!(
-                native_manifest_dir_for(base_dirs.config_dir(), browser, host_dir, platform),
+                native_manifest_dir_for(
+                    base_dirs.config_dir(),
+                    base_dirs.home_dir(),
+                    browser,
+                    host_dir,
+                    platform
+                ),
                 expected
             );
             if current {
@@ -74,6 +127,23 @@ fn windows_registry_locations_cover_supported_browsers() {
     );
     assert_eq!(windows_registry_vendor(NativeBrowser::Chromium), "Chromium");
     assert_eq!(windows_registry_vendor(NativeBrowser::Helium), "Chromium");
+    assert_eq!(windows_registry_vendor(NativeBrowser::Firefox), "Mozilla");
+}
+
+#[test]
+fn firefox_manifests_use_mozilla_locations() {
+    let (config, home, host) = (Path::new("config"), Path::new("home"), Path::new("host"));
+    let dir =
+        |platform| native_manifest_dir_for(config, home, NativeBrowser::Firefox, host, platform);
+    assert_eq!(
+        dir(NativePlatform::Linux),
+        home.join(".mozilla").join("native-messaging-hosts")
+    );
+    assert_eq!(
+        dir(NativePlatform::Macos),
+        config.join("Mozilla").join("NativeMessagingHosts")
+    );
+    assert_eq!(dir(NativePlatform::Windows), host);
 }
 
 #[test]
@@ -594,4 +664,136 @@ fn copied_native_host_launches_registered_pm_and_rejects_unusable_paths() {
     }
     fs::write(host.with_file_name(DESKTOP_EXECUTABLE_FILE), "invalid json").unwrap();
     assert!(desktop_executable(&host).is_err());
+}
+
+#[test]
+fn the_browser_cannot_unlock_or_choose_vaults() {
+    // Unlocking happens only in the desktop app or CLI.
+    for action in ["unlock", "vaults", "switchVault"] {
+        assert!(
+            serde_json::from_value::<NativeRequest>(
+                json!({"id": 1, "action": action, "password": "synthetic-master"})
+            )
+            .is_err(),
+            "{action}"
+        );
+    }
+}
+
+#[test]
+fn passkey_requests_need_the_site_and_session_and_map_to_browser_commands() {
+    let options = r#"{"rpId":"example.com","challenge":"AAAA"}"#;
+    let mut list: NativeRequest = serde_json::from_value(json!({
+        "id": 1, "action": "getPasskeys", "domain": "https://example.com", "passkeyRequest": options
+    }))
+    .unwrap();
+    list.validate().unwrap();
+    assert!(matches!(
+        command_for_request(&mut list).unwrap(),
+        ServerCommand::BrowserPasskeys { origin, request } if origin == "https://example.com" && request == options
+    ));
+    let mut get: NativeRequest = serde_json::from_value(json!({
+        "id": 2, "action": "getPasskeyAssertion", "domain": "https://example.com", "entryId": 4,
+        "passkeyRequest": options, "expectedRevision": 1, "expectedSession": "a".repeat(64)
+    }))
+    .unwrap();
+    get.validate().unwrap();
+    assert!(matches!(
+        command_for_request(&mut get).unwrap(),
+        ServerCommand::BrowserPasskeyGet { id: 4, .. }
+    ));
+    // A desktop-issued verification token passes through; `verified` is
+    // never set by the native host, and passwords are not accepted.
+    for (action, extra) in [
+        (
+            "createPasskey",
+            json!({"expectedSession": "a".repeat(64), "operationId": "op-1"}),
+        ),
+        (
+            "getPasskeyAssertion",
+            json!({"entryId": 4, "expectedRevision": 1, "expectedSession": "a".repeat(64)}),
+        ),
+    ] {
+        let mut value = json!({"id": 8, "action": action, "domain": "https://example.com",
+            "passkeyRequest": options, "verificationToken": "c".repeat(64)});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let mut request: NativeRequest = serde_json::from_value(value).unwrap();
+        request.validate().unwrap();
+        let (verification, verified) = match command_for_request(&mut request).unwrap() {
+            ServerCommand::BrowserPasskeyCreate {
+                verification,
+                verified,
+                ..
+            }
+            | ServerCommand::BrowserPasskeyGet {
+                verification,
+                verified,
+                ..
+            } => (verification, verified),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(verification, Some("c".repeat(64)), "{action}");
+        assert!(!verified);
+    }
+    let session = "a".repeat(64);
+    for (case, invalid) in [
+        (
+            "missing WebAuthn request",
+            json!({"id": 3, "action": "getPasskeys", "domain": "https://example.com"}),
+        ),
+        (
+            "registration without a session or operation",
+            json!({"id": 4, "action": "createPasskey", "domain": "https://example.com", "passkeyRequest": options}),
+        ),
+        (
+            "registration without an operation",
+            json!({"id": 5, "action": "createPasskey", "domain": "https://example.com",
+                "passkeyRequest": options, "expectedSession": session}),
+        ),
+        (
+            "sign-in without the reviewed revision",
+            json!({"id": 6, "action": "getPasskeyAssertion", "domain": "https://example.com", "entryId": 4,
+                "passkeyRequest": options, "expectedSession": session}),
+        ),
+        (
+            "oversized WebAuthn request",
+            json!({"id": 7, "action": "getPasskeys", "domain": "https://example.com",
+                "passkeyRequest": "x".repeat(64 * 1024 + 1)}),
+        ),
+        (
+            "a password instead of a desktop confirmation",
+            json!({"id": 9, "action": "createPasskey", "domain": "https://example.com", "passkeyRequest": options,
+                "expectedSession": session, "operationId": "op-2", "password": "synthetic-master"}),
+        ),
+        (
+            "malformed verification token",
+            json!({"id": 10, "action": "createPasskey", "domain": "https://example.com", "passkeyRequest": options,
+                "expectedSession": session, "operationId": "op-3", "verificationToken": "not-hex"}),
+        ),
+    ] {
+        let request: NativeRequest = serde_json::from_value(invalid).unwrap();
+        assert!(request.validate().is_err(), "{case}");
+    }
+    let mut verify: NativeRequest = serde_json::from_value(json!({
+        "id": 11, "action": "verifyPasskeyUser", "domain": "https://example.com",
+        "expectedSession": "a".repeat(64)
+    }))
+    .unwrap();
+    verify.validate().unwrap();
+    assert!(matches!(
+        command_for_request(&mut verify).unwrap(),
+        ServerCommand::PasskeyVerification { origin } if origin == "https://example.com"
+    ));
+    assert_eq!(NativeAction::VerifyPasskeyUser.policy().lane, "approval");
+    assert!(
+        NativeAction::CreatePasskey.policy().mutates,
+        "registration needs an operation ID"
+    );
+    assert_eq!(
+        NativeAction::GetPasskeys.policy().allowed_senders,
+        ["background"]
+    );
 }

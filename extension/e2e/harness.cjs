@@ -72,9 +72,11 @@ async function launchExtension(options = {}) {
                 PM_E2E_NATIVE_ACCOUNTS: JSON.stringify(options.accounts || []),
                 ...(options.env || {})
             },
+            ignoreHTTPSErrors: options.ignoreHTTPSErrors === true,
             args: [
                 `--disable-extensions-except=${testExtensionPath}`,
-                `--load-extension=${testExtensionPath}`
+                `--load-extension=${testExtensionPath}`,
+                ...(options.args || [])
             ]
         });
         const coveredPages = new Map();

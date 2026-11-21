@@ -61,6 +61,10 @@ struct NativeRequest {
     approve: Option<bool>,
     #[serde(default, rename = "verificationCode")]
     verification_code: Option<SecretString>,
+    #[serde(default, rename = "passkeyRequest")]
+    passkey_request: Option<String>,
+    #[serde(default, rename = "verificationToken")]
+    verification_token: Option<String>,
 }
 
 impl NativeRequest {
@@ -79,6 +83,8 @@ impl NativeRequest {
             ("fingerprint", self.fingerprint.is_some()),
             ("approve", self.approve.is_some()),
             ("verificationCode", self.verification_code.is_some()),
+            ("passkeyRequest", self.passkey_request.is_some()),
+            ("verificationToken", self.verification_token.is_some()),
         ];
         if self
             .expected_session
@@ -116,6 +122,21 @@ impl NativeRequest {
         {
             return Err("invalid item identifier".into());
         }
+        if self
+            .passkey_request
+            .as_ref()
+            .is_some_and(|r| r.len() > 64 * 1024)
+        {
+            return Err("WebAuthn request exceeds limit".into());
+        }
+        if self.verification_token.as_ref().is_some_and(|token| {
+            token.len() != 64
+                || !token
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        }) {
+            return Err("invalid passkey verification token".into());
+        }
         Ok(())
     }
 }
@@ -133,6 +154,8 @@ impl Zeroize for NativeRequest {
         self.fingerprint.zeroize();
         self.verification_code.zeroize();
         self.approve.zeroize();
+        self.passkey_request.zeroize();
+        self.verification_token.zeroize();
         *self = Self::default();
     }
 }
@@ -226,8 +249,27 @@ pub fn invoked_directly() -> bool {
         .is_some_and(|name| name == HOST_BINARY_NAME)
 }
 
-pub fn install(extension_id: &str, browser: NativeBrowser) -> Result<PathBuf, String> {
-    validate_extension_id(extension_id)?;
+/// The add-on ID in the packaged Firefox manifest (`scripts/firefox_manifest.cjs`).
+pub const FIREFOX_EXTENSION_ID: &str = "password-manager@nelszack.dev";
+
+/// The browser-specific allow list for a native host manifest.
+fn manifest_allow_list(extension_id: &str, browser: NativeBrowser) -> (&'static str, Value) {
+    match browser {
+        NativeBrowser::Firefox => ("allowed_extensions", json!([extension_id])),
+        _ => (
+            "allowed_origins",
+            json!([format!("chrome-extension://{extension_id}/")]),
+        ),
+    }
+}
+
+pub fn install(extension_id: Option<&str>, browser: NativeBrowser) -> Result<PathBuf, String> {
+    let extension_id = match (extension_id, browser) {
+        (Some(id), _) => id,
+        (None, NativeBrowser::Firefox) => FIREFOX_EXTENSION_ID,
+        (None, _) => return Err("--extension-id is required for Chrome-family browsers".into()),
+    };
+    validate_extension_id(extension_id, browser)?;
     let base_dirs =
         BaseDirs::new().ok_or_else(|| "could not locate the user config directory".to_string())?;
     let host_dir = data_dir().join("native-messaging");
@@ -239,14 +281,15 @@ pub fn install(extension_id: &str, browser: NativeBrowser) -> Result<PathBuf, St
     let manifest_dir = native_manifest_dir(&base_dirs, browser, &host_dir);
     fs::create_dir_all(&manifest_dir)
         .map_err(|error| format!("could not create {}: {error}", manifest_dir.display()))?;
-    let manifest_path = manifest_dir.join(format!("{HOST_NAME}.json"));
-    let manifest = json!({
+    let manifest_path = manifest_dir.join(manifest_file_name(browser));
+    let (allow_key, allowed) = manifest_allow_list(extension_id, browser);
+    let mut manifest = json!({
         "name": HOST_NAME,
         "description": "Password Manager browser bridge",
         "path": host_path,
         "type": "stdio",
-        "allowed_origins": [format!("chrome-extension://{extension_id}/")]
     });
+    manifest[allow_key] = allowed;
     let encoded = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("could not encode native host manifest: {error}"))?;
     fs::write(&manifest_path, encoded)
@@ -287,15 +330,40 @@ fn native_manifest_dir(base_dirs: &BaseDirs, browser: NativeBrowser, host_dir: &
     let platform = NativePlatform::Macos;
     #[cfg(target_os = "windows")]
     let platform = NativePlatform::Windows;
-    native_manifest_dir_for(base_dirs.config_dir(), browser, host_dir, platform)
+    native_manifest_dir_for(
+        base_dirs.config_dir(),
+        base_dirs.home_dir(),
+        browser,
+        host_dir,
+        platform,
+    )
+}
+
+/// On Windows every browser's manifest lives in the host directory, so the
+/// Firefox manifest (with its different allow list) gets its own name.
+fn manifest_file_name(browser: NativeBrowser) -> String {
+    match browser {
+        NativeBrowser::Firefox => format!("{HOST_NAME}.firefox.json"),
+        _ => format!("{HOST_NAME}.json"),
+    }
 }
 
 fn native_manifest_dir_for(
     config_dir: &Path,
+    home_dir: &Path,
     browser: NativeBrowser,
     host_dir: &Path,
     platform: NativePlatform,
 ) -> PathBuf {
+    match (platform, browser) {
+        (NativePlatform::Linux, NativeBrowser::Firefox) => {
+            return home_dir.join(".mozilla").join("native-messaging-hosts");
+        }
+        (NativePlatform::Macos, NativeBrowser::Firefox) => {
+            return config_dir.join("Mozilla").join("NativeMessagingHosts");
+        }
+        _ => {}
+    }
     let browser_dir = match (platform, browser) {
         (NativePlatform::Linux, NativeBrowser::Chrome) => PathBuf::from("google-chrome"),
         (NativePlatform::Linux, NativeBrowser::Chromium) => PathBuf::from("chromium"),
@@ -304,6 +372,7 @@ fn native_manifest_dir_for(
         (NativePlatform::Macos, NativeBrowser::Chromium) => PathBuf::from("Chromium"),
         (NativePlatform::Macos, NativeBrowser::Helium) => PathBuf::from("net.imput.helium"),
         (NativePlatform::Windows, _) => return host_dir.to_path_buf(),
+        (_, NativeBrowser::Firefox) => unreachable!("handled above"),
     };
     config_dir.join(browser_dir).join("NativeMessagingHosts")
 }
@@ -399,10 +468,38 @@ fn windows_registry_vendor(browser: NativeBrowser) -> &'static str {
         // Helium currently discovers native hosts through Chromium's registry
         // location rather than a Helium-specific vendor key.
         NativeBrowser::Helium => "Chromium",
+        NativeBrowser::Firefox => "Mozilla",
     }
 }
 
-fn validate_extension_id(extension_id: &str) -> Result<(), String> {
+fn validate_extension_id(extension_id: &str, browser: NativeBrowser) -> Result<(), String> {
+    if browser == NativeBrowser::Firefox {
+        // Firefox add-on IDs are email-like or a braced UUID.
+        let email = extension_id.split_once('@').is_some_and(|(local, domain)| {
+            let allowed = |part: &str| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+            };
+            allowed(local) && allowed(domain)
+        });
+        let uuid = extension_id.len() == 38
+            && extension_id.starts_with('{')
+            && extension_id.ends_with('}')
+            && extension_id[1..37].bytes().enumerate().all(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            });
+        return if extension_id.len() <= 80 && (email || uuid) {
+            Ok(())
+        } else {
+            Err("Firefox add-on IDs look like name@example.com or {UUID}".to_string())
+        };
+    }
     if extension_id.len() == 32
         && extension_id
             .bytes()
@@ -776,6 +873,8 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 kind: crate::types::ItemKind::Login,
                 additional_urls: vec![],
                 custom_fields: vec![],
+                tags: vec![],
+                favorite: false,
             },
             copy_timeout: 0,
         }),
@@ -807,6 +906,38 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             )))
         }
         "lock" => Ok(ServerCommand::Lock(true)),
+        "getPasskeys" => Ok(ServerCommand::BrowserPasskeys {
+            origin: required(request.domain.take(), "domain", 2048)?,
+            request: required(
+                request.passkey_request.take(),
+                "WebAuthn request",
+                64 * 1024,
+            )?,
+        }),
+        "createPasskey" => Ok(ServerCommand::BrowserPasskeyCreate {
+            origin: required(request.domain.take(), "domain", 2048)?,
+            request: required(
+                request.passkey_request.take(),
+                "WebAuthn request",
+                64 * 1024,
+            )?,
+            verification: request.verification_token.take(),
+            verified: false,
+        }),
+        "verifyPasskeyUser" => Ok(ServerCommand::PasskeyVerification {
+            origin: required(request.domain.take(), "domain", 2048)?,
+        }),
+        "getPasskeyAssertion" => Ok(ServerCommand::BrowserPasskeyGet {
+            origin: required(request.domain.take(), "domain", 2048)?,
+            id: item_id(request)?,
+            request: required(
+                request.passkey_request.take(),
+                "WebAuthn request",
+                64 * 1024,
+            )?,
+            verification: request.verification_token.take(),
+            verified: false,
+        }),
         _ => Err("unsupported native messaging action".to_string()),
     }
 }

@@ -397,6 +397,8 @@ mod tests {
                 field("environment", "test", false),
                 field("private", "hidden-value", true),
             ],
+            tags: vec![],
+            favorite: false,
         };
         command(
             api,
@@ -658,6 +660,8 @@ mod tests {
             kind: ItemKind::Login,
             additional_urls: vec![],
             custom_fields: vec![],
+            tags: vec![],
+            favorite: false,
         };
         assert!(
             vault_command(
@@ -681,6 +685,8 @@ mod tests {
             kind: ItemKind::Login,
             additional_urls: vec![],
             custom_fields: vec![],
+            tags: vec![],
+            favorite: false,
         };
         assert!(
             vault_command(

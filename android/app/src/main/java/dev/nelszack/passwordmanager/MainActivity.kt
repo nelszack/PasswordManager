@@ -3,10 +3,15 @@ package dev.nelszack.passwordmanager
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import org.json.JSONArray
 import org.json.JSONObject
 
 private const val ROW_PAGE_SIZE = 50
+/** Matches the vault's per-attachment limit. */
+private const val MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+/** Filter-chip value selecting favorites rather than an item type. */
+private const val FAVORITES = "\u0000favorites"
 
 open class MainActivity : ManagementActivity() {
     override fun showItems(message: String) {
@@ -326,6 +331,7 @@ open class MainActivity : ManagementActivity() {
         val options =
             listOf(
                 "All" to null,
+                "★ Favorites" to FAVORITES,
                 "Logins" to "login",
                 "Notes" to "secure-note",
                 "Cards" to "payment-card",
@@ -355,7 +361,8 @@ open class MainActivity : ManagementActivity() {
             val end = minOf(entries.length(), from + ROW_PAGE_SIZE)
             for (i in from until end) {
                 val entry = entries.getJSONObject(i)
-                val name = entry.getString("name")
+                val name =
+                    (if (entry.optBoolean("favorite")) "★ " else "") + entry.getString("name")
                 val type = entry.getString("kind")
                 val user = entry.opt("username") as? String ?: ""
                 val host =
@@ -364,7 +371,11 @@ open class MainActivity : ManagementActivity() {
                         runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
                     } else ""
                 val summary =
-                    listOf(user.ifBlank { host }, MobileUi.kindLabel(type))
+                    listOf(
+                            user.ifBlank { host },
+                            MobileUi.kindLabel(type),
+                            VaultCommands.tags(entry).joinToString(", "),
+                        )
                         .filter(String::isNotBlank)
                         .joinToString(" · ")
                 rows.addView(
@@ -394,13 +405,15 @@ open class MainActivity : ManagementActivity() {
             val needle = search.text.toString()
             searchText = needle
             val kind = selectedKind
+            val favorites = kind == FAVORITES
             val version = ++queryVersion
             task({
                 Vault.commandJson(
                     VaultCommands.search(
                         query = needle.ifBlank { null },
-                        kind = kind,
+                        kind = kind.takeUnless { favorites },
                         sort = "name",
+                        favorite = if (favorites) true else null,
                     )
                 )
             }) { result ->
@@ -584,12 +597,110 @@ open class MainActivity : ManagementActivity() {
         }
     }
 
+    /** Lists attachments with save/remove actions and offers to add a file. */
+    private fun attachments(entry: JSONObject) {
+        val id = entry.getLong("id")
+        val attachments = entry.optJSONArray("attachments") ?: JSONArray()
+        val passkey = entry.optBoolean("is_passkey")
+        if (attachments.length() == 0 && passkey) return
+        section("Attachments")
+        for (i in 0 until attachments.length()) {
+            val attachment = attachments.getJSONObject(i)
+            val name = attachment.getString("name")
+            actionRow(name, "${MobileUi.byteSize(attachment.getLong("size"))} · Save a copy", "F") {
+                destination(name) { uri ->
+                    unlock({
+                        task({
+                            val bytes =
+                                DeviceKeys.decode(
+                                    Vault.json("attachment_data", "id" to id, "name" to name)
+                                        .getString("data")
+                                )
+                            try {
+                                contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                                    ?: error("Could not write selected file")
+                            } finally {
+                                bytes.fill(0)
+                            }
+                        }) { detail(id) }
+                    })
+                }
+            }
+            button("Remove $name") {
+                confirm("Remove the attachment \"$name\"? This cannot be undone.") {
+                    task({
+                        runCatching {
+                            Vault.command(
+                                VaultCommands.removeAttachment(id, name),
+                                entry.getLong("revision"),
+                            )
+                            afterToolChange()
+                        }
+                    }) { result ->
+                        result.fold({ detail(id) }, { notice(it.message ?: "Could not remove") })
+                    }
+                }
+            }
+        }
+        if (attachments.length() == 0) label("No attachments", 14f)
+        if (!passkey) button("Add attachment") {
+            source { uri ->
+                unlock({
+                    task({
+                        runCatching {
+                            val name =
+                                contentResolver
+                                    .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
+                                    ?: "attachment"
+                            val bytes =
+                                contentResolver.openInputStream(uri)?.use {
+                                    it.readBounded(MAX_ATTACHMENT_BYTES)
+                                } ?: error("Could not open selected file")
+                            try {
+                                Vault.json(
+                                    "attachment_add",
+                                    "id" to id,
+                                    "name" to name,
+                                    "data" to DeviceKeys.encode(bytes),
+                                    "expected_revision" to entry.getLong("revision"),
+                                )
+                            } finally {
+                                bytes.fill(0)
+                            }
+                            afterToolChange()
+                        }
+                    }) { result ->
+                        result.fold({ detail(id) }, { notice(it.message ?: "Could not attach file") })
+                    }
+                })
+            }
+        }
+    }
+
     private fun detail(id: Long) {
         task({ Vault.commandJson(VaultCommands.item(id)) }) { entry ->
             page("Item details")
             pageBack = { items() }
             label(entry.getString("name"), 28f)
             label(MobileUi.kindLabel(entry.getString("kind")).uppercase(), 12f)
+            val tags = VaultCommands.tags(entry)
+            if (tags.isNotEmpty()) label("Tags: ${tags.joinToString(", ")}", 14f)
+            if (!entry.optBoolean("is_passkey")) {
+                val starred = entry.optBoolean("favorite")
+                button(if (starred) "★ Remove from favorites" else "☆ Add to favorites") {
+                    task({
+                        runCatching {
+                            Vault.command(
+                                VaultCommands.setFavorite(id, !starred),
+                                entry.getLong("revision"),
+                            )
+                        }
+                    }) { result ->
+                        result.fold({ detail(id) }, { notice(it.message ?: "Could not update") })
+                    }
+                }
+            }
             val user = entry.opt("username") as? String ?: ""
             if (user.isNotBlank()) {
                 section("Username / owner")
@@ -691,6 +802,7 @@ open class MainActivity : ManagementActivity() {
                     } else label(url)
                 }
             }
+            attachments(entry)
             val fields = entry.optJSONArray("fields") ?: JSONArray()
             if (fields.length() > 0) section("Custom fields")
             for (i in 0 until fields.length()) {

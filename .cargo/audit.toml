@@ -6,4 +6,12 @@ ignore = [
     # target compiles (`cargo tree -i chrono --target <target>` is empty for
     # Linux, Windows, macOS, and Android). Remove once zxcvbn drops it.
     "RUSTSEC-2026-0543",
+    # rsa (Marvin timing attack) and crypto-bigint 0.5 (constant-time timing
+    # variability) appear in Cargo.lock only as optional dependencies of
+    # ssh-key, whose RSA and ECDSA features are disabled: the SSH agent signs
+    # with Ed25519 only. `cargo tree --target all -e normal,build -i rsa` (and
+    # `-i crypto-bigint`, `-i p256`, `-i ecdsa`) is empty. Remove if either
+    # feature is ever enabled; prefer ssh-key 0.7, whose stack avoids both.
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0387",
 ]

@@ -37,10 +37,11 @@ pub use totp::AuthenticatorCode;
 
 mod browser;
 mod management;
-pub use pm_contracts::vault::{AutofillItem, BrowserLogin};
 pub use pm_contracts::vault::{
-    HistoryPage, ItemChanges, ItemDetail, ItemField, ItemPage, ItemSummary, TrashPage, TrashSummary,
+    AttachmentInfo, HistoryPage, ItemChanges, ItemDetail, ItemField, ItemPage, ItemSummary,
+    TrashPage, TrashSummary,
 };
+pub use pm_contracts::vault::{AutofillItem, BrowserLogin};
 mod query;
 use browser::hostname;
 #[cfg(test)]
@@ -98,6 +99,13 @@ impl AuditEntrySnapshot {
 
 mod audit;
 pub(crate) use audit::{PendingAudit, PendingScores};
+pub(crate) mod attachments;
+pub(crate) mod passkey_pin;
+pub(crate) mod passkeys;
+pub(crate) mod ssh_agent;
+pub(crate) mod typed_fill;
+use attachments::Attachment;
+pub use passkeys::PasskeyChoice;
 
 mod import;
 
@@ -229,6 +237,25 @@ pub struct EntryMetadata {
     pub additional_urls: Vec<String>,
     pub password_changed: Option<Timestamp>,
     pub custom_fields: Vec<CustomField>,
+    /// Organization labels. Absent from documents that use none, so vaults
+    /// without tags or favorites stay readable by older releases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[zeroize(skip)]
+    pub favorite: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+impl EntryMetadata {
+    /// Whether this record uses fields introduced by document schema 3.
+    fn uses_organization(&self) -> bool {
+        self.favorite || !self.tags.is_empty()
+    }
+    pub(crate) fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t.eq_ignore_ascii_case(tag.trim()))
+    }
 }
 #[derive(
     Serialize, Deserialize, Default, PartialEq, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
@@ -278,10 +305,12 @@ struct Item {
     history: Vec<PasswordRevision>,
     authenticator: Option<Authenticator>,
     duo: Option<DuoRecord>,
+    attachments: Vec<Attachment>,
     lifecycle: Lifecycle,
     strength: CachedStrength,
     sites: browser::CachedSites,
     search: query::CachedSearch,
+    ssh: ssh_agent::CachedSshKey,
 }
 // Derived runtime data never affects item equality, revisions, or persistence.
 #[derive(Debug, Default, Clone)]
@@ -343,10 +372,12 @@ impl Item {
             history: Vec::new(),
             authenticator: None,
             duo: None,
+            attachments: Vec::new(),
             lifecycle: Lifecycle::Active,
             strength: CachedStrength::default(),
             sites: browser::CachedSites::default(),
             search: query::CachedSearch::default(),
+            ssh: ssh_agent::CachedSshKey::default(),
         }
     }
 }
@@ -396,6 +427,9 @@ pub struct VaultMetadata {
     pub filename: String,
     pub(crate) duo_session: Option<[u8; 32]>,
     pub(crate) changes: Option<(u64, u64, Vec<usize>)>,
+    /// The last save moved this vault to a document schema older releases
+    /// cannot read; reported once, then cleared.
+    pub(crate) schema_upgraded: bool,
 }
 impl PartialEq for VaultMetadata {
     fn eq(&self, other: &Self) -> bool {
@@ -458,6 +492,7 @@ impl Vault {
                 filename,
                 duo_session: None,
                 changes: None,
+                schema_upgraded: false,
             },
         }
     }
@@ -469,6 +504,7 @@ impl Vault {
         item.strength = CachedStrength::default();
         item.sites = browser::CachedSites::default();
         item.search.0.take();
+        item.ssh = ssh_agent::CachedSshKey::default();
         Some(item)
     }
     /// Mutable access to an item's runtime Duo state. Duo records feed none of
@@ -563,6 +599,10 @@ impl Vault {
 }
 struct MetadataUpdate<'a> {
     kind: Option<ItemKind>,
+    add_tags: &'a [String],
+    remove_tags: &'a [String],
+    clear_tags: bool,
+    favorite: Option<bool>,
     add_urls: &'a [String],
     remove_urls: &'a [String],
     clear_urls: bool,
@@ -627,6 +667,21 @@ struct PortableItem {
     totp: Option<SecretString>,
     #[serde(default)]
     duo: Option<DuoCredentials>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    #[zeroize(skip)]
+    favorite: bool,
+    #[serde(default)]
+    attachments: Vec<PortableAttachment>,
+}
+
+/// Portable attachments carry their content as standard base64.
+#[derive(Serialize, Deserialize, zeroize::Zeroize)]
+struct PortableAttachment {
+    name: String,
+    added: Timestamp,
+    data: SecretString,
 }
 
 #[derive(Serialize, Deserialize, zeroize::Zeroize)]
@@ -647,6 +702,10 @@ struct ImportedItem {
     password_history: Vec<PortableRevision>,
     totp: Option<SecretString>,
     duo: Option<DuoCredentials>,
+    tags: Vec<String>,
+    #[zeroize(skip)]
+    favorite: bool,
+    attachments: Vec<Attachment>,
 }
 
 impl ImportedItem {
@@ -661,6 +720,31 @@ impl ImportedItem {
             password_history: Vec::new(),
             totp: None,
             duo: None,
+            tags: Vec::new(),
+            favorite: false,
+            attachments: Vec::new(),
+        }
+    }
+    /// Add a label from another manager (a folder, collection, or tag). Source
+    /// labels may contain characters tags reserve, so they are adapted rather
+    /// than rejecting the item.
+    fn add_tag(&mut self, label: &str) {
+        let mut tag: String = label
+            .chars()
+            .map(|c| if c == ',' || c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        while tag.len() > item_rules::MAX_TAG_BYTES {
+            tag.pop();
+        }
+        let tag = tag.trim_end().to_owned();
+        if !tag.is_empty()
+            && self.tags.len() < item_rules::MAX_TAGS
+            && !self.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag))
+        {
+            self.tags.push(tag);
         }
     }
 }
@@ -763,6 +847,7 @@ impl Vault {
             additional_urls: urls,
             password_changed: None,
             custom_fields: fields,
+            ..EntryMetadata::default()
         };
     }
     pub(crate) fn set_test_trashed(&mut self, id: usize, deleted_at: &str) {

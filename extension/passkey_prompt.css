@@ -1,0 +1,9 @@
+main { display: grid; gap: 10px; }
+#choices { display: grid; gap: 6px; }
+#verify { display: grid; gap: 6px; }
+#verify[hidden] { display: none; }
+#verify .hint { margin: 0; }
+#verify .check { display: flex; gap: 8px; align-items: center; }
+#choices label { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.actions { display: grid; gap: 8px; }
+button { width: 100%; }

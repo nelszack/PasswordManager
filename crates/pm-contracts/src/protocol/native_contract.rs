@@ -18,6 +18,10 @@ pub enum NativeAction {
     SaveCredentials,
     UpdateCredentials,
     OperationStatus,
+    GetPasskeys,
+    CreatePasskey,
+    GetPasskeyAssertion,
+    VerifyPasskeyUser,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +35,7 @@ pub struct NativePolicy {
     pub result_shape: &'static str,
 }
 impl NativeAction {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 18] = [
         Self::Status,
         Self::Lock,
         Self::OpenDesktop,
@@ -46,6 +50,10 @@ impl NativeAction {
         Self::SaveCredentials,
         Self::UpdateCredentials,
         Self::OperationStatus,
+        Self::GetPasskeys,
+        Self::CreatePasskey,
+        Self::GetPasskeyAssertion,
+        Self::VerifyPasskeyUser,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -63,6 +71,10 @@ impl NativeAction {
             Self::SaveCredentials => "saveCredentials",
             Self::UpdateCredentials => "updateCredentials",
             Self::OperationStatus => "operationStatus",
+            Self::GetPasskeys => "getPasskeys",
+            Self::CreatePasskey => "createPasskey",
+            Self::GetPasskeyAssertion => "getPasskeyAssertion",
+            Self::VerifyPasskeyUser => "verifyPasskeyUser",
         }
     }
     pub fn policy(self) -> NativePolicy {
@@ -73,10 +85,13 @@ impl NativeAction {
                 | Self::GetTotp
                 | Self::SaveCredentials
                 | Self::UpdateCredentials
+                | Self::CreatePasskey
         );
         let lane = match self {
             Self::Status | Self::Lock | Self::OpenDesktop | Self::OperationStatus => "control",
             Self::DuoRequests | Self::DuoRespond | Self::GetDuoItems => "duo",
+            // Waits for the person in the desktop app; never blocks other lanes.
+            Self::VerifyPasskeyUser => "approval",
             _ => "work",
         };
         let allowed_senders: &[&str] = match self {
@@ -134,6 +149,26 @@ impl NativeAction {
                 "message",
             ),
             Self::OperationStatus => (&["operationId"], &[], "receipt"),
+            Self::GetPasskeys => (&["domain", "passkeyRequest"], &[], "passkeyArray"),
+            // `verificationToken` comes from verifyPasskeyUser after the
+            // person confirmed in the desktop app.
+            Self::CreatePasskey => (
+                &["domain", "passkeyRequest", "expectedSession"],
+                &["verificationToken"],
+                "passkeyCredential",
+            ),
+            Self::GetPasskeyAssertion => (
+                &[
+                    "domain",
+                    "entryId",
+                    "passkeyRequest",
+                    "expectedRevision",
+                    "expectedSession",
+                ],
+                &["verificationToken"],
+                "passkeyCredential",
+            ),
+            Self::VerifyPasskeyUser => (&["domain", "expectedSession"], &[], "message"),
         };
         NativePolicy {
             mutates,
@@ -142,10 +177,11 @@ impl NativeAction {
             required_fields,
             optional_fields,
             result_shape,
-            timeout_ms: if matches!(self, Self::DuoRequests | Self::DuoRespond) {
-                65_000
-            } else {
-                15_000
+            timeout_ms: match self {
+                Self::DuoRequests | Self::DuoRespond => 65_000,
+                // The service waits up to 90 seconds for the person.
+                Self::VerifyPasskeyUser => 100_000,
+                _ => 15_000,
             },
         }
     }
@@ -199,6 +235,8 @@ pub fn browser_declarations() -> String {
             "authenticator" => "Authenticator",
             "duoArray" => "DuoRequest[]",
             "receipt" => "OperationReceipt",
+            "passkeyArray" => "PasskeyChoice[]",
+            "passkeyCredential" => "PasskeyCredentialJSON",
             _ => unreachable!(),
         };
         results.push_str(&format!(

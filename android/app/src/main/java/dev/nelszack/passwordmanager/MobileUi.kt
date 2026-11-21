@@ -14,6 +14,14 @@ import androidx.core.content.ContextCompat
 
 /** Native components shared by management screens; autofill keeps its compact presentation. */
 internal object MobileUi {
+    /** A short human-readable file size. */
+    fun byteSize(bytes: Long): String =
+        when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> String.format(java.util.Locale.ROOT, "%.1f KiB", bytes / 1024.0)
+            else -> String.format(java.util.Locale.ROOT, "%.1f MiB", bytes / 1048576.0)
+        }
+
     fun dp(context: Context, value: Int) =
         (context.resources.displayMetrics.density * value).toInt()
 

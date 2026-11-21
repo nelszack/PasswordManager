@@ -40,7 +40,7 @@
 - `src/lib.rs` - Shared production library used by the desktop/CLI, Android adapter, and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
 - `docs/commands.template.html` - Static layout used by the command-reference generator
-- `extension/` - Browser extension (Chrome/Chromium); `ui_transport.js` shares window messaging and reports failures without retrying mutations
+- `extension/` - Browser extension (Chrome/Chromium, plus a generated Firefox build from `scripts/package_extension.cjs --browser firefox`); `ui_transport.js` shares window messaging and reports failures without retrying mutations
 
 See the [architecture review](architecture-review.md) for the reasoning behind
 the domain, protocol, and session refactor.

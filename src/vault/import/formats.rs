@@ -323,13 +323,20 @@ pub(super) fn external_json(
         }
         if let Some(folder_id) = value.get("folderId").and_then(Value::as_str) {
             if let Some(folder) = folders.get(folder_id) {
-                field(&mut item, "folder", Some((*folder).into()), false);
+                item.add_tag(folder);
             } else {
                 losses.warn(index, "folder reference could not be resolved");
             }
         }
-        if value.get("favorite").and_then(Value::as_bool) == Some(true) {
-            field(&mut item, "favorite", Some("true".into()), false);
+        item.favorite = value.get("favorite").and_then(Value::as_bool) == Some(true);
+        for tag in value
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            item.add_tag(tag);
         }
         for (object, key, message) in [
             (
@@ -394,6 +401,7 @@ pub(super) fn external_json(
             "totp",
             "folderId",
             "favorite",
+            "tags",
             "reprompt",
             "organizationId",
             "collectionIds",
@@ -647,6 +655,17 @@ pub(super) fn csv_with_losses(
             ),
         });
         item.kind = kind;
+        if let Some(folder) = csv_field(&headers, &row, &["folder", "grouping", "group"]) {
+            item.add_tag(&folder);
+        }
+        for tag in csv_field(&headers, &row, &["tags"])
+            .iter()
+            .flat_map(|tags| tags.split([',', ';']))
+        {
+            item.add_tag(tag);
+        }
+        item.favorite = csv_field(&headers, &row, &["favorite", "fav"])
+            .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "True" | "yes"));
         if kind == ItemKind::SecureNote
             && let Some(notes) = item
                 .entry
@@ -689,6 +708,12 @@ pub(super) fn csv_with_losses(
                 "kind",
                 "totp",
                 "logintotp",
+                "folder",
+                "grouping",
+                "group",
+                "tags",
+                "favorite",
+                "fav",
             ]
             .contains(&header.as_str())
                 || primary_aliases.contains(&header.as_str())
@@ -745,11 +770,13 @@ mod tests {
         assert_eq!(items[0].additional_urls, ["https://two.example"]);
         assert!(items[0].totp.is_some());
         assert_eq!(items[0].password_history[0].password, "older");
+        assert_eq!(items[0].tags, ["Work"]);
+        assert!(items[0].favorite);
         assert!(
-            items[0]
+            !items[0]
                 .custom_fields
                 .iter()
-                .any(|f| f.name == "folder" && f.value == "Work")
+                .any(|f| f.name == "folder" || f.name == "favorite")
         );
         assert!(
             items[0]

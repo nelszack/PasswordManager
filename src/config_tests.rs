@@ -115,7 +115,10 @@ fn updates_persist_all_fields_and_boundary_values() {
                     password_history_limit: history,
                     trash_retention_days: retention
                 },
-                server: ServerConfig { port },
+                server: ServerConfig {
+                    port,
+                    ssh_agent: false
+                },
                 desktop: DesktopConfig::default(),
                 sync: SyncConfig::default(),
             },
@@ -328,6 +331,7 @@ password_history_limit=10
 trash_retention_days=0
 [server]
 port={}
+ssh_agent=false
 [desktop]
 appearance="dark"
 scale=100

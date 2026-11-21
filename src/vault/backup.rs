@@ -97,6 +97,7 @@ pub(super) fn decode_backup(
             filename,
             duo_session: None,
             changes: None,
+            schema_upgraded: false,
         },
     })
 }

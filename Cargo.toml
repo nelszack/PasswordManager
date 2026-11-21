@@ -43,6 +43,8 @@ subtle = "2"
 totp-rs = { version = "6", default-features = false, features = ["otpauth", "zeroize"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 base64 = "0.23"
+ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ed25519", "encryption"] }
+signature = { version = "2", default-features = false }
 aws-lc-rs = "1.18"
 pem-rfc7468 = { version = "1.0", features = ["alloc"] }
 html-escape = "0.3"

@@ -190,7 +190,7 @@ pub(super) async fn run(
             NativeHostCommands::Install {
                 extension_id,
                 browser,
-            } => match native_messaging::install(&extension_id, browser) {
+            } => match native_messaging::install(extension_id.as_deref(), browser) {
                 Ok(path) => console.print_success(&format!(
                     "Native messaging host installed at {}",
                     path.display()
@@ -219,7 +219,8 @@ pub(super) async fn run(
             }
             let restart_required = (command.reset
                 || command.password_history_limit.is_some()
-                || command.trash_retention_days.is_some())
+                || command.trash_retention_days.is_some()
+                || command.ssh_agent.is_some())
                 && configured_server_running();
             let effective = if command.has_updates() {
                 try_update(conf.clone(), command, config_file)
@@ -236,9 +237,29 @@ pub(super) async fn run(
             );
             if restart_required {
                 console.print_warning(
-                    "restart the server before the updated recovery settings take effect",
+                    "restart the server before the updated recovery or SSH agent settings take \
+                     effect",
                 );
             }
+        }
+        CliCommands::SshAgent { command: None } => {
+            let path = password_manager::server::ssh_agent_socket();
+            let quoted = format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+            let mut text = format!("SSH_AUTH_SOCK={quoted}; export SSH_AUTH_SOCK;");
+            if !conf.server.ssh_agent {
+                text.push_str(
+                    "\n# The agent is off; enable it with `pm config --ssh-agent true` and \
+                     restart the server.",
+                );
+            }
+            console.print_data(
+                serde_json::json!({
+                    "socket": path,
+                    "enabled": conf.server.ssh_agent,
+                    "supported": cfg!(unix),
+                }),
+                &text,
+            );
         }
         CliCommands::Start => match start(port) {
             Ok(message) => console.print_success(&message),
@@ -249,6 +270,7 @@ pub(super) async fn run(
                 port,
                 conf.recovery.password_history_limit,
                 conf.recovery.trash_retention_days,
+                conf.server.ssh_agent,
             )
             .await
             {

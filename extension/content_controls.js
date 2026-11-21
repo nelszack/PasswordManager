@@ -106,10 +106,13 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             }
         });
         securePickerControls.set(input, control);
-        button.addEventListener("click", async event => {
+        button.addEventListener("click", event => {
             if (!event.isTrusted) return;
             event.preventDefault();
             event.stopPropagation();
+            return control.activate();
+        });
+        control.activate = async () => {
             try {
                 const scope = selectionScope();
                 const selection = await openSecurePicker(kind);
@@ -124,7 +127,25 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
                     button.setAttribute("aria-label", title);
                 }, 5000);
             }
-        });
+        };
+    }
+
+    // Keyboard shortcut: open the picker for the focused field, or else for the
+    // first visible login field on the page. Returns whether a picker opened.
+    function activateShortcut(focused) {
+        let control = focused ? securePickerControls.get(focused) : undefined;
+        if (!control) {
+            for (const record of positionedControls) {
+                const candidate = securePickerControls.get(record.input);
+                if (candidate?.kind === "login" && isElementVisible(record.input)) {
+                    control = candidate;
+                    break;
+                }
+            }
+        }
+        if (!control) return false;
+        control.activate();
+        return true;
     }
 
     function createSecureCredentialButton(input) {
@@ -183,6 +204,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         createSecureTotpButton,
         createSecureTypedButton,
         removeSecurePickerButton,
+        activateShortcut,
         registerPositionedControl,
         schedulePosition,
         layoutChanged: schedulePosition,

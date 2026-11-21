@@ -1,4 +1,6 @@
-importScripts(
+// Chrome's service worker loads these here; Firefox's event page lists the same
+// scripts in its generated manifest and has no importScripts.
+if (typeof importScripts === "function") importScripts(
     "command_contract.js",
     "background_security.js",
     "background_state.js",
@@ -13,7 +15,8 @@ importScripts(
     "background_prompts.js",
     "background_router.js",
     "duo_detection.js",
-    "background_duo.js"
+    "background_duo.js",
+    "background_passkeys.js"
 );
 
 // Wire dependencies once; each service owns its maps and lifecycle rules.
@@ -28,6 +31,7 @@ const native = PasswordManagerBackgroundNative.create({
         pickers.invalidate();
         prompts.invalidate();
         duo.invalidate();
+        passkeys.invalidate();
     },
 });
 const pendingCredentials = PasswordManagerBackgroundPending.create({
@@ -69,6 +73,13 @@ const prompts = PasswordManagerBackgroundPrompts.create({
     setTimeout,
     onLoginContext: duo.rememberLogin,
 });
+const passkeys = PasswordManagerBackgroundPasskeys.create({
+    chrome,
+    security: PasswordManagerSecurity,
+    nativeRequest: native.request,
+    crypto,
+    setTimeout,
+});
 const manifest = chrome.runtime.getManifest();
 const status = PasswordManagerBackgroundStatus.create({
     chrome,
@@ -83,6 +94,7 @@ const status = PasswordManagerBackgroundStatus.create({
         pickers.invalidate();
         prompts.invalidate();
         duo.invalidate();
+        passkeys.invalidate();
     },
     cleanupExpired: () => {
         pendingCredentials.cleanup().catch(() => {});
@@ -96,7 +108,7 @@ const startup = new Promise(resolve => {
         return;
     }
     chrome.windows.getAll({ populate: true }, windows => {
-        const promptPaths = ["picker.html", "credential_prompt.html", "duo_prompt.html"].map(path =>
+        const promptPaths = ["picker.html", "credential_prompt.html", "duo_prompt.html", "passkey_prompt.html"].map(path =>
             chrome.runtime.getURL(path)
         );
         for (const window of windows || []) {
@@ -125,8 +137,10 @@ const router = PasswordManagerBackgroundRouter.create({
     prompts,
     pendingCredentials,
     duo,
+    passkeys,
 });
 chrome.windows.onRemoved.addListener(windowId => {
-    if (!duo.windowRemoved(windowId) && !prompts.windowRemoved(windowId)) pickers.windowRemoved(windowId);
+    if (!duo.windowRemoved(windowId) && !prompts.windowRemoved(windowId) && !passkeys.windowRemoved(windowId))
+        pickers.windowRemoved(windowId);
 });
 status.start();

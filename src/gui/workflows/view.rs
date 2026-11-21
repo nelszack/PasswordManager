@@ -1080,15 +1080,21 @@ fn browser_form<'a>(
     form.push(text("Register the browser extension").size(19))
         .push(
             text(
-                "Load extension/ as an unpacked extension first, then enter its ID. Reload \
-             the extension afterward. On Windows, fully close the browser before \
-             installing or updating its native host.",
+                "Load extension/ as an unpacked extension first, then enter its ID. For \
+             Firefox, load the packaged Firefox build; its ID can stay empty. Reload the \
+             extension afterward. On Windows, fully close the browser before installing or \
+             updating its native host.",
             )
             .size(14),
         )
         .push(
             pick_list(
-                [Browser::Chrome, Browser::Chromium, Browser::Helium],
+                [
+                    Browser::Chrome,
+                    Browser::Chromium,
+                    Browser::Helium,
+                    Browser::Firefox,
+                ],
                 Some(state.browser.browser),
                 |value| event(Event::Browser(value)),
             )
@@ -1096,7 +1102,7 @@ fn browser_form<'a>(
             .padding(10),
         )
         .push(field(
-            "32-character extension ID",
+            "Extension ID (32 characters; optional for Firefox)",
             &state.browser.extension_id,
             Field::ExtensionId,
             false,

@@ -5,8 +5,25 @@
     if (typeof module === "object" && module.exports) module.exports = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
-    const protocolVersion = 5;
+    const protocolVersion = 6;
     const operations = Object.freeze({
+  "createPasskey": {
+    "mutates": true,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "domain",
+      "passkeyRequest",
+      "expectedSession"
+    ],
+    "optionalFields": [
+      "verificationToken"
+    ],
+    "resultShape": "passkeyCredential"
+  },
   "duoRequests": {
     "mutates": false,
     "lane": "duo",
@@ -107,6 +124,39 @@
     ],
     "optionalFields": [],
     "resultShape": "summaryArray"
+  },
+  "getPasskeyAssertion": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "domain",
+      "entryId",
+      "passkeyRequest",
+      "expectedRevision",
+      "expectedSession"
+    ],
+    "optionalFields": [
+      "verificationToken"
+    ],
+    "resultShape": "passkeyCredential"
+  },
+  "getPasskeys": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "domain",
+      "passkeyRequest"
+    ],
+    "optionalFields": [],
+    "resultShape": "passkeyArray"
   },
   "getTotp": {
     "mutates": true,
@@ -210,6 +260,20 @@
       "username"
     ],
     "resultShape": "message"
+  },
+  "verifyPasskeyUser": {
+    "mutates": false,
+    "lane": "approval",
+    "timeoutMs": 100000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "domain",
+      "expectedSession"
+    ],
+    "optionalFields": [],
+    "resultShape": "message"
   }
 });
     const kinds = new Set(["login", "secure-note", "payment-card", "identity", "wifi", "software-license", "ssh-key", "api-secret"]);
@@ -250,6 +314,8 @@
                 case "requestId": valid = bounded(value, 256, true) && /^[a-zA-Z0-9_-]+$/.test(value); break;
                 case "fingerprint": valid = text(value) && /^[a-fA-F0-9]{128}$/.test(value); break;
                 case "verificationCode": valid = text(value) && /^\d{0,6}$/.test(value); break;
+                case "verificationToken": valid = text(value) && /^[a-f0-9]{64}$/.test(value); break;
+                case "passkeyRequest": valid = bounded(value, 65536) && value.startsWith("{"); break;
                 default: valid = false;
             }
             if (!valid) fail("Invalid native request field");
@@ -294,6 +360,8 @@
             case "authenticator": valid = authenticator(data); break;
             case "duoArray": valid = Array.isArray(data) && data.every(duoRequest); break;
             case "receipt": valid = receipt(data); break;
+            case "passkeyArray": valid = Array.isArray(data) && data.every(choice => object(choice) && positive(choice.id) && integer(choice.revision) && text(choice.rp_id) && typeof choice.user_name === "string" && typeof choice.display_name === "string"); break;
+            case "passkeyCredential": valid = object(data) && text(data.id) && data.rawId === data.id && data.type === "public-key" && object(data.response) && text(data.response.clientDataJSON) && object(data.clientExtensionResults); break;
         }
         if (!valid) fail("Invalid native operation result");
         return data;

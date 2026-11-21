@@ -363,3 +363,36 @@ fn parsed_header_matches_the_written_header_and_its_session() {
         decrypt_file(&mut credentials, &encrypted).unwrap();
     assert_eq!(plaintext.as_slice(), b"synthetic");
 }
+
+#[test]
+fn a_session_reverifies_only_its_own_password_without_the_vault_file() {
+    let parameters = KdfParameters {
+        memory_kib: 8 * 1024,
+        iterations: 1,
+        parallelism: 1,
+    };
+    let mut session = VaultCredentials::from(PasswordType::Password("reverify-test-pass".into()));
+    with_test_kdf_parameters(parameters, || {
+        try_encrypt_file_in_place(&mut session, b"payload".to_vec()).unwrap()
+    });
+    assert!(password_matches(&session, "reverify-test-pass"));
+    assert!(!password_matches(&session, "reverify-test-Pass"));
+    assert!(!password_matches(&session, ""));
+    assert!(!password_matches(
+        &VaultCredentials::Locked,
+        "reverify-test-pass"
+    ));
+    let mut keyed = VaultCredentials::Session {
+        encryption_key: [1; 32],
+        salt: [2; 16],
+        kdf: 0,
+        memory_kib: 8 * 1024,
+        iterations: 1,
+        parallelism: 1,
+    };
+    assert!(
+        !password_matches(&keyed, "anything"),
+        "key-file sessions never match a password"
+    );
+    keyed.zeroize();
+}

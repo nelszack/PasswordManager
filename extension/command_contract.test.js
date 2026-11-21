@@ -16,6 +16,17 @@ test("generated native request policy rejects cross-operation fields, missing re
     ]) assert.throws(() => contract.validateRequest("updateCredentials", invalid));
     assert.throws(() => contract.validateRequest("getLoginItems", { password: "secret" }));
     assert.throws(() => contract.validateRequest("managerUnlock", { operationId: "unlock", password: "master", keyPath: "/tmp/key" }));
+    // Passkey operations carry only a desktop-issued verification token,
+    // never a password.
+    const passkey = { domain: "https://example.com", passkeyRequest: "{}", expectedSession: "a".repeat(64) };
+    const verificationToken = "b".repeat(64);
+    assert.ok(contract.validateRequest("createPasskey", { ...passkey, operationId: "op", verificationToken }));
+    assert.ok(contract.validateRequest("getPasskeyAssertion", { ...passkey, entryId: 1, expectedRevision: 0, verificationToken }));
+    assert.throws(() => contract.validateRequest("createPasskey", { ...passkey, operationId: "op", password: "master" }));
+    assert.throws(() => contract.validateRequest("createPasskey", { ...passkey, operationId: "op", verificationToken: "B".repeat(64) }));
+    assert.ok(contract.validateRequest("verifyPasskeyUser", { domain: "https://example.com", expectedSession: "a".repeat(64) }));
+    assert.equal(contract.operations.verifyPasskeyUser.lane, "approval");
+    for (const removed of ["unlock", "vaults", "switchVault"]) assert.equal(contract.operations[removed], undefined);
     assert.deepEqual(contract.operations.saveCredentials.allowedSenders, ["background"]);
     assert.deepEqual(contract.operations.updateCredentials.allowedSenders, ["background"]);
 });

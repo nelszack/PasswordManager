@@ -69,7 +69,21 @@ fn fields(a: &Item, b: &Item) -> Vec<ConflictField> {
             &b.metadata.custom_fields
         )
     );
+    field!(
+        "organization",
+        (&a.metadata.tags, a.metadata.favorite),
+        (&b.metadata.tags, b.metadata.favorite),
+        organization(a),
+        organization(b)
+    );
     protected!("history", a.history, b.history);
+    field!(
+        "attachments",
+        a.attachments,
+        b.attachments,
+        attachment_summary(a),
+        attachment_summary(b)
+    );
     protected!("authenticator", a.authenticator, b.authenticator);
     // Runtime review keys must never create a spurious conflict.
     protected!(
@@ -91,6 +105,29 @@ fn password_date(item: &Item) -> &Timestamp {
         .password_changed
         .as_ref()
         .unwrap_or(&item.entry.created)
+}
+/// Names and sizes only; attachment contents are never shown in a review.
+fn attachment_summary(item: &Item) -> String {
+    if item.attachments.is_empty() {
+        return "No attachments".into();
+    }
+    item.attachments
+        .iter()
+        .map(|a| format!("{} ({} bytes)", a.name, a.data.len()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+fn organization(item: &Item) -> String {
+    let tags = if item.metadata.tags.is_empty() {
+        "No tags".to_owned()
+    } else {
+        format!("Tags: {}", item.metadata.tags.join(", "))
+    };
+    if item.metadata.favorite {
+        format!("{tags} · favorite")
+    } else {
+        tags
+    }
 }
 fn lifecycle(item: &Item) -> String {
     match &item.lifecycle {
@@ -263,11 +300,21 @@ fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<Va
                     "url" => dest.entry.url = src.entry.url.clone(),
                     "notes" => dest.entry.notes = src.entry.notes.clone(),
                     "metadata" => {
+                        // Organization is reviewed separately as its own field.
                         let changed = dest.metadata.password_changed.clone();
+                        let tags = std::mem::take(&mut dest.metadata.tags);
+                        let favorite = dest.metadata.favorite;
                         dest.metadata = src.metadata.clone();
                         dest.metadata.password_changed = changed;
+                        dest.metadata.tags = tags;
+                        dest.metadata.favorite = favorite;
+                    }
+                    "organization" => {
+                        dest.metadata.tags = src.metadata.tags.clone();
+                        dest.metadata.favorite = src.metadata.favorite;
                     }
                     "history" => dest.history = src.history.clone(),
+                    "attachments" => dest.attachments = src.attachments.clone(),
                     "authenticator" => dest.authenticator = src.authenticator.clone(),
                     "duo" => dest.duo = src.duo.clone(),
                     "lifecycle" => dest.lifecycle = src.lifecycle.clone(),
@@ -404,6 +451,42 @@ mod tests {
             local.data.items[&ItemId(1)].entry.password.expose(),
             "local-secret"
         );
+    }
+    #[test]
+    fn organization_and_general_metadata_are_chosen_independently() {
+        let (local, mut remote) = pair();
+        {
+            let item = local.data.items[&ItemId(1)].clone();
+            let mut local_item = item;
+            local_item.metadata.tags = vec!["Local tag".into()];
+            local_item.metadata.favorite = true;
+            let mut local = local.clone();
+            local.data.items.insert(ItemId(1), local_item);
+            let remote_item = remote.data.items.get_mut(&ItemId(1)).unwrap();
+            remote_item.metadata.tags = vec!["Cloud tag".into()];
+            remote_item.metadata.kind = ItemKind::SecureNote;
+            let review = compare(&local.data, &remote.data);
+            let fields: Vec<_> = review[0].fields.iter().map(|f| f.field.as_str()).collect();
+            assert!(fields.contains(&"organization") && fields.contains(&"metadata"));
+            let organization = review[0]
+                .fields
+                .iter()
+                .find(|f| f.field == "organization")
+                .unwrap();
+            assert_eq!(organization.local, "Tags: Local tag · favorite");
+            assert_eq!(organization.remote, "Tags: Cloud tag");
+            let mut choices = choices(&local.data, &remote.data, Side::Local);
+            choices
+                .iter_mut()
+                .find(|c| c.field == "metadata")
+                .unwrap()
+                .side = Side::Remote;
+            let merged = merge(&local.data, &remote.data, &choices).unwrap();
+            let item = &merged.items[&ItemId(1)];
+            assert_eq!(item.metadata.kind, ItemKind::SecureNote);
+            assert_eq!(item.metadata.tags, ["Local tag"]);
+            assert!(item.metadata.favorite);
+        }
     }
     #[test]
     fn incomplete_duplicate_unknown_and_absent_item_choices_are_checked() {

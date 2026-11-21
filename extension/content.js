@@ -91,6 +91,20 @@ module.exports.create = function create({
     },
   });
 
+  // The extension's keyboard shortcut reaches every frame; only the focused
+  // frame acts. Pages cannot send extension runtime messages.
+  function deepActiveElement() {
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    return active;
+  }
+  function shortcutListener(message, sender) {
+    if (message?.action !== "pmShortcutFill" || sender?.id !== chrome.runtime.id) return;
+    if (!alive() || !document.hasFocus()) return;
+    withVisibilityCache(() => controls.activateShortcut(deepActiveElement()));
+  }
+  chrome.runtime.onMessage.addListener(shortcutListener);
+
   // Dispose instead of acting once the extension context is gone.
   function alive() {
     if (disposed) return false;
@@ -333,6 +347,7 @@ module.exports.create = function create({
     bridge.dispose();
     duo?.dispose();
     credentials.dispose();
+    chrome.runtime.onMessage.removeListener(shortcutListener);
   }
   return {
     start,

@@ -53,8 +53,11 @@ preferred launcher. Automatic shortcut installation currently targets Linux.
 
 The Vault tab supports creating a password-protected vault, selecting an
 existing vault, unlocking with a password or an absolute external-key path,
-searching item names/usernames/URLs, adding items, and viewing/editing names,
-types, usernames, primary secrets, URLs, multiline notes, and custom fields.
+searching item names/usernames/URLs/tags, adding items, and viewing/editing names,
+types, usernames, primary secrets, URLs, tags, favorites, multiline notes, and
+custom fields. Enter tags as a comma-separated list. Favorites show a ★ in the
+item list; use **Add to favorites** on an open item to star it without editing.
+The list's tag picker and **Favorites only** checkbox narrow the items shown.
 Open **Custom fields & advanced options** and enable **Edit as a multiline secret** when entering private keys or other multiline values;
 that editor displays the text while editing. The desktop creation form accepts a
 friendly vault name and opens the new vault using the password just entered.
@@ -377,8 +380,13 @@ require revealing them first. TOTP codes refresh for each copy and display an
 expiry countdown when shown. HOTP generation is an explicit action that advances
 the saved counter.
 
+The details screen also lists attachments: tap one to save a copy, or use
+**Add attachment** to store a file of up to 5 MiB.
+
 Choose **Add item** or **Edit item** for typed editing, multiple website addresses,
-notes, and custom fields. **Save item** and **Cancel** stay at the bottom while
+notes, comma-separated tags, the favorite mark, and custom fields. The **★ Favorites**
+filter chip lists starred items, and an item's details screen can star or unstar it
+directly. **Save item** and **Cancel** stay at the bottom while
 the form scrolls. Back and Cancel ask before discarding changed drafts. A failed
 save keeps your draft so you can correct the problem. Leaving the app or locking
 still clears sensitive views; a draft is not a saved recovery copy.
@@ -417,8 +425,21 @@ On Android's legacy Chrome autofill API, the page port may be unavailable. The
 exact-hostname picker then requires explicit login/address selection and shows
 saved nonstandard ports; it cannot verify the current page port. See the
 [origin and browser restrictions](../android/README.md#setup). Native-app matching
-uses the app's package and signing certificate. Android card/identity autofill
-and desktop browser passkey use remain unimplemented.
+uses the app's package and signing certificate.
+
+Payment-card and identity forms (checkout, address, and contact forms) offer
+**Fill a saved card** or **Fill a saved identity** when the screen has no login
+fields. Choosing it opens the sheet: unlock if needed, then pick the card or
+identity explicitly; nothing is filled without that choice, and no card or
+identity data reaches Android before it. Fields are recognized from Android
+autofill hints, the page's `autocomplete` attributes, and field names and labels,
+using the same rules as the browser extension. Cards fill the number, cardholder
+(the item's username), and **Expiry**/**Security code** fields; an `MM/YY` expiry
+also fills separate month and year fields. Identities fill their name (split into
+first and last names when needed) and fields such as **Email**, **Phone**,
+**Address**, **City**, and **ZIP**. Email and phone fields alone, as on many
+login and search forms, are not treated as identity forms. Dropdown fields are
+not filled.
 
 ### Android preferences
 
@@ -594,7 +615,111 @@ pm search --type wifi
 pm search --totp --sort name
 pm search --weak --sort password-age
 pm search --stale-days 365 --sort password-age
+pm view --tag work --favorites
 ```
+
+### Tags and favorites
+
+Tags organize items without changing how they are matched or filled. Each item
+can have up to 32 tags of up to 64 bytes; tags cannot contain commas, and
+duplicates that differ only by case are merged. `--tag` (repeatable) on `view`
+or `search` lists only items carrying every given tag, and `--favorites` lists
+only starred items. The general search term also matches tags.
+
+```bash
+pm add --name "AWS console" --url https://aws.amazon.com --tag work --tag cloud --favorite
+pm update --id 3 --add-tag finance --remove-tag old --favorite
+pm update --id 3 --clear-tags --unfavorite
+```
+
+A vault that uses tags or favorites is saved in vault document schema 3. Older
+releases refuse to open it rather than silently discard the new data, so update
+every device (desktop, CLI, and Android) before relying on tags in a synced
+vault. The first save that needs the new schema says so once: the CLI prints a
+warning, the desktop app shows a banner until you dismiss it, and Android adds it
+to the save message. Removing every tag, favorite, and attachment returns the
+vault to the previous schema.
+Sync conflict review lists tags and favorites as their own **organization** field.
+
+### SSH agent
+
+On Linux and macOS the local service can act as an SSH agent, so `ssh`, `git`,
+and `ssh-keygen -Y sign` use keys stored in your vault without key files on
+disk. It is off by default:
+
+```bash
+pm config --ssh-agent true
+pm kill && pm start          # the agent starts with the service
+eval "$(pm ssh-agent)"       # sets SSH_AUTH_SOCK for this shell
+ssh-add -l                   # lists keys from the unlocked vault
+```
+
+Add the `eval` line to your shell profile to use it everywhere. Keys are off
+until you enable them: give the SSH-key item a custom field named **SSH agent**
+(the desktop SSH-key template includes it) with the value
+
+- `on` — serve the key while its vault is unlocked, or
+- `confirm` — ask before every signature.
+
+The primary secret must be an OpenSSH **Ed25519** private key
+(`-----BEGIN OPENSSH PRIVATE KEY-----`, as written by `ssh-keygen -t ed25519`).
+For a passphrase-protected key, store the passphrase in a secret custom field
+named **Passphrase**; it is decrypted once and kept in memory only while the
+vault stays unlocked. RSA and ECDSA keys are not served.
+
+```bash
+pm update --id 5 --field "SSH agent=confirm"
+```
+
+With `confirm`, the desktop app shows **SSH key requested** naming the key and
+the destination, with **Allow once** and **Refuse**; `pm status` lists the same
+requests and `pm ssh-agent approve ID` or `pm ssh-agent deny ID` answers them.
+Unanswered requests are refused after 30 seconds. The destination comes from
+OpenSSH's session binding: the host's name from `~/.ssh/known_hosts` when it is
+stored unhashed, otherwise its key fingerprint. Tools that do not bind a session
+(such as `ssh-keygen -Y sign`) show "an unknown host".
+
+Requests relayed through agent forwarding (`ssh -A`) from another machine are
+always refused, so a server you log in to cannot use your keys. Keys appear only
+while their vault is unlocked; locking, the inactivity
+timeout, or a screen lock leaves the agent with no identities. Agent use does not
+count as vault activity, so it never keeps a vault unlocked.
+
+The agent only lists keys and signs; `ssh-add` cannot add or remove keys
+through it. Any process running as your user can ask it to sign with an `on`
+key while the vault is unlocked, as with OpenSSH's own agent; use `confirm` for
+keys that need more protection. Its socket is owner-only (mode 0600 in a 0700
+directory), normally in `agent/ssh-agent.sock` under the data directory, or in a
+private directory under `$XDG_RUNTIME_DIR` (or the temporary directory) when
+that path would be too long for a socket. If the agent cannot start,
+`pm status` reports why. Windows support is planned.
+
+### Attachments
+
+Attach small files such as recovery-code PDFs, scanned documents, or key files
+to any item except a passkey. Attachments are encrypted inside the vault, so
+encrypted backups, sync, and portable JSON exports carry them automatically.
+Each attachment can be up to 5 MiB, and a vault holds at most 25 MiB of
+attachments (including items in the trash). An item can have up to 32
+attachments with unique names; names cannot contain `/`, `\`, or control
+characters.
+
+```bash
+pm attachment add --id 4 --path ~/Documents/recovery-codes.pdf
+pm attachment add --id 4 --path scan.png --name "Passport scan.png"
+pm get --id 4                       # lists attachments and their sizes
+pm attachment save --id 4 --name recovery-codes.pdf --path ~/Downloads/codes.pdf
+pm attachment remove --id 4 --name recovery-codes.pdf
+```
+
+Saved copies are created with owner-only permissions and never replace an
+existing file unless you pass `--force`. Removing an attachment is permanent;
+restore an encrypted backup to recover it. In the desktop app, open an item and
+use **Add attachment…**, **Save as…**, or **Remove…** (which asks for
+confirmation). On Android, the item's details screen lists attachments; tap one to
+save a copy through the system file picker, or choose **Add attachment**.
+Portable JSON stores attachment content as base64; plaintext CSV omits it.
+A vault with attachments uses vault document schema 3, like tags.
 
 The general search term matches any non-secret field. Field-specific filters are
 combined, so every supplied filter must match. Matching is case-insensitive.
@@ -659,6 +784,7 @@ pm update --id 3 --field environment=staging
 pm update --id 3 --secret-field api-token
 pm update --id 3 --remove-field environment
 pm update --id 3 --clear-fields
+pm update --id 3 --add-tag work --favorite
 ```
 
 ### Delete an Entry
@@ -1003,6 +1129,12 @@ The timeout is based on inactivity: each authenticated vault operation resets it
 passive status polling does not.
 Durations accept seconds or `s`, `m`, `h`, and `d` suffixes. New configurations
 default to 15 minutes; a value of `0` disables inactivity locking.
+After five wrong passwords in a row, the local service makes you wait before the
+next attempt: one second, then two, doubling up to five minutes. This applies to
+the CLI and the desktop app alike, and to deleting a vault
+with its password. A correct password resets the count. Refused attempts are not
+checked, so waiting is the only way through.
+
 Locking clears vault memory without depending on storage writes. If automatic
 clipboard cleanup fails, `pm status` reports a warning and the extension shows a
 warning badge; the vault itself is already locked.
@@ -1115,8 +1247,9 @@ pm import --path backup.csv --conflicts keep-both
 ```
 
 Bitwarden JSON imports preserve logins, secure notes, cards, identities, SSH keys,
-all login URLs, TOTP, password history, and custom fields. Folder names and
-favorites are retained as custom fields. Hidden fields, card security codes, and
+all login URLs, TOTP, password history, and custom fields. Folder names become
+tags and favorites keep their star. CSV imports read `folder`, `grouping`,
+`tags`, and `favorite` columns the same way. Hidden fields, card security codes, and
 sensitive identity numbers stay secret fields; secure-note bodies become primary
 secrets rather than ordinary searchable notes. History follows the configured
 retention limit.
@@ -1124,8 +1257,9 @@ retention limit.
 Android-created passkeys are preserved by encrypted backups and portable JSON
 exports as reserved secret fields. CSV export refuses vaults containing passkeys
 because CSV cannot preserve their signing keys. The desktop browser extension
-currently fills passwords; Android passkey creation and sign-in use the native
-credential provider. See [Android setup](../android/README.md).
+creates and uses passkeys (see [Passkeys in the browser](#passkeys-in-the-browser));
+Android passkey creation and sign-in use the native credential provider. See
+[Android setup](../android/README.md).
 
 Both previews and completed imports report unsupported item counts and bounded,
 secret-free warnings. These identify omitted passkeys, attachments, linked fields,
@@ -1350,9 +1484,17 @@ source ~/.local/share/bash-completion/completions/pm
 ## Browser Extension
 
 Use the desktop app or CLI to unlock and edit your vault. The extension popup
-shows connection status and can lock the vault. Website pickers, credential-save
-prompts, signup generation, and Duo decisions remain available; the extension has
-no full vault-management page or browser generator-settings editor.
+shows connection status, locks the vault, and while it is locked offers
+**Unlock in desktop app**; the browser never asks for your master password to
+unlock. Website pickers, credential-save prompts, signup generation, and Duo
+decisions remain available; the extension has no full vault-management page or
+browser generator-settings editor.
+
+**Keyboard shortcuts.** `Ctrl+Shift+L` (`⌘⇧L` on macOS) opens the account
+picker for the focused login field, or for the first visible login field on the
+page; `Ctrl+Shift+Y` (`⌘⇧Y`) opens the popup. Change them at
+`chrome://extensions/shortcuts`. The picker still asks you to choose an account,
+so a shortcut never fills anything by itself.
 
 Lock and status requests use a separate native-host connection from site work
 and Duo polling. Requests that expire while queued are never sent. If a sent save
@@ -1364,9 +1506,78 @@ explicit acknowledgement. Neither review nor acknowledgement replays the write.
 The browser extension injects credential-handling code only into HTTPS pages.
 It does not offer autofill or save prompts on plaintext HTTP pages.
 
+### Passkeys in the browser
+
+When a website asks to create a passkey or sign in with one, the extension opens
+a small window naming the site. **Save passkey** stores a new passkey in the
+unlocked vault (as a login item named `Passkey: SITE (USER)`); for sign-in, choose
+the saved account and **Sign in**. **Use another passkey provider** hands the
+request back to the browser (for example, to a security key or the operating
+system's passkeys), and **Cancel** refuses it. Passkeys made here work on
+Android, and Android-created passkeys work here, through sync or backups.
+
+Sites can ask for *user verification*, proof that it is really you rather than
+anyone at an unlocked computer. You never type a secret into the browser for
+this. When a site asks (WebAuthn's default), the window offers **Confirm it's me
+in the desktop app**. Leave it unchecked to continue with presence only, which
+most sites accept; check it and the window waits while the desktop app shows
+**Confirm it's you** for that site. Type your master password or passkey PIN
+there and choose **Confirm**, and the site is told you were verified. **Refuse**,
+or no answer within 90 seconds, leaves the browser window open to try again or
+cancel. Sites that require verification always need this step. From a terminal,
+`pm status` lists waiting requests and `pm passkey approve ID` or
+`pm passkey deny ID` answers them.
+
+A **passkey PIN** (at least 6 characters) is how a key-file vault confirms, and
+it can be used instead of the master password in any vault. Set it in
+**Settings → Security → Passkey PIN** or with `pm passkey set-pin`, and remove it
+with **Remove PIN** or `pm passkey remove-pin`. It belongs to this device and
+vault: it is not synced, and changing the vault's password or key retires it.
+Wrong PINs are slowed down like wrong master passwords. A key-file vault without
+a PIN reports presence only and cannot serve sites that require verification;
+the window says so, and **Use another passkey provider** hands the request to the
+browser.
+The Android app verifies you with its unlock or fingerprint before every passkey
+operation.
+
+The extension only handles requests it can serve: ES256 passkeys on the device,
+without security-key or cross-device hints and without extensions other than
+`credProps`. Everything else, and the browser's passkey autofill suggestions
+(conditional requests), goes straight to the browser. If no passkey for the site
+is saved, sign-in requests also go to the browser. While the vault is locked the
+window asks you to unlock in the desktop app first. Only top-level HTTPS pages are
+covered; passkeys requested inside embedded frames use the browser.
+
+### Firefox
+
+Firefox 128 or later runs the same extension from a generated Firefox build.
+Release archives include it as `extension-firefox/`; from a source checkout,
+create it with:
+
+```bash
+node scripts/package_extension.cjs --browser firefox ~/pm-extension-firefox
+pm native-host install --browser firefox
+```
+
+The Firefox build uses background scripts instead of a service worker and the
+fixed add-on ID `password-manager@nelszack.dev`, so `--extension-id` is
+optional for Firefox. The host is registered in `~/.mozilla/native-messaging-hosts`
+on Linux, `~/Library/Application Support/Mozilla/NativeMessagingHosts` on macOS,
+and under `HKCU\Software\Mozilla\NativeMessagingHosts` on Windows. Chrome-family
+and Firefox registrations are independent, so both browsers can be registered.
+
+For development, load the build with **about:debugging → This Firefox → Load
+Temporary Add-on…** and choose its `manifest.json`; temporary add-ons are removed
+when Firefox restarts. A permanent installation must be signed through
+addons.mozilla.org (an unlisted, self-distributed signature is enough). Firefox
+installed as a Snap or Flatpak cannot start native hosts outside its sandbox;
+use a distribution or Mozilla package instead. Firefox 128 is required because
+the extension binds every picker and save prompt to the exact page document and
+origin the browser reports, and older versions do not report them.
+
 1. Build or install `pm` at a stable path, then load the `extension` folder as
    an unpacked extension in Chrome, Chromium, or Helium on Linux, macOS, or
-   Windows.
+   Windows. For Firefox, see [Firefox](#firefox).
 2. Copy its 32-character ID from `chrome://extensions` and register the native
    host:
 
@@ -1380,7 +1591,8 @@ It does not offer autofill or save prompts on plaintext HTTP pages.
    On Windows, `--browser helium` automatically uses Helium's
    Chromium-compatible native-messaging registry location. Fully exit Helium,
    including any background processes, and reopen it after registration.
-3. Start and unlock the password-manager server.
+3. Start the password-manager server, then unlock it in the desktop app or the
+   CLI.
 4. Visit a login page and use the key button beside a credential field to
    choose an account. The extension can offer to save or update credentials
    when a login is submitted.

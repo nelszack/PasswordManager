@@ -117,6 +117,21 @@ enum Request {
         id: usize,
         origin: String,
     },
+    /// Roles of described form fields for card and identity autofill. Pure
+    /// classification; available while locked.
+    TypedFields {
+        fields: Vec<String>,
+    },
+    /// Cards or identities to choose from (names only).
+    TypedChoices {
+        kind: ItemKind,
+    },
+    /// The chosen item's values for the form's roles.
+    TypedValues {
+        id: usize,
+        kind: ItemKind,
+        roles: Vec<String>,
+    },
     SiteOtp {
         id: usize,
         origin: String,
@@ -175,6 +190,18 @@ enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    /// Attach a file chosen with the system picker (base64url content).
+    AttachmentAdd {
+        id: usize,
+        name: String,
+        data: SecretString,
+        expected_revision: Option<u64>,
+    },
+    /// An attachment's content as base64url, for saving with the system picker.
+    AttachmentData {
+        id: usize,
+        name: String,
+    },
     ImportItems {
         data: SecretString,
         conflicts: Option<ConflictPolicy>,
@@ -222,6 +249,7 @@ impl Request {
                 | Self::Passcheck { .. }
                 | Self::CloudList { .. }
                 | Self::CloudDownload { .. }
+                | Self::TypedFields { .. }
         )
     }
 
@@ -846,7 +874,10 @@ impl MobileState {
             | Request::HostnameLogins { .. }
             | Request::OtpLogins { .. }
             | Request::Login { .. }
-            | Request::SiteOtp { .. }) => self.autofill_request(request),
+            | Request::SiteOtp { .. }
+            | Request::TypedFields { .. }
+            | Request::TypedChoices { .. }
+            | Request::TypedValues { .. }) => self.autofill_request(request),
             request @ (Request::Passkeys { .. }
             | Request::PasskeyCreate { .. }
             | Request::PasskeyGet { .. }) => self.passkey_request(request),
@@ -954,6 +985,23 @@ impl MobileState {
             } => self.browser_choices(&origin, hostname_only, true),
             Request::Login { id, origin } => self.login(id, &origin),
             Request::SiteOtp { id, origin } => self.site_otp(id, &origin),
+            Request::TypedFields { fields } => {
+                if fields.len() > 1000 || fields.iter().any(|f| f.len() > 4096) {
+                    return Err("Too many or too long field descriptions".into());
+                }
+                Ok(json!(typed_fill::classify(&fields)))
+            }
+            Request::TypedChoices { kind } => Ok(json!(self.vault()?.typed_fill_choices(kind))),
+            Request::TypedValues { id, kind, roles } => {
+                if roles.len() > 64 {
+                    return Err("Too many fields".into());
+                }
+                let values = self
+                    .vault()?
+                    .typed_fill_values(id, kind, &roles)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!(values))
+            }
             _ => Err(MISROUTED.into()),
         }
     }
@@ -989,7 +1037,10 @@ impl MobileState {
                     .map(|(_, p)| p)
                     .collect();
                 let hash = client_hash.as_deref().map(passkey::decode).transpose()?;
-                let (p, response) = passkey::create(&request, &origin, hash.as_deref(), &existing)?;
+                // The provider activity requires a fresh unlock (password or
+                // biometric) before every passkey operation.
+                let (p, response) =
+                    passkey::create(&request, &origin, hash.as_deref(), &existing, true)?;
                 self.save_passkey(&p)?;
                 Ok(response)
             }
@@ -1001,7 +1052,7 @@ impl MobileState {
             } => {
                 let p = self.passkey(id)?;
                 let hash = client_hash.as_deref().map(passkey::decode).transpose()?;
-                p.authenticate(&request, &origin, hash.as_deref())
+                p.authenticate(&request, &origin, hash.as_deref(), true)
             }
             _ => Err(MISROUTED.into()),
         }
@@ -1019,6 +1070,43 @@ impl MobileState {
             }
             Request::ExportItems { format, confirmed } => {
                 self.export_items(format.as_deref() != Some("csv"), confirmed)
+            }
+            Request::AttachmentAdd {
+                id,
+                name,
+                data,
+                expected_revision,
+            } => {
+                // Base64 holds 3 bytes per 4 characters; reject oversized
+                // input before decoding it.
+                let limit = attachments::MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
+                if data.len() > limit {
+                    return Err(format!(
+                        "Attachments are limited to {} MiB each",
+                        attachments::MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                    ));
+                }
+                let bytes = Zeroizing::new(passkey::decode(data.expose())?);
+                let (vault, credentials) = self.unlocked()?;
+                let target = Target::Id(id);
+                if let Some(expected) = expected_revision
+                    && vault.target_revision(&target) != Some(expected)
+                {
+                    return Err(
+                        "Item changed since it was opened; reopen it before continuing".into(),
+                    );
+                }
+                vault
+                    .add_attachment(&target, &name, bytes, credentials)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "message": "Attachment added." }))
+            }
+            Request::AttachmentData { id, name } => {
+                let data = self
+                    .vault()?
+                    .attachment_data(&Target::Id(id), &name)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "data": passkey::encode(&*data) }))
             }
             Request::ImportItems {
                 data,
@@ -1236,16 +1324,7 @@ impl MobileState {
     /// Public identities of stored passkeys. Private keys are neither parsed
     /// nor copied, and a damaged record is skipped instead of hiding the rest.
     fn passkey_identities(&self) -> Result<Vec<(usize, PasskeyIdentity)>, String> {
-        let mut result = Vec::new();
-        let mut skipped = 0usize;
-        for item in self.vault()?.active_items() {
-            if let Some(field) = item.passkey_field() {
-                match serde_json::from_str::<PasskeyIdentity>(&field.value) {
-                    Ok(p) if p.validate().is_ok() => result.push((item.entry.id, p)),
-                    _ => skipped += 1,
-                }
-            }
-        }
+        let (result, skipped) = self.vault()?.passkey_identities();
         if skipped > 0 {
             // A count only: never log a record, identity, or key.
             eprintln!("pm-mobile: skipped {skipped} invalid stored passkey record(s)");
@@ -1255,52 +1334,12 @@ impl MobileState {
 
     /// One stored passkey with its signing key, fully validated before use.
     fn passkey(&self, id: usize) -> Result<Passkey, String> {
-        let field = self
-            .vault()?
-            .item(id)
-            .filter(|item| item.active())
-            .and_then(|item| item.passkey_field())
-            .ok_or("Passkey not found")?;
-        let p: Passkey =
-            serde_json::from_str(&field.value).map_err(|_| "Invalid stored passkey")?;
-        p.validate()?;
-        Ok(p)
+        self.vault()?.stored_passkey(id)
     }
 
     fn save_passkey(&mut self, p: &Passkey) -> Result<(), String> {
-        p.validate()?;
-        let entry = TypedEntry {
-            entry: crate::types::PasswordEntry {
-                name: format!(
-                    "Passkey: {} ({}) {}",
-                    p.rp_id,
-                    p.user_name,
-                    &p.credential_id[..8]
-                ),
-                username: Some(p.user_name.clone()),
-                password: "".into(),
-                url: Some(format!("https://{}", p.rp_id)),
-                notes: None,
-                copy: false,
-            },
-            kind: ItemKind::Login,
-            additional_urls: vec![],
-            custom_fields: vec![CustomField {
-                name: passkey::FIELD.into(),
-                value: serde_json::to_string(p)
-                    .map_err(|_| "Could not encode passkey")?
-                    .into(),
-                secret: true,
-            }],
-        };
         let (vault, credentials) = self.unlocked()?;
-        let added = vault
-            .add_passkey_entry(entry, credentials)
-            .map_err(|e| e.to_string())?;
-        if !added {
-            return Err("Passkey entry already exists; retry registration".into());
-        }
-        Ok(())
+        vault.save_passkey(p, credentials)
     }
 }
 
@@ -1344,6 +1383,8 @@ fn mobile_command(command: &ServerCommand) -> Result<(), &'static str> {
             copy_timeout,
         } => !entry.entry.copy && *copy_timeout == 0,
         C::Delete(target) => !matches!(target, Target::Vault { .. }),
+        // Adding and saving use the mobile byte requests instead of paths.
+        C::Attachment(crate::types::AttachmentCommand::Remove { .. }) => true,
         _ => false,
     };
     if allowed {
@@ -1380,10 +1421,16 @@ fn response_value(responses: Vec<RpcResponse>, existing_update: bool) -> Result<
     if existing_update && response.code == ResponseCode::NotFound as i32 {
         return Ok(json!({ "changed": false }));
     }
+    let notice = response.notice;
     match response.payload {
         ResponsePayload::Message(message) if response.code != ResponseCode::Success as i32 => {
             Err(message)
         }
+        // The app shows result messages, so the notice follows the message.
+        ResponsePayload::Message(message) => Ok(Value::String(match notice {
+            Some(notice) => format!("{message} {notice}"),
+            None => message,
+        })),
         payload => Ok(payload.into_json()),
     }
 }
@@ -1560,6 +1607,8 @@ pub(super) mod test_support {
             kind: ItemKind::Login,
             additional_urls: vec![],
             custom_fields: vec![],
+            tags: vec![],
+            favorite: false,
         };
         vault_command(
             api,
@@ -1694,6 +1743,221 @@ mod tests {
         assert!(
             api.call(r#"{"op":"site_otp","origin":"https://accounts.example.com","id":1}"#)
                 .is_err()
+        );
+    }
+
+    /// The exact JSON shapes the Android app sends (`VaultCommands.kt`).
+    #[test]
+    fn android_tag_and_favorite_requests_match_the_shared_contract() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        let vault = |command: Value| json!({ "op": "vault", "command": command }).to_string();
+        api.call(&vault(json!({ "operation": "add", "arguments": {
+            "entry": { "entry": { "name": "Tagged", "username": null, "password": "synthetic",
+                "url": null, "notes": null, "copy": false },
+                "kind": "login", "additional_urls": [], "custom_fields": [],
+                "tags": ["Work", "Cloud"], "favorite": false },
+            "copy_timeout": 0 } })))
+            .unwrap();
+        save(
+            &mut api,
+            "Untagged",
+            "user",
+            "synthetic",
+            "https://example.com",
+        )
+        .unwrap();
+        // The favorite toggle sends only the mark.
+        api.call(&vault(json!({ "operation": "update", "arguments": {
+            "entry": { "target": { "Id": 1 }, "update": {} }, "kind": null,
+            "add_url": [], "remove_url": [], "clear_urls": false, "set_fields": [],
+            "remove_fields": [], "clear_fields": false, "favorite": true } })))
+            .unwrap();
+        let detail = item(&mut api, 1).unwrap();
+        assert_eq!(detail["favorite"], true);
+        assert_eq!(detail["tags"], json!(["Work", "Cloud"]));
+        assert_eq!(detail["password"], "synthetic");
+        // A full edit replaces the tags; an edit without tag fields keeps them.
+        api.call(&vault(json!({ "operation": "update", "arguments": {
+            "entry": { "target": { "Id": 1 }, "update": { "name": "Tagged", "username": null,
+                "url": null, "notes": null }, "password": "synthetic" },
+            "kind": "login", "add_url": [], "remove_url": [], "clear_urls": true,
+            "set_fields": [], "remove_fields": [], "clear_fields": true,
+            "add_tags": ["Home"], "remove_tags": [], "clear_tags": true, "favorite": true } })))
+            .unwrap();
+        assert_eq!(item(&mut api, 1).unwrap()["tags"], json!(["Home"]));
+        update(&mut api, 1, "Tagged", "synthetic").unwrap();
+        assert_eq!(item(&mut api, 1).unwrap()["tags"], json!(["Home"]));
+        let favorites = api
+            .call(&vault(json!({ "operation": "list", "arguments": {
+                "query": null, "name": null, "username": null, "url": null, "notes": null,
+                "list": { "kind": null, "has_totp": null, "weak": false, "stale_days": null,
+                    "sort": "name", "descending": false, "tags": [], "favorite": true } } })))
+            .unwrap();
+        let items = favorites["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "Tagged");
+        assert_eq!(items[0]["favorite"], true);
+    }
+
+    #[test]
+    fn android_attachments_transfer_bytes_and_respect_revisions_and_limits() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        save(
+            &mut api,
+            "Holder",
+            "user",
+            "synthetic",
+            "https://example.com",
+        )
+        .unwrap();
+        let content = passkey::encode([0u8, 1, 2, 250, 255]);
+        let add = |revision: u64| {
+            json!({ "op": "attachment_add", "id": 1, "name": "scan.png",
+                "data": content, "expected_revision": revision })
+            .to_string()
+        };
+        assert!(api.call(&add(99)).unwrap_err().contains("changed"));
+        let revision = item(&mut api, 1).unwrap()["revision"].as_u64().unwrap();
+        api.call(&add(revision)).unwrap();
+        let detail = item(&mut api, 1).unwrap();
+        assert_eq!(detail["attachments"][0]["name"], "scan.png");
+        assert_eq!(detail["attachments"][0]["size"], 5);
+        let data = api
+            .call(r#"{"op":"attachment_data","id":1,"name":"SCAN.png"}"#)
+            .unwrap();
+        assert_eq!(data["data"], content);
+        let oversized = passkey::encode(vec![0u8; attachments::MAX_ATTACHMENT_BYTES + 1]);
+        assert!(
+            api.call(
+                &json!({ "op": "attachment_add", "id": 1, "name": "big", "data": oversized })
+                    .to_string()
+            )
+            .is_err()
+        );
+        // Path-based commands are desktop-only; removal goes through the vault command.
+        for command in [
+            json!({ "Add": { "target": { "Id": 1 }, "path": "/etc/hosts", "name": null } }),
+            json!({ "Save": { "target": { "Id": 1 }, "name": "scan.png",
+                "path": "/tmp/out", "force": true } }),
+        ] {
+            assert!(
+                vault_command(
+                    &mut api,
+                    serde_json::from_value(
+                        json!({ "operation": "attachment", "arguments": command })
+                    )
+                    .unwrap()
+                )
+                .is_err()
+            );
+        }
+        vault_command(
+            &mut api,
+            ServerCommand::Attachment(crate::types::AttachmentCommand::Remove {
+                target: Target::Id(1),
+                name: "scan.png".into(),
+            }),
+        )
+        .unwrap();
+        assert!(
+            item(&mut api, 1).unwrap()["attachments"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        api.lock();
+        assert!(
+            api.call(r#"{"op":"attachment_data","id":1,"name":"scan.png"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn android_card_and_identity_requests_classify_while_locked_and_fill_while_unlocked() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        // Classification needs no vault.
+        let roles = api
+            .call(r#"{"op":"typed_fields","fields":["creditCardNumber","cc-csc","username"]}"#)
+            .unwrap();
+        assert_eq!(roles[0]["role"], "cc-number");
+        assert_eq!(roles[0]["kind"], "payment-card");
+        assert_eq!(roles[1]["role"], "cc-csc");
+        assert!(roles[2].is_null());
+        assert!(
+            api.call(r#"{"op":"typed_choices","kind":"payment-card"}"#)
+                .is_err()
+        );
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        vault_command(
+            &mut api,
+            ServerCommand::Add {
+                entry: TypedEntry {
+                    entry: PasswordEntry {
+                        name: "Visa".into(),
+                        username: Some("Alex Example".into()),
+                        password: "4111111111111111".into(),
+                        url: None,
+                        notes: None,
+                        copy: false,
+                    },
+                    kind: ItemKind::PaymentCard,
+                    additional_urls: vec![],
+                    custom_fields: vec![CustomField {
+                        name: "Security code".into(),
+                        value: "123".into(),
+                        secret: true,
+                    }],
+                    tags: vec![],
+                    favorite: false,
+                },
+                copy_timeout: 0,
+            },
+        )
+        .unwrap();
+        save(
+            &mut api,
+            "Login",
+            "user",
+            "synthetic",
+            "https://example.com",
+        )
+        .unwrap();
+        let choices = api
+            .call(r#"{"op":"typed_choices","kind":"payment-card"}"#)
+            .unwrap();
+        assert_eq!(choices.as_array().unwrap().len(), 1);
+        assert!(
+            !choices.to_string().contains("4111"),
+            "choices carry no secrets"
+        );
+        let values = api
+            .call(r#"{"op":"typed_values","id":1,"kind":"payment-card","roles":["cc-number","cc-csc","cc-name"]}"#)
+            .unwrap();
+        assert_eq!(values["cc-number"], "4111111111111111");
+        assert_eq!(values["cc-csc"], "123");
+        assert_eq!(values["cc-name"], "Alex Example");
+        assert!(
+            api.call(r#"{"op":"typed_values","id":2,"kind":"payment-card","roles":["cc-number"]}"#)
+                .is_err(),
+            "a login is never filled as a card"
+        );
+        assert!(
+            api.call(r#"{"op":"typed_choices","kind":"login"}"#)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -1906,6 +2170,8 @@ mod tests {
                     value: "not a passkey".into(),
                     secret: true,
                 }],
+                tags: vec![],
+                favorite: false,
             };
             assert!(vault.add_passkey_entry(damaged, credentials).unwrap());
         }

@@ -13,6 +13,10 @@ pub struct ItemSummary {
     pub urls: Vec<String>,
     pub has_totp: bool,
     pub has_duo: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub favorite: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemPage {
@@ -42,6 +46,22 @@ pub struct ItemField {
     pub secret: bool,
     pub value: Option<SecretString>,
 }
+/// A passkey a person can choose for a sign-in; no key material.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasskeyChoice {
+    pub id: usize,
+    pub revision: u64,
+    pub rp_id: String,
+    pub user_name: String,
+    pub display_name: String,
+}
+/// An attachment's metadata; its content is fetched or saved separately.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentInfo {
+    pub name: String,
+    pub size: u64,
+    pub added: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemDetail {
     pub id: usize,
@@ -62,6 +82,12 @@ pub struct ItemDetail {
     /// Passkey records hide their key material and cannot be edited as ordinary items.
     #[serde(default)]
     pub is_passkey: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentInfo>,
     pub created: String,
     pub modified: String,
 }

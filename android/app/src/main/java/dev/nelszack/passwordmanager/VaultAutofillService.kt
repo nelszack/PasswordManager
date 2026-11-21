@@ -29,8 +29,123 @@ data class LoginForm(
         get() = otp != null && username == null && password == null
 }
 
+/** A payment-card or identity form: each field's role, as classified by the vault library. */
+data class TypedForm(
+    val origin: String,
+    val hostnameOnly: Boolean,
+    val kind: String,
+    val fields: Map<AutofillId, String>,
+) {
+    val ids
+        get() = fields.keys.toTypedArray()
+
+    val card
+        get() = kind == "payment-card"
+}
+
 object Forms {
     class Rejected(val reason: String) : IllegalStateException(reason)
+
+    /** One text field's identity, origin, and the text that describes its role. */
+    private data class Described(
+        val id: AutofillId,
+        val description: String,
+        val origin: String?,
+        val focused: Boolean,
+    )
+
+    /**
+     * Card and identity fields, used when the structure has no login fields. The shared vault
+     * library assigns roles so the rules match the browser extension's.
+     */
+    fun readTyped(context: Context, structure: AssistStructure): TypedForm? {
+        val packageName = structure.activityComponent.packageName
+        if (packageName == context.packageName) return null
+        val fields = mutableListOf<Described>()
+        val addresses = mutableListOf<String>()
+        fun walk(node: AssistStructure.ViewNode, depth: Int = 0, inheritedOrigin: String? = null) {
+            if (depth > 100 || fields.size > 200 || node.visibility != View.VISIBLE) return
+            if (
+                node.idPackage == packageName &&
+                    node.idEntry in setOf("url_bar", "mozac_browser_toolbar_url_view") &&
+                    node.htmlInfo == null &&
+                    !node.isFocused
+            ) {
+                node.text?.toString()?.takeIf { it.isNotBlank() }?.let(addresses::add)
+            }
+            val nodeOrigin =
+                node.webDomain?.let { domain ->
+                    val scheme = node.webScheme ?: throw Rejected("missing_website_scheme")
+                    CallerIdentity.websiteOrigin("$scheme://$domain")
+                } ?: inheritedOrigin
+            val html = node.htmlInfo?.attributes?.associate { it.first to it.second }.orEmpty()
+            val variation = node.inputType and InputType.TYPE_MASK_VARIATION
+            val password =
+                variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                    variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+            val id = node.autofillId
+            if (id != null && !password && node.autofillType == View.AUTOFILL_TYPE_TEXT) {
+                val description =
+                    listOfNotNull(
+                            html["autocomplete"],
+                            node.idEntry,
+                            node.hint,
+                            html["name"],
+                            html["id"],
+                            html["label"],
+                            html["placeholder"],
+                        )
+                        .plus(node.autofillHints?.toList().orEmpty())
+                        .joinToString(" ")
+                        .take(4096)
+                if (description.isNotBlank())
+                    fields.add(Described(id, description, nodeOrigin, node.isFocused))
+            }
+            for (i in 0 until node.childCount) walk(node.getChildAt(i), depth + 1, nodeOrigin)
+        }
+        for (i in 0 until structure.windowNodeCount) walk(structure.getWindowNodeAt(i).rootViewNode)
+        if (fields.isEmpty()) return null
+        val roles =
+            Vault.request(
+                "typed_fields",
+                "fields" to org.json.JSONArray(fields.map(Described::description)),
+            ) as org.json.JSONArray
+        data class Classified(val field: Described, val kind: String, val role: String)
+        val classified =
+            fields.indices.mapNotNull { i ->
+                roles.optJSONObject(i)?.let {
+                    Classified(fields[i], it.getString("kind"), it.getString("role"))
+                }
+            }
+        if (classified.isEmpty()) return null
+        // Fill the kind the person is typing into; otherwise prefer a card.
+        val kind =
+            classified.firstOrNull { it.field.focused }?.kind
+                ?: if (classified.any { it.kind == "payment-card" }) "payment-card" else "identity"
+        val chosen = classified.filter { it.kind == kind }
+        val (origin, hostnameOnly) =
+            siteOrigin(context, packageName, chosen.map { it.field.origin }, addresses)
+        Log.d("PMAutofill", "Parsed typed form kind=$kind fields=${chosen.size}")
+        return TypedForm(origin, hostnameOnly, kind, chosen.associate { it.field.id to it.role })
+    }
+
+    /** The app, or the single trusted-browser website, that owns every field. */
+    private fun siteOrigin(
+        context: Context,
+        packageName: String,
+        origins: List<String?>,
+        addresses: List<String>,
+    ): Pair<String, Boolean> {
+        val domains = origins.filterNotNull().toSet()
+        if (domains.isEmpty()) return CallerIdentity.appOrigin(context, packageName) to false
+        if (domains.size != 1 || origins.any { it != domains.single() })
+            throw Rejected("ambiguous_website_origin")
+        if (!CallerIdentity.trustedBrowser(context, packageName)) throw Rejected("untrusted_browser")
+        val site = CallerIdentity.browserSite(domains.single(), addresses)
+        if (site.hostnameOnly && packageName != "com.android.chrome")
+            throw Rejected("missing_full_website_address")
+        return site.origin to site.hostnameOnly
+    }
 
     fun read(context: Context, structure: AssistStructure): LoginForm? {
         val packageName = structure.activityComponent.packageName
@@ -175,7 +290,13 @@ class VaultAutofillService : AutofillService() {
             val response = runCatching {
                 val structure =
                     request.fillContexts.lastOrNull()?.structure ?: return@runCatching null
-                val form = Forms.read(this, structure) ?: return@runCatching null
+                val form =
+                    Forms.read(this, structure)
+                        ?: return@runCatching Forms.readTyped(this, structure)?.let { typed ->
+                            FillResponse.Builder()
+                                .addDataset(AutofillSuggestions.typedSuggestion(this, request, typed))
+                                .build()
+                        }
                 val scope =
                     AutofillScope(
                         structure.activityComponent.packageName,

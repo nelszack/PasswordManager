@@ -36,6 +36,7 @@ pub enum Reply {
     Acknowledged,
     KeyFile(Option<SecretString>),
     PickedFile(super::workflows::Field, Option<SecretString>),
+    AttachmentPath(Option<String>),
     Local(String),
 }
 
@@ -350,8 +351,10 @@ fn save_settings_at(
         ));
     }
     let previous_recovery = current.recovery.clone();
+    let previous_agent = current.server.ssh_agent;
     let conf = config::try_update(current, changes, path)?;
-    let restart_required = running && conf.recovery != previous_recovery;
+    let restart_required =
+        running && (conf.recovery != previous_recovery || conf.server.ssh_agent != previous_agent);
     Ok(Reply::Settings {
         conf,
         restart_required,

@@ -19,6 +19,7 @@ pub enum Toggle {
     GeneratorCopy,
     PasswordCopy,
     SyncAutomatic,
+    SshAgent,
 }
 
 pub struct SettingsDraft {
@@ -37,6 +38,7 @@ pub struct SettingsDraft {
     pub scale: u16,
     pub sync_server: String,
     pub sync_automatic: bool,
+    pub ssh_agent: bool,
 }
 
 impl From<&Config> for SettingsDraft {
@@ -57,6 +59,7 @@ impl From<&Config> for SettingsDraft {
             scale: conf.desktop.scale,
             sync_server: conf.sync.server_url.clone(),
             sync_automatic: conf.sync.automatic,
+            ssh_agent: conf.server.ssh_agent,
         }
     }
 }
@@ -90,6 +93,7 @@ impl SettingsDraft {
             scale,
             sync_server,
             sync_automatic,
+            ssh_agent,
         );
         self.baseline = conf.clone();
     }
@@ -113,6 +117,7 @@ impl SettingsDraft {
             Toggle::GeneratorCopy => &mut self.generator_copy,
             Toggle::PasswordCopy => &mut self.password_copy,
             Toggle::SyncAutomatic => &mut self.sync_automatic,
+            Toggle::SshAgent => &mut self.ssh_agent,
         } = value;
     }
 
@@ -183,6 +188,7 @@ impl SettingsDraft {
                 .then(|| self.sync_server.clone()),
             sync_automatic: (self.sync_automatic != base.sync.automatic)
                 .then_some(self.sync_automatic),
+            ssh_agent: (self.ssh_agent != base.server.ssh_agent).then_some(self.ssh_agent),
         })
     }
 
@@ -202,6 +208,7 @@ impl SettingsDraft {
             || self.scale != previous.scale
             || self.sync_server != previous.sync_server
             || self.sync_automatic != previous.sync_automatic
+            || self.ssh_agent != previous.ssh_agent
     }
 
     /// Validate one edited field against valid defaults so the inline error

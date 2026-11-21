@@ -185,6 +185,29 @@ pub(crate) fn execute_unlocked(
     server_info: &mut VaultCredentials,
     password_history_limit: usize,
 ) -> Deferred {
+    let deferred = dispatch_unlocked(responses, msg, vault, server_info, password_history_limit);
+    if std::mem::take(&mut vault.metadata.schema_upgraded)
+        && let Some(response) = responses.iter_mut().find(|r| {
+            r.code == ResponseCode::Success as i32 || r.code == ResponseCode::Durability as i32
+        })
+    {
+        response.notice = Some(SCHEMA_UPGRADE_NOTICE.into());
+    }
+    deferred
+}
+
+/// Shown once, when a save first uses tags, favorites, or attachments.
+pub(crate) const SCHEMA_UPGRADE_NOTICE: &str = "This vault now uses features (tags, favorites, or attachments) that older versions of \
+     Password Manager cannot open. Update the app on your other devices, including Android, \
+     before they sync this vault.";
+
+fn dispatch_unlocked(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+    password_history_limit: usize,
+) -> Deferred {
     match msg {
         msg @ (ServerCommand::Add { .. }
         | ServerCommand::Delete(..)
@@ -215,6 +238,16 @@ pub(crate) fn execute_unlocked(
             browser_command(responses, msg, vault);
             Deferred::None
         }
+        msg @ (ServerCommand::BrowserPasskeys { .. }
+        | ServerCommand::BrowserPasskeyCreate { .. }
+        | ServerCommand::BrowserPasskeyGet { .. }) => {
+            passkey_command(responses, msg, vault, server_info);
+            Deferred::None
+        }
+        ServerCommand::Attachment(command) => {
+            attachment_command(responses, command, vault, server_info);
+            Deferred::None
+        }
         msg @ (ServerCommand::Trash
         | ServerCommand::RestoreTrash(..)
         | ServerCommand::PurgeTrash(..)
@@ -226,6 +259,84 @@ pub(crate) fn execute_unlocked(
             Deferred::None
         }
         _ => unreachable!("session lifecycle operations handled before unlocked dispatch"),
+    }
+}
+
+/// Browser WebAuthn. The origin was derived by the native host from the
+/// browser's sender metadata.
+fn passkey_command(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+) {
+    let parse = |request: &str| crate::passkey::parse(request);
+    // `verified` is set by the service only after redeeming a confirmation
+    // token; clients cannot set it.
+    let result = match msg {
+        ServerCommand::BrowserPasskeys { origin, request } => parse(&request)
+            .and_then(|request| vault.browser_passkeys(&origin, &request))
+            .map(ResponsePayload::Passkeys),
+        ServerCommand::BrowserPasskeyCreate {
+            origin,
+            request,
+            verified,
+            ..
+        } => parse(&request)
+            .and_then(|request| {
+                vault.browser_passkey_create(&origin, &request, server_info, verified)
+            })
+            .map(|value| ResponsePayload::PasskeyCredential(value.to_string())),
+        ServerCommand::BrowserPasskeyGet {
+            origin,
+            id,
+            request,
+            verified,
+            ..
+        } => parse(&request)
+            .and_then(|request| vault.browser_passkey_get(&origin, id, &request, verified))
+            .map(|value| ResponsePayload::PasskeyCredential(value.to_string())),
+        _ => unreachable!("dispatched by execute_unlocked"),
+    };
+    match result {
+        Ok(payload) => respond_ok(payload, responses),
+        Err(error) => respond_failure(&format!("Passkey request failed: {error}"), responses),
+    }
+}
+
+/// Add, save, or remove an item's file attachments.
+fn attachment_command(
+    responses: &mut Vec<RpcResponse>,
+    command: AttachmentCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+) {
+    use crate::vault::attachments;
+    match command {
+        AttachmentCommand::Add { target, path, name } => {
+            let name = name.unwrap_or_else(|| attachments::default_name(&path));
+            match attachments::read_attachment_file(&path)
+                .and_then(|data| vault.add_attachment(&target, &name, data, server_info))
+            {
+                Ok(()) => respond("Attachment added.", responses),
+                Err(error) => respond_failed("Attachment failed", &error, responses),
+            }
+        }
+        AttachmentCommand::Save {
+            target,
+            name,
+            path,
+            force,
+        } => match vault.save_attachment(&target, &name, &path, force) {
+            Ok(()) => respond("Attachment saved.", responses),
+            Err(error) => respond_failed("Saving the attachment failed", &error, responses),
+        },
+        AttachmentCommand::Remove { target, name } => {
+            match vault.remove_attachment(&target, &name, server_info) {
+                Ok(()) => respond("Attachment removed.", responses),
+                Err(error) => respond_failed("Removing the attachment failed", &error, responses),
+            }
+        }
     }
 }
 
