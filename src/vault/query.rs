@@ -9,6 +9,10 @@ impl Vault {
         items.retain(|item| {
             options.kind.is_none_or(|kind| item.metadata.kind == kind)
                 && options
+                    .favorite
+                    .is_none_or(|expected| item.metadata.favorite == expected)
+                && options.tags.iter().all(|tag| item.metadata.has_tag(tag))
+                && options
                     .has_totp
                     .is_none_or(|expected| item.authenticator.is_some() == expected)
                 && (!options.weak
@@ -67,6 +71,7 @@ impl Vault {
                         m.name.contains(q.as_str())
                             || m.username.as_ref().is_some_and(|v| v.contains(q.as_str()))
                             || m.urls.iter().any(|v| v.contains(q.as_str()))
+                            || m.tags.iter().any(|v| v.contains(q.as_str()))
                             || notes_match(q)
                             || m.fields.iter().any(|(name, value)| {
                                 name.contains(q.as_str())
@@ -134,6 +139,7 @@ pub(super) struct SearchMetadata {
     pub(super) name: Zeroizing<String>,
     username: Option<Zeroizing<String>>,
     urls: Vec<Zeroizing<String>>,
+    tags: Vec<Zeroizing<String>>,
     fields: Vec<(Zeroizing<String>, Option<Zeroizing<String>>)>,
 }
 impl Item {
@@ -149,6 +155,7 @@ impl SearchMetadata {
             name: lower(&item.entry.name),
             username: item.entry.username.as_deref().map(lower),
             urls: item.urls().map(lower).collect(),
+            tags: item.metadata.tags.iter().map(|t| lower(t)).collect(),
             fields: item
                 .metadata
                 .custom_fields

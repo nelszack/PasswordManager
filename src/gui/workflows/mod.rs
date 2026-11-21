@@ -103,6 +103,7 @@ pub enum Browser {
     Chrome,
     Chromium,
     Helium,
+    Firefox,
 }
 impl std::fmt::Display for Browser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1105,6 +1106,8 @@ impl State {
             url: nonempty(&self.search.url),
             notes: (!self.search.notes.is_empty()).then(|| self.search.notes.clone()),
             list: ListOptions {
+                tags: vec![],
+                favorite: None,
                 kind: self.search.kind,
                 has_totp: self.search.has_otp,
                 weak: self.search.weak,
@@ -1619,12 +1622,14 @@ impl App {
                     Browser::Chrome => NativeBrowser::Chrome,
                     Browser::Chromium => NativeBrowser::Chromium,
                     Browser::Helium => NativeBrowser::Helium,
+                    Browser::Firefox => NativeBrowser::Firefox,
                 };
                 return self.launch(Job::Local, move || {
                     let path = match action {
-                        Action::InstallHost => {
-                            password_manager::native_messaging::install(&extension_id, browser)
-                        }
+                        Action::InstallHost => password_manager::native_messaging::install(
+                            Some(extension_id.trim()).filter(|id| !id.is_empty()),
+                            browser,
+                        ),
                         Action::UpdateHost => password_manager::native_messaging::update(),
                         Action::Shortcut => crate::desktop::install_shortcut(),
                         _ => unreachable!(),

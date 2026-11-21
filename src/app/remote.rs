@@ -1,6 +1,6 @@
 use super::output::Output;
 use password_manager::{
-    cli::{BackupCommands, CliCommands, DeleteArgs, EntryArgs, TotpCommands},
+    cli::{AttachmentCommands, BackupCommands, CliCommands, DeleteArgs, EntryArgs, TotpCommands},
     client, config,
     encryption::try_prompt_for_confirmed_password,
     file::{resolve_key_path, resolve_new_key_path},
@@ -171,6 +171,39 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             })
         }
         CliCommands::Status => ServerCommand::Status,
+        CliCommands::SshAgent {
+            command: Some(command),
+        } => match command {
+            password_manager::cli::SshAgentCommands::Approve { id } => {
+                ServerCommand::SshDecision { id, allow: true }
+            }
+            password_manager::cli::SshAgentCommands::Deny { id } => {
+                ServerCommand::SshDecision { id, allow: false }
+            }
+        },
+        CliCommands::Passkey { command } => {
+            use password_manager::cli::PasskeyCommands;
+            let read = |prompt: &str| {
+                rpassword::prompt_password(prompt).unwrap_or_else(|error| {
+                    console.exit_error(&format!("could not read input: {error}"), 1)
+                })
+            };
+            match command {
+                PasskeyCommands::Approve { id } => ServerCommand::PasskeyDecision {
+                    id,
+                    secret: Some(read("Master password or passkey PIN: ").into()),
+                },
+                PasskeyCommands::Deny { id } => ServerCommand::PasskeyDecision { id, secret: None },
+                PasskeyCommands::SetPin => {
+                    let pin = read("New passkey PIN: ");
+                    if *zeroize::Zeroizing::new(read("Re-enter the passkey PIN: ")) != pin {
+                        console.exit_error("The passkey PINs do not match.", 2);
+                    }
+                    ServerCommand::SetPasskeyPin(Some(pin.into()))
+                }
+                PasskeyCommands::RemovePin => ServerCommand::SetPasskeyPin(None),
+            }
+        }
         CliCommands::Kill => ServerCommand::Kill,
         CliCommands::New { key_path } => ServerCommand::New(if let Some(kp) = key_path {
             resolved_new_key(kp, console)
@@ -191,6 +224,8 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             notes,
             fields,
             secret_fields,
+            tags,
+            favorite,
             generate_password,
             copy,
             no_copy,
@@ -230,6 +265,8 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
                     kind,
                     additional_urls: urls.collect(),
                     custom_fields,
+                    tags,
+                    favorite,
                 },
                 copy_timeout: conf.clipboard.timeout,
             }
@@ -274,6 +311,28 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             list: args.list.into(),
         }),
         CliCommands::History { target } => ServerCommand::History(target_type(target)),
+        CliCommands::Attachment { command } => ServerCommand::Attachment(match command {
+            AttachmentCommands::Add { target, path, name } => types::AttachmentCommand::Add {
+                target: target_type(target),
+                path: resolved_file(path, console),
+                name,
+            },
+            AttachmentCommands::Save {
+                target,
+                name,
+                path,
+                force,
+            } => types::AttachmentCommand::Save {
+                target: target_type(target),
+                name,
+                path: resolved_file(path, console),
+                force,
+            },
+            AttachmentCommands::Remove { target, name } => types::AttachmentCommand::Remove {
+                target: target_type(target),
+                name,
+            },
+        }),
         CliCommands::RestorePassword { target, revision } => ServerCommand::RestorePassword {
             target: target_type(target),
             revision,
@@ -403,6 +462,16 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
                 set_fields,
                 remove_fields: metadata.remove_fields,
                 clear_fields: metadata.clear_fields,
+                add_tags: metadata.add_tags,
+                remove_tags: metadata.remove_tags,
+                clear_tags: metadata.clear_tags,
+                favorite: if metadata.favorite {
+                    Some(true)
+                } else if metadata.unfavorite {
+                    Some(false)
+                } else {
+                    None
+                },
             })
         }
 

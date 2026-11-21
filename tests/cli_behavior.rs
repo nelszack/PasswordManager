@@ -1130,7 +1130,12 @@ fn config_and_completion_commands_persist_in_an_isolated_home() {
         .arg(&completion)
         .output()
         .unwrap();
-    assert!(generated.status.success());
+    assert!(
+        generated.status.success(),
+        "{:?}: {}",
+        generated.status,
+        String::from_utf8_lossy(&generated.stderr)
+    );
     assert!(std::fs::read_to_string(completion).unwrap().contains("_pm"));
 }
 

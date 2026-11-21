@@ -74,8 +74,76 @@ class FillActivity : VaultActivity() {
             window.decorView.alpha = 0f
             window.attributes = window.attributes.apply { dimAmount = 0f }
         }
-        if (intent.getStringExtra("mode") == "save") unlock({ save() }, fresh = true)
-        else prepareFill()
+        when (intent.getStringExtra("mode")) {
+            "save" -> unlock({ save() }, fresh = true)
+            "typed" -> prepareTyped()
+            else -> prepareFill()
+        }
+    }
+
+    /** Cards and identities: the person always chooses the item in this sheet. */
+    private fun prepareTyped() {
+        val structure =
+            intent.getParcelableExtra<AssistStructure>(AutofillManager.EXTRA_ASSIST_STRUCTURE)
+                ?: return finish()
+        task({
+            val form = Forms.readTyped(this, structure) ?: error("Unsupported form")
+            val scope =
+                AutofillScope(
+                    structure.activityComponent.packageName,
+                    form.origin,
+                    form.hostnameOnly,
+                )
+            val reuse =
+                Vault.autofillSession.allows(scope) && Vault.json("status").getBoolean("unlocked")
+            Triple(form, scope, reuse)
+        }) { (form, scope, reuse) ->
+            showSheet()
+            unlock({ chooseTyped(form, scope) }, fresh = !reuse)
+        }
+    }
+
+    private fun chooseTyped(form: TypedForm, scope: AutofillScope) {
+        task({ Vault.request("typed_choices", "kind" to form.kind) as JSONArray }) { choices ->
+            page(if (form.card) "Choose a card" else "Choose an identity")
+            label(java.net.URI(form.origin).host ?: form.origin)
+            if (choices.length() == 0)
+                label(
+                    if (form.card) "No payment cards are saved in this vault."
+                    else "No identities are saved in this vault."
+                )
+            for (i in 0 until choices.length()) {
+                val choice = choices.getJSONObject(i)
+                val owner = choice.opt("username") as? String ?: ""
+                button(listOf(choice.getString("name"), owner).filter(String::isNotBlank).joinToString(" · ")) {
+                    fillTyped(form, scope, choice.getLong("id"))
+                }
+            }
+            button("Cancel") { finish() }
+        }
+    }
+
+    private fun fillTyped(form: TypedForm, scope: AutofillScope, id: Long) {
+        task({
+            Vault.json(
+                "typed_values",
+                "id" to id,
+                "kind" to form.kind,
+                "roles" to JSONArray(form.fields.values.distinct()),
+            )
+        }) { values ->
+            val dataset = Dataset.Builder(Forms.presentation(this, "Password Manager"))
+            var filled = 0
+            for ((field, role) in form.fields) {
+                val value = values.optString(role)
+                if (value.isNotEmpty()) {
+                    dataset.setValue(field, AutofillValue.forText(value))
+                    filled++
+                }
+            }
+            if (filled == 0) label("This item has nothing to fill in these fields.")
+            else returnToSite(scope, dataset.build())
+        }
     }
 
     private fun prepareFill() {

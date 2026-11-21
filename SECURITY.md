@@ -66,6 +66,20 @@ The extension has no full management/editing API. Site selectors receive summari
 and release only the explicitly selected, origin-bound item. OTP seeds and Duo
 signing keys are never returned. Popup recovery checks and acknowledgements verify
 the browser-provided extension ID and popup URL; save prompts can check outcomes.
+The extension and native host cannot unlock a vault or choose which vault is
+open; unlocking happens only in the desktop app or CLI, and one vault is unlocked
+at a time.
+The service delays password attempts after five consecutive failures (doubling to
+five minutes) for every client; this slows guessing through the service, though
+a process that can read the vault file can still attack it offline. The optional SSH agent (off by default) serves only SSH-key
+items whose "SSH agent" field is `on` or `confirm`, from the unlocked vault while it
+is unlocked. `on` keys sign for any process of the same user, like OpenSSH's agent;
+`confirm` keys wait for an explicit decision in the desktop app or CLI. Requests
+marked as forwarded by OpenSSH's session binding are refused. The destination
+shown is the one the SSH client reports; the binding signature is not verified,
+because the caller is already a process of the same user. The agent never returns
+private keys, refuses key addition and removal, and checks the peer's user ID on
+an owner-only socket. Keyboard shortcuts only open the site-scoped picker.
 Native OTP responses carry structured code, lifetime and counter data rather
 than parsed terminal output. Secret and custom-field data responses preserve
 the stored bytes, including whitespace and empty values.
@@ -256,9 +270,36 @@ as plaintext secrets; encrypted backups include them as encrypted data. CSV
 export refuses passkeys to prevent silent key loss. The initial authenticator
 supports ES256, discoverable credentials, no identifying attestation, and zero
 signature counters for credentials eligible for synchronization. It sets backup
-eligibility without claiming that a backup has completed. Desktop browser
-passkey use, direct credential exchange, PRF/largeBlob extensions, hardware
-attestation, and cross-device QR authentication are outside this initial adapter.
+eligibility without claiming that a backup has completed. Direct credential
+exchange, PRF/largeBlob extensions, hardware attestation, and cross-device QR
+authentication are outside this initial adapter.
+
+In desktop browsers, a page-world script wraps `navigator.credentials` in
+top-level HTTPS documents. The page can call, replace, or observe that wrapper,
+so it is untrusted: the background takes the origin, frame, and document from
+browser sender metadata, the vault validates the relying-party ID against that
+origin, and every registration or sign-in needs a click in an extension window
+that names the site. Sign-in choices list only passkeys whose relying party
+matches the origin, the selection carries its unlock session and item revision,
+and the request is cancelled if the tab has navigated to another site.
+The vault reports WebAuthn user verification only after the person confirms that
+site in the desktop app or CLI with the master password (checked against the
+unlocked session's key without reading the vault file) or this device's passkey
+PIN. The browser never carries the secret: the service holds the browser's request
+until the desktop answer, then issues a random one-time token bound to that site
+and unlock session, valid for 60 seconds, and only redeeming it sets the flag.
+Otherwise the vault reports user presence only, and requests that require
+verification are refused. Wrong PINs share the unlock slowdown. The PIN is stored
+as a keyed check value in `passkey-pins.json` in the data directory, keyed by a
+value derived from the vault's encryption key, so the file alone does not allow
+offline guessing; changing the vault credentials retires it. Any process of the
+same user that knows the master password or PIN could also answer a request, as
+with the SSH agent's confirmations. On Android every passkey
+operation follows a fresh unlock or biometric check, so verification is reported
+there.
+Conditional (autofill) requests, cross-platform or security-key hints, other
+algorithms, and unsupported extensions stay with the browser's own WebAuthn, as
+does any request the person declines with **Use another passkey provider**.
 
 Locking clears sensitive Android views and invalidates UI callbacks immediately.
 Screen-off, backgrounding and inactivity request a lock, except the bounded

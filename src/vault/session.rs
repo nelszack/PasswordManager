@@ -141,6 +141,48 @@ impl VaultSession {
             Self::Unlocked(live) => Some(&live.vault),
         }
     }
+    fn pin_key(&self) -> Option<([u8; 16], &[u8; 32])> {
+        match self {
+            Self::Unlocked(live) => match &live.credentials {
+                VaultCredentials::Session { encryption_key, .. } => {
+                    Some((live.vault.vault_id(), encryption_key))
+                }
+                _ => None,
+            },
+            Self::Locked => None,
+        }
+    }
+    /// The unlocked vault uses a master password that can be re-checked.
+    pub(crate) fn password_check(&self) -> bool {
+        match self {
+            Self::Locked => false,
+            Self::Unlocked(live) => crate::encryption::password_session(&live.credentials),
+        }
+    }
+    /// Whether a passkey PIN is set for the unlocked vault (PINs live in `dir`).
+    pub(crate) fn passkey_pin(&self, dir: &std::path::Path) -> bool {
+        self.pin_key()
+            .is_some_and(|(id, key)| super::passkey_pin::is_set(dir, &id, key))
+    }
+    /// Whether `secret` confirms the person for a passkey request: this
+    /// device's passkey PIN, or the vault's master password.
+    pub(crate) fn confirms_person(&self, dir: &std::path::Path, secret: &str) -> bool {
+        let Self::Unlocked(live) = self else {
+            return false;
+        };
+        self.pin_key()
+            .is_some_and(|(id, key)| super::passkey_pin::matches(dir, &id, key, secret))
+            || crate::encryption::password_matches(&live.credentials, secret)
+    }
+    /// Set or remove this device's passkey PIN for the unlocked vault.
+    pub(crate) fn set_passkey_pin(
+        &self,
+        dir: &std::path::Path,
+        pin: Option<&str>,
+    ) -> Result<(), String> {
+        let (id, key) = self.pin_key().ok_or("Vault locked.")?;
+        super::passkey_pin::set(dir, &id, key, pin)
+    }
     /// Borrow complete unlocked state. A panic drops it and leaves this session
     /// locked; normal reads and mutations retain the same capability and epoch.
     pub(crate) fn with_unlocked<T>(
@@ -172,6 +214,31 @@ mod tests {
             iterations: 1,
             parallelism: 1,
         }
+    }
+    #[test]
+    fn only_password_sessions_report_a_password_to_check() {
+        assert!(!VaultSession::Locked.password_check());
+        assert!(VaultSession::unlock(Vault::memory(), key()).password_check());
+        let VaultCredentials::Session {
+            encryption_key,
+            salt,
+            memory_kib,
+            iterations,
+            parallelism,
+            ..
+        } = key()
+        else {
+            unreachable!()
+        };
+        let key_file = VaultCredentials::Session {
+            encryption_key,
+            salt,
+            kdf: 0,
+            memory_kib,
+            iterations,
+            parallelism,
+        };
+        assert!(!VaultSession::unlock(Vault::memory(), key_file).password_check());
     }
     #[test]
     fn only_complete_cached_credentials_can_install_an_unlocked_session() {

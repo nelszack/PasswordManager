@@ -8,7 +8,9 @@ export interface ItemSummary { id: number; revision: number; name: string; usern
 export interface CustomField { name: string; value: string; secret: boolean; }
 export interface BrowserLogin { id: number; revision: number; name: string; username: string | null; password: string; has_totp: boolean; }
 export interface AutofillItem { id: number; revision: number; name: string; kind: ItemKind; username: string | null; primary_secret: string; custom_fields: CustomField[]; }
-export interface ServerStatus { locked: boolean; version: string; warning: string | null; vault_revision: number | null; cloud_warning: string | null; }
+export interface ServerStatus { locked: boolean; version: string; warning: string | null; vault_revision: number | null; cloud_warning: string | null; password_check?: boolean; }
+export interface PasskeyChoice { id: number; revision: number; rp_id: string; user_name: string; display_name: string; }
+export interface PasskeyCredentialJSON { id: string; rawId: string; type: "public-key"; authenticatorAttachment: string; clientExtensionResults: Record<string, unknown>; response: Record<string, unknown>; }
 export type Authenticator = { code: string; mode: "totp"; expires_in: number; counter: null } | { code: string; mode: "hotp"; expires_in: null; counter: string };
 export interface DuoRequest { id: string; application: string; username: string; location: string; summary: string; expires_at: number; code_digits: number | null; unsupported: string | null; fingerprint: string; }
 export interface NativeRequests {
@@ -26,6 +28,10 @@ export interface NativeRequests {
     saveCredentials: { operationId: string; domain: string; password: string; name: string; expectedSession: string; username?: string; };
     updateCredentials: { operationId: string; domain: string; entryId: number; password: string; expectedRevision: number; expectedSession: string; username?: string; };
     operationStatus: { operationId: string; };
+    getPasskeys: { domain: string; passkeyRequest: string; };
+    createPasskey: { operationId: string; domain: string; passkeyRequest: string; expectedSession: string; verificationToken?: string; };
+    getPasskeyAssertion: { domain: string; entryId: number; passkeyRequest: string; expectedRevision: number; expectedSession: string; verificationToken?: string; };
+    verifyPasskeyUser: { domain: string; expectedSession: string; };
 }
 export interface NativeResults {
     status: ServerStatus;
@@ -42,10 +48,14 @@ export interface NativeResults {
     saveCredentials: string | OperationReceipt;
     updateCredentials: string | OperationReceipt;
     operationStatus: OperationReceipt;
+    getPasskeys: PasskeyChoice[];
+    createPasskey: PasskeyCredentialJSON | OperationReceipt;
+    getPasskeyAssertion: PasskeyCredentialJSON;
+    verifyPasskeyUser: string;
 }
 export type NativeAction = keyof NativeRequests;
-export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
-export const protocolVersion: 5;
+export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo" | "approval"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
+export const protocolVersion: 6;
 export const operations: Readonly<Record<NativeAction, NativePolicy>>;
 export function validateRequest<K extends NativeAction>(action: K, fields: NativeRequests[K]): NativeRequests[K];
 export function validateResult<K extends NativeAction>(action: K, data: unknown): NativeResults[K];

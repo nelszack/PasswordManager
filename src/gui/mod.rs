@@ -27,8 +27,8 @@ use password_manager::{
     protocol::{OperationState, RequestEnvelope, ResponseCode, ResponsePayload},
     secret::SecretString,
     types::{
-        ItemKind, ListOptions, PasswordType, SearchFilter, ServerCommand, SortField, Target,
-        UnlockInfo,
+        AttachmentCommand, EntryChanges, EntryUpdate, ItemKind, ListOptions, PasswordType,
+        SearchFilter, ServerCommand, SortField, Target, TypedUpdate, UnlockInfo,
     },
     vault::{ItemDetail, ItemSummary},
 };
@@ -123,10 +123,14 @@ enum Job {
     Field(FieldTarget),
     FieldCopy,
     Unlock,
+    SshDecision,
+    PasskeyDecision,
+    PasskeyPin,
     Lock,
     Create,
     Save,
     SaveEditor,
+    Favorite(usize),
     Delete,
     Copy,
     Stop,
@@ -137,6 +141,13 @@ enum Job {
     ConflictReview,
     PickKey,
     PickFile(workflows::Field),
+    /// A file chosen for item `id`: to attach (`None`) or to save the
+    /// attachment at that index to.
+    PickAttachment {
+        id: usize,
+        save: Option<usize>,
+    },
+    Attachment(usize),
     Workflow(workflows::Action),
     Local,
     Cloud,
@@ -205,6 +216,17 @@ enum Message {
     BrowseKey,
     Creating(bool),
     Unlock,
+    /// Allow (`true`) or refuse a waiting SSH agent signature.
+    SshDecision(String, bool),
+    /// The master password or passkey PIN for a waiting passkey request.
+    PasskeySecret(SecretString),
+    /// Confirm (`true`, with the typed secret) or refuse a passkey request.
+    PasskeyDecision(String, bool),
+    PinNew(SecretString),
+    PinConfirm(SecretString),
+    /// Save the typed passkey PIN, or remove it (`false`).
+    SavePasskeyPin(bool),
+    DismissFormatNotice,
     Create,
     Lock,
     Stop,
@@ -225,6 +247,18 @@ enum Message {
     MultilineSecret(bool),
     SecretEdit(text_editor::Action),
     Url(usize, String),
+    Tags(String),
+    Favorite(bool),
+    /// Star or unstar the open item without entering the editor.
+    ToggleFavorite,
+    AddAttachment,
+    /// Save the open item's attachment at this index.
+    SaveAttachment(usize),
+    RemoveAttachment(usize),
+    ConfirmRemoveAttachment,
+    CancelRemoveAttachment,
+    FilterTag(Option<String>),
+    FilterFavorites(bool),
     AddUrl,
     RemoveUrl(usize),
     Notes(text_editor::Action),
@@ -330,6 +364,8 @@ struct App {
     item: Option<ItemDetail>,
     editor: Editor,
     delete_confirm: bool,
+    /// Attachment name awaiting removal confirmation on the open item.
+    remove_attachment: Option<String>,
     reveal_until: Option<Instant>,
     serial: u64,
     request_state: RequestState,
@@ -392,6 +428,7 @@ impl App {
             item: None,
             editor: Editor::Closed,
             delete_confirm: false,
+            remove_attachment: None,
             reveal_until: None,
             serial: 0,
             request_state: RequestState::Idle,
@@ -554,6 +591,8 @@ impl App {
             self.ui.progress_started = Some(Instant::now());
             self.ui.progress = match job {
                 Job::Save | Job::SaveEditor => "Saving item…".into(),
+                Job::Favorite(_) => "Updating favorites…".into(),
+                Job::Attachment(_) => "Updating attachments…".into(),
                 Job::Unlock => "Unlocking vault…".into(),
                 Job::Create => "Creating encrypted vault…".into(),
                 Job::ConflictReview => "Loading the latest version for comparison…".into(),
@@ -784,6 +823,7 @@ impl App {
                 self.ui.width = size.width;
                 self.ui.height = size.height;
             }
+            Message::DismissFormatNotice => self.ui.format_notice = None,
             Message::DismissNotice => {
                 self.ui.undo_trash = None;
                 self.notice.clear();
@@ -798,6 +838,14 @@ impl App {
             | Message::CopyUsername
             | Message::Delete
             | Message::FilterKind(..)
+            | Message::FilterTag(..)
+            | Message::FilterFavorites(..)
+            | Message::ToggleFavorite
+            | Message::AddAttachment
+            | Message::SaveAttachment(..)
+            | Message::RemoveAttachment(..)
+            | Message::ConfirmRemoveAttachment
+            | Message::CancelRemoveAttachment
             | Message::HideField(..)
             | Message::ItemPage(..)
             | Message::JumpItemPage
@@ -872,6 +920,12 @@ impl App {
             | Message::BrowseKey
             | Message::Creating(..)
             | Message::Unlock
+            | Message::SshDecision(..)
+            | Message::PasskeySecret(..)
+            | Message::PasskeyDecision(..)
+            | Message::PinNew(..)
+            | Message::PinConfirm(..)
+            | Message::SavePasskeyPin(..)
             | Message::Create
             | Message::Stop) => return self.update_connection(message),
             Message::Tab(tab) => return self.switch_tab(tab),
@@ -911,6 +965,8 @@ impl App {
             | Message::CopyPolicy(..)
             | Message::ReplacePassword(..)
             | Message::Url(..)
+            | Message::Tags(..)
+            | Message::Favorite(..)
             | Message::AddUrl
             | Message::RemoveUrl(..)
             | Message::Notes(..)) => return self.update_editor(message),
@@ -1186,7 +1242,9 @@ impl App {
                     restart_required,
                 } => {
                     let restart_required = restart_required
-                        || self.connection.running && conf.recovery != self.conf.recovery;
+                        || self.connection.running
+                            && (conf.recovery != self.conf.recovery
+                                || conf.server.ssh_agent != self.conf.server.ssh_agent);
                     if !self.connection.running
                         && conf.server.port != self.conf.server.port
                         && self.connection.client.port == self.conf.server.port
@@ -1212,7 +1270,7 @@ impl App {
                     };
                     self.conf = conf;
                     self.notice = if restart_required {
-                        "Settings saved. Restart the server to apply recovery settings. The lock \
+                        "Settings saved. Restart the server to apply recovery and SSH agent settings. The lock \
                          timeout applies on the next unlock."
                     } else {
                         "Settings saved. The lock timeout applies on the next unlock."
@@ -1264,6 +1322,11 @@ impl App {
                     self.notice.clear();
                 }
                 Reply::PickedFile(field, Some(path)) => self.workspace.edit(field, path),
+                Reply::AttachmentPath(Some(path)) => {
+                    if let Job::PickAttachment { id, save } = job {
+                        return self.attachment_picked(id, save, path);
+                    }
+                }
                 Reply::Local(message) if job == Job::Local => self.notice = message,
                 Reply::Local(message) => self.workspace.receive(ResponsePayload::Message(message)),
                 _ => {}
@@ -1271,6 +1334,9 @@ impl App {
             return Task::none();
         };
         let response = *response;
+        if let Some(notice) = &response.notice {
+            self.ui.format_notice = Some(notice.clone());
+        }
         if self.recovery.id().is_none() {
             self.recovery = pending
                 .first()
@@ -1333,7 +1399,31 @@ impl App {
             return self.status();
         }
         if matches!(job, Job::Connect | Job::Attach | Job::Status) {
-            return self.complete_status(job, response, vaults);
+            let known: Vec<String> = self
+                .ui
+                .passkey_requests
+                .iter()
+                .map(|r| r.id.clone())
+                .collect();
+            let task = self.complete_status(job, response, vaults);
+            // A new passkey request waits for this window: ask the desktop
+            // to draw attention to it without stealing focus.
+            if self
+                .ui
+                .passkey_requests
+                .iter()
+                .any(|request| !known.contains(&request.id))
+            {
+                let attention = iced::window::latest().then(|window| match window {
+                    Some(id) => iced::window::request_user_attention(
+                        id,
+                        Some(iced::window::UserAttention::Critical),
+                    ),
+                    None => Task::none(),
+                });
+                return Task::batch([task, attention]);
+            }
+            return task;
         }
         // A lock or another client switching vaults invalidates every selection.
         if !matches!(
@@ -1426,6 +1516,11 @@ impl App {
                 }
                 return self.status();
             }
+            (Job::SshDecision, _) => return self.status(),
+            (Job::PasskeyDecision | Job::PasskeyPin, ResponsePayload::Message(message)) => {
+                self.notice = message;
+                return self.status();
+            }
             (Job::Stop, _) => {
                 self.clear_vault();
                 self.connection.running = false;
@@ -1495,6 +1590,8 @@ fn edits_draft(message: &Message) -> bool {
             | Message::MultilineSecret(_)
             | Message::SecretEdit(_)
             | Message::Url(..)
+            | Message::Tags(_)
+            | Message::Favorite(_)
             | Message::AddUrl
             | Message::RemoveUrl(_)
             | Message::Notes(_)

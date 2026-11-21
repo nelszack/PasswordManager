@@ -94,12 +94,13 @@ pub fn profile(kind: ItemKind) -> Profile {
             secret: "Private key",
             name_hint: "e.g. Production SSH key",
             guidance: "Store the private key with its connection details. Use the multiline \
-                       editor to paste a key.",
+                       editor to paste a key. Set SSH agent to on or confirm to use it with ssh.",
             suggested: &[
                 ("Hostname", false),
                 ("Port", false),
                 ("Public key", false),
                 ("Passphrase", true),
+                ("SSH agent", false),
             ],
         },
         ItemKind::ApiSecret => Profile {
@@ -189,6 +190,20 @@ pub struct Draft {
     pub multiline: bool,
     pub secret_editor: text_editor::Content,
     pub copy_policy: ClipboardPolicy,
+    /// Comma-separated tags as typed; parsed by [`parse_tags`] on save.
+    pub tags: String,
+    pub favorite: bool,
+}
+
+/// Split a comma-separated tag list, dropping blanks. The vault normalizes
+/// spacing and duplicates and enforces the limits.
+pub fn parse_tags(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 pub struct Validation {
@@ -226,6 +241,8 @@ impl Draft {
             urls: item.urls.clone(),
             notes: text_editor::Content::with_text(&notes),
             original_notes: notes,
+            tags: item.tags.join(", "),
+            favorite: item.favorite,
             fields: item
                 .fields
                 .iter()
@@ -292,6 +309,14 @@ impl Draft {
                 &original.kind.to_string(),
                 &latest.kind.to_string(),
                 &self.kind.to_string(),
+            ));
+        }
+        if parse_tags(&self.tags) != original.tags {
+            rows.push(comparison(
+                "Tags",
+                &original.tags.join(", "),
+                &latest.tags.join(", "),
+                &parse_tags(&self.tags).join(", "),
             ));
         }
         if self.urls != original.urls {
@@ -390,6 +415,12 @@ impl Draft {
         }
         if self.urls != original.urls {
             merged.urls = self.urls.clone();
+        }
+        if parse_tags(&self.tags) != original.tags {
+            merged.tags = self.tags.clone();
+        }
+        if self.favorite != original.favorite {
+            merged.favorite = self.favorite;
         }
         if self.notes_changed {
             merged.notes = text_editor::Content::with_text(&self.notes.text());
@@ -532,6 +563,10 @@ impl Draft {
                 set_fields,
                 remove_fields,
                 clear_fields: false,
+                add_tags: parse_tags(&self.tags),
+                remove_tags: vec![],
+                clear_tags: true,
+                favorite: Some(self.favorite),
             }))
         } else {
             Ok(ServerCommand::Add {
@@ -547,6 +582,8 @@ impl Draft {
                     kind: self.kind,
                     additional_urls: urls.into_iter().skip(1).collect(),
                     custom_fields: set_fields,
+                    tags: parse_tags(&self.tags),
+                    favorite: self.favorite,
                 },
                 copy_timeout: 0,
             })
@@ -580,6 +617,9 @@ mod tests {
 
     fn item() -> ItemDetail {
         ItemDetail {
+            attachments: vec![],
+            tags: vec![],
+            favorite: false,
             id: 42,
             revision: 7,
             name: "Example".into(),
@@ -850,6 +890,9 @@ mod merge_tests {
     #[test]
     fn reapply_preserves_concurrent_metadata_and_unedited_hidden_fields() {
         let original = ItemDetail {
+            attachments: vec![],
+            tags: vec![],
+            favorite: false,
             id: 5,
             revision: 1,
             name: "Original".into(),

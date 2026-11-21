@@ -43,6 +43,10 @@ use session_token::*;
 mod instance_lock;
 mod system_lock;
 use instance_lock::acquire_server_lock;
+mod ssh_agent;
+pub use ssh_agent::socket_path as ssh_agent_socket;
+mod passkey_approvals;
+mod unlock_throttle;
 
 pub use crate::protocol::{DEFAULT_PORT, server_addr};
 pub use crate::vault::VaultCredentials as ServerInfo;
@@ -197,6 +201,7 @@ pub async fn server(
     port: u16,
     password_history_limit: usize,
     trash_retention_days: u64,
+    ssh_agent: bool,
 ) -> Result<(), String> {
     let directory = data_dir();
     let instance_lock = Arc::new(acquire_server_lock(&directory)?);
@@ -226,10 +231,30 @@ pub async fn server(
     );
     let system_lock =
         system_lock::Monitor::start(worker.system_lock_handler(Arc::clone(&background_error)));
+    let ssh_approvals: Arc<ssh_agent::SshApprovals> = Arc::default();
+    let passkey_approvals: Arc<passkey_approvals::PasskeyApprovals> = Arc::default();
     let cloud_task = cloud::start(worker.clone(), stopping.clone());
+    // An agent failure is reported, not fatal: the vault service still runs.
+    #[cfg(unix)]
+    let agent = match ssh_agent
+        .then(|| ssh_agent::Agent::start(worker.clone(), Arc::clone(&ssh_approvals)))
+    {
+        Some(Ok(agent)) => Some(agent),
+        Some(Err(error)) => {
+            let _ = ssh_agent::UNAVAILABLE.set(format!("SSH agent unavailable: {error}"));
+            None
+        }
+        None => None,
+    };
+    #[cfg(not(unix))]
+    if ssh_agent {
+        let _ = ssh_agent::UNAVAILABLE
+            .set("The SSH agent is not available on this platform yet.".into());
+    }
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let connection_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
     let status_subscribers = Arc::new(Semaphore::new(MAX_STATUS_SUBSCRIBERS));
+    let unlock_throttle = Arc::default();
 
     loop {
         tokio::select! {
@@ -253,6 +278,9 @@ pub async fn server(
                     password_history_limit,
                     trash_retention_days,
                     status_subscribers: Arc::clone(&status_subscribers),
+                    unlock_throttle: Arc::clone(&unlock_throttle),
+                    ssh_approvals: Arc::clone(&ssh_approvals),
+                    passkey_approvals: Arc::clone(&passkey_approvals),
                 };
                 let permit = match Arc::clone(&connection_slots).acquire_owned().await {
                     Ok(permit) => permit,
@@ -268,6 +296,10 @@ pub async fn server(
     }
     stopping.store(true, Ordering::Release);
     cloud_task.abort();
+    #[cfg(unix)]
+    if let Some(agent) = agent {
+        agent.stop();
+    }
     system_lock.stop();
     worker.lock().await;
     let _ = crate::clipboard::clear_owned();
@@ -293,6 +325,12 @@ struct ConnectionState {
     trash_retention_days: u64,
     /// Bounds long-lived status subscriptions for this server.
     status_subscribers: Arc<Semaphore>,
+    /// Shared by every connection so repeated wrong passwords slow down.
+    unlock_throttle: Arc<std::sync::Mutex<unlock_throttle::UnlockThrottle>>,
+    /// SSH agent signatures waiting for a decision.
+    ssh_approvals: Arc<ssh_agent::SshApprovals>,
+    /// Browser passkey requests waiting for the person's confirmation.
+    passkey_approvals: Arc<passkey_approvals::PasskeyApprovals>,
 }
 
 async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, worker: VaultWorker) {
@@ -344,6 +382,42 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             outcome::CommandOutcome {
                 responses: vec![current_status(&state, &worker).await],
                 effect: CommandEffect::None,
+                ..Default::default()
+            }
+        } else if let ServerCommand::PasskeyVerification { origin } = &request.command {
+            // Waits for the person, so it never occupies the vault worker.
+            let session = worker.session_id();
+            let result = if let Err(e) = request.validate() {
+                Err(e)
+            } else if session.is_none() {
+                Err("Vault locked.".into())
+            } else if request.expected_session.is_some() && request.expected_session != session {
+                Err("Unlock session changed; try the passkey request again".into())
+            } else if !worker.passkey_confirmation().0 {
+                Err("This vault has no master password or passkey PIN to confirm with.".into())
+            } else {
+                // Locking (or any session change) ends the wait at once.
+                let asked = session.clone().unwrap_or_default();
+                let mut sessions = worker.changes().0;
+                let ended = async {
+                    while sessions.changed().await.is_ok() {
+                        if sessions.borrow().as_deref() != Some(asked.as_str()) {
+                            break;
+                        }
+                    }
+                };
+                tokio::select! {
+                    result = state.passkey_approvals.ask(origin.clone(), asked.clone()) => result,
+                    () = ended => Err("The vault locked; try the passkey request again".into()),
+                }
+            };
+            let mut response = match result {
+                Ok(token) => RpcResponse::success(ResponsePayload::Message(token)),
+                Err(error) => RpcResponse::message(ResponseCode::Failure, error),
+            };
+            response.session_id = session;
+            outcome::CommandOutcome {
+                responses: vec![response],
                 ..Default::default()
             }
         } else if let ServerCommand::Cloud(action) = &request.command {
@@ -503,6 +577,7 @@ async fn current_status(state: &ConnectionState, worker: &VaultWorker) -> RpcRes
             .system_lock
             .as_deref()
             .and_then(system_lock::Monitor::warning),
+        ssh_agent::UNAVAILABLE.get().cloned(),
     ]
     .into_iter()
     .flatten()
@@ -515,6 +590,9 @@ async fn current_status(state: &ConnectionState, worker: &VaultWorker) -> RpcRes
     if let ResponsePayload::Status(status) = &mut response.payload {
         status.vault_revision = worker.vault_revision();
         status.cloud_warning = worker.cloud_warning().await;
+        status.ssh_requests = state.ssh_approvals.list();
+        (status.passkey_verification, status.passkey_pin) = worker.passkey_confirmation();
+        status.passkey_requests = state.passkey_approvals.list_for(session_id.as_deref());
     }
     response.session_id = session_id;
     response
@@ -576,6 +654,8 @@ async fn stream_status(
         tokio::select! {
             changed = sessions.changed() => if changed.is_err() { return },
             changed = revisions.changed() => if changed.is_err() { return },
+            () = state.ssh_approvals.changed.notified() => {}
+            () = state.passkey_approvals.changed.notified() => {}
             _ = tokio::time::sleep(STATUS_WARNING_CHECK) => {}
             readable = stream.readable() => {
                 // Clients never write after subscribing: data or EOF ends it.

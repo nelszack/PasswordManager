@@ -28,6 +28,42 @@ struct PortableItemRef<'a> {
     totp: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duo: Option<&'a DuoCredentials>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    tags: &'a [String],
+    #[serde(skip_serializing_if = "is_false")]
+    favorite: bool,
+    #[serde(skip_serializing_if = "ExportAttachments::is_empty")]
+    attachments: ExportAttachments<'a>,
+}
+
+/// Base64-encodes attachment content while the export is written.
+struct ExportAttachments<'a>(&'a [Attachment]);
+impl ExportAttachments<'_> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+impl Serialize for ExportAttachments<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for attachment in self.0 {
+            #[derive(Serialize)]
+            struct PortableAttachmentRef<'a> {
+                name: &'a str,
+                added: &'a Timestamp,
+                data: &'a str,
+            }
+            let data = Zeroizing::new(STANDARD.encode(&attachment.data));
+            sequence.serialize_element(&PortableAttachmentRef {
+                name: &attachment.name,
+                added: &attachment.added,
+                data: &data,
+            })?;
+        }
+        sequence.end()
+    }
 }
 
 #[derive(Serialize)]
@@ -155,6 +191,9 @@ impl Serialize for ExportItems<'_> {
                     .as_ref()
                     .map(|a| a.configuration.as_str()),
                 duo: item.duo.as_ref().map(|d| &d.credentials),
+                tags: &m.tags,
+                favorite: m.favorite,
+                attachments: ExportAttachments(&item.attachments),
             })?;
         }
         sequence.end()

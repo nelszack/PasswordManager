@@ -11,13 +11,34 @@ pub fn render(payload: &ResponsePayload) -> String {
         }
         ResponsePayload::Secret(secret) => secret.expose().to_owned(),
         ResponsePayload::Status(status) => format!(
-            "Status: {}\nVersion: {}{}",
+            "Status: {}\nVersion: {}{}{}{}",
             if status.locked {
                 "Locked (run `pm unlock` to open your vault)"
             } else {
                 "Unlocked"
             },
             status.version,
+            status
+                .ssh_requests
+                .iter()
+                .map(|request| format!(
+                    "\nSSH request {}: key \"{}\" for {} (pm ssh-agent approve {})",
+                    request.id,
+                    metadata(&request.key).as_str(),
+                    metadata(&request.host).as_str(),
+                    request.id
+                ))
+                .collect::<String>(),
+            status
+                .passkey_requests
+                .iter()
+                .map(|request| format!(
+                    "\nPasskey request {}: confirm it is you for {} (pm passkey approve {})",
+                    request.id,
+                    metadata(&request.site).as_str(),
+                    request.id
+                ))
+                .collect::<String>(),
             status
                 .warning
                 .as_ref()
@@ -71,8 +92,9 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .iter()
                 .map(|item| {
                     let mut block = format!(
-                        "#{} {} ({}{})\n",
+                        "#{} {}{} ({}{})\n",
                         item.id,
+                        if item.favorite { "★ " } else { "" },
                         metadata(&item.name).as_str(),
                         item.kind,
                         if item.has_totp { ", OTP" } else { "" }
@@ -82,6 +104,9 @@ pub fn render(payload: &ResponsePayload) -> String {
                     }
                     if !item.urls.is_empty() {
                         block += &format!("   URLs: {}\n", urls(&item.urls));
+                    }
+                    if !item.tags.is_empty() {
+                        block += &format!("   Tags: {}\n", tags(&item.tags));
                     }
                     block
                 })
@@ -105,6 +130,20 @@ pub fn render(payload: &ResponsePayload) -> String {
             }
             if !item.urls.is_empty() {
                 lines.push(format!("URLs:     {}", urls(&item.urls)));
+            }
+            if !item.tags.is_empty() {
+                lines.push(format!("Tags:     {}", tags(&item.tags)));
+            }
+            if item.favorite {
+                lines.push("Favorite: yes".into());
+            }
+            if !item.attachments.is_empty() {
+                lines.push("Attachments:".into());
+                lines.extend(
+                    item.attachments.iter().map(|a| {
+                        format!("  {} ({})", metadata(&a.name).as_str(), byte_size(a.size))
+                    }),
+                );
             }
             lines.push(format!(
                 "Password: {}",
@@ -300,6 +339,22 @@ fn optional_metadata(value: Option<&str>) -> String {
         .filter(|v| !v.is_empty())
         .map(|v| metadata(v).to_string())
         .unwrap_or_else(|| "—".into())
+}
+
+fn byte_size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1_048_576.0),
+    }
+}
+
+fn tags(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|tag| metadata(tag).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn urls(values: &[String]) -> String {

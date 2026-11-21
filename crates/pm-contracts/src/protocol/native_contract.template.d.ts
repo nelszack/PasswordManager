@@ -8,7 +8,9 @@ export interface ItemSummary { id: number; revision: number; name: string; usern
 export interface CustomField { name: string; value: string; secret: boolean; }
 export interface BrowserLogin { id: number; revision: number; name: string; username: string | null; password: string; has_totp: boolean; }
 export interface AutofillItem { id: number; revision: number; name: string; kind: ItemKind; username: string | null; primary_secret: string; custom_fields: CustomField[]; }
-export interface ServerStatus { locked: boolean; version: string; warning: string | null; vault_revision: number | null; cloud_warning: string | null; }
+export interface ServerStatus { locked: boolean; version: string; warning: string | null; vault_revision: number | null; cloud_warning: string | null; password_check?: boolean; }
+export interface PasskeyChoice { id: number; revision: number; rp_id: string; user_name: string; display_name: string; }
+export interface PasskeyCredentialJSON { id: string; rawId: string; type: "public-key"; authenticatorAttachment: string; clientExtensionResults: Record<string, unknown>; response: Record<string, unknown>; }
 export type Authenticator = { code: string; mode: "totp"; expires_in: number; counter: null } | { code: string; mode: "hotp"; expires_in: null; counter: string };
 export interface DuoRequest { id: string; application: string; username: string; location: string; summary: string; expires_at: number; code_digits: number | null; unsupported: string | null; fingerprint: string; }
 export interface NativeRequests {
@@ -16,7 +18,7 @@ __REQUESTS__}
 export interface NativeResults {
 __RESULTS__}
 export type NativeAction = keyof NativeRequests;
-export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
+export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo" | "approval"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
 export const protocolVersion: __PROTOCOL_VERSION__;
 export const operations: Readonly<Record<NativeAction, NativePolicy>>;
 export function validateRequest<K extends NativeAction>(action: K, fields: NativeRequests[K]): NativeRequests[K];

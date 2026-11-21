@@ -44,7 +44,13 @@ var PasswordManagerPopupState = (() => {
     function neverSaveSites(value) {
         return Array.isArray(value) ? value.filter(site => typeof site === "string" && site) : [];
     }
-    return { presentation, hint, operationLabel, generatorSettings, neverSaveSites };
+    // While locked, the desktop app is where you unlock.
+    function desktopLabel(status = {}) {
+        return status.native && status.running && !status.versionError && status.locked
+            ? "Unlock in desktop app"
+            : "Open desktop app";
+    }
+    return { presentation, hint, operationLabel, generatorSettings, neverSaveSites, desktopLabel };
 })();
 
 if (typeof module !== "undefined") module.exports = PasswordManagerPopupState;

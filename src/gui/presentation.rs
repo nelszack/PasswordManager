@@ -98,6 +98,21 @@ pub(super) struct State {
     pub shortcuts: bool,
     pub settings_section: SettingsSection,
     pub kind: Option<ItemKind>,
+    pub tag: Option<String>,
+    pub favorites_only: bool,
+    /// SSH agent signatures waiting for a decision.
+    pub ssh_requests: Vec<password_manager::protocol::SshRequest>,
+    /// Browser passkey requests waiting for the person to confirm.
+    pub passkey_requests: Vec<password_manager::protocol::PasskeyRequest>,
+    /// The master password or passkey PIN typed to confirm the first request.
+    pub passkey_secret: SecretString,
+    /// A passkey PIN is set for the unlocked vault on this device.
+    pub passkey_pin: bool,
+    /// New passkey PIN and its confirmation in Settings → Security.
+    pub pin_new: SecretString,
+    pub pin_confirm: SecretString,
+    /// A one-time notice from the service, such as a vault format upgrade.
+    pub format_notice: Option<String>,
     pub notice_error: bool,
     pub confirm_stop: bool,
     pub active_vault: Option<(String, String)>,
@@ -138,6 +153,15 @@ impl Default for State {
             shortcuts: false,
             settings_section: SettingsSection::default(),
             kind: None,
+            tag: None,
+            favorites_only: false,
+            ssh_requests: Vec::new(),
+            passkey_requests: Vec::new(),
+            passkey_secret: SecretString::default(),
+            passkey_pin: false,
+            pin_new: SecretString::default(),
+            pin_confirm: SecretString::default(),
+            format_notice: None,
             notice_error: false,
             confirm_stop: false,
             master_error: None,
@@ -320,6 +344,8 @@ impl App {
         if cache.as_ref().is_none_or(|cached| {
             cached.query.as_str() != self.query
                 || cached.kind != self.ui.kind
+                || cached.tag != self.ui.tag
+                || cached.favorites_only != self.ui.favorites_only
                 || cached.source_len != self.items.len()
         }) {
             let query = zeroize::Zeroizing::new(self.query.trim().to_lowercase());
@@ -330,6 +356,10 @@ impl App {
                 .enumerate()
                 .filter_map(|(index, item)| {
                     (self.ui.kind.is_none_or(|kind| kind == item.kind)
+                        && (!self.ui.favorites_only || item.favorite)
+                        && self.ui.tag.as_ref().is_none_or(|tag| {
+                            item.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+                        })
                         && (query.is_empty() || {
                             let text = search_text
                                 .entry(item.id)
@@ -347,6 +377,8 @@ impl App {
             *cache = Some(MatchingItems {
                 query: zeroize::Zeroizing::new(self.query.clone()),
                 kind: self.ui.kind,
+                tag: self.ui.tag.clone(),
+                favorites_only: self.ui.favorites_only,
                 source_len: self.items.len(),
                 indices,
             });
@@ -361,6 +393,8 @@ impl App {
 struct MatchingItems {
     query: zeroize::Zeroizing<String>,
     kind: Option<ItemKind>,
+    tag: Option<String>,
+    favorites_only: bool,
     source_len: usize,
     indices: Vec<usize>,
 }
@@ -376,6 +410,7 @@ impl SearchText {
             values: std::iter::once(item.name.as_str())
                 .chain(item.username.as_deref())
                 .chain(item.urls.iter().map(String::as_str))
+                .chain(item.tags.iter().map(String::as_str))
                 .map(|value| zeroize::Zeroizing::new(value.to_lowercase()))
                 .collect(),
         }
@@ -440,6 +475,8 @@ mod tests {
     fn item_deltas_preserve_unchanged_search_text_and_remove_stale_metadata() {
         let mut app = crate::gui::tests::app();
         let item = |id, name: &str| ItemSummary {
+            tags: vec![],
+            favorite: false,
             id,
             revision: 1,
             name: name.into(),
@@ -490,6 +527,8 @@ mod tests {
     fn cached_matches_follow_search_kind_refresh_and_lock() {
         let mut app = crate::gui::tests::app();
         let summary = |name: &str, kind| ItemSummary {
+            tags: vec![],
+            favorite: false,
             id: 1,
             revision: 1,
             name: name.into(),

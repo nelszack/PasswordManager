@@ -331,6 +331,8 @@ fn rendered_screens_fit_supported_windows() {
         app.connection.session = Some("synthetic-session".into());
         app.items = (1..=3)
             .map(|id| ItemSummary {
+                tags: vec![],
+                favorite: false,
                 id,
                 revision: 1,
                 name: format!("Example account {id}"),
@@ -426,6 +428,8 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
     app.connection.session = Some("synthetic-session".into());
     app.items = (0..2000)
         .map(|id| ItemSummary {
+            tags: vec![],
+            favorite: false,
             id: id + 1,
             revision: 1,
             name: format!("Account {id:04}"),
@@ -457,6 +461,8 @@ fn tool_search_trash_and_audit_pages_bound_widgets_and_keep_item_identity() {
     use password_manager::vault::{AuditLabel, AuditReport, ItemPage, TrashPage, TrashSummary};
     let items: Vec<_> = (0..103)
         .map(|id| ItemSummary {
+            tags: vec![],
+            favorite: false,
             id,
             revision: 1,
             name: format!("Paged item {id:03}"),

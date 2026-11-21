@@ -173,11 +173,11 @@ Linux shortcuts are platform-specific and do not need mobile equivalents.
 
 ## Later interoperability work (not implemented by the initial Android adapter)
 
-- [ ] Desktop browser passkey creation/sign-in integration and its security tests.
+- [x] Desktop browser passkey creation/sign-in integration and its security tests (Chromium end-to-end test registers, signs in, and verifies the signature; Firefox acceptance pending).
 - [ ] Android Credential Exchange import/export for direct Google and other provider transfers.
 - [ ] External passkey import formats, including supported Bitwarden/FIDO CXF key representations.
 - [ ] PRF/largeBlob extensions, related-origin requests, and cross-device QR authentication.
-- [ ] Mobile payment-card and identity autofill.
+- [x] Mobile payment-card and identity autofill (explicit choice per fill; shared Rust field rules). Device acceptance with real checkout and address forms is still pending.
 
 ## Mobile feature parity roadmap
 

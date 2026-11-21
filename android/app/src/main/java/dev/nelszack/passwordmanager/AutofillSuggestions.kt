@@ -105,6 +105,33 @@ internal object AutofillSuggestions {
         return dataset.build()
     }
 
+    /** One suggestion that opens the card or identity chooser; it carries no values. */
+    fun typedSuggestion(context: Context, request: FillRequest, form: TypedForm): Dataset {
+        val pending = Forms.pending(context, "typed")
+        val title = if (form.card) "Fill a saved card" else "Fill a saved identity"
+        val dataset =
+            Dataset.Builder(Forms.presentation(context, "$title\nPassword Manager"))
+                .setAuthentication(pending.intentSender)
+        form.ids.forEach {
+            dataset.setValue(
+                it,
+                null,
+                java.util.regex.Pattern.compile(".*", java.util.regex.Pattern.DOTALL),
+            )
+        }
+        if (Build.VERSION.SDK_INT >= 30)
+            inlinePresentation(
+                    context,
+                    request.inlineSuggestionsRequest,
+                    0,
+                    pending,
+                    title,
+                    "Password Manager",
+                )
+                ?.let { dataset.setInlinePresentation(it) }
+        return dataset.build()
+    }
+
     @RequiresApi(30)
     fun inlinePresentation(
         context: Context,

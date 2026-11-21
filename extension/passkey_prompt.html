@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Passkey · Password Manager</title>
+  <link rel="stylesheet" href="picker.css">
+  <link rel="stylesheet" href="common.css"><link rel="stylesheet" href="passkey_prompt.css">
+    <script src="ui_transport.js"></script>
+    <script src="ui_session.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="brand">
+      <img src="icons/icon32.png" alt="">
+      <h1 id="title">Passkey</h1>
+    </header>
+    <p id="destination"></p>
+    <p id="status" role="status" aria-live="polite">Loading…</p>
+    <div id="choices" role="radiogroup" aria-label="Saved passkeys"></div>
+    <div id="verify" hidden>
+      <label class="check"><input id="confirmInDesktop" type="checkbox"> <span>Confirm it's me in the desktop app</span></label>
+      <p id="verifyHint" class="hint"></p>
+    </div>
+    <div class="actions">
+      <button id="confirm" class="primary" type="button" disabled>Continue</button>
+      <button id="fallback" type="button">Use another passkey provider</button>
+      <button id="cancel" type="button">Cancel</button>
+    </div>
+  </main>
+  <script src="passkey_prompt.js"></script>
+</body>
+</html>

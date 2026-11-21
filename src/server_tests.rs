@@ -26,6 +26,9 @@ fn test_connection_state() -> ConnectionState {
         password_history_limit: 10,
         trash_retention_days: 0,
         status_subscribers: Arc::new(Semaphore::new(MAX_STATUS_SUBSCRIBERS)),
+        unlock_throttle: Arc::default(),
+        ssh_approvals: Arc::default(),
+        passkey_approvals: Arc::default(),
     }
 }
 fn test_worker(session: VaultSession, state: &ConnectionState) -> VaultWorker {
@@ -368,6 +371,10 @@ fn mutation_responses_preserve_precommit_and_committed_durability_states() {
             set_fields: vec![],
             remove_fields: vec![],
             clear_fields: false,
+            add_tags: vec![],
+            remove_tags: vec![],
+            clear_tags: false,
+            favorite: None,
         });
         let outcome = crate::vault::with_write_fault(fault, || {
             execute_command(state.clone(), command, &mut session)
@@ -403,6 +410,10 @@ fn mutation_responses_preserve_precommit_and_committed_durability_states() {
             set_fields: vec![],
             remove_fields: vec![],
             clear_fields: false,
+            add_tags: vec![],
+            remove_tags: vec![],
+            clear_tags: false,
+            favorite: None,
         }),
         &mut session,
     );
@@ -732,6 +743,10 @@ async fn expected_revisions_prevent_overlapping_editor_writes() {
             set_fields: vec![],
             remove_fields: vec![],
             clear_fields: false,
+            add_tags: vec![],
+            remove_tags: vec![],
+            clear_tags: false,
+            favorite: None,
         })
     };
     let first = RequestEnvelope::new(update("First"))
@@ -1561,4 +1576,203 @@ async fn status_subscriptions_are_bounded_and_refused_ones_report_a_failure() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_failed_unlocks_are_slowed_for_every_client() {
+    init_test_data_dir();
+    let state = test_connection_state();
+    let worker = test_worker(VaultSession::Locked, &state);
+    let attempt = || {
+        RequestEnvelope::new(ServerCommand::Unlock(crate::types::UnlockInfo {
+            key: PasswordType::Password("synthetic-wrong-password".into()),
+            timeout: 0,
+            vault_file: Some("00000000000000000000000000000000.enc".into()),
+        }))
+    };
+    for _ in 0..6 {
+        let response = request_over_tcp(&state, worker.clone(), attempt()).await;
+        assert_ne!(response.code, ResponseCode::Success as i32);
+        assert!(!response.error_message().contains("Too many"));
+    }
+    let refused = request_over_tcp(&state, worker.clone(), attempt()).await;
+    assert!(
+        refused
+            .error_message()
+            .contains("Too many incorrect attempts"),
+        "{}",
+        refused.error_message()
+    );
+    state.unlock_throttle.lock().unwrap().succeeded();
+    let allowed = request_over_tcp(&state, worker, attempt()).await;
+    assert!(!allowed.error_message().contains("Too many"));
+}
+
+/// Sends `command` bound to the worker's current unlock session, as the
+/// desktop app and native host do.
+async fn in_session(
+    state: ConnectionState,
+    worker: VaultWorker,
+    command: ServerCommand,
+) -> RpcResponse {
+    let mut envelope = RequestEnvelope::new(command);
+    envelope.expected_session = worker.session_id();
+    request_over_tcp(&state, worker, envelope).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_proof_waits_for_a_desktop_confirmation_with_the_pin() {
+    init_test_data_dir();
+    let state = test_connection_state();
+    // A key-file session: no master password to check.
+    let key_file = VaultSession::unlock(
+        Vault::memory(),
+        VaultCredentials::Session {
+            encryption_key: [43; 32],
+            salt: [43; 16],
+            kdf: 0,
+            memory_kib: 8192,
+            iterations: 1,
+            parallelism: 1,
+        },
+    );
+    let worker = test_worker(key_file, &state);
+    let origin = "https://login.example.com".to_string();
+    let send = |command: ServerCommand| in_session(state.clone(), worker.clone(), command);
+    let status = || async {
+        match send(ServerCommand::Status).await.payload {
+            ResponsePayload::Status(status) => status,
+            other => panic!("expected status, got {other:?}"),
+        }
+    };
+    assert!(!status().await.passkey_verification);
+    let refused = send(ServerCommand::PasskeyVerification {
+        origin: origin.clone(),
+    })
+    .await;
+    assert!(
+        refused
+            .error_message()
+            .contains("no master password or passkey PIN")
+    );
+
+    let short = send(ServerCommand::SetPasskeyPin(Some("123".into()))).await;
+    assert_ne!(short.code, ResponseCode::Success as i32);
+    let set = send(ServerCommand::SetPasskeyPin(Some("135790".into()))).await;
+    assert_eq!(
+        set.code,
+        ResponseCode::Success as i32,
+        "{}",
+        set.error_message()
+    );
+    let current = status().await;
+    assert!(current.passkey_pin && current.passkey_verification);
+
+    let waiting = tokio::spawn(send(ServerCommand::PasskeyVerification {
+        origin: origin.clone(),
+    }));
+    let request = loop {
+        if let Some(request) = status().await.passkey_requests.into_iter().next() {
+            break request;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(request.site, origin);
+    let wrong = send(ServerCommand::PasskeyDecision {
+        id: request.id.clone(),
+        secret: Some("000000".into()),
+    })
+    .await;
+    assert!(wrong.error_message().contains("incorrect"));
+    let confirmed = send(ServerCommand::PasskeyDecision {
+        id: request.id.clone(),
+        secret: Some("135790".into()),
+    })
+    .await;
+    assert_eq!(
+        confirmed.code,
+        ResponseCode::Success as i32,
+        "{}",
+        confirmed.error_message()
+    );
+    let ResponsePayload::Message(token) = waiting.await.unwrap().payload else {
+        panic!("expected a verification token");
+    };
+    assert!(status().await.passkey_requests.is_empty());
+
+    let registration = |user: &[u8]| {
+        serde_json::json!({"rp":{"id":"example.com","name":"Example"},
+            "user":{"id":crate::passkey::encode(user),"name":"alice","displayName":"Alice"},
+            "challenge":crate::passkey::encode([5;32]),
+            "pubKeyCredParams":[{"type":"public-key","alg":-7}],
+            "authenticatorSelection":{"userVerification":"required"}})
+        .to_string()
+    };
+    let create =
+        |user: &'static [u8], verification: Option<String>| ServerCommand::BrowserPasskeyCreate {
+            origin: origin.clone(),
+            request: registration(user),
+            verification,
+            verified: false,
+        };
+    let forged = send(create(b"user-1", Some("f".repeat(64)))).await;
+    assert!(forged.error_message().contains("expired"));
+    let created = send(create(b"user-1", Some(token.clone()))).await;
+    let ResponsePayload::PasskeyCredential(credential) = created.payload else {
+        panic!("expected a credential: {}", created.error_message());
+    };
+    let credential: serde_json::Value = serde_json::from_str(&credential).unwrap();
+    let data = crate::passkey::decode(
+        credential["response"]["authenticatorData"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data[32] & 0x04, 0x04, "user verified");
+    let reused = send(create(b"user-2", Some(token))).await;
+    assert!(
+        reused.error_message().contains("expired"),
+        "tokens work once"
+    );
+    let removed = send(ServerCommand::SetPasskeyPin(None)).await;
+    assert_eq!(removed.code, ResponseCode::Success as i32);
+    assert!(!status().await.passkey_verification);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn locking_ends_a_waiting_passkey_confirmation() {
+    init_test_data_dir();
+    let state = test_connection_state();
+    let worker = test_worker(session(Vault::memory()), &state);
+    let waiting = tokio::spawn(in_session(
+        state.clone(),
+        worker.clone(),
+        ServerCommand::PasskeyVerification {
+            origin: "https://login.example.com".into(),
+        },
+    ));
+    let session = worker.session_id();
+    while state
+        .passkey_approvals
+        .list_for(session.as_deref())
+        .is_empty()
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    worker.lock().await;
+    let ended = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("locking ends the wait")
+        .unwrap();
+    assert!(
+        ended.error_message().contains("locked"),
+        "{}",
+        ended.error_message()
+    );
+    assert!(
+        state
+            .passkey_approvals
+            .list_for(session.as_deref())
+            .is_empty()
+    );
 }

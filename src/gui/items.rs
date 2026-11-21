@@ -9,6 +9,69 @@ impl App {
                 self.ui.kind = kind;
                 self.ui.item_page = 0;
             }
+            Message::FilterTag(tag) => {
+                self.ui.tag = tag;
+                self.ui.item_page = 0;
+            }
+            Message::FilterFavorites(value) => {
+                self.ui.favorites_only = value;
+                self.ui.item_page = 0;
+            }
+            Message::AddAttachment if self.writes_allowed() && self.editor.is_none() => {
+                if let Some(item) = &self.item {
+                    let id = item.id;
+                    self.serial += 1;
+                    self.request_state = RequestState::Busy;
+                    return file_picker::pick_attachment(self.serial, id, None);
+                }
+            }
+            Message::SaveAttachment(index) if self.editor.is_none() => {
+                if let Some(item) = &self.item
+                    && let Some(attachment) = item.attachments.get(index)
+                {
+                    let (id, name) = (item.id, attachment.name.clone());
+                    self.serial += 1;
+                    self.request_state = RequestState::Busy;
+                    return file_picker::pick_attachment(self.serial, id, Some((index, name)));
+                }
+            }
+            Message::RemoveAttachment(index) if self.writes_allowed() => {
+                self.remove_attachment = self
+                    .item
+                    .as_ref()
+                    .and_then(|item| item.attachments.get(index))
+                    .map(|a| a.name.clone());
+            }
+            Message::CancelRemoveAttachment => self.remove_attachment = None,
+            Message::ConfirmRemoveAttachment if self.writes_allowed() => {
+                if let (Some(name), Some(item)) = (self.remove_attachment.take(), &self.item) {
+                    let (id, revision) = (item.id, item.revision);
+                    return self.request(
+                        Job::Attachment(id),
+                        ServerCommand::Attachment(AttachmentCommand::Remove {
+                            target: Target::Id(id),
+                            name,
+                        }),
+                        Some(revision),
+                    );
+                }
+            }
+            Message::ToggleFavorite if self.writes_allowed() && self.editor.is_none() => {
+                if let Some(item) = &self.item {
+                    let mut change = TypedUpdate::from(EntryUpdate {
+                        target: Target::Id(item.id),
+                        update: EntryChanges::default(),
+                        password: None,
+                    });
+                    change.favorite = Some(!item.favorite);
+                    let (id, revision) = (item.id, item.revision);
+                    return self.request(
+                        Job::Favorite(id),
+                        ServerCommand::Update(change),
+                        Some(revision),
+                    );
+                }
+            }
             Message::ItemPage(page) => {
                 self.ui.item_page = page;
                 self.ui.page_input.clear();
@@ -271,6 +334,16 @@ impl App {
                 self.item = Some(item);
                 self.reveal_until = Some(Instant::now() + Duration::from_secs(15));
             }
+            (Job::Attachment(id), ResponsePayload::Message(message)) => {
+                self.notice = message;
+                return self.refresh_item(id, ItemIntent::View, incremental);
+            }
+            (Job::Attachment(id), _) => {
+                return self.refresh_item(id, ItemIntent::View, incremental);
+            }
+            (Job::Favorite(id), _) => {
+                return self.refresh_item(id, ItemIntent::View, incremental);
+            }
             (Job::SaveEditor, _) => {
                 if let Some(id) = self.editor.as_ref().and_then(|draft| draft.id) {
                     self.notice = "Item saved. You can configure its authenticators below.".into();
@@ -292,6 +365,7 @@ impl App {
                 self.editor = Editor::Closed;
                 self.item = None;
                 self.delete_confirm = false;
+                self.remove_attachment = None;
                 self.notice = "Item saved.".into();
                 if incremental {
                     self.ui.saved_item = None;
@@ -310,6 +384,7 @@ impl App {
                 self.editor = Editor::Closed;
                 self.item = None;
                 self.delete_confirm = false;
+                self.remove_attachment = None;
                 self.notice = "Item moved to encrypted trash. You can restore it from Tools → \
                                Deleted items."
                     .into();
@@ -359,6 +434,42 @@ impl App {
         )
     }
 
+    /// Attach the chosen file, or save an attachment to the chosen path. The
+    /// item must still be the one open when the chooser was shown.
+    pub(super) fn attachment_picked(
+        &mut self,
+        id: usize,
+        save: Option<usize>,
+        path: String,
+    ) -> Task<Message> {
+        let Some(item) = self.item.as_ref().filter(|item| item.id == id) else {
+            return Task::none();
+        };
+        let revision = item.revision;
+        let command = match save {
+            None => AttachmentCommand::Add {
+                target: Target::Id(id),
+                path,
+                name: None,
+            },
+            Some(index) => match item.attachments.get(index) {
+                // The system dialog already confirmed any replacement.
+                Some(attachment) => AttachmentCommand::Save {
+                    target: Target::Id(id),
+                    name: attachment.name.clone(),
+                    path,
+                    force: true,
+                },
+                None => return Task::none(),
+            },
+        };
+        self.request(
+            Job::Attachment(id),
+            ServerCommand::Attachment(command),
+            Some(revision),
+        )
+    }
+
     pub(super) fn refresh_item(
         &mut self,
         id: usize,
@@ -389,6 +500,7 @@ impl App {
         self.notice.clear();
         self.ui.undo_trash = None;
         self.delete_confirm = false;
+        self.remove_attachment = None;
         self.workspace.prepared = None;
         self.workspace.clear_inputs();
         self.editor = Editor::Closed;

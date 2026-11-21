@@ -145,7 +145,7 @@ pub fn decrypt_record_stream(
     Ok(plaintext)
 }
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const DEFAULT_PORT: u16 = 7878;
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()
@@ -332,6 +332,9 @@ pub enum ResponsePayload {
     Trash(crate::vault::TrashPage),
     CloudVaults(Vec<crate::cloud::RemoteVault>),
     CloudConflicts(crate::cloud::ConflictReview),
+    Passkeys(Vec<crate::vault::PasskeyChoice>),
+    /// A WebAuthn `PublicKeyCredential` in its `toJSON()` form, as JSON text.
+    PasskeyCredential(String),
 }
 impl ResponsePayload {
     pub fn into_json(self) -> serde_json::Value {
@@ -364,6 +367,10 @@ impl ResponsePayload {
             Self::CloudConflicts(value) => {
                 serde_json::to_value(value).expect("cloud conflicts serialize")
             }
+            Self::Passkeys(value) => serde_json::to_value(value).expect("passkeys serialize"),
+            Self::PasskeyCredential(value) => {
+                serde_json::from_str(&value).unwrap_or(serde_json::Value::Null)
+            }
         }
     }
 }
@@ -383,6 +390,10 @@ pub struct RpcResponse {
     pub changes: Option<crate::vault::ItemChanges>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_revision: Option<u64>,
+    /// Something the person should know about a successful change, shown in
+    /// addition to its result (for example, a vault format upgrade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 impl RpcResponse {
     pub fn new(code: ResponseCode, payload: ResponsePayload) -> Self {
@@ -395,6 +406,7 @@ impl RpcResponse {
             operation: None,
             changes: None,
             vault_revision: None,
+            notice: None,
         }
     }
     pub fn success(payload: ResponsePayload) -> Self {
@@ -642,6 +654,35 @@ pub struct ServerStatus {
     pub cloud_warning: Option<String>,
     pub version: String,
     pub warning: Option<String>,
+    /// SSH signatures waiting for the person's decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_requests: Vec<SshRequest>,
+    /// The unlocked vault can confirm a passkey request: it uses a master
+    /// password or has a passkey PIN on this device. False while locked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passkey_verification: bool,
+    /// A passkey PIN is set for the unlocked vault on this device.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passkey_pin: bool,
+    /// Browser passkey requests waiting for confirmation in the desktop app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passkey_requests: Vec<PasskeyRequest>,
+}
+/// A browser passkey request waiting for the person to confirm it is them.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PasskeyRequest {
+    pub id: String,
+    /// The browser-reported site, such as `https://login.example.com`.
+    pub site: String,
+}
+/// An SSH agent signature that needs confirmation. No key material.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SshRequest {
+    pub id: String,
+    /// The vault item's name.
+    pub key: String,
+    /// The destination host as the SSH client reported it, or its key fingerprint.
+    pub host: String,
 }
 impl ServerStatus {
     pub fn new(locked: bool, warning: Option<String>) -> Self {
@@ -651,6 +692,10 @@ impl ServerStatus {
             vault_revision: None,
             cloud_warning: None,
             warning,
+            ssh_requests: Vec::new(),
+            passkey_verification: false,
+            passkey_pin: false,
+            passkey_requests: Vec::new(),
         }
     }
 }

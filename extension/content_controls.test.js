@@ -220,3 +220,35 @@ test("picker failures show a temporary warning, and credential selections fill w
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(filled.length, 2, "a removed form is never filled");
 });
+
+test("the fill shortcut opens the focused field's picker, else the first visible login field", t => {
+    const dom = installDom(t);
+    const form = dom.document.createElement("form");
+    const username = dom.input("email");
+    const code = dom.input();
+    form.append(username, code);
+    dom.document.body.appendChild(form);
+    const opened = [];
+    const controls = create({
+        bridge: {
+            fillInput() {},
+            openSecurePicker: kind => {
+                opened.push(kind);
+                return Promise.resolve(null);
+            },
+        },
+        credentials: { storeUsernameForLater() {} },
+        autofill: noAutofill,
+    });
+    t.after(() => controls.dispose());
+    assert.equal(controls.activateShortcut(null), false, "no controls on the page");
+    controls.createSecureTotpButton(code);
+    dom.flushFrames();
+    assert.equal(controls.activateShortcut(null), false, "only login pickers are a fallback");
+    assert.equal(controls.activateShortcut(code), true, "a focused field uses its own picker");
+    controls.createSecureCredentialButton(username);
+    dom.flushFrames();
+    assert.equal(controls.activateShortcut(null), true);
+    assert.equal(controls.activateShortcut(dom.document.body), true, "unrelated focus falls back");
+    assert.deepEqual(opened, ["totp", "login", "login"]);
+});

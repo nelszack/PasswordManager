@@ -288,6 +288,15 @@ test("popup requires a reviewed unknown outcome and explicit inspection without 
     assert.equal(env.messages.some(message => ["saveCredentials", "updateCredentials"].includes(message.action)), false);
 });
 
+test("the popup has no master-password field and unlocks only through the desktop app", async () => {
+    const env = await popupEnvironment({ getStatus: { native: true, running: true, locked: true } });
+    assert.equal(env.elements.openDesktopBtn.textContent, "Unlock in desktop app");
+    assert.match(env.elements.nativeHint.textContent, /desktop app/);
+    assert.equal(env.messages.some(message => ["unlockVault", "listVaults"].includes(message.action)), false);
+    const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "popup.html"), "utf8");
+    assert.doesNotMatch(html, /type="password"/);
+});
+
 test("popup opens the desktop while disconnected and reports launch errors", async () => {
     for (const response of [{ success: true }, { success: false, error: "Native host unavailable" }, {}]) {
         const env = await popupEnvironment({ getStatus: { native: false }, openDesktop: response });
@@ -414,4 +423,93 @@ test("popup generator falls back to defaults and reports clipboard failures", as
     fresh.elements.genValue.textContent = "";
     await fresh.elements.genCopy.dispatch("click");
     assert.equal(fresh.context.copied, undefined);
+});
+
+test("passkey prompt shows the browser-reported site and sends only explicit choices", async () => {
+    const ids = ["title", "destination", "status", "choices", "confirm", "fallback", "cancel", "verify", "verifyHint", "confirmInDesktop"];
+    const prompt = async (data, completion = { success: true }, query = "?token=t1") => {
+        const env = environment(ids, { getPasskeyPromptData: data, completePasskeyPrompt: completion }, query);
+        env.elements.verify.hidden = true;
+        execute("passkey_prompt.js", env.context);
+        await settle();
+        return env;
+    };
+    const site = { success: true, origin: "https://login.example.com", rp: "example.com", locked: false, canConfirm: true };
+    for (const [data, expectedTitle] of [
+        [{ ...site, kind: "get", user: "", choices: [{ id: 3, userName: "alice", displayName: "Alice" }, { id: 4, userName: "bob", displayName: "bob" }] },
+            "Sign in with a passkey"],
+        [{ ...site, kind: "create", user: "alice", choices: [] }, "Save a passkey"],
+    ]) {
+        const env = await prompt(data);
+        assert.equal(env.elements.title.textContent, expectedTitle);
+        assert.match(env.elements.destination.textContent, /login\.example\.com/);
+        assert.equal(env.elements.confirm.disabled, false);
+        if (data.kind === "get") {
+            assert.equal(env.elements.choices.children.length, 2);
+            const [, second] = env.elements.choices.children;
+            second.children[0].dispatch("change");
+            assert.equal(second.children[1].textContent, "bob");
+            assert.equal(env.elements.choices.children[0].children[1].textContent, "Alice (alice)");
+        }
+        env.elements.confirm.dispatch("click", { isTrusted: false });
+        await settle();
+        assert.equal(env.messages.some(message => message.action === "completePasskeyPrompt"), false);
+        // Optional proof by default; nothing is ever typed into this window.
+        assert.equal(env.elements.verify.hidden, false);
+        assert.equal(env.elements.confirmInDesktop.checked, false);
+        assert.match(env.elements.verifyHint.textContent, /Optional/);
+        env.elements.confirmInDesktop.checked = data.kind === "get";
+        env.elements.confirm.dispatch("click", { isTrusted: true });
+        await settle();
+        const completion = env.messages.find(message => message.action === "completePasskeyPrompt");
+        assert.equal(completion.selection.confirmInDesktop, data.kind === "get" ? true : undefined);
+        assert.equal("password" in completion.selection, false);
+        assert.equal(completion.token, "t1");
+        assert.equal(completion.selection.action, "confirm");
+        if (data.kind === "get") assert.equal(completion.selection.id, 4);
+        assert.equal(env.context.closed, true);
+    }
+
+    const locked = await prompt({ ...site, kind: "create", origin: "not a url", user: "a", locked: true, choices: [] },
+        { success: false, error: "Passkey request expired" }, "?token=t2");
+    assert.match(locked.elements.status.textContent, /locked/);
+    assert.equal(locked.elements.confirm.disabled, true);
+    locked.elements.fallback.dispatch("click");
+    await settle();
+    assert.equal(locked.messages.at(-1).selection.action, "fallback");
+    assert.equal(locked.elements.status.textContent, "Passkey request expired");
+    assert.equal(locked.elements.cancel.disabled, false);
+    locked.elements.cancel.dispatch("click");
+    await settle();
+    assert.equal(locked.messages.at(-1).selection.action, "cancel");
+
+    // Required proof: the box is checked and fixed; a refusal can be retried.
+    const required = await prompt({ ...site, kind: "create", user: "a", verification: "required", choices: [] },
+        { success: false, error: "Refused in the desktop app." }, "?token=t4");
+    assert.equal(required.elements.confirmInDesktop.checked, true);
+    assert.equal(required.elements.confirmInDesktop.disabled, true);
+    assert.match(required.elements.verifyHint.textContent, /requires/);
+    required.elements.confirm.dispatch("click", { isTrusted: true });
+    assert.match(required.elements.status.textContent, /desktop app/);
+    assert.equal(required.elements.cancel.disabled, false, "cancel stays available while waiting");
+    await settle();
+    assert.equal(required.elements.status.textContent, "Refused in the desktop app.");
+    assert.equal(required.elements.confirm.disabled, false, "the person can try again");
+
+    const discouraged = await prompt({ ...site, kind: "create", user: "a", verification: "discouraged", choices: [] }, undefined, "?token=t5");
+    assert.equal(discouraged.elements.verify.hidden, true);
+
+    // A vault with no master password or PIN: no proof offered; required sites are explained.
+    const plain = await prompt({ ...site, kind: "create", user: "a", canConfirm: false, choices: [] }, undefined, "?token=t6");
+    assert.equal(plain.elements.verify.hidden, true);
+    assert.equal(plain.elements.confirm.disabled, false, "presence-only registration still works");
+    const strict = await prompt({ ...site, kind: "create", user: "a", canConfirm: false, verification: "required", choices: [] }, undefined, "?token=t7");
+    assert.equal(strict.elements.verify.hidden, true);
+    assert.match(strict.elements.status.textContent, /passkey PIN.*another passkey provider/);
+    assert.equal(strict.elements.confirm.disabled, true);
+
+    const expired = environment(ids, { getPasskeyPromptData: { success: false, error: "Passkey request expired" } }, "?token=t3");
+    execute("passkey_prompt.js", expired.context);
+    await settle();
+    assert.equal(expired.elements.status.textContent, "Passkey request expired");
 });

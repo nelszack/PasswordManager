@@ -45,6 +45,53 @@ pub fn pick_workflow_file(serial: u64, field: Field, save: bool) -> Task<Message
         })
 }
 
+/// Choose a file to attach, or (with `save`) where to save an attachment.
+pub fn pick_attachment(serial: u64, id: usize, save: Option<(usize, String)>) -> Task<Message> {
+    let index = save.as_ref().map(|(index, _)| *index);
+    iced::window::latest()
+        .then(move |window| {
+            let suggested = save.as_ref().map(|(_, name)| name.clone());
+            match window {
+                Some(id) => iced::window::run(id, move |window| {
+                    let dialog = rfd::AsyncFileDialog::new().set_parent(window);
+                    let picker: Picker = match &suggested {
+                        Some(name) => Box::pin(
+                            dialog
+                                .set_title("Save attachment as")
+                                .set_file_name(name)
+                                .save_file(),
+                        ),
+                        None => Box::pin(dialog.set_title("Attach a file").pick_file()),
+                    };
+                    Some(picker)
+                }),
+                None => Task::done(None),
+            }
+        })
+        .then(move |picker| {
+            Task::perform(
+                async move {
+                    let picker = picker.ok_or_else(|| {
+                        Failure::from("The file chooser needs an open window.".to_owned())
+                    })?;
+                    let path = picker
+                        .await
+                        .map(|file| selected_path(file.path()))
+                        .transpose()
+                        .map_err(Failure::from)?;
+                    Ok(Reply::AttachmentPath(path.map(|p| p.expose().to_owned())))
+                },
+                move |result| {
+                    Message::Finished(
+                        serial,
+                        Job::PickAttachment { id, save: index },
+                        Arc::new(result),
+                    )
+                },
+            )
+        })
+}
+
 /// Create the parented chooser on Iced's window thread (required by AppKit),
 /// then await it asynchronously. Picking only fills the path.
 pub fn pick_key_file(serial: u64) -> Task<Message> {
@@ -80,10 +127,10 @@ pub fn pick_key_file(serial: u64) -> Task<Message> {
 
 fn selected_path(path: &Path) -> Result<SecretString, String> {
     if !path.is_absolute() {
-        return Err("Select a key file using an absolute path.".into());
+        return Err("Select a file using an absolute path.".into());
     }
     path.to_str().map(SecretString::from).ok_or_else(|| {
-        "The selected key-file path is not valid UTF-8. Choose a file with a UTF-8 filename.".into()
+        "The selected path is not valid UTF-8. Choose a file with a UTF-8 filename.".into()
     })
 }
 

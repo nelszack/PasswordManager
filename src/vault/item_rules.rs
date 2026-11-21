@@ -9,6 +9,30 @@ pub const MAX_URL_BYTES: usize = 8192;
 pub const MAX_CUSTOM_FIELDS: usize = 128;
 pub const MAX_FIELD_NAME_BYTES: usize = 128;
 pub const MAX_FIELD_VALUE_BYTES: usize = 1024 * 1024;
+pub const MAX_TAGS: usize = 32;
+pub const MAX_TAG_BYTES: usize = 64;
+
+/// Trims tags, drops case-insensitive duplicates (keeping the first spelling),
+/// and rejects empty, oversized, or comma/control-containing labels. Commas are
+/// reserved so every client can accept a comma-separated tag list.
+pub(super) fn normalize_tags(tags: &mut Vec<String>) -> Result<(), VaultError> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(tags.len());
+    for tag in tags.drain(..) {
+        let tag = tag.split_whitespace().collect::<Vec<_>>().join(" ");
+        if tag.is_empty() || tag.len() > MAX_TAG_BYTES {
+            return Err(invalid(format!("Tags must be 1 to {MAX_TAG_BYTES} bytes")));
+        }
+        if tag.contains(',') || tag.chars().any(char::is_control) {
+            return Err(invalid("Tags cannot contain commas or control characters"));
+        }
+        if seen.insert(tag.to_lowercase()) {
+            normalized.push(tag);
+        }
+    }
+    *tags = normalized;
+    Ok(())
+}
 
 /// Passkey private keys live in this reserved custom field. Only the passkey
 /// workflow may create it; ordinary edits, reveals, and copies never touch it.
@@ -86,6 +110,7 @@ pub(super) fn normalize_new_fields(fields: &mut [CustomField]) -> Result<(), Vau
 /// The parts of an item that count and uniqueness limits look at.
 #[derive(Clone, Copy)]
 pub(super) struct Shape {
+    tags: usize,
     urls: usize,
     fields: usize,
     duplicate_fields: bool,
@@ -95,6 +120,7 @@ impl Shape {
     pub(super) fn of(item: &Item) -> Self {
         let mut names = HashSet::new();
         Self {
+            tags: item.metadata.tags.len(),
             urls: item.urls().count(),
             fields: item.metadata.custom_fields.len(),
             duplicate_fields: !item
@@ -111,6 +137,9 @@ impl Shape {
 /// editable as long as an edit does not make them larger.
 pub(super) fn check_item_limits(item: &Item, before: Option<Shape>) -> Result<(), VaultError> {
     let after = Shape::of(item);
+    if after.tags > MAX_TAGS && before.is_none_or(|b| after.tags > b.tags) {
+        return Err(invalid(format!("Items are limited to {MAX_TAGS} tags")));
+    }
     if after.urls > MAX_URLS && before.is_none_or(|b| after.urls > b.urls) {
         return Err(invalid(format!("Items are limited to {MAX_URLS} websites")));
     }
@@ -150,6 +179,8 @@ mod tests {
             kind: ItemKind::Login,
             additional_urls: vec![],
             custom_fields: fields,
+            tags: vec![],
+            favorite: false,
         }
     }
 

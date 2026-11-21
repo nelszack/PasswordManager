@@ -140,6 +140,7 @@ jobs:
           mkdir -p "dist/$package/fuzz"
           cp fuzz/README.md "dist/$package/fuzz/"
           node scripts/package_extension.cjs "dist/$package/extension"
+          node scripts/package_extension.cjs --browser firefox "dist/$package/extension-firefox"
           cp release-completions/* "dist/$package/completions/"
           # Sorted entries, fixed owners, modes and SOURCE_DATE_EPOCH timestamps.
           python3 scripts/ci/package_archive.py "dist/$package" "dist/$package.tar.gz" --executable "${{ matrix.executable }}"
@@ -159,6 +160,8 @@ jobs:
           Copy-Item fuzz/README.md "dist/$Package/fuzz/"
           node scripts/package_extension.cjs "dist/$Package/extension"
           if ($LASTEXITCODE -ne 0) { throw "Extension packaging failed" }
+          node scripts/package_extension.cjs --browser firefox "dist/$Package/extension-firefox"
+          if ($LASTEXITCODE -ne 0) { throw "Firefox extension packaging failed" }
           Copy-Item "release-completions/*" "dist/$Package/completions/"
           # Sorted entries, fixed modes and SOURCE_DATE_EPOCH timestamps.
           python scripts/ci/package_archive.py "dist/$Package" "dist/$Package.zip" --executable "${{ matrix.executable }}"

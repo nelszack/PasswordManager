@@ -282,6 +282,44 @@ pub(crate) fn keyfile_session(encrypted: &[u8], master: &[u8; 32]) -> Option<Vau
     (header.kdf == KDF_KEYFILE).then(|| header.session(encryption_key_from_master(master)))
 }
 
+/// Whether this unlocked session came from a master password, so the person can
+/// be re-verified with `password_matches`. Key-file sessions cannot.
+pub(crate) fn password_session(credentials: &VaultCredentials) -> bool {
+    matches!(credentials, VaultCredentials::Session { kdf, .. } if *kdf != KDF_KEYFILE)
+}
+
+/// Whether `password` derives this unlocked session's key: re-verifies the person
+/// without reading or decrypting the vault. Key-file sessions never match.
+pub(crate) fn password_matches(credentials: &VaultCredentials, password: &str) -> bool {
+    let VaultCredentials::Session {
+        encryption_key,
+        salt,
+        kdf,
+        memory_kib,
+        iterations,
+        parallelism,
+    } = credentials
+    else {
+        return false;
+    };
+    if *kdf == KDF_KEYFILE {
+        return false;
+    }
+    let Some(master) = master_key_from_password_with_params(
+        password,
+        salt,
+        *memory_kib,
+        *iterations,
+        *parallelism,
+    ) else {
+        return false;
+    };
+    let mut master = Zeroizing::new(master);
+    let derived = Zeroizing::new(encryption_key_from_master(&master));
+    master.zeroize();
+    subtle::ConstantTimeEq::ct_eq(&derived[..], &encryption_key[..]).into()
+}
+
 pub(crate) fn cached_credentials(
     encrypted: &[u8],
     encryption_key: [u8; 32],

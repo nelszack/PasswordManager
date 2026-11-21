@@ -169,11 +169,31 @@ fn cbor_text(out: &mut Vec<u8>, text: &str) {
     cbor_len(out, 0x60, text.len());
     out.extend_from_slice(text.as_bytes());
 }
-fn authenticator_data(rp: &str, attested: bool) -> Vec<u8> {
+/// Whether a request requires (`Some(true)`) or discourages (`Some(false)`)
+/// user verification; `None` is WebAuthn's default, "preferred".
+pub fn user_verification(request: &Value) -> Option<bool> {
+    let value = request["userVerification"]
+        .as_str()
+        .or_else(|| request["authenticatorSelection"]["userVerification"].as_str());
+    match value {
+        Some("required") => Some(true),
+        Some("discouraged") => Some(false),
+        _ => None,
+    }
+}
+fn authenticator_data(rp: &str, attested: bool, verified: bool) -> Vec<u8> {
     let mut result = digest(&SHA256, rp.as_bytes()).as_ref().to_vec();
-    // UP, UV, BE; eligible for backup, without claiming a completed backup.
+    // UP and BE always; UV only after the person was actually verified for this
+    // operation. Eligible for backup, without claiming a completed backup.
     // Synchronized credentials use a zero signature counter.
-    result.push(if attested { 0x4d } else { 0x0d });
+    let mut flags = 0x09;
+    if verified {
+        flags |= 0x04;
+    }
+    if attested {
+        flags |= 0x40;
+    }
+    result.push(flags);
     result.extend_from_slice(&0u32.to_be_bytes());
     result
 }
@@ -182,6 +202,7 @@ pub fn create(
     origin: &str,
     client_hash: Option<&[u8]>,
     existing: &[PasskeyIdentity],
+    verified: bool,
 ) -> Result<(Passkey, Value)> {
     let rp = text(request.get("rp").ok_or("Missing RP")?, "id")?;
     validate_origin(rp, origin)?;
@@ -235,7 +256,7 @@ pub fn create(
     cbor_bytes(&mut cose, &public[1..33]);
     cose.push(0x22);
     cbor_bytes(&mut cose, &public[33..65]);
-    let mut auth = authenticator_data(rp, true);
+    let mut auth = authenticator_data(rp, true, verified);
     auth.extend_from_slice(&[0; 16]); // no identifying attestation / AAGUID
     auth.extend_from_slice(&(id.len() as u16).to_be_bytes());
     auth.extend_from_slice(&id);
@@ -255,10 +276,20 @@ pub fn create(
         display_name: display.into(),
         private_key: encode(pkcs8.as_ref()),
     };
+    // SubjectPublicKeyInfo for an uncompressed P-256 key, as WebAuthn's
+    // getPublicKey() and toJSON() report it.
+    let mut spki = vec![
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    spki.extend_from_slice(public);
     let response = json!({
         "attestationObject": encode(attestation),
         "transports": ["internal"],
         "clientDataJSON": client_data_field(&client, client_hash),
+        "authenticatorData": encode(&auth),
+        "publicKey": encode(spki),
+        "publicKeyAlgorithm": -7,
     });
     let extensions = if request["extensions"]["credProps"] == true {
         json!({ "credProps": { "rk": true } })
@@ -328,6 +359,7 @@ impl Passkey {
         request: &Value,
         origin: &str,
         client_hash: Option<&[u8]>,
+        verified: bool,
     ) -> Result<Value> {
         validate_origin(&self.rp_id, origin)?;
         if !self.matches(request) {
@@ -348,7 +380,7 @@ impl Passkey {
         if hash.len() != 32 {
             return Err("Invalid client data hash".into());
         }
-        let auth = authenticator_data(&self.rp_id, false);
+        let auth = authenticator_data(&self.rp_id, false, verified);
         let mut message = auth.clone();
         message.extend(hash);
         let signature = self
@@ -380,12 +412,13 @@ mod tests {
             "https://example.com",
             Some(&browser_hash),
             &[],
+            true,
         )
         .unwrap();
         assert_eq!(registration["response"]["clientDataJSON"], encode(b"{}"));
         let request = json!({"rpId":"example.com","challenge":encode([7;32])});
         let response = key
-            .authenticate(&request, "https://example.com", Some(&browser_hash))
+            .authenticate(&request, "https://example.com", Some(&browser_hash), true)
             .unwrap();
         assert_eq!(response["response"]["clientDataJSON"], encode(b"{}"));
         let mut signed =
@@ -401,14 +434,20 @@ mod tests {
         )
         .unwrap();
         assert!(
-            key.authenticate(&request, "https://example.com", Some(&[0; 31]))
+            key.authenticate(&request, "https://example.com", Some(&[0; 31]), true)
                 .is_err()
         );
     }
     #[test]
     fn registration_assertion_and_verifier_agree() {
-        let (key, registration) =
-            create(&registration(), "https://login.example.com", None, &[]).unwrap();
+        let (key, registration) = create(
+            &registration(),
+            "https://login.example.com",
+            None,
+            &[],
+            true,
+        )
+        .unwrap();
         let att = decode(
             registration["response"]["attestationObject"]
                 .as_str()
@@ -418,7 +457,7 @@ mod tests {
         assert!(att.windows(4).any(|w| w == b"none"));
         let request = json!({"rpId":"example.com","challenge":encode([7;32])});
         let response = key
-            .authenticate(&request, "https://example.com", None)
+            .authenticate(&request, "https://example.com", None, true)
             .unwrap();
         let body = &response["response"];
         let auth = decode(body["authenticatorData"].as_str().unwrap()).unwrap();
@@ -457,25 +496,34 @@ mod tests {
     }
     #[test]
     fn reject_wrong_origin_algorithm_exclusion_and_allow_list() {
-        let (key, _) = create(&registration(), "https://example.com", None, &[]).unwrap();
+        let (key, _) = create(&registration(), "https://example.com", None, &[], true).unwrap();
         for origin in [
             "https://evil.com",
             "http://example.com",
             "https://example.com.evil.com",
             "https://example.com/path",
         ] {
-            assert!(create(&registration(), origin, None, &[]).is_err());
+            assert!(create(&registration(), origin, None, &[], true).is_err());
         }
         assert!(validate_rp("com").is_err());
         let mut options = registration();
         options["pubKeyCredParams"][0]["alg"] = (-257).into();
-        assert!(create(&options, "https://example.com", None, &[]).is_err());
+        assert!(create(&options, "https://example.com", None, &[], true).is_err());
         options = registration();
         options["excludeCredentials"] = json!([{"type":"public-key","id":key.credential_id}]);
-        assert!(create(&options, "https://example.com", None, &[key.identity()]).is_err());
+        assert!(
+            create(
+                &options,
+                "https://example.com",
+                None,
+                &[key.identity()],
+                true
+            )
+            .is_err()
+        );
         let request = json!({"rpId":"example.com","challenge":encode([1;32]),"allowCredentials":[{"type":"public-key","id":encode([0;32])}]});
         assert!(
-            key.authenticate(&request, "https://example.com", None)
+            key.authenticate(&request, "https://example.com", None, true)
                 .is_err()
         );
     }

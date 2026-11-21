@@ -13,7 +13,7 @@ const PasswordManagerBackgroundNative = {
     }) {
         const NATIVE_HOST = "com.myproject.password_manager";
         const channels = new Map(
-            ["control", "work", "duo"].map(name => [
+            ["control", "work", "duo", "approval"].map(name => [
                 name,
                 { name, port: null, active: null, queue: [], idleTimer: null, recoveryTimer: null },
             ])

@@ -270,6 +270,15 @@ fn one(response: RpcResponse) -> outcome::CommandOutcome {
     }
 }
 
+/// Passkey confirmation flags published with each session change.
+fn passkey_flags_of(session: &VaultSession) -> u8 {
+    if session.is_locked() {
+        return 0;
+    }
+    let pin = session.passkey_pin(&crate::file::data_dir());
+    u8::from(pin || session.password_check()) | (u8::from(pin) << 1)
+}
+
 /// Stores `value` and wakes receivers only when it differs from the current one.
 fn publish<T: PartialEq>(sender: &watch::Sender<T>, value: T) {
     sender.send_if_modified(|current| {
@@ -288,6 +297,9 @@ pub(super) struct VaultWorker {
     locked: watch::Receiver<Option<String>>,
     revision: watch::Receiver<Option<u64>>,
     cloud_warning: Arc<Mutex<Option<String>>>,
+    /// Passkey confirmation for the unlocked vault: bit 0 means it can
+    /// confirm the person, bit 1 means a passkey PIN is set.
+    passkey_flags: Arc<std::sync::atomic::AtomicU8>,
 }
 impl VaultWorker {
     /// Session and vault-revision receivers. The worker notifies only when a
@@ -308,6 +320,8 @@ impl VaultWorker {
         let (normal_tx, mut normal) = mpsc::channel::<Job>(QUEUE_CAPACITY);
         let (control_tx, mut control) = mpsc::channel::<Job>(CONTROL_CAPACITY);
         let (locked_tx, locked) = watch::channel(session.session_id());
+        let passkey_flags = Arc::new(std::sync::atomic::AtomicU8::new(passkey_flags_of(&session)));
+        let flags = passkey_flags.clone();
         let (revision_tx, revision) = watch::channel(session.vault().map(Vault::vault_revision));
         tokio::spawn(async move {
             let mut owner = Some(Owner::new(session));
@@ -328,6 +342,7 @@ impl VaultWorker {
                         owner=Some(returned);
                         let warning=result.err().map(|e|format!("Automatic lock cleanup warning: {e}"));
                         *background.lock().await=warning;
+                        flags.store(0, Ordering::Release);
                         publish(&locked_tx, None);
                         deadline=None;
                         continue;
@@ -359,6 +374,7 @@ impl VaultWorker {
                     returned.session.vault().map(Vault::vault_revision),
                 );
                 let locked = returned.session.is_locked();
+                flags.store(passkey_flags_of(&returned.session), Ordering::Release);
                 publish(&locked_tx, returned.session.session_id());
                 owner = Some(returned);
                 if locked {
@@ -387,7 +403,17 @@ impl VaultWorker {
             locked,
             revision,
             cloud_warning: Arc::new(Mutex::new(None)),
+            passkey_flags,
         }
+    }
+    /// (can confirm a passkey request, a passkey PIN is set) for the unlocked vault.
+    pub fn passkey_confirmation(&self) -> (bool, bool) {
+        let flags = if self.session_id().is_some() {
+            self.passkey_flags.load(Ordering::Acquire)
+        } else {
+            0
+        };
+        (flags & 1 != 0, flags & 2 != 0)
     }
     pub fn vault_revision(&self) -> Option<u64> {
         if self.session_id().is_none() {

@@ -237,6 +237,93 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     if let Some(warning) = &app.warning {
         chrome = chrome.push(panel(text(warning).size(14).style(text::danger)));
     }
+    if let Some(notice) = &app.ui.format_notice {
+        chrome = chrome.push(panel(
+            row![
+                text(notice).size(14).width(Fill),
+                action("Got it", Message::DismissFormatNotice, true),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ));
+    }
+    for request in &app.ui.ssh_requests {
+        chrome =
+            chrome.push(panel(
+                column![
+                text("SSH key requested").size(17),
+                text(format!(
+                    "A program wants to sign in to {} with “{}”. Allow it only if you just started \
+                     that connection.",
+                    request.host, request.key
+                ))
+                .size(14),
+                row![
+                    primary(
+                        "Allow once",
+                        Message::SshDecision(request.id.clone(), true),
+                        !app.busy()
+                    ),
+                    action("Refuse", Message::SshDecision(request.id.clone(), false), !app.busy())
+                        .style(quiet_danger),
+                ]
+                .spacing(8)
+                .wrap(),
+            ]
+                .spacing(8),
+            ));
+    }
+    if let Some(request) = app.ui.passkey_requests.first() {
+        let site = request
+            .site
+            .strip_prefix("https://")
+            .unwrap_or(&request.site);
+        let waiting = app.ui.passkey_requests.len() - 1;
+        chrome = chrome.push(panel(
+            column![
+                text("Confirm it's you").size(17),
+                text(format!(
+                    "{site} asked your browser for a passkey and wants proof that it is you. \
+                     Confirm only if you just did this in your browser.{}",
+                    if waiting > 0 {
+                        format!(" {waiting} more waiting.")
+                    } else {
+                        String::new()
+                    }
+                ))
+                .size(14),
+                text_input(
+                    if app.ui.passkey_pin {
+                        "Master password or passkey PIN"
+                    } else {
+                        "Master password"
+                    },
+                    app.ui.passkey_secret.expose(),
+                )
+                .id("passkey-secret")
+                .secure(true)
+                .padding(12)
+                .on_input(|value: String| Message::PasskeySecret(value.into()))
+                .on_submit(Message::PasskeyDecision(request.id.clone(), true)),
+                row![
+                    primary(
+                        "Confirm",
+                        Message::PasskeyDecision(request.id.clone(), true),
+                        !app.busy()
+                    ),
+                    action(
+                        "Refuse",
+                        Message::PasskeyDecision(request.id.clone(), false),
+                        !app.busy()
+                    )
+                    .style(quiet_danger),
+                ]
+                .spacing(8)
+                .wrap(),
+            ]
+            .spacing(8),
+        ));
+    }
     if let Some(target) = app.workspace.duo.watch.as_ref() {
         chrome = chrome.push(
             row![
@@ -790,6 +877,7 @@ fn vault(app: &App) -> Element<'_, Message> {
             .padding(10),
         ]
         .spacing(8),
+        tag_filters(app),
         row![
             text(if app.compact() {
                 format!("{count} / {}", app.items.len())
@@ -1001,6 +1089,96 @@ fn item_pager<'a>(
     sidebar
 }
 
+/// Attachment names and sizes, with save/remove actions and an add button.
+fn attachments_section<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
+    let mut section = column![label("Attachments")].spacing(6);
+    for (index, attachment) in item.attachments.iter().enumerate() {
+        let size = match attachment.size {
+            0..1024 => format!("{} B", attachment.size),
+            1024..1_048_576 => format!("{:.1} KiB", attachment.size as f64 / 1024.0),
+            _ => format!("{:.1} MiB", attachment.size as f64 / 1_048_576.0),
+        };
+        let mut controls = row![action(
+            "Save as…",
+            Message::SaveAttachment(index),
+            !app.busy()
+        )]
+        .spacing(8);
+        if app.remove_attachment.as_deref() == Some(attachment.name.as_str()) {
+            controls = controls
+                .push(
+                    action(
+                        "Confirm removal",
+                        Message::ConfirmRemoveAttachment,
+                        app.writes_allowed(),
+                    )
+                    .style(quiet_danger),
+                )
+                .push(action("Keep", Message::CancelRemoveAttachment, true));
+        } else {
+            controls = controls.push(
+                action(
+                    "Remove…",
+                    Message::RemoveAttachment(index),
+                    app.writes_allowed(),
+                )
+                .style(quiet_danger),
+            );
+        }
+        section = section.push(
+            column![
+                text(format!("{} · {size}", attachment.name)).size(14),
+                controls.wrap()
+            ]
+            .spacing(4),
+        );
+    }
+    if item.attachments.is_empty() {
+        section = section.push(text("No attachments").size(13));
+    }
+    section
+        .push(action(
+            "Add attachment…",
+            Message::AddAttachment,
+            app.writes_allowed() && !item.is_passkey,
+        ))
+        .into()
+}
+
+/// Tag and favorites filters. Tags come from the loaded item summaries, so the
+/// choices always match what is in the vault.
+fn tag_filters(app: &App) -> Element<'_, Message> {
+    const ALL: &str = "All tags";
+    let mut tags: Vec<String> = Vec::new();
+    for tag in app.items.iter().flat_map(|item| &item.tags) {
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            tags.push(tag.clone());
+        }
+    }
+    tags.sort_by_key(|tag| tag.to_lowercase());
+    let favorites = checkbox(app.ui.favorites_only)
+        .label("Favorites only")
+        .on_toggle(Message::FilterFavorites);
+    if tags.is_empty() && app.ui.tag.is_none() {
+        return favorites.into();
+    }
+    let mut choices = vec![ALL.to_owned()];
+    choices.extend(tags);
+    let selected = app.ui.tag.clone().unwrap_or_else(|| ALL.into());
+    row![
+        pick_list(choices, Some(selected), |choice| Message::FilterTag(
+            (choice != ALL).then_some(choice)
+        ))
+        .placeholder("Filter by tag")
+        .width(Fill)
+        .padding(8),
+        favorites,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 /// The current page of matching items, or guidance when nothing matches.
 fn item_entries(app: &App) -> Column<'_, Message> {
     let mut entries = Column::new().spacing(6);
@@ -1023,13 +1201,21 @@ fn item_entries(app: &App) -> Column<'_, Message> {
             .as_deref()
             .filter(|username| !username.is_empty());
         let kind = model::profile(item.kind).title;
-        let subtitle = username.map_or_else(
+        let mut subtitle = username.map_or_else(
             || kind.to_owned(),
             |username| format!("{username} · {kind}"),
         );
+        if !item.tags.is_empty() {
+            subtitle = format!("{subtitle} · {}", item.tags.join(", "));
+        }
+        let title = if item.favorite {
+            format!("★ {}", item.name)
+        } else {
+            item.name.clone()
+        };
         let entry_content = row![
             avatar(&item.name, selected),
-            column![text(&item.name).size(16), text(subtitle).size(13)].spacing(3)
+            column![text(title).size(16), text(subtitle).size(13)].spacing(3)
         ]
         .spacing(12)
         .align_y(Alignment::Center);
@@ -1177,6 +1363,12 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
             .push(rule::horizontal(1))
             .push(app.workspace.account_authenticators(app, item));
     }
+    if !item.tags.is_empty() {
+        content = content
+            .push(label("Tags"))
+            .push(text(item.tags.join(", ")).size(14));
+    }
+    content = content.push(attachments_section(app, item));
     if !item.urls.is_empty() {
         content = content.push(label("URLs"));
         for (index, url) in item.urls.iter().enumerate() {
@@ -1279,6 +1471,15 @@ fn details<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Message> {
                     "Copy secret",
                     Message::Copy,
                     app.copying_allowed() && item.has_secret
+                ),
+                action(
+                    if item.favorite {
+                        "★ Remove favorite"
+                    } else {
+                        "☆ Add to favorites"
+                    },
+                    Message::ToggleFavorite,
+                    app.writes_allowed() && !item.is_passkey
                 ),
                 action("Edit item", Message::Edit, app.writes_allowed())
             ]
@@ -1396,6 +1597,20 @@ fn editor<'a>(app: &'a App, draft: &'a Draft) -> Element<'a, Message> {
     let websites = editor_websites(draft, enabled);
     form = form
         .push(websites)
+        .push(
+            column![
+                label("Tags (optional, comma-separated)"),
+                text_input("e.g. work, finance", &draft.tags)
+                    .accessibility_label("Tags, separated by commas")
+                    .id("item-tags")
+                    .padding(10)
+                    .on_input_maybe(enabled.then_some(Message::Tags)),
+                checkbox(draft.favorite)
+                    .label("Favorite")
+                    .on_toggle_maybe(enabled.then_some(Message::Favorite)),
+            ]
+            .spacing(6),
+        )
         .push(
             column![
                 label("Notes (optional)"),
@@ -2207,6 +2422,60 @@ fn passwords_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a,
 }
 
 /// Lock timeout and default vault.
+/// This device's passkey PIN for the unlocked vault: how key-file vaults (or
+/// anyone who prefers it to the master password) confirm passkey requests.
+fn passkey_pin_settings(app: &App) -> Column<'_, Message> {
+    let mut section = column![label("Passkey PIN (this device)")].spacing(8);
+    if app.connection.session.is_none() {
+        return section.push(text("Unlock a vault to set its passkey PIN.").size(14));
+    }
+    let enabled = !app.busy();
+    section = section
+        .push(
+            text(if app.ui.passkey_pin {
+                "A passkey PIN is set. When a site asks for proof that it is you, confirm here \
+                 with the PIN or your master password."
+            } else {
+                "When a site asks for proof that it is you, the passkey window can wait for you \
+                 to confirm here. Password vaults use the master password; set a PIN of at \
+                 least 6 characters to confirm a key-file vault, or to use instead of the \
+                 master password. The PIN stays on this device."
+            })
+            .size(14),
+        )
+        .push(
+            text_input("New passkey PIN", app.ui.pin_new.expose())
+                .secure(true)
+                .padding(12)
+                .on_input_maybe(enabled.then_some(|value: String| Message::PinNew(value.into()))),
+        )
+        .push(
+            text_input("Enter it again", app.ui.pin_confirm.expose())
+                .accessibility_label("Confirm passkey PIN")
+                .secure(true)
+                .padding(12)
+                .on_input_maybe(
+                    enabled.then_some(|value: String| Message::PinConfirm(value.into())),
+                ),
+        );
+    let mut buttons = row![action(
+        if app.ui.passkey_pin {
+            "Change PIN"
+        } else {
+            "Set PIN"
+        },
+        Message::SavePasskeyPin(true),
+        enabled && !app.ui.pin_new.expose().is_empty(),
+    )]
+    .spacing(8);
+    if app.ui.passkey_pin {
+        buttons = buttons.push(
+            action("Remove PIN", Message::SavePasskeyPin(false), enabled).style(quiet_danger),
+        );
+    }
+    section.push(buttons)
+}
+
 fn security_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, Message> {
     let mut choices = vec![vault_names::Choice {
         id: String::new(),
@@ -2249,6 +2518,21 @@ fn security_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, 
         .padding(12),
     )
     .push(text("The lock timeout applies on the next unlock.").size(14))
+    .push(
+        checkbox(app.settings.ssh_agent)
+            .label("Serve SSH keys to ssh through a local agent (Linux and macOS)")
+            .on_toggle(|value| Message::SettingToggled(SettingsToggle::SshAgent, value)),
+    )
+    .push(
+        text(format!(
+            "Ed25519 SSH-key items are offered while their vault is unlocked. \
+             Restart the local service after changing this, then set SSH_AUTH_SOCK={} (or run \
+             `eval \"$(pm ssh-agent)\"`).",
+            password_manager::server::ssh_agent_socket().display()
+        ))
+        .size(14),
+    )
+    .push(passkey_pin_settings(app))
     .push(action(
         "Vault credentials & security tools",
         Message::OpenTools(workflows::Section::Security),

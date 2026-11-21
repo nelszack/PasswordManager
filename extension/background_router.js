@@ -14,6 +14,7 @@ const PasswordManagerBackgroundRouter = {
         prompts,
         pendingCredentials,
         duo,
+        passkeys,
     }) {
         function sendAction(action, fields, sendResponse, refreshAfter = false) {
             nativeRequest(action, fields)
@@ -71,6 +72,10 @@ const PasswordManagerBackgroundRouter = {
             openSecurePicker: { handle: (request, sender) => pickers.open(request, sender) },
             getSecurePickerData: { handle: (request, sender) => pickers.dataWhenLoaded(request, sender) },
             completeSecurePicker: { handle: (request, sender) => pickers.complete(request, sender) },
+            passkeyRequest: { handle: (request, sender) => passkeys.request(request, sender) },
+            getPasskeyPromptData: { handle: (request, sender) => passkeys.data(request, sender) },
+            completePasskeyPrompt: { handle: (request, sender) => passkeys.complete(request, sender) },
+            cancelPasskeyRequest: { handle: (request, sender) => passkeys.cancel(request, sender) },
         };
 
         function handleRequest(request, sender, sendResponse) {
@@ -163,12 +168,18 @@ const PasswordManagerBackgroundRouter = {
                 pickers.invalidate();
                 prompts.invalidate();
                 duo.invalidate();
+                passkeys.invalidate();
                 sendAction("lock", {}, sendResponse, true);
                 return true;
             }
             sendResponse({ success: false, error: "Unsupported extension request" });
             return false;
         }
+        // Keyboard shortcut: ask the focused frame to open the login picker.
+        chrome.commands?.onCommand.addListener((command, tab) => {
+            if (command !== "fill-login" || !Number.isSafeInteger(tab?.id)) return;
+            chrome.tabs.sendMessage(tab.id, { action: "pmShortcutFill" }, () => void chrome.runtime.lastError);
+        });
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             startup
                 .then(() => handleRequest(request, sender, sendResponse))

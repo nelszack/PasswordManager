@@ -33,6 +33,7 @@ impl Zeroize for TypedEntry {
         self.entry.zeroize();
         self.additional_urls.zeroize();
         self.custom_fields.zeroize();
+        self.tags.zeroize();
     }
 }
 
@@ -72,6 +73,8 @@ impl Zeroize for TypedUpdate {
         self.remove_url.zeroize();
         self.set_fields.zeroize();
         self.remove_fields.zeroize();
+        self.add_tags.zeroize();
+        self.remove_tags.zeroize();
     }
 }
 
@@ -100,6 +103,9 @@ impl Zeroize for ServerCommand {
                 domain.zeroize()
             }
             Self::RestorePassword { target, .. } => target.zeroize(),
+            Self::BrowserPasskeyCreate { verification, .. }
+            | Self::BrowserPasskeyGet { verification, .. } => verification.zeroize(),
+            Self::PasskeyDecision { secret, .. } | Self::SetPasskeyPin(secret) => secret.zeroize(),
             _ => {}
         }
     }
@@ -112,6 +118,26 @@ pub enum ServerCommand {
     Kill,
     Lock(bool),
     Unlock(UnlockInfo),
+    /// Allow or refuse a pending SSH agent signature.
+    SshDecision {
+        id: String,
+        allow: bool,
+    },
+    /// Wait for the person to confirm a browser passkey request in the desktop
+    /// app or CLI. Succeeds with a one-time verification token for `origin`.
+    PasskeyVerification {
+        origin: String,
+    },
+    /// Answer a waiting passkey confirmation: the master password or passkey
+    /// PIN confirms it, `None` refuses it.
+    PasskeyDecision {
+        id: String,
+        #[serde(default)]
+        secret: Option<SecretString>,
+    },
+    /// Set (or with `None`, remove) this device's passkey PIN for the
+    /// unlocked vault.
+    SetPasskeyPin(Option<SecretString>),
     Status,
     Cloud(crate::cloud::Action),
     BrowserAutofill,
@@ -173,7 +199,34 @@ pub enum ServerCommand {
         id: usize,
     },
     BrowserDuoItems(String),
+    /// WebAuthn for a browser-verified origin; `request` is the page's options
+    /// as WebAuthn JSON.
+    BrowserPasskeys {
+        origin: String,
+        request: String,
+    },
+    /// `verification` is a token from `PasskeyVerification` for this origin.
+    /// The service redeems it once and sets `verified`, which never comes from
+    /// a client; only then does the vault report user verification.
+    BrowserPasskeyCreate {
+        origin: String,
+        request: String,
+        #[serde(default)]
+        verification: Option<String>,
+        #[serde(skip)]
+        verified: bool,
+    },
+    BrowserPasskeyGet {
+        origin: String,
+        id: usize,
+        request: String,
+        #[serde(default)]
+        verification: Option<String>,
+        #[serde(skip)]
+        verified: bool,
+    },
     OperationStatus(String),
+    Attachment(AttachmentCommand),
     /// Keep the connection open and receive a status record whenever the
     /// lock state, vault revision, or warnings change. Carries no secrets.
     StatusEvents,
@@ -186,6 +239,9 @@ impl ServerCommand {
             self,
             Self::Status
                 | Self::StatusEvents
+                | Self::SshDecision { .. }
+                | Self::PasskeyVerification { .. }
+                | Self::PasskeyDecision { .. }
                 | Self::Cloud(_)
                 | Self::History(_)
                 | Self::Trash
@@ -195,6 +251,8 @@ impl ServerCommand {
                 | Self::BrowserLogins(_)
                 | Self::BrowserLogin { .. }
                 | Self::BrowserDuoItems(_)
+                | Self::BrowserPasskeys { .. }
+                | Self::BrowserPasskeyGet { .. }
                 | Self::List(_)
                 | Self::ManagementItem { .. }
                 | Self::GetSecret(_)
@@ -219,6 +277,8 @@ impl ServerCommand {
             self,
             Self::Kill
                 | Self::Lock(_)
+                | Self::SshDecision { .. }
+                | Self::PasskeyVerification { .. }
                 | Self::Status
                 | Self::Cloud(_)
                 | Self::OperationStatus(_)
@@ -252,6 +312,11 @@ impl ServerCommand {
                 | DuoCommand::Respond { target, .. }
                 | DuoCommand::Remove { target },
             ) => Some(target),
+            Self::Attachment(
+                AttachmentCommand::Add { target, .. }
+                | AttachmentCommand::Save { target, .. }
+                | AttachmentCommand::Remove { target, .. },
+            ) => Some(target),
             _ => None,
         }
     }
@@ -274,11 +339,34 @@ impl ServerCommand {
                 | Self::ManagementCopy { id, .. }
                 | Self::BrowserLogin { id, .. }
                 | Self::BrowserAuthenticatorData { id, .. }
+                | Self::BrowserPasskeyGet { id, .. }
                 | Self::BrowserAutofillItem(id) => Some(*id),
                 _ => None,
             },
         }
     }
+}
+
+/// File attachments. Paths are read and written by the local service; the
+/// mobile bridge transfers bytes through its own requests instead.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum AttachmentCommand {
+    Add {
+        target: Target,
+        path: String,
+        /// Defaults to the file's name.
+        name: Option<String>,
+    },
+    Save {
+        target: Target,
+        name: String,
+        path: String,
+        force: bool,
+    },
+    Remove {
+        target: Target,
+        name: String,
+    },
 }
 
 #[derive(
@@ -457,6 +545,12 @@ pub struct ListOptions {
     pub stale_days: Option<u64>,
     pub sort: SortField,
     pub descending: bool,
+    /// Keep only items carrying every listed tag (case-insensitive).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Keep only favorites (`true`) or only non-favorites (`false`).
+    #[serde(default)]
+    pub favorite: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -565,6 +659,11 @@ pub struct TypedEntry {
     pub kind: ItemKind,
     pub additional_urls: Vec<String>,
     pub custom_fields: Vec<CustomField>,
+    /// Free-form labels used to organize and filter items.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 impl std::fmt::Debug for TypedEntry {
@@ -575,6 +674,8 @@ impl std::fmt::Debug for TypedEntry {
             .field("kind", &self.kind)
             .field("additional_urls", &self.additional_urls)
             .field("custom_field_count", &self.custom_fields.len())
+            .field("tags", &self.tags)
+            .field("favorite", &self.favorite)
             .field("secret", &"<redacted>")
             .finish()
     }
@@ -719,6 +820,16 @@ pub struct TypedUpdate {
     pub set_fields: Vec<CustomField>,
     pub remove_fields: Vec<String>,
     pub clear_fields: bool,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+    /// Remove every tag before applying `add_tags`.
+    #[serde(default)]
+    pub clear_tags: bool,
+    /// Mark (`true`) or unmark (`false`) the item as a favorite.
+    #[serde(default)]
+    pub favorite: Option<bool>,
 }
 
 /// An entry edit that leaves the item's kind, websites, and custom fields alone.
@@ -733,6 +844,10 @@ impl From<EntryUpdate> for TypedUpdate {
             set_fields: vec![],
             remove_fields: vec![],
             clear_fields: false,
+            add_tags: vec![],
+            remove_tags: vec![],
+            clear_tags: false,
+            favorite: None,
         }
     }
 }
@@ -749,6 +864,10 @@ impl std::fmt::Debug for TypedUpdate {
             .field("custom_field_count", &self.set_fields.len())
             .field("remove_fields", &self.remove_fields)
             .field("clear_fields", &self.clear_fields)
+            .field("add_tags", &self.add_tags)
+            .field("remove_tags", &self.remove_tags)
+            .field("clear_tags", &self.clear_tags)
+            .field("favorite", &self.favorite)
             .field(
                 "secret",
                 &self.entry.password.as_ref().map(|_| "<redacted>"),

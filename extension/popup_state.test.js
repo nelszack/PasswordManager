@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { presentation, hint, operationLabel, generatorSettings, neverSaveSites } = require("./popup_state.js");
+const { presentation, hint, operationLabel, generatorSettings, neverSaveSites, desktopLabel } = require("./popup_state.js");
 
 test("popup renders disconnected, stopped, locked, and unlocked states", () => {
     assert.deepEqual(presentation(), { color: "#f59e0b", text: "Browser connection not set up", canLock: false });
@@ -19,11 +19,17 @@ test("popup renders disconnected, stopped, locked, and unlocked states", () => {
     );
 });
 
-test("popup hints name the next step for each state", () => {
+test("popup hints and the desktop button name the next step for each state", () => {
+    const locked = { native: true, running: true, locked: true };
     assert.match(hint(), /browser integration/);
     assert.match(hint({ native: true }), /start it/);
-    assert.match(hint({ native: true, running: true, locked: true }), /Unlock/);
+    assert.match(hint(locked), /Unlock/);
     assert.match(hint({ native: true, running: true }), /key button/);
+    // While locked, the button sends you to the desktop app to unlock.
+    assert.equal(desktopLabel(locked), "Unlock in desktop app");
+    assert.equal(desktopLabel({ ...locked, locked: false }), "Open desktop app");
+    assert.equal(desktopLabel({ ...locked, versionError: "mismatch" }), "Open desktop app");
+    assert.equal(desktopLabel(), "Open desktop app");
 });
 
 test("pending operations get plain-language labels with a short ID", () => {

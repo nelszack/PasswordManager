@@ -26,6 +26,7 @@ async function contentEnvironment(t) {
         addListener: (listener) => runtimeListeners.add(listener),
         removeListener: (listener) => runtimeListeners.delete(listener),
       },
+      _listeners: runtimeListeners,
     },
     storage: {
       local: { get: (_keys, callback) => callback({}) },
@@ -416,4 +417,29 @@ test("discovered roots stop listening after disposal", async (t) => {
   env.click(env.submit);
   await env.settle();
   assert.equal(env.prompts().length, 0);
+});
+
+test("the fill shortcut opens the login picker only from the extension in the focused frame", async (t) => {
+  const env = await contentEnvironment(t);
+  let focused = true;
+  env.document.hasFocus = () => focused;
+  const deliver = (message, sender) => {
+    for (const listener of env.chrome.runtime._listeners) listener(message, sender);
+  };
+  const pickerRequests = () => env.messages.filter((message) => message.action === "openSecurePicker");
+  env.dom.flushFrames();
+  deliver({ action: "pmShortcutFill" }, { id: "other-extension" });
+  deliver({ action: "somethingElse" }, { id: "extension-id" });
+  focused = false;
+  deliver({ action: "pmShortcutFill" }, { id: "extension-id" });
+  await env.settle();
+  assert.equal(pickerRequests().length, 0);
+  focused = true;
+  env.username.focus();
+  deliver({ action: "pmShortcutFill" }, { id: "extension-id" });
+  await env.settle();
+  assert.equal(pickerRequests().length, 1);
+  assert.equal(pickerRequests()[0].kind, "login");
+  env.controller.dispose();
+  assert.equal(env.chrome.runtime._listeners.size, 0, "dispose removes every runtime listener");
 });

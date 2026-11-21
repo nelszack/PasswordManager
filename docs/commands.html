@@ -94,6 +94,7 @@ Supplying no options displays the effective configuration. Boolean settings acce
         <dt><code>--password-history-limit &lt;PASSWORD_HISTORY_LIMIT&gt;</code></dt><dd>Maximum prior passwords retained per entry; zero disables history</dd>
         <dt><code>--trash-retention-days &lt;TRASH_RETENTION_DAYS&gt;</code></dt><dd>Automatically purge trash older than this many days; zero disables it</dd>
         <dt><code>--server-port &lt;SERVER_PORT&gt;</code></dt><dd>Set the default loopback port used by the server and client</dd>
+        <dt><code>--ssh-agent &lt;SSH_AGENT&gt;</code></dt><dd>Serve Ed25519 SSH keys from the unlocked vault through a local SSH agent (Linux and macOS; restart the server to apply)</dd>
         <dt><code>--default-vault &lt;DEFAULT_VAULT&gt;</code></dt><dd>Opaque vault ID selected by default when unlocking (from pm vaults)</dd>
       </dl>
     </section>
@@ -123,6 +124,62 @@ Zero disables automatic locking for this unlock session. If omitted, uses the co
       <h2><code>pm vaults</code></h2>
       <p>List opaque vault filenames without decrypting them or requiring a server</p>
       <pre><code>Usage: pm vaults</code></pre>
+    </section>
+    <section class="command" id="pm-ssh-agent">
+      <h2><code>pm ssh-agent</code></h2>
+      <p>Print shell commands that point SSH at the password manager&#39;s agent, or answer a signature waiting for confirmation.
+
+Enable the agent with `pm config --ssh-agent true` and restart the server. It offers Ed25519 SSH-key items whose &quot;SSH agent&quot; field is `on` or `confirm` from the unlocked vault; locking removes them. `pm status` lists waiting requests.</p>
+      <pre><code>Usage: pm ssh-agent [COMMAND]</code></pre>
+    </section>
+    <section class="command" id="pm-ssh-agent-approve">
+      <h2><code>pm ssh-agent approve</code></h2>
+      <p>Allow a waiting signature (ID from `pm status`)</p>
+      <pre><code>Usage: pm ssh-agent approve &lt;ID&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ID &lt;ID&gt;</code></dt><dd>Request ID shown by `pm status`</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-ssh-agent-deny">
+      <h2><code>pm ssh-agent deny</code></h2>
+      <p>Refuse a waiting signature</p>
+      <pre><code>Usage: pm ssh-agent deny &lt;ID&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ID &lt;ID&gt;</code></dt><dd>Request ID shown by `pm status`</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-passkey">
+      <h2><code>pm passkey</code></h2>
+      <p>Confirm browser passkey requests, or set this device&#39;s passkey PIN.
+
+When a site asks for proof that it is you, the extension&#39;s passkey window can wait for you to confirm here or in the desktop app with your master password or passkey PIN. A PIN is how key-file vaults confirm; it is kept on this device only. `pm status` lists waiting requests.</p>
+      <pre><code>Usage: pm passkey &lt;COMMAND&gt;</code></pre>
+    </section>
+    <section class="command" id="pm-passkey-approve">
+      <h2><code>pm passkey approve</code></h2>
+      <p>Confirm a waiting request; prompts for the master password or passkey PIN</p>
+      <pre><code>Usage: pm passkey approve &lt;ID&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ID &lt;ID&gt;</code></dt><dd>Request ID shown by `pm status`</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-passkey-deny">
+      <h2><code>pm passkey deny</code></h2>
+      <p>Refuse a waiting request</p>
+      <pre><code>Usage: pm passkey deny &lt;ID&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ID &lt;ID&gt;</code></dt><dd>Request ID shown by `pm status`</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-passkey-set-pin">
+      <h2><code>pm passkey set-pin</code></h2>
+      <p>Set or replace the passkey PIN for the unlocked vault (prompts twice)</p>
+      <pre><code>Usage: pm passkey set-pin</code></pre>
+    </section>
+    <section class="command" id="pm-passkey-remove-pin">
+      <h2><code>pm passkey remove-pin</code></h2>
+      <p>Remove the passkey PIN for the unlocked vault</p>
+      <pre><code>Usage: pm passkey remove-pin</code></pre>
     </section>
     <section class="command" id="pm-sync">
       <h2><code>pm sync</code></h2>
@@ -220,10 +277,10 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     </section>
     <section class="command" id="pm-native-host-install">
       <h2><code>pm native-host install</code></h2>
-      <p>Register the native host for an unpacked Chrome-family extension</p>
-      <pre><code>Usage: pm native-host install [OPTIONS] --extension-id &lt;EXTENSION_ID&gt;</code></pre>
+      <p>Register the native host for the browser extension</p>
+      <pre><code>Usage: pm native-host install [OPTIONS]</code></pre>
       <dl class="flags">
-        <dt><code>--extension-id &lt;EXTENSION_ID&gt;</code></dt><dd>The 32-character ID shown for the extension on chrome://extensions</dd>
+        <dt><code>--extension-id &lt;EXTENSION_ID&gt;</code></dt><dd>The 32-character ID shown on chrome://extensions. Firefox uses the packaged add-on&#39;s fixed ID unless another is given</dd>
         <dt><code>--browser &lt;BROWSER&gt;</code></dt><dd>Browser whose per-user native-messaging registration should be updated Default: <code>chrome</code>.</dd>
       </dl>
     </section>
@@ -486,6 +543,8 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
         <dt><code>--notes &lt;NOTES&gt;</code></dt><dd>Free-form notes stored with the item</dd>
         <dt><code>--field &lt;NAME=VALUE&gt;</code></dt><dd>Add a searchable custom field as NAME=VALUE</dd>
         <dt><code>--secret-field &lt;NAME&gt;</code></dt><dd>Prompt privately for the value of this custom field</dd>
+        <dt><code>--tag &lt;TAG&gt;</code></dt><dd>Label the item with a tag; repeat for several (`--tag work --tag aws`)</dd>
+        <dt><code>--favorite</code></dt><dd>Mark the item as a favorite</dd>
         <dt><code>--generate-password</code></dt><dd>Generate the primary secret instead of prompting for it</dd>
         <dt><code>--no-copy</code></dt><dd>Do not copy a newly added login password, overriding configuration Default: <code>false</code>.</dd>
         <dt><code>--copy</code></dt><dd>Copy the newly added primary secret to the clipboard Default: <code>false</code>.</dd>
@@ -503,6 +562,8 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old</dd>
         <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results Default: <code>id</code>.</dd>
         <dt><code>--descending</code></dt><dd>Reverse the selected sort order</dd>
+        <dt><code>--tag &lt;TAG&gt;</code></dt><dd>Include only items with this tag; repeat to require several</dd>
+        <dt><code>--favorites</code></dt><dd>Include only favorite items</dd>
       </dl>
     </section>
     <section class="command" id="pm-search">
@@ -522,6 +583,8 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old</dd>
         <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results Default: <code>id</code>.</dd>
         <dt><code>--descending</code></dt><dd>Reverse the selected sort order</dd>
+        <dt><code>--tag &lt;TAG&gt;</code></dt><dd>Include only items with this tag; repeat to require several</dd>
+        <dt><code>--favorites</code></dt><dd>Include only favorite items</dd>
       </dl>
     </section>
     <section class="command" id="pm-update">
@@ -546,6 +609,11 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
         <dt><code>--secret-field &lt;NAME&gt;</code></dt><dd>Prompt privately for the value of this custom field</dd>
         <dt><code>--remove-field &lt;NAME&gt;</code></dt><dd>Remove a custom field by case-insensitive name</dd>
         <dt><code>--clear-fields</code></dt><dd>Remove every custom field from the item</dd>
+        <dt><code>--add-tag &lt;TAG&gt;</code></dt><dd>Add a tag; repeat for several</dd>
+        <dt><code>--remove-tag &lt;TAG&gt;</code></dt><dd>Remove a tag by case-insensitive name</dd>
+        <dt><code>--clear-tags</code></dt><dd>Remove every tag (applied before --add-tag)</dd>
+        <dt><code>--favorite</code></dt><dd>Mark the item as a favorite</dd>
+        <dt><code>--unfavorite</code></dt><dd>Remove the item from favorites</dd>
       </dl>
     </section>
     <section class="command" id="pm-get">
@@ -576,6 +644,49 @@ By default imports into the unlocked vault. `--new` creates a separate locked va
         <dt><code>--key &lt;KEY_PATH&gt;</code></dt><dd>Create the new imported vault&#39;s external key; requires `--new`</dd>
         <dt><code>--preview</code></dt><dd>Show import counts and conflicts without changing the vault</dd>
         <dt><code>--conflicts &lt;CONFLICTS&gt;</code></dt><dd>How duplicate name/username/URL records are handled Default: <code>skip</code>.</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-attachment">
+      <h2><code>pm attachment</code></h2>
+      <p>Attach a file to an item, or save or remove an attachment.
+
+Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault). `pm get` lists an item&#39;s attachments.</p>
+      <pre><code>Usage: pm attachment &lt;COMMAND&gt;</code></pre>
+    </section>
+    <section class="command" id="pm-attachment-add">
+      <h2><code>pm attachment add</code></h2>
+      <p>Store a copy of a file in the item</p>
+      <pre><code>Usage: pm attachment add [OPTIONS] --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--path &lt;PATH&gt;</code></dt><dd>File to attach (at most 5 MiB)</dd>
+        <dt><code>--name &lt;NAME&gt;</code></dt><dd>Attachment name; defaults to the file&#39;s name</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-attachment-save">
+      <h2><code>pm attachment save</code></h2>
+      <p>Write an attachment to a new private file</p>
+      <pre><code>Usage: pm attachment save [OPTIONS] --name &lt;NAME&gt; --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--name &lt;NAME&gt;</code></dt><dd>Attachment name (case-insensitive), as listed by `pm get`</dd>
+        <dt><code>--path &lt;PATH&gt;</code></dt><dd>Destination file</dd>
+        <dt><code>--force</code></dt><dd>Replace an existing file</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-attachment-remove">
+      <h2><code>pm attachment remove</code></h2>
+      <p>Delete an attachment from the item</p>
+      <pre><code>Usage: pm attachment remove --name &lt;NAME&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
+        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--name &lt;NAME&gt;</code></dt><dd>Attachment name (case-insensitive)</dd>
       </dl>
     </section>
     <section class="command" id="pm-export">

@@ -155,11 +155,14 @@ impl Output {
             }
         };
         let code = response.code;
+        let notice = response.notice.clone();
         if self.json {
             if code == 0 {
-                let document = password_manager::protocol::SecretJson::from(
-                    serde_json::json!({"ok":true,"data":response.payload.into_json(),"operation":response.operation}),
-                );
+                let mut value = serde_json::json!({"ok":true,"data":response.payload.into_json(),"operation":response.operation});
+                if let Some(notice) = &notice {
+                    value["notice"] = serde_json::Value::String(notice.clone());
+                }
+                let document = password_manager::protocol::SecretJson::from(value);
                 let encoded = zeroize::Zeroizing::new(
                     serde_json::to_string(&document).expect("response serializes"),
                 );
@@ -186,6 +189,12 @@ impl Output {
                 let rendered = zeroize::Zeroizing::new(render_response(&response.payload));
                 self.print_success(&rendered);
             }
+        }
+        // Shown even with --quiet: it asks for action on other devices.
+        if !self.json
+            && let Some(notice) = notice
+        {
+            self.print_warning(&notice);
         }
         if code == 0 { Ok(()) } else { Err(code) }
     }

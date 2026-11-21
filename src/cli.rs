@@ -285,6 +285,32 @@ pub enum CliCommands {
     },
     /// List opaque vault filenames without decrypting them or requiring a server.
     Vaults,
+    /// Print shell commands that point SSH at the password manager's agent, or
+    /// answer a signature waiting for confirmation.
+    ///
+    /// Enable the agent with `pm config --ssh-agent true` and restart the server.
+    /// It offers Ed25519 SSH-key items whose "SSH agent" field is `on` or `confirm`
+    /// from the unlocked vault; locking removes them. `pm status` lists waiting requests.
+    #[command(
+        after_help = "Examples:\n  eval \"$(pm ssh-agent)\"\n  ssh-add -l\n  pm ssh-agent approve 1a2b3c4d5e6f"
+    )]
+    SshAgent {
+        #[command(subcommand)]
+        command: Option<SshAgentCommands>,
+    },
+    /// Confirm browser passkey requests, or set this device's passkey PIN.
+    ///
+    /// When a site asks for proof that it is you, the extension's passkey window
+    /// can wait for you to confirm here or in the desktop app with your master
+    /// password or passkey PIN. A PIN is how key-file vaults confirm; it is kept
+    /// on this device only. `pm status` lists waiting requests.
+    #[command(
+        after_help = "Examples:\n  pm passkey approve 1a2b3c4d5e6f\n  pm passkey deny 1a2b3c4d5e6f\n  pm passkey set-pin\n  pm passkey remove-pin"
+    )]
+    Passkey {
+        #[command(subcommand)]
+        command: PasskeyCommands,
+    },
     /// Connect, download, and synchronize encrypted cloud vaults.
     #[command(
         after_help = "Examples:\n  pm sync connect https://server.example --token-file \
@@ -410,7 +436,7 @@ pub enum CliCommands {
     },
     /// Add a login or another typed secret to the unlocked vault.
     #[command(
-        after_help = "Examples:\n  pm add --name github --username alice --url https://github.com\n  pm add --name router --type wifi --field 'ssid=Home' --secret-field passphrase\n  pm add --name api --type api-secret --generate"
+        after_help = "Examples:\n  pm add --name github --username alice --url https://github.com --tag work --favorite\n  pm add --name router --type wifi --field 'ssid=Home' --secret-field passphrase\n  pm add --name api --type api-secret --generate"
     )]
     Add {
         /// Display name used to identify and search for the item.
@@ -434,6 +460,12 @@ pub enum CliCommands {
         /// Prompt privately for the value of this custom field.
         #[arg(long = "secret-field", value_name = "NAME")]
         secret_fields: Vec<String>,
+        /// Label the item with a tag; repeat for several (`--tag work --tag aws`).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Mark the item as a favorite.
+        #[arg(long)]
+        favorite: bool,
         /// Generate the primary secret instead of prompting for it.
         #[arg(long = "generate-password", visible_alias = "generate")]
         generate_password: bool,
@@ -447,7 +479,7 @@ pub enum CliCommands {
     /// List vault items without displaying their primary secrets.
     #[command(
         after_help = "Examples:\n  pm view\n  pm view --type login --sort name\n  pm view --weak \
-                      --descending"
+                      --descending\n  pm view --tag work --favorites"
     )]
     #[command(visible_aliases = ["list", "ls"])]
     View(ListArgs),
@@ -459,7 +491,7 @@ pub enum CliCommands {
     Search(SearchArgs),
     /// Modify an existing item selected by stable ID or exact name.
     #[command(
-        after_help = "Examples:\n  pm update --id 4 --username alice@example.com\n  pm update github --password --generate\n  pm update --id 7 --field environment=production --add-url https://example.com"
+        after_help = "Examples:\n  pm update --id 4 --username alice@example.com\n  pm update github --password --generate\n  pm update --id 7 --field environment=production --add-url https://example.com\n  pm update --id 7 --add-tag work --remove-tag old --favorite"
     )]
     Update {
         #[command(flatten)]
@@ -520,6 +552,19 @@ pub enum CliCommands {
         #[arg(long, value_enum, default_value_t = crate::types::ConflictPolicy::Skip)]
         conflicts: crate::types::ConflictPolicy,
     },
+    /// Attach a file to an item, or save or remove an attachment.
+    ///
+    /// Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per
+    /// vault). `pm get` lists an item's attachments.
+    #[command(
+        after_help = "Examples:\n  pm attachment add --id 4 --path recovery-codes.pdf\n  pm attachment \
+                      save --id 4 --name recovery-codes.pdf --path ~/Downloads/codes.pdf\n  pm \
+                      attachment remove --id 4 --name recovery-codes.pdf"
+    )]
+    Attachment {
+        #[command(subcommand)]
+        command: AttachmentCommands,
+    },
     /// Export the unlocked vault as portable JSON or interoperable CSV.
     ///
     /// A `.json` destination preserves rich metadata; other extensions use
@@ -574,15 +619,17 @@ pub enum NativeHostCommands {
                       reload the extension after upgrading."
     )]
     Update,
-    /// Register the native host for an unpacked Chrome-family extension.
-    #[command(after_help = "Example:\n  pm native-host install --extension-id \
-                            abcdefghijklmnopabcdefghijklmnop --browser chrome\n\nReload the \
-                            extension after installation. On Windows, fully close the browser \
-                            before reinstalling an upgraded native host.")]
+    /// Register the native host for the browser extension.
+    #[command(after_help = "Examples:\n  pm native-host install --extension-id \
+                            abcdefghijklmnopabcdefghijklmnop --browser chrome\n  pm native-host \
+                            install --browser firefox\n\nReload the extension after installation. \
+                            On Windows, fully close the browser before reinstalling an upgraded \
+                            native host.")]
     Install {
-        /// The 32-character ID shown for the extension on chrome://extensions.
+        /// The 32-character ID shown on chrome://extensions. Firefox uses the
+        /// packaged add-on's fixed ID unless another is given.
         #[arg(long)]
-        extension_id: String,
+        extension_id: Option<String>,
         /// Browser whose per-user native-messaging registration should be updated.
         #[arg(long, value_enum, default_value_t = NativeBrowser::Chrome)]
         browser: NativeBrowser,
@@ -629,7 +676,7 @@ pub enum BackupCommands {
     },
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum NativeBrowser {
     /// Google Chrome.
     Chrome,
@@ -637,6 +684,8 @@ pub enum NativeBrowser {
     Chromium,
     /// Helium browser.
     Helium,
+    /// Mozilla Firefox 128 or later, using the packaged Firefox extension.
+    Firefox,
 }
 
 #[derive(Args, Debug)]
@@ -664,7 +713,8 @@ pub struct ConfigArgs {
             "password_history_limit",
             "trash_retention_days",
             "server_port",
-            "default_vault"
+            "default_vault",
+            "ssh_agent"
         ]
     )]
     pub reset: bool,
@@ -696,6 +746,10 @@ pub struct ConfigArgs {
     /// Set the default loopback port used by the server and client.
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
     pub server_port: Option<u16>,
+    /// Serve Ed25519 SSH keys from the unlocked vault through a local SSH agent
+    /// (Linux and macOS; restart the server to apply).
+    #[arg(long)]
+    pub ssh_agent: Option<bool>,
     /// Opaque vault ID selected by default when unlocking (from pm vaults).
     #[arg(long)]
     pub default_vault: Option<String>,
@@ -714,6 +768,7 @@ impl ConfigArgs {
             || self.trash_retention_days.is_some()
             || self.server_port.is_some()
             || self.default_vault.is_some()
+            || self.ssh_agent.is_some()
     }
 }
 
@@ -731,6 +786,7 @@ impl From<ConfigArgs> for crate::config::ConfigChanges {
             trash_retention_days: args.trash_retention_days,
             server_port: args.server_port,
             default_vault: args.default_vault,
+            ssh_agent: args.ssh_agent,
             clear_default_vault: false,
             ..Default::default()
         }
@@ -775,6 +831,26 @@ pub struct MetadataArgs {
     /// Remove every custom field from the item.
     #[arg(long, conflicts_with_all = ["fields", "secret_fields", "remove_fields"])]
     pub clear_fields: bool,
+    /// Add a tag; repeat for several.
+    #[arg(long = "add-tag", value_name = "TAG")]
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    /// Remove a tag by case-insensitive name.
+    #[arg(long = "remove-tag", value_name = "TAG", conflicts_with = "clear_tags")]
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+    /// Remove every tag (applied before --add-tag).
+    #[arg(long)]
+    #[serde(default)]
+    pub clear_tags: bool,
+    /// Mark the item as a favorite.
+    #[arg(long, conflicts_with = "unfavorite")]
+    #[serde(default)]
+    pub favorite: bool,
+    /// Remove the item from favorites.
+    #[arg(long)]
+    #[serde(default)]
+    pub unfavorite: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -800,6 +876,12 @@ pub struct ListArgs {
     /// Reverse the selected sort order.
     #[arg(long)]
     pub descending: bool,
+    /// Include only items with this tag; repeat to require several.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Include only favorite items.
+    #[arg(long)]
+    pub favorites: bool,
 }
 
 impl From<ListArgs> for ListOptions {
@@ -817,6 +899,8 @@ impl From<ListArgs> for ListOptions {
             stale_days: value.stale_days,
             sort: value.sort,
             descending: value.descending,
+            tags: value.tags,
+            favorite: value.favorites.then_some(true),
         }
     }
 }
@@ -1054,6 +1138,75 @@ impl From<UpdateArgs> for crate::types::EntryChanges {
             notes: args.notes.map(Into::into),
         }
     }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SshAgentCommands {
+    /// Allow a waiting signature (ID from `pm status`).
+    Approve {
+        /// Request ID shown by `pm status`.
+        id: String,
+    },
+    /// Refuse a waiting signature.
+    Deny {
+        /// Request ID shown by `pm status`.
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PasskeyCommands {
+    /// Confirm a waiting request; prompts for the master password or passkey PIN.
+    Approve {
+        /// Request ID shown by `pm status`.
+        id: String,
+    },
+    /// Refuse a waiting request.
+    Deny {
+        /// Request ID shown by `pm status`.
+        id: String,
+    },
+    /// Set or replace the passkey PIN for the unlocked vault (prompts twice).
+    SetPin,
+    /// Remove the passkey PIN for the unlocked vault.
+    RemovePin,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AttachmentCommands {
+    /// Store a copy of a file in the item.
+    Add {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// File to attach (at most 5 MiB).
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        path: String,
+        /// Attachment name; defaults to the file's name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Write an attachment to a new private file.
+    Save {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Attachment name (case-insensitive), as listed by `pm get`.
+        #[arg(long)]
+        name: String,
+        /// Destination file.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        path: String,
+        /// Replace an existing file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete an attachment from the item.
+    Remove {
+        #[command(flatten)]
+        target: EntryArgs,
+        /// Attachment name (case-insensitive).
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[cfg(test)]

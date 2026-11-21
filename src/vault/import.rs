@@ -157,6 +157,30 @@ fn import_portable(
             if let Some(credentials) = &item.duo {
                 crate::duo::validate_credentials(credentials).map_err(|e| e.to_string())?;
             }
+            item_rules::normalize_tags(&mut item.tags)
+                .and_then(|()| {
+                    (item.tags.len() <= item_rules::MAX_TAGS)
+                        .then_some(())
+                        .ok_or_else(|| VaultError::InvalidInput("too many tags".into()))
+                })
+                .map_err(|error| format!("invalid tags for {:?}: {error}", item.name))?;
+            let attachments = std::mem::take(&mut item.attachments)
+                .into_iter()
+                .map(|mut attachment| {
+                    use base64::{Engine, engine::general_purpose::STANDARD};
+                    let data = STANDARD
+                        .decode(attachment.data.expose())
+                        .map_err(|_| format!("invalid attachment data for {:?}", item.name));
+                    attachment.data.zeroize();
+                    Ok(Attachment {
+                        name: std::mem::take(&mut attachment.name),
+                        added: attachment.added.clone(),
+                        data: data?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            attachments::check_stored(&attachments)
+                .map_err(|error| format!("invalid attachments for {:?}: {error}", item.name))?;
             Ok(ImportedItem {
                 portable: true,
                 entry: VaultEntry {
@@ -176,6 +200,9 @@ fn import_portable(
                 password_history: item.password_history,
                 totp: item.totp,
                 duo: item.duo,
+                tags: std::mem::take(&mut item.tags),
+                favorite: item.favorite,
+                attachments,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -183,6 +210,36 @@ fn import_portable(
 }
 
 impl Vault {
+    /// Imported attachments must fit the vault-wide budget. A portable
+    /// replacement swaps the existing item's attachments for the imported ones.
+    fn check_imported_attachments(
+        &self,
+        operations: &[(Option<usize>, ImportedItem)],
+    ) -> Result<(), VaultError> {
+        let incoming: usize = operations
+            .iter()
+            .flat_map(|(_, item)| &item.attachments)
+            .map(|a| a.data.len())
+            .sum();
+        if incoming == 0 {
+            return Ok(());
+        }
+        let replaced: usize = operations
+            .iter()
+            .filter(|(_, item)| item.portable)
+            .filter_map(|(id, _)| id.and_then(|id| self.item(id)))
+            .map(Item::attachment_bytes)
+            .sum();
+        if (self.total_attachment_bytes() - replaced).saturating_add(incoming)
+            > attachments::MAX_VAULT_ATTACHMENT_BYTES
+        {
+            return Err(VaultError::InvalidInput(format!(
+                "Imported attachments would exceed the {} MiB per-vault limit",
+                attachments::MAX_VAULT_ATTACHMENT_BYTES / (1024 * 1024)
+            )));
+        }
+        Ok(())
+    }
     fn replace_portable_records(
         &mut self,
         id: usize,
@@ -196,11 +253,14 @@ impl Vault {
             .map(|s| Authenticator::parse(s))
             .transpose()?;
         let item = self.item_mut(id).unwrap();
+        item.attachments = std::mem::take(&mut imported.attachments);
         item.metadata = EntryMetadata {
             kind: imported.kind,
             additional_urls: std::mem::take(&mut imported.additional_urls),
             password_changed: imported.password_changed.take(),
             custom_fields: std::mem::take(&mut imported.custom_fields),
+            tags: std::mem::take(&mut imported.tags),
+            favorite: imported.favorite,
         };
         item.duo = imported.duo.take().map(|credentials| DuoRecord {
             credentials,
@@ -309,6 +369,7 @@ impl Vault {
             }
         }
         let mut plan = self.plan_import(imported, conflicts, preview)?;
+        self.check_imported_attachments(&plan.operations)?;
         plan.report.unsupported = losses.unsupported;
         plan.report.loss_count = losses.count;
         plan.report.losses = losses.messages;
@@ -369,6 +430,12 @@ impl Vault {
                     if !imported.custom_fields.is_empty() {
                         item.metadata.custom_fields = std::mem::take(&mut imported.custom_fields);
                     }
+                    for tag in std::mem::take(&mut imported.tags) {
+                        if !item.metadata.has_tag(&tag) {
+                            item.metadata.tags.push(tag);
+                        }
+                    }
+                    item.metadata.favorite |= imported.favorite;
                     if let Some(config) = imported.totp.take() {
                         item.authenticator = Some(Authenticator::parse(&config)?);
                     }

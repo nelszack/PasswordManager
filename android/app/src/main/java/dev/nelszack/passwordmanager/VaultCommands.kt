@@ -71,6 +71,8 @@ object VaultCommands {
         staleDays: Long? = null,
         sort: String = "id",
         descending: Boolean = false,
+        tags: List<String> = emptyList(),
+        favorite: Boolean? = null,
     ) =
         command(
             "list",
@@ -88,7 +90,9 @@ object VaultCommands {
                         .put("weak", weak)
                         .put("stale_days", nullable(staleDays))
                         .put("sort", sort)
-                        .put("descending", descending),
+                        .put("descending", descending)
+                        .put("tags", JSONArray(tags))
+                        .put("favorite", nullable(favorite)),
                 ),
         )
 
@@ -110,6 +114,8 @@ object VaultCommands {
         notes: String? = null,
         kind: String = "login",
         fields: List<Field> = emptyList(),
+        tags: List<String> = emptyList(),
+        favorite: Boolean = false,
     ) =
         command(
             "add",
@@ -129,14 +135,17 @@ object VaultCommands {
                         )
                         .put("kind", kind)
                         .put("additional_urls", JSONArray(urls.drop(1)))
-                        .put("custom_fields", JSONArray(fields.map(Field::json))),
+                        .put("custom_fields", JSONArray(fields.map(Field::json)))
+                        .put("tags", JSONArray(tags))
+                        .put("favorite", favorite),
                 )
                 .put("copy_timeout", 0),
         )
 
     /**
      * Replaces an item's details. With [replaceDetails], websites and custom fields are replaced by
-     * [urls] and [fields]; otherwise they are left unchanged.
+     * [urls] and [fields]; otherwise they are left unchanged. Non-null [tags] replace every tag and
+     * non-null [favorite] sets the favorite mark; null leaves each unchanged.
      */
     fun update(
         id: Long,
@@ -148,6 +157,8 @@ object VaultCommands {
         kind: String? = null,
         fields: List<Field> = emptyList(),
         replaceDetails: Boolean = false,
+        tags: List<String>? = null,
+        favorite: Boolean? = null,
     ) =
         command(
             "update",
@@ -172,8 +183,46 @@ object VaultCommands {
                 .put("clear_urls", replaceDetails)
                 .put("set_fields", JSONArray(fields.map(Field::json)))
                 .put("remove_fields", JSONArray())
-                .put("clear_fields", replaceDetails),
+                .put("clear_fields", replaceDetails)
+                .put("add_tags", JSONArray(tags.orEmpty()))
+                .put("remove_tags", JSONArray())
+                .put("clear_tags", tags != null)
+                .put("favorite", nullable(favorite)),
         )
+
+    /** Marks or unmarks a favorite, leaving every other detail unchanged. */
+    fun setFavorite(id: Long, favorite: Boolean) =
+        command(
+            "update",
+            JSONObject()
+                .put("entry", JSONObject().put("target", target(id)).put("update", JSONObject()))
+                .put("kind", JSONObject.NULL)
+                .put("add_url", JSONArray())
+                .put("remove_url", JSONArray())
+                .put("clear_urls", false)
+                .put("set_fields", JSONArray())
+                .put("remove_fields", JSONArray())
+                .put("clear_fields", false)
+                .put("favorite", favorite),
+        )
+
+    /** Deletes an attachment; adding and reading use the bridge's byte requests. */
+    fun removeAttachment(id: Long, name: String) =
+        command(
+            "attachment",
+            JSONObject()
+                .put("Remove", JSONObject().put("target", target(id)).put("name", name)),
+        )
+
+    /** Splits a comma-separated tag list as typed by the user. */
+    fun parseTags(text: String): List<String> =
+        text.split(',').map(String::trim).filter(String::isNotEmpty)
+
+    /** An item's tags from a list summary or item detail. */
+    fun tags(item: JSONObject): List<String> {
+        val tags = item.optJSONArray("tags") ?: return emptyList()
+        return (0 until tags.length()).map(tags::getString)
+    }
 
     /** Enrolls Duo passcodes, and push approvals when [push] is set. */
     fun duoEnroll(id: Long, activation: String, mode: String, push: Boolean, replace: Boolean) =

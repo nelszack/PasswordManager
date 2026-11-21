@@ -112,6 +112,7 @@ pub struct ConfigChanges {
     pub desktop_scale: Option<u16>,
     pub sync_server_url: Option<String>,
     pub sync_automatic: Option<bool>,
+    pub ssh_agent: Option<bool>,
 }
 
 /// Shared duration syntax for CLI arguments and desktop settings.
@@ -139,6 +140,8 @@ pub fn parse_duration(value: &str) -> Result<u64, String> {
 #[serde(default)]
 pub struct ServerConfig {
     pub port: u16,
+    /// Serve Ed25519 SSH-key items through a local SSH agent socket.
+    pub ssh_agent: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -193,6 +196,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: crate::protocol::DEFAULT_PORT,
+            ssh_agent: false,
         }
     }
 }
@@ -348,6 +352,9 @@ pub fn try_update(
     }
     if let Some(automatic) = modify.sync_automatic {
         config.sync.automatic = automatic;
+    }
+    if let Some(enabled) = modify.ssh_agent {
+        config.server.ssh_agent = enabled;
     }
     write_file(&config, config_path)?;
     Ok(config)

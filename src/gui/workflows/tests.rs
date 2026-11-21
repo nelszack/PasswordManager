@@ -7,6 +7,8 @@ fn app() -> App {
     app.connection.running = true;
     app.connection.session = Some("a".repeat(64));
     app.items.push(ItemSummary {
+        tags: vec![],
+        favorite: false,
         id: 7,
         revision: 11,
         name: "Work".into(),
@@ -150,6 +152,9 @@ fn history_does_not_follow_an_account_selected_on_the_vault_tab() {
     let reply = workflow_reply(
         &app,
         ResponsePayload::Item(ItemDetail {
+            attachments: vec![],
+            tags: vec![],
+            favorite: false,
             id: 8,
             revision: 11,
             name: "Other".into(),

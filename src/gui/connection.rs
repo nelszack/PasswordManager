@@ -101,7 +101,7 @@ impl App {
         self.conf = conf;
         self.confirm_reset_settings = false;
         self.notice = if recovery_changed {
-            "Settings reloaded. Restart the server to apply recovery settings."
+            "Settings reloaded. Restart the server to apply recovery and SSH agent settings."
         } else {
             "Settings reloaded."
         }
@@ -186,6 +186,44 @@ impl App {
                 self.notice.clear();
                 self.ui.notice_error = false;
                 return iced::widget::operation::focus("master-password");
+            }
+            Message::PasskeySecret(value) => self.ui.passkey_secret = value,
+            Message::PasskeyDecision(id, confirm) if self.connection.running => {
+                let secret = std::mem::take(&mut self.ui.passkey_secret);
+                if confirm && secret.expose().is_empty() {
+                    self.report_error("Enter your master password or passkey PIN to confirm.");
+                    return Task::none();
+                }
+                return self.request(
+                    Job::PasskeyDecision,
+                    ServerCommand::PasskeyDecision {
+                        id,
+                        secret: confirm.then_some(secret),
+                    },
+                    None,
+                );
+            }
+            Message::PinNew(value) => self.ui.pin_new = value,
+            Message::PinConfirm(value) => self.ui.pin_confirm = value,
+            Message::SavePasskeyPin(set) if self.connection.session.is_some() => {
+                let pin = std::mem::take(&mut self.ui.pin_new);
+                let confirm = std::mem::take(&mut self.ui.pin_confirm);
+                if set && pin.expose() != confirm.expose() {
+                    self.report_error("The passkey PINs do not match.");
+                    return Task::none();
+                }
+                return self.request(
+                    Job::PasskeyPin,
+                    ServerCommand::SetPasskeyPin(set.then_some(pin)),
+                    None,
+                );
+            }
+            Message::SshDecision(id, allow) if self.connection.running => {
+                return self.request(
+                    Job::SshDecision,
+                    ServerCommand::SshDecision { id, allow },
+                    None,
+                );
             }
             Message::Unlock => {
                 let timeout =
@@ -293,6 +331,12 @@ impl App {
                 self.clear_vault();
                 self.ui.active_vault = known;
             }
+            self.ui.ssh_requests = status.ssh_requests;
+            if status.passkey_requests.is_empty() {
+                self.ui.passkey_secret = SecretString::default();
+            }
+            self.ui.passkey_requests = status.passkey_requests;
+            self.ui.passkey_pin = status.passkey_pin;
             self.connection.session = next_session;
             if status.locked {
                 if self.recovery.id().is_some() {
