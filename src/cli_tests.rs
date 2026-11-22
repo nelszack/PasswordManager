@@ -108,6 +108,15 @@ fn config_reset_is_exclusive_and_noop_is_detectable() {
     assert!(!ConfigArgs::default().has_updates());
     assert!(Cli::try_parse_from(["pm", "config", "--reset"]).is_ok());
     assert!(Cli::try_parse_from(["pm", "config", "--reset", "--length", "24"]).is_err());
+    let cli = Cli::try_parse_from(["pm", "config", "--sync-automatic", "false"]).unwrap();
+    let Some(CliCommands::Config(args)) = cli.command else {
+        panic!("expected Config command")
+    };
+    assert!(args.has_updates());
+    assert_eq!(
+        crate::config::ConfigChanges::from(args).sync_automatic,
+        Some(false)
+    );
 }
 
 #[test]
@@ -218,6 +227,8 @@ fn test_search_query_and_filters_parse() {
     }
     assert!(Cli::try_parse_from(["pm", "search"]).is_err());
     assert!(Cli::try_parse_from(["pm", "search", "--stale-days", "90"]).is_ok());
+    assert!(Cli::try_parse_from(["pm", "search", "--tag", "work"]).is_ok());
+    assert!(Cli::try_parse_from(["pm", "search", "--favorites"]).is_ok());
 }
 
 #[test]

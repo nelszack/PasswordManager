@@ -926,6 +926,11 @@ fn search_form<'a>(
         ("URL contains", state.search.url.as_str(), Field::Url),
         ("Notes contain", state.search.notes.expose(), Field::Notes),
         (
+            "Tags, comma-separated (items must have every tag)",
+            state.search.tags.as_str(),
+            Field::Tags,
+        ),
+        (
             "Passwords at least this many days old (optional)",
             state.audit.stale_days.as_str(),
             Field::StaleDays,
@@ -1001,6 +1006,12 @@ fn search_form<'a>(
         "Only weak primary secrets",
         state.search.weak,
         Toggle::Weak,
+        enabled,
+    ))
+    .push(toggle(
+        "Only favorites",
+        state.search.favorites,
+        Toggle::Favorites,
         enabled,
     ))
     .push(toggle(

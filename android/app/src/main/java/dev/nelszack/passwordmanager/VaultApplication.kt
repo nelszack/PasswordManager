@@ -99,6 +99,21 @@ object Vault {
 
     fun json(op: String, vararg args: Pair<String, Any?>) = request(op, *args) as JSONObject
 
+    @Volatile private var profiles: Map<String, JSONObject>? = null
+
+    /**
+     * Per-type editor labels and suggested custom fields, keyed by item kind. They come from the
+     * same Rust table as the desktop editor and never change while the app runs.
+     */
+    fun itemProfiles(): Map<String, JSONObject> =
+        profiles
+            ?: (request("item_profiles") as org.json.JSONArray).let { list ->
+                (0 until list.length())
+                    .map(list::getJSONObject)
+                    .associateBy { it.getString("kind") }
+                    .also { profiles = it }
+            }
+
     /**
      * Runs a shared vault command built by [VaultCommands]. With [expectedRevision], the command is
      * refused if the item changed since it was read. Irreversible commands (purging trash,

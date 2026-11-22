@@ -83,6 +83,8 @@ enum Request {
     Passcheck {
         password: SecretString,
     },
+    /// Per-type editor labels and suggested custom fields, shared with the desktop.
+    ItemProfiles,
     CloudList {
         server: String,
         token: SecretString,
@@ -247,6 +249,7 @@ impl Request {
                 | Self::SettingsSave { .. }
                 | Self::Generate(_)
                 | Self::Passcheck { .. }
+                | Self::ItemProfiles
                 | Self::CloudList { .. }
                 | Self::CloudDownload { .. }
                 | Self::TypedFields { .. }
@@ -869,7 +872,8 @@ impl MobileState {
             request @ (Request::SettingsGet
             | Request::SettingsSave { .. }
             | Request::Generate(_)
-            | Request::Passcheck { .. }) => self.settings_request(request),
+            | Request::Passcheck { .. }
+            | Request::ItemProfiles) => self.settings_request(request),
             request @ (Request::Logins { .. }
             | Request::HostnameLogins { .. }
             | Request::OtpLogins { .. }
@@ -961,6 +965,7 @@ impl MobileState {
             Request::Passcheck { password } => Ok(json!({
                 "assessment": crate::password::password_strength_output(&password),
             })),
+            Request::ItemProfiles => Ok(crate::item_profile::profiles_json()),
             _ => Err(MISROUTED.into()),
         }
     }

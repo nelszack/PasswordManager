@@ -892,6 +892,14 @@ mod tests {
         );
     }
     #[test]
+    fn item_profiles_are_available_while_locked() {
+        let (_directory, mut api, _) = fixture();
+        request(&mut api, json!({"op":"lock"}));
+        let profiles = request(&mut api, json!({"op":"item_profiles"}));
+        assert_eq!(profiles, crate::item_profile::profiles_json());
+        assert_eq!(profiles[0]["kind"], "login");
+    }
+    #[test]
     fn generation_search_audit_and_settings_use_shared_policies() {
         let (directory, mut api, _) = fixture();
         add(&mut api, "Account", ItemKind::Login);

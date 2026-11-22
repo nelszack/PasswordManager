@@ -587,6 +587,8 @@ fn advanced_search_keeps_all_cli_filters_and_never_requests_secrets() {
     app.workspace.audit.stale_days = "30".into();
     app.workspace.search.sort = SortField::Modified;
     app.workspace.search.descending = true;
+    app.workspace.search.tags = "work, , aws".into();
+    app.workspace.search.favorites = true;
     let prepared = app.workspace.prepare(Action::Search, &app).unwrap();
     let ServerCommand::List(filter) = &prepared.command else {
         panic!()
@@ -598,6 +600,8 @@ fn advanced_search_keeps_all_cli_filters_and_never_requests_secrets() {
     assert!(filter.list.weak && filter.list.descending);
     assert_eq!(filter.list.stale_days, Some(30));
     assert_eq!(filter.list.sort, SortField::Modified);
+    assert_eq!(filter.list.tags, ["work", "aws"]);
+    assert_eq!(filter.list.favorite, Some(true));
 }
 
 #[test]

@@ -45,6 +45,7 @@ open class MainActivity : ManagementActivity() {
 
     private var searchText = ""
     private var selectedKind: String? = null
+    private var selectedTag: String? = null
     private var queryVersion = 0L
     private var pendingSearch: Runnable? = null
     private var codeTick: Runnable? = null
@@ -66,6 +67,7 @@ open class MainActivity : ManagementActivity() {
         queryVersion++
         searchText = ""
         selectedKind = null
+        selectedTag = null
         super.clearSecrets()
     }
 
@@ -328,6 +330,12 @@ open class MainActivity : ManagementActivity() {
         val chips = android.widget.LinearLayout(this)
         filters.addView(chips)
         layout.addView(filters, MobileUi.margins(this, 12))
+        // Filled with a tag picker once the vault's tags are known.
+        val tagFilter =
+            android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+            }
+        layout.addView(tagFilter)
         val options =
             listOf(
                 "All" to null,
@@ -401,11 +409,55 @@ open class MainActivity : ManagementActivity() {
                 rows.addView(more)
             }
         }
-        fun load() {
+        lateinit var load: () -> Unit
+        fun drawTags(entries: JSONArray) {
+            val tags = sortedSetOf(String.CASE_INSENSITIVE_ORDER)
+            for (i in 0 until entries.length()) tags.addAll(VaultCommands.tags(entries.getJSONObject(i)))
+            selectedTag?.let(tags::add)
+            tagFilter.removeAllViews()
+            if (tags.isEmpty()) return
+            val choices = listOf("All tags") + tags
+            tagFilter.addView(
+                android.widget.Spinner(this).apply {
+                    contentDescription = "Filter by tag"
+                    adapter =
+                        android.widget.ArrayAdapter(
+                            this@MainActivity,
+                            android.R.layout.simple_spinner_dropdown_item,
+                            choices,
+                        )
+                    minimumHeight = MobileUi.dp(this@MainActivity, 48)
+                    background = MobileUi.shape(this@MainActivity, outline = true, radius = 12)
+                    setSelection(choices.indexOfFirst { it == selectedTag }.coerceAtLeast(0))
+                    onItemSelectedListener =
+                        object : android.widget.AdapterView.OnItemSelectedListener {
+                            override fun onItemSelected(
+                                parent: android.widget.AdapterView<*>?,
+                                view: android.view.View?,
+                                position: Int,
+                                id: Long,
+                            ) {
+                                val tag = if (position == 0) null else choices[position]
+                                if (tag == selectedTag) return
+                                selectedTag = tag
+                                load()
+                            }
+
+                            override fun onNothingSelected(
+                                parent: android.widget.AdapterView<*>?
+                            ) {}
+                        }
+                },
+                MobileUi.margins(this, 12),
+            )
+        }
+        load = {
             val needle = search.text.toString()
             searchText = needle
             val kind = selectedKind
+            val tag = selectedTag
             val favorites = kind == FAVORITES
+            val filtered = needle.isNotBlank() || kind != null || tag != null
             val version = ++queryVersion
             task({
                 Vault.commandJson(
@@ -413,6 +465,7 @@ open class MainActivity : ManagementActivity() {
                         query = needle.ifBlank { null },
                         kind = kind.takeUnless { favorites },
                         sort = "name",
+                        tags = listOfNotNull(tag),
                         favorite = if (favorites) true else null,
                     )
                 )
@@ -420,7 +473,8 @@ open class MainActivity : ManagementActivity() {
                 if (version != queryVersion || rows.parent !== layout) return@task
                 val entries = result.getJSONArray("items")
                 rows.removeAllViews()
-                if (needle.isBlank() && kind == null) {
+                if (!filtered) drawTags(entries)
+                if (!filtered) {
                     duoShortcut.removeAllViews()
                     val accounts = duoAccounts(entries)
                     if (accounts.isNotEmpty())
@@ -438,12 +492,12 @@ open class MainActivity : ManagementActivity() {
                 }
                 count.text =
                     "${entries.length()} ${if(entries.length()==1) "item" else "items"}" +
-                        if (needle.isNotBlank() || kind != null) " found" else " in your vault"
+                        if (filtered) " found" else " in your vault"
                 if (entries.length() == 0) {
                     rows.addView(
                         MobileUi.text(
                             this,
-                            if (needle.isNotBlank() || kind != null) "No matching items"
+                            if (filtered) "No matching items"
                             else "Your vault is ready",
                             21f,
                             bold = true,
@@ -452,8 +506,7 @@ open class MainActivity : ManagementActivity() {
                     rows.addView(
                         MobileUi.text(
                             this,
-                            if (needle.isNotBlank() || kind != null)
-                                "Try another search or choose All."
+                            if (filtered) "Try another search or choose All."
                             else "Add your first login, note or other important detail.",
                             15f,
                             muted = true,
@@ -533,6 +586,11 @@ open class MainActivity : ManagementActivity() {
                 true
             } else false
         }
+        // A filtered first load cannot list every tag, so read them separately.
+        if (searchText.isNotBlank() || selectedKind != null || selectedTag != null)
+            task({ Vault.commandJson(VaultCommands.search(sort = "name")).getJSONArray("items") }) {
+                if (tagFilter.parent === layout) drawTags(it)
+            }
         load()
     }
 

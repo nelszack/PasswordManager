@@ -198,6 +198,7 @@ pub enum Field {
     Notes,
     ExtensionId,
     OperationId,
+    Tags,
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Toggle {
@@ -215,6 +216,7 @@ pub enum Toggle {
     OtpOptions,
     WatchDuo,
     NotifyDuo,
+    Favorites,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -501,6 +503,7 @@ impl State {
                     Field::Name => &mut self.search.name,
                     Field::Username => &mut self.search.username,
                     Field::Url => &mut self.search.url,
+                    Field::Tags => &mut self.search.tags,
                     Field::ExtensionId => &mut self.browser.extension_id,
                     Field::OperationId => &mut self.utilities.operation_id,
                     _ => unreachable!(),
@@ -519,6 +522,7 @@ impl State {
             Toggle::RequireOtp => &mut self.audit.require_otp,
             Toggle::Weak => &mut self.search.weak,
             Toggle::Descending => &mut self.search.descending,
+            Toggle::Favorites => &mut self.search.favorites,
             Toggle::ReplaceDuo => &mut self.authenticator.replace_duo,
             Toggle::WatchOtp | Toggle::WatchDuo => return,
             Toggle::OtpOptions => &mut self.otp.options_open,
@@ -1106,8 +1110,8 @@ impl State {
             url: nonempty(&self.search.url),
             notes: (!self.search.notes.is_empty()).then(|| self.search.notes.clone()),
             list: ListOptions {
-                tags: vec![],
-                favorite: None,
+                tags: crate::gui::model::parse_tags(&self.search.tags),
+                favorite: self.search.favorites.then_some(true),
                 kind: self.search.kind,
                 has_totp: self.search.has_otp,
                 weak: self.search.weak,

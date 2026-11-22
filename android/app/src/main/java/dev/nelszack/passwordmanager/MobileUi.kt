@@ -219,6 +219,15 @@ internal object MobileUi {
         return input
     }
 
+    /** Changes the caption and hint of an input made by [field]. */
+    fun relabel(input: EditText, label: String) {
+        input.hint = label
+        val container = input.parent as? android.view.ViewGroup ?: return
+        val parent = container.parent as? android.view.ViewGroup ?: return
+        val caption = parent.getChildAt(parent.indexOfChild(container) - 1) as? TextView
+        if (caption?.labelFor == input.id) caption.text = label
+    }
+
     fun date(value: String): String = runCatching {
         java.time.OffsetDateTime.parse(value)
             .atZoneSameInstant(java.time.ZoneId.systemDefault())

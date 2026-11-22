@@ -295,7 +295,7 @@ Completion export generates the same definitions as `pm completions`; choose a
 new destination file, then configure your shell to load it.
 
 Internal native-host/clipboard commands, generated developer artifacts, and
-terminal output flags remain CLI-specific. See the [CLI/GUI feature map](gui-cli-parity.md). Settings controls
+terminal output flags remain CLI-specific. See the [CLI, desktop and Android feature map](gui-cli-parity.md). Settings controls
 persistent defaults; generation and authenticator controls provide one-time
 overrides.
 
@@ -384,9 +384,12 @@ The details screen also lists attachments: tap one to save a copy, or use
 **Add attachment** to store a file of up to 5 MiB.
 
 Choose **Add item** or **Edit item** for typed editing, multiple website addresses,
-notes, comma-separated tags, the favorite mark, and custom fields. The **★ Favorites**
-filter chip lists starred items, and an item's details screen can star or unstar it
-directly. **Save item** and **Cancel** stay at the bottom while
+notes, comma-separated tags, the favorite mark, and custom fields. A new item
+starts with the fields suggested for its type, such as **Expiry** and **Security
+code** for a payment card; blank suggestions are not saved. The **★ Favorites**
+filter chip lists starred items, the tag picker below the chips lists items with
+one tag, and an item's details screen can star or unstar it directly. **Tools →
+Advanced search** can require several tags or favorites only. **Save item** and **Cancel** stay at the bottom while
 the form scrolls. Back and Cancel ask before discarding changed drafts. A failed
 save keeps your draft so you can correct the problem. Leaving the app or locking
 still clears sensitive views; a draft is not a saved recovery copy.

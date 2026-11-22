@@ -273,14 +273,20 @@ abstract class ManagementActivity : VaultActivity() {
         }
     }
 
+    /** Opens the item editor once the shared per-type labels are available. */
     protected fun typedEditor(entry: JSONObject?) {
+        task({ Vault.itemProfiles() }) { profiles -> typedEditor(entry, profiles) }
+    }
+
+    private fun typedEditor(entry: JSONObject?, profiles: Map<String, JSONObject>) {
         page(if (entry == null) "Add item" else "Edit item")
         val kind =
             choice(
                 "Item type",
-                kinds.map(MobileUi::kindLabel),
-                entry?.optString("kind")?.let(MobileUi::kindLabel),
+                kinds.map { profiles[it]?.optString("title") ?: MobileUi.kindLabel(it) },
+                entry?.optString("kind")?.let { profiles[it]?.optString("title") ?: MobileUi.kindLabel(it) },
             )
+        val guidance = label("")
         section("Item details")
         val name = edit("Name", entry?.optString("name").orEmpty())
         val username = edit("Username / owner", entry?.opt("username") as? String ?: "")
@@ -319,7 +325,7 @@ abstract class ManagementActivity : VaultActivity() {
         val rows = mutableListOf<Field>()
         val fieldRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         layout.addView(fieldRows)
-        fun field(value: JSONObject?) {
+        fun field(value: JSONObject?): Field {
             val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             val fieldName =
                 MobileUi.field(this, row, "Field name", value?.optString("name").orEmpty(), false)
@@ -339,11 +345,50 @@ abstract class ManagementActivity : VaultActivity() {
             row.addView(secret)
             row.addView(removed)
             fieldRows.addView(row)
-            rows.add(Field(fieldName, fieldValue, secret, removed))
+            return Field(fieldName, fieldValue, secret, removed).also(rows::add)
         }
         val fields = entry?.optJSONArray("fields") ?: JSONArray()
         for (i in 0 until fields.length()) field(fields.getJSONObject(i))
         button("Add custom field") { field(null) }
+        // A new item starts with its type's suggested fields (the names card and
+        // identity autofill recognize). Untouched suggestions follow a type change
+        // and blank ones are not saved.
+        val suggestions = mutableMapOf<Field, String>()
+        fun untouched(row: Field) =
+            suggestions[row] == row.name.text.toString() &&
+                row.value.text.isEmpty() &&
+                !row.removed.isChecked
+        fun applyProfile(kindValue: String) {
+            val profile = profiles[kindValue] ?: return
+            guidance.text = profile.optString("guidance")
+            name.hint = profile.optString("name_hint", "Name")
+            MobileUi.relabel(username, profile.optString("owner", "Username / owner"))
+            MobileUi.relabel(password, profile.optString("secret", "Password / primary secret"))
+            if (entry != null || !suggestions.keys.all(::untouched)) return
+            for (row in suggestions.keys) {
+                fieldRows.removeView(row.name.parent.parent as android.view.View)
+                rows.remove(row)
+            }
+            suggestions.clear()
+            val suggested = profile.optJSONArray("suggested") ?: JSONArray()
+            for (i in 0 until suggested.length()) {
+                val template = suggested.getJSONObject(i)
+                val row = field(JSONObject(template.toString()).put("value", ""))
+                suggestions[row] = template.getString("name")
+            }
+        }
+        applyProfile(kinds[kind.selectedItemPosition.coerceIn(0, kinds.lastIndex)])
+        kind.onItemSelectedListener =
+            object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: android.widget.AdapterView<*>?,
+                    view: android.view.View?,
+                    position: Int,
+                    id: Long,
+                ) = applyProfile(kinds[position.coerceIn(0, kinds.lastIndex)])
+
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
         button("Generate password") {
             task({ Vault.json("generate") }) { password.setText(it.getString("password")) }
         }
@@ -375,7 +420,7 @@ abstract class ManagementActivity : VaultActivity() {
             primary("Save item") {
                 val savedFields =
                     rows
-                        .filter { !it.removed.isChecked }
+                        .filter { !it.removed.isChecked && !untouched(it) }
                         .map {
                             VaultCommands.Field(
                                 it.name.text.toString().trim(),
@@ -668,6 +713,8 @@ abstract class ManagementActivity : VaultActivity() {
                     "id" to "Item number",
                 ),
             )
+        val tags = edit("Tags, comma-separated (items must have every tag)")
+        val favorites = toggle("Favorites only")
         val descending = toggle("Descending")
         button("Search items") {
             fun text(field: EditText) = field.text.toString().takeIf(String::isNotEmpty)
@@ -689,6 +736,8 @@ abstract class ManagementActivity : VaultActivity() {
                     staleDays = days.text.toString().trim().toLongOrNull(),
                     sort = sort(),
                     descending = descending.isChecked,
+                    tags = VaultCommands.parseTags(tags.text.toString()),
+                    favorite = if (favorites.isChecked) true else null,
                 )
             task({ Vault.commandJson(filter).getJSONArray("items") }) { entries ->
                 page("Search results")

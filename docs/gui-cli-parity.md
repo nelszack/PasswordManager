@@ -1,66 +1,85 @@
-# CLI and desktop feature map
+# CLI, desktop and Android feature map
 
-The desktop uses the same typed server commands as the CLI. This map covers
-public commands and their options; terminal presentation and hidden developer or
-process entry points have no separate desktop action.
+All three clients run the same Rust vault code. The CLI and desktop send typed
+server commands to the local service. Android sends the same `ServerCommand`s to
+the shared library in process (`src/vault/mobile.rs`). Item-type labels and
+suggested fields come from one shared table (`src/item_profile.rs`), so a card or
+identity created on any client has the field names that card and identity autofill
+recognize.
 
-| CLI command | Desktop route |
-| --- | --- |
-| `gui` | Default launch; Tools → Browser integration installs the Linux shortcut. |
-| `genpass`, `passcheck` | Generator: password/passphrase, character groups, exact symbols, ambiguous-character exclusion, length/words/separator, strength check, stats/copy/timeout overrides. |
-| `config` | Settings: all persistent CLI defaults, reset, service port, default vault. |
-| `passkey` | The Vault tab's Confirm it's you banner answers `approve`/`deny`; Settings → Security → Passkey PIN runs `set-pin`/`remove-pin`. |
-| `ssh-agent` | Settings → Security: SSH agent switch and the socket path to use as `SSH_AUTH_SOCK`; the Vault tab's SSH key requested banner answers `approve`/`deny`. |
-| `unlock`, `new`, `rekey`, `delete --vault` | Vault picker/unlock form and Tools → Vault security: selected filename, password/key file, timeout, creation, credential changes, and external-key retention. |
-| `vaults` | Vault picker and refresh, including while the service is stopped. |
-| `start`, `status`, `lock`, `kill` | Connection status and refresh, Lock, Settings → Connection → Start/Stop local service. |
-| `operation` | Tools → CLI utilities → Check operation outcome, including while locked. The existing pending-operation banner separately reviews this window's uncertain changes. |
-| `add`, `update`, `delete` | Vault item editor: all eight types, username, primary secret/manual or generated, notes, multiple URLs, tags and favorite mark, searchable/secret custom fields, removal/clearing, add-copy override, and trash. Item details star or unstar an item directly. |
-| `attachment` | Item details → Attachments: add a file through the system chooser, save a copy, or remove one with confirmation. |
-| `view`, `search` | Vault list and Tools → Advanced search: all text/field/type/authenticator/weak/stale filters and sort fields/direction. The vault list also filters by tag and favorites. |
-| `get` | Item details: reveal/copy primary secret or individual custom fields; reveal protected values explicitly. |
-| `history`, `restore-password` | Tools → Password history: select an item, load revisions, restore a revision. |
-| `trash`, `restore`, `purge` | Tools → Deleted items: restore, erase one, or empty trash with confirmation. |
-| `audit` | Tools → Vault health: stale threshold, breach lookup, and missing authenticator checks. |
-| `totp` | Item authenticator controls: set/remove, Duo passcode enrollment and mode, show/copy, timeout override, TOTP watch and copy-on-refresh. HOTP advances only on explicit requests. |
-| `duo` | Item authenticator controls: enroll/replace/mode, fetch/watch/interval/notifications, review and approve/deny an exact request, Verified Push code, remove enrollment. |
-| `backup`, `import`, `export` | Tools → Import, export & backups: paths, password/key credentials, backup/export replacement, import preview/new vault/conflict policy. `.json` selects portable JSON; other export suffixes select CSV. |
-| `native-host` | Tools → Browser integration: Chrome/Chromium/Helium/Firefox registration and update. The hidden bridge process is started by the browser. |
-| `sync` | Settings → Connection → Cloud sync: server URL/device credential, list/select/download vault, download comparison copy, enable/disable/status/check/now, and side-by-side conflict review with per-field resolution. Tokens can be pasted from a credential file instead of supplied via a CLI file argument. |
-| `completions` | Tools → CLI utilities: save definitions for all five shells. Existing destination files are protected. |
+Reviewed against `src/cli.rs`, `src/gui/`, and the Android sources on
+2026-11-21. A cell describes what is implemented. It does not mean device
+acceptance; see the [mobile acceptance matrix](mobile-implementation.md#mobile-feature-parity-roadmap).
 
-CLI aliases select the same operation. `--json`, `--quiet`, stdout-only output,
-shell dynamic-completion setup, noninteractive `--yes`, and hidden internal or
-generated-artifact commands are specific to terminal/process integration. The
-desktop provides native presentation, explicit confirmations, and file exports.
-Its Connection settings also offer a one-time port override.
+## Shared vault operations
+
+| Capability | CLI | Desktop | Android |
+| --- | --- | --- | --- |
+| Create, unlock, choose vault | `new`, `unlock`, `vaults` | Vault picker and unlock form | Vault home → Set up / Unlock / Add or restore a vault |
+| Add and edit all eight item types | `add`, `update` | Item editor with type-specific labels and suggested fields | Add item / Edit item with the same type labels and suggested fields |
+| Websites, notes, custom fields, secret fields | `add`/`update` `--url`, `--field`, `--secret-field`, `--remove-field` | Item editor | Item editor (one website per line; secret/remove per field) |
+| Tags and favorites | `--tag`, `--add-tag`, `--remove-tag`, `--favorite` | Editor; star in item details | Editor (comma-separated tags, Favorite) |
+| Browse and filter | `view` with `--type`, `--tag`, `--favorites`, health filters and sort | Vault list: text, type, tag, favorites | Vault list: text, type chips, ★ Favorites, tag picker |
+| Advanced search | `search`: text, name, username, URL, notes, type, authenticator, weak, stale, tags, favorites, sort | Tools → Advanced search (all of these) | Tools → Advanced search (all of these) |
+| Show and copy secrets | `get`, `--password-only`, `--field`, `--reveal-secrets` | Item details: reveal/copy primary secret and fields | Item details: show/copy password, username, each field |
+| Attachments | `attachment` add/save/remove | Item details → Attachments | Item details → Attachments (system file picker) |
+| Trash | `delete`, `trash`, `restore`, `purge` | Delete; Tools → Deleted items | Delete item; Tools → Deleted items |
+| Password history | `history`, `restore-password` | Tools → Password history | Item → Password history |
+| Vault health | `audit` (`--stale-days`, `--require-totp`, `--breaches`) | Tools → Vault health | Tools → Vault health |
+| TOTP/HOTP | `totp` set/show/remove/duo | Item authenticator controls | Item → Authenticator & Duo; HOTP needs explicit confirmation |
+| Duo Push | `duo` enroll/requests/approve/deny/remove | Item authenticator controls | Authenticator → Duo enrollment & push; Duo shortcut on the vault list |
+| Generator and strength check | `genpass`, `passcheck` | Generator | Tools → Password generator (also while locked) |
+| Encrypted backups | `backup` create/restore | Tools → Import, export & backups | Tools → Files & backups |
+| Import and export | `import` (preview, conflict policy, `--new`), `export` (JSON/CSV) | Tools → Import, export & backups | Tools → Files & backups (preview, conflict policy, JSON/CSV) |
+| Change credentials, delete vault | `rekey`, `delete --vault` | Tools → Vault security | Tools → Vault credentials |
+| Cloud sync | `sync` connect/vaults/pull [--copy]/enable/disable/status/check/conflicts/resolve/now | Settings → Connection → Cloud sync | Settings → Cloud sync settings / download vault and Review sync conflicts; Tools → Sync controls |
+| Automatic background sync | `config --sync-automatic` | Settings → Cloud sync checkbox | Syncs on open and after each change (no background service) |
+| Preferences | `config` | Settings | Settings → Mobile settings (separate device-local values) |
+| Lock | `lock` | Lock | Lock button; also locks on background, screen off and inactivity |
+
+CLI aliases select the same operation. `--json`, `--quiet`, `--yes`, stdout output
+and shell dynamic completion are for scripts and terminals only. The desktop and
+Android ask for confirmation and save files through a file chooser instead.
+
+## Differences by platform
+
+These exist only where they make sense:
+
+- **Desktop service and terminal** (CLI and desktop): `start`, `status`, `kill`,
+  `operation` (Tools → CLI utilities → Check operation outcome), `completions`
+  (Tools → CLI utilities), `native-host` (Tools → Browser integration), `gui`
+  (`--install-shortcut`: Tools → Browser integration), Connection settings and a
+  one-time port override. Android runs no background service, so it has nothing
+  to start, stop or recover.
+- **Browser passkey confirmation and SSH agent** (CLI and desktop): `passkey`
+  approve/deny and PIN (the Vault tab's Confirm it's you banner, Settings →
+  Security → Passkey PIN), and `ssh-agent` (Settings → Security switch and socket;
+  SSH key requested banner). Android is itself the passkey provider and confirms
+  with fingerprint or vault unlock. Phones have no SSH agent. SSH key items still
+  carry their "SSH agent" field, so a key added on the phone works with the
+  desktop agent.
+- **Desktop appearance and scale**: desktop Settings only. Android follows the
+  system theme and font size.
+- **Live watching**: `totp show --watch` and `duo watch` (`--notify`,
+  `--interactive`); the desktop has TOTP watch/copy-on-refresh and Duo watch
+  with notifications. Android refreshes the code on the item screen and checks
+  Duo when you tap Check again.
+- **Per-unlock timeout**: `unlock --timeout` and the desktop unlock form override
+  the default for one session. Android always uses the auto-lock preference.
+- **Passphrase word default**: Android saves a default word count. The CLI and
+  desktop start at 6 each time (`genpass --words`).
+- **Android only**: biometric unlock, password/card/identity autofill and the
+  Android 14+ passkey provider, encrypted vault snapshot export, the
+  old-password recovery copy kept during rekey, and an explicit "apply trash
+  retention" action (the desktop service purges old trash by itself).
+
+## Tests
 
 Regression tests cover command construction, secret/session handling, settings,
-generation, recovery, and completion output. Rendering tests cover native Iced
-widget layouts; a full interactive platform acceptance pass remains separate.
-
-## Android feature map
-
-Android calls the shared Rust vault library in process and has separate
-device-local settings. Version 0.3.0 uses the following routes:
-
-| Capability | Android route |
-| --- | --- |
-| Vault selection/create/import/restore | Vault home → Add or restore a vault; Open a local vault selects existing local storage. |
-| Items and search | Vault → live search/type filters and ★ Favorites, Add item, item details → Edit item (tags, favorite). Tools → Advanced search adds filters/sorting. |
-| Attachments | Item details → Attachments: tap to save a copy with the system picker, Add attachment, Remove. |
-| Reveal/copy, history, authenticators | Item details → show/copy actions, Password history, Authenticator & Duo. HOTP requires explicit confirmed generation. |
-| Generation and health | Tools → Password generator / Vault health; standalone generation is available while locked. |
-| Trash and recovery | Tools → Deleted items / Files & backups; imports have preview/policy approval, and file transfers use Android's picker. |
-| Credential changes and key files | Tools → Vault credentials; home setup → External-key vault tools. Rekey/deletion require original credentials. |
-| Settings and biometrics | Settings → Mobile settings / Biometric unlock. Mobile defaults and ranges differ from desktop `pm config`. |
-| Sync | Settings → Cloud sync settings / download vault / Review sync conflicts; Tools → Sync controls for per-vault status, check, enable/disable and explicit synchronization. |
-| Browser/system integration | Settings → Enable password autofill; Android 14+ → Enable password and passkey provider. Android autofills passwords, TOTP, payment cards, and identities; each card or identity fill needs an explicit choice. |
-
-Daemon/process administration, desktop shortcut/native-host registration, shell
-completions, terminal flags, and desktop watch/notification switches have no
-one-to-one mobile route. Android does not run a continuous desktop-style sync
-daemon. Passkey data is interoperable: passkeys created by the desktop browser extension
-work on Android and the reverse. See the [mobile feature and acceptance matrix](mobile-implementation.md#mobile-feature-parity-roadmap)
-for per-capability limits and the [Android user guide](user-guide.md#android-app)
-for daily workflows. Implementation is distinct from real provider acceptance.
+generation, recovery and completion output for the CLI and desktop. Rendering
+tests cover native Iced layouts. `every_public_cli_command_has_an_entry_in_the_desktop_feature_map`
+fails if a new public CLI command is not listed here. Android host tests in
+`src/vault/mobile*.rs` run the bridge requests the app uses, and the Android
+instrumentation tests are listed in the
+[mobile checklist](mobile-implementation.md#verification-evidence). Interactive
+platform acceptance is separate.

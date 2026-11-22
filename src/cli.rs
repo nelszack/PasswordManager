@@ -714,7 +714,8 @@ pub struct ConfigArgs {
             "trash_retention_days",
             "server_port",
             "default_vault",
-            "ssh_agent"
+            "ssh_agent",
+            "sync_automatic"
         ]
     )]
     pub reset: bool,
@@ -750,6 +751,10 @@ pub struct ConfigArgs {
     /// (restart the server to apply).
     #[arg(long)]
     pub ssh_agent: Option<bool>,
+    /// Let the running server synchronize sync-enabled vaults in the background
+    /// (`pm sync now` still works when this is false).
+    #[arg(long)]
+    pub sync_automatic: Option<bool>,
     /// Opaque vault ID selected by default when unlocking (from pm vaults).
     #[arg(long)]
     pub default_vault: Option<String>,
@@ -769,6 +774,7 @@ impl ConfigArgs {
             || self.server_port.is_some()
             || self.default_vault.is_some()
             || self.ssh_agent.is_some()
+            || self.sync_automatic.is_some()
     }
 }
 
@@ -787,6 +793,7 @@ impl From<ConfigArgs> for crate::config::ConfigChanges {
             server_port: args.server_port,
             default_vault: args.default_vault,
             ssh_agent: args.ssh_agent,
+            sync_automatic: args.sync_automatic,
             clear_default_vault: false,
             ..Default::default()
         }
@@ -960,7 +967,7 @@ pub struct PurgeArgs {
 pub struct SearchArgs {
     /// Case-insensitive text matched across name, username, URLs, notes, custom-field
     /// names, and non-secret custom-field values.
-    #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak", "stale_days"])]
+    #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak", "stale_days", "tags", "favorites"])]
     pub query: Option<String>,
     /// Require this text in the entry name.
     #[arg(long)]

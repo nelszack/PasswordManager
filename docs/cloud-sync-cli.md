@@ -45,7 +45,10 @@ pm sync now
 pm sync disable
 ```
 
-Disabling sync retains local and remote copies. Server installation, device
+Disabling sync retains local and remote copies. While the local service runs,
+it synchronizes sync-enabled vaults in the background. `pm config
+--sync-automatic false` turns that off for every vault (the desktop's **Automatically
+synchronize enabled vaults** setting); `pm sync now` still works. Server installation, device
 revocation, updates, and recovery are covered in the administration guide.
 
 ## Resolve concurrent edits

@@ -60,6 +60,9 @@ pub struct SearchForm {
     pub kind: Option<ItemKind>,
     pub has_otp: Option<bool>,
     pub sort: SortField,
+    /// Comma-separated tags; every listed tag must be present.
+    pub tags: String,
+    pub favorites: bool,
 }
 
 pub struct AuthenticatorForm {
