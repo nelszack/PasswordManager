@@ -1,8 +1,8 @@
 # Private Android application
 
 The Android client embeds `pm-mobile` and calls the existing Rust vault library
-in process. It does not connect to the desktop's local socket. Password autofill
-requires 64-bit Android 9+, and the password/passkey credential provider requires Android
+in process. It does not connect to the desktop's local socket. Password, card, and
+identity autofill requires 64-bit Android 9+, and the password/passkey credential provider requires Android
 14+. No Google Play services dependency or store publication is required.
 
 Current development build: **0.3.0 (version code 12)**. It has been tested with
@@ -137,6 +137,16 @@ without full native address evidence still refuse legacy filling. Saving in
 hostname mode asks the user to check the saved address/port and prevents an
 update from silently moving an existing login to another port. Invisible form
 fields are ignored. Actual browser filling remains a separate hardware check.
+
+Payment-card and identity forms (checkout, address, and contact forms) are offered
+only when the screen has no login fields. Fields are classified by the Rust vault
+library with the same rules as the browser extension, and the same caller checks
+apply: native apps by package and certificate, browsers only through the trusted
+allowlist. The person always unlocks if needed and picks the card or identity in
+the fill sheet; no card or identity data reaches Android before that choice.
+Dropdown fields are not filled. Real checkout and address forms remain a separate
+hardware check. See the [user guide](../docs/user-guide.md#fingerprint-unlock-and-autofill)
+for which fields are filled.
 
 Autofill reuses a successful unlock for the same caller and site for up to five
 minutes between completed fills, so username, password, and code steps do not

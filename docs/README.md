@@ -1,7 +1,6 @@
 # Documentation
 
-Reviewed against the working `feature/android-passkeys` implementation on
-2026-11-16. Android delivery is a private development APK, version **0.3.0 (12)**;
+Reviewed against `main` on 2026-11-21. Android delivery is a private development APK, version **0.3.0 (12)**;
 desktop/CLI workspace version and local protocol version are independent.
 
 | Start here | Contents |
