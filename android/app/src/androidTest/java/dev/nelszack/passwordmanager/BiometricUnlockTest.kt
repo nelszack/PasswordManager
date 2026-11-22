@@ -69,21 +69,11 @@ class BiometricUnlockTest {
         val scenario = vault.launch(MainActivity::class.java)
         try {
             val completed = CountDownLatch(1)
-            val task =
-                SecureActivity::class
-                    .java
-                    .declaredMethods
-                    .single { it.name == "task" }
-                    .apply { isAccessible = true }
             scenario.onActivity { activity ->
-                task.invoke(
-                    activity,
-                    { Unit },
-                    { _: Any? ->
-                        completed.countDown()
-                        throw IllegalStateException("Synthetic completion failure")
-                    },
-                )
+                activity.task({ Unit }) {
+                    completed.countDown()
+                    throw IllegalStateException("Synthetic completion failure")
+                }
             }
             assertTrue(completed.await(10, TimeUnit.SECONDS))
             instrumentation.waitForIdleSync()

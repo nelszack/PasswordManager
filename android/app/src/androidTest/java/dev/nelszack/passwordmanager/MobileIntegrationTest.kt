@@ -59,14 +59,8 @@ class MobileIntegrationTest {
         drainWorker()
         // Simulate a delayed authentication callback arriving after onStop.
         val ran = java.util.concurrent.atomic.AtomicBoolean(false)
-        val task =
-            SecureActivity::class
-                .java
-                .declaredMethods
-                .single { it.name == "task" }
-                .apply { isAccessible = true }
         instrumentation.runOnMainSync {
-            task.invoke(requireNotNull(stopped), { ran.set(true) }, { _: Any? -> })
+            requireNotNull(stopped).task({ ran.set(true) }) {}
         }
         drainWorker()
         assertFalse("Stopped activities must not run late authentication work", ran.get())
