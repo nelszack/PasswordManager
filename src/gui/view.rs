@@ -2520,15 +2520,20 @@ fn security_settings<'a>(app: &'a App, form: Column<'a, Message>) -> Column<'a, 
     .push(text("The lock timeout applies on the next unlock.").size(14))
     .push(
         checkbox(app.settings.ssh_agent)
-            .label("Serve SSH keys to ssh through a local agent (Linux and macOS)")
+            .label("Serve SSH keys to ssh through a local agent")
             .on_toggle(|value| Message::SettingToggled(SettingsToggle::SshAgent, value)),
     )
     .push(
         text(format!(
             "Ed25519 SSH-key items are offered while their vault is unlocked. \
              Restart the local service after changing this, then set SSH_AUTH_SOCK={} (or run \
-             `eval \"$(pm ssh-agent)\"`).",
-            password_manager::server::ssh_agent_socket().display()
+             `{}`).",
+            password_manager::server::ssh_agent_socket().display(),
+            if cfg!(windows) {
+                "pm ssh-agent | Out-String | Invoke-Expression"
+            } else {
+                "eval \"$(pm ssh-agent)\""
+            }
         ))
         .size(14),
     )

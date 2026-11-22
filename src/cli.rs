@@ -285,14 +285,14 @@ pub enum CliCommands {
     },
     /// List opaque vault filenames without decrypting them or requiring a server.
     Vaults,
-    /// Print shell commands that point SSH at the password manager's agent, or
-    /// answer a signature waiting for confirmation.
+    /// Print shell commands (PowerShell on Windows) that point SSH at the password
+    /// manager's agent, or answer a signature waiting for confirmation.
     ///
     /// Enable the agent with `pm config --ssh-agent true` and restart the server.
     /// It offers Ed25519 SSH-key items whose "SSH agent" field is `on` or `confirm`
     /// from the unlocked vault; locking removes them. `pm status` lists waiting requests.
     #[command(
-        after_help = "Examples:\n  eval \"$(pm ssh-agent)\"\n  ssh-add -l\n  pm ssh-agent approve 1a2b3c4d5e6f"
+        after_help = "Examples:\n  eval \"$(pm ssh-agent)\"\n  pm ssh-agent | Out-String | Invoke-Expression   # PowerShell\n  ssh-add -l\n  pm ssh-agent approve 1a2b3c4d5e6f"
     )]
     SshAgent {
         #[command(subcommand)]
@@ -747,7 +747,7 @@ pub struct ConfigArgs {
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
     pub server_port: Option<u16>,
     /// Serve Ed25519 SSH keys from the unlocked vault through a local SSH agent
-    /// (Linux and macOS; restart the server to apply).
+    /// (restart the server to apply).
     #[arg(long)]
     pub ssh_agent: Option<bool>,
     /// Opaque vault ID selected by default when unlocking (from pm vaults).

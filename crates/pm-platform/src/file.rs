@@ -131,6 +131,9 @@ fn set_windows_acl(path: &Path, directory: bool) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+pub use windows_acl::PrivateSecurityAttributes;
+
+#[cfg(target_os = "windows")]
 mod windows_acl {
     use std::{io, os::windows::ffi::OsStrExt, path::Path, ptr};
     use windows_sys::Win32::{
@@ -141,15 +144,78 @@ mod windows_acl {
             Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW},
             CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
             GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, InitializeAcl,
-            IsValidSid, OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION,
-            PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            InitializeSecurityDescriptor, IsValidSid, OBJECT_INHERIT_ACE,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+            SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+            SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::FILE_ALL_ACCESS,
         System::{
-            SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+            SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION},
             Threading::{GetCurrentProcess, OpenProcessToken},
         },
     };
+
+    /// Security attributes whose protected DACL grants full control to the
+    /// current user only, for kernel objects such as named pipes. Everything
+    /// the attributes point to is owned here and stays at a fixed address.
+    pub struct PrivateSecurityAttributes {
+        attributes: Box<SECURITY_ATTRIBUTES>,
+        _descriptor: Box<SECURITY_DESCRIPTOR>,
+        _acl: Vec<u32>,
+    }
+
+    // SAFETY: the raw pointers refer only to the heap buffers owned alongside
+    // them, which are never mutated after construction.
+    unsafe impl Send for PrivateSecurityAttributes {}
+    // SAFETY: as above; shared access only reads them.
+    unsafe impl Sync for PrivateSecurityAttributes {}
+
+    impl PrivateSecurityAttributes {
+        pub fn new() -> io::Result<Self> {
+            let user = CurrentUser::query()?;
+            // The ACE holds its own copy of the SID, so `user` may be dropped.
+            let acl = single_ace_acl(user.sid(), 0)?;
+            let mut descriptor = Box::new(SECURITY_DESCRIPTOR::default());
+            let raw: PSECURITY_DESCRIPTOR = (&raw mut *descriptor).cast();
+            // SAFETY: `raw` points to writable SECURITY_DESCRIPTOR storage, and
+            // the absolute descriptor references `acl`, which lives as long as
+            // `self` and whose heap buffer does not move.
+            unsafe {
+                if InitializeSecurityDescriptor(raw, SECURITY_DESCRIPTOR_REVISION) == 0
+                    || SetSecurityDescriptorDacl(raw, 1, acl.as_ptr().cast(), 0) == 0
+                    || SetSecurityDescriptorControl(raw, SE_DACL_PROTECTED, SE_DACL_PROTECTED) == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            let attributes = Box::new(SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: raw,
+                bInheritHandle: 0,
+            });
+            Ok(Self {
+                attributes,
+                _descriptor: descriptor,
+                _acl: acl,
+            })
+        }
+
+        /// A pointer to the SECURITY_ATTRIBUTES, valid while `self` lives.
+        /// Windows only reads through it.
+        pub fn as_ptr(&self) -> *mut core::ffi::c_void {
+            (&raw const *self.attributes).cast_mut().cast()
+        }
+    }
+
+    /// Verifies the DACL of the file at `path` as one created with
+    /// [`PrivateSecurityAttributes`].
+    #[cfg(test)]
+    pub(super) fn verify_private(path: &Path) -> io::Result<()> {
+        let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
+        name.push(0);
+        verify(&name, CurrentUser::query()?.sid(), 0)
+    }
 
     pub(super) fn protect(path: &Path, directory: bool) -> io::Result<()> {
         let mut name: Vec<u16> = std::path::absolute(path)?
@@ -691,6 +757,37 @@ mod test {
             !missing.parent().unwrap().exists(),
             "parent creation is caller policy"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn private_security_attributes_create_objects_only_the_user_can_open() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+            Storage::FileSystem::{CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL},
+        };
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("pipe-like object");
+        let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
+        name.push(0);
+        let attributes = PrivateSecurityAttributes::new().unwrap();
+        // SAFETY: `name` is NUL-terminated and `attributes` outlives the call.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                attributes.as_ptr().cast(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        // SAFETY: the handle was opened above and is closed once.
+        unsafe { CloseHandle(handle) };
+        windows_acl::verify_private(&path).unwrap();
     }
 
     #[cfg(target_os = "windows")]

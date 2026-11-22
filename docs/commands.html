@@ -94,7 +94,7 @@ Supplying no options displays the effective configuration. Boolean settings acce
         <dt><code>--password-history-limit &lt;PASSWORD_HISTORY_LIMIT&gt;</code></dt><dd>Maximum prior passwords retained per entry; zero disables history</dd>
         <dt><code>--trash-retention-days &lt;TRASH_RETENTION_DAYS&gt;</code></dt><dd>Automatically purge trash older than this many days; zero disables it</dd>
         <dt><code>--server-port &lt;SERVER_PORT&gt;</code></dt><dd>Set the default loopback port used by the server and client</dd>
-        <dt><code>--ssh-agent &lt;SSH_AGENT&gt;</code></dt><dd>Serve Ed25519 SSH keys from the unlocked vault through a local SSH agent (Linux and macOS; restart the server to apply)</dd>
+        <dt><code>--ssh-agent &lt;SSH_AGENT&gt;</code></dt><dd>Serve Ed25519 SSH keys from the unlocked vault through a local SSH agent (restart the server to apply)</dd>
         <dt><code>--default-vault &lt;DEFAULT_VAULT&gt;</code></dt><dd>Opaque vault ID selected by default when unlocking (from pm vaults)</dd>
       </dl>
     </section>
@@ -127,7 +127,7 @@ Zero disables automatic locking for this unlock session. If omitted, uses the co
     </section>
     <section class="command" id="pm-ssh-agent">
       <h2><code>pm ssh-agent</code></h2>
-      <p>Print shell commands that point SSH at the password manager&#39;s agent, or answer a signature waiting for confirmation.
+      <p>Print shell commands (PowerShell on Windows) that point SSH at the password manager&#39;s agent, or answer a signature waiting for confirmation.
 
 Enable the agent with `pm config --ssh-agent true` and restart the server. It offers Ed25519 SSH-key items whose &quot;SSH agent&quot; field is `on` or `confirm` from the unlocked vault; locking removes them. `pm status` lists waiting requests.</p>
       <pre><code>Usage: pm ssh-agent [COMMAND]</code></pre>

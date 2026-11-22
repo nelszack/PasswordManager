@@ -235,7 +235,7 @@ pub async fn server(
     let passkey_approvals: Arc<passkey_approvals::PasskeyApprovals> = Arc::default();
     let cloud_task = cloud::start(worker.clone(), stopping.clone());
     // An agent failure is reported, not fatal: the vault service still runs.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let agent = match ssh_agent
         .then(|| ssh_agent::Agent::start(worker.clone(), Arc::clone(&ssh_approvals)))
     {
@@ -246,7 +246,7 @@ pub async fn server(
         }
         None => None,
     };
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     if ssh_agent {
         let _ = ssh_agent::UNAVAILABLE
             .set("The SSH agent is not available on this platform yet.".into());
@@ -296,7 +296,7 @@ pub async fn server(
     }
     stopping.store(true, Ordering::Release);
     cloud_task.abort();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     if let Some(agent) = agent {
         agent.stop();
     }

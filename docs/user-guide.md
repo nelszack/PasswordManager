@@ -643,7 +643,7 @@ Sync conflict review lists tags and favorites as their own **organization** fiel
 
 ### SSH agent
 
-On Linux and macOS the local service can act as an SSH agent, so `ssh`, `git`,
+On Linux, macOS, and Windows the local service can act as an SSH agent, so `ssh`, `git`,
 and `ssh-keygen -Y sign` use keys stored in your vault without key files on
 disk. It is off by default:
 
@@ -654,7 +654,27 @@ eval "$(pm ssh-agent)"       # sets SSH_AUTH_SOCK for this shell
 ssh-add -l                   # lists keys from the unlocked vault
 ```
 
-Add the `eval` line to your shell profile to use it everywhere. Keys are off
+Add the `eval` line to your shell profile to use it everywhere.
+
+On Windows the agent listens on a named pipe for the built-in OpenSSH client
+(`C:\Windows\System32\OpenSSH\ssh.exe`). In PowerShell:
+
+```powershell
+pm config --ssh-agent true
+pm kill; pm start
+pm ssh-agent | Out-String | Invoke-Expression   # sets SSH_AUTH_SOCK for this session
+ssh-add -l
+```
+
+To use it in every new terminal, store the variable once with
+`setx SSH_AUTH_SOCK "\\.\pipe\pm-ssh-agent-…"`, using the exact pipe name
+`pm ssh-agent` prints. It does not replace Windows' own **OpenSSH Authentication
+Agent** service (`\\.\pipe\openssh-ssh-agent`); the two can run side by side,
+and `SSH_AUTH_SOCK` picks which one `ssh` uses. Git for Windows uses its own
+bundled `ssh`, which cannot reach a named pipe, so point Git at the Windows
+client: `git config --global core.sshCommand C:/Windows/System32/OpenSSH/ssh.exe`.
+
+Keys are off
 until you enable them: give the SSH-key item a custom field named **SSH agent**
 (the desktop SSH-key template includes it) with the value
 
@@ -691,8 +711,11 @@ key while the vault is unlocked, as with OpenSSH's own agent; use `confirm` for
 keys that need more protection. Its socket is owner-only (mode 0600 in a 0700
 directory), normally in `agent/ssh-agent.sock` under the data directory, or in a
 private directory under `$XDG_RUNTIME_DIR` (or the temporary directory) when
-that path would be too long for a socket. If the agent cannot start,
-`pm status` reports why. Windows support is planned.
+that path would be too long for a socket. On Windows the pipe
+`\\.\pipe\pm-ssh-agent-` plus a tag derived from the data directory admits only
+your user account and refuses connections from other machines; the agent does
+not start if another process already holds that name. If the agent cannot start,
+`pm status` reports why.
 
 ### Attachments
 

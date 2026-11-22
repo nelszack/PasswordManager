@@ -244,8 +244,17 @@ pub(super) async fn run(
         }
         CliCommands::SshAgent { command: None } => {
             let path = password_manager::server::ssh_agent_socket();
-            let quoted = format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
-            let mut text = format!("SSH_AUTH_SOCK={quoted}; export SSH_AUTH_SOCK;");
+            // PowerShell on Windows; POSIX shells elsewhere.
+            #[cfg(windows)]
+            let mut text = format!(
+                "$env:SSH_AUTH_SOCK = '{}'",
+                path.display().to_string().replace('\'', "''")
+            );
+            #[cfg(not(windows))]
+            let mut text = format!(
+                "SSH_AUTH_SOCK='{}'; export SSH_AUTH_SOCK;",
+                path.display().to_string().replace('\'', r"'\''")
+            );
             if !conf.server.ssh_agent {
                 text.push_str(
                     "\n# The agent is off; enable it with `pm config --ssh-agent true` and \
@@ -256,7 +265,7 @@ pub(super) async fn run(
                 serde_json::json!({
                     "socket": path,
                     "enabled": conf.server.ssh_agent,
-                    "supported": cfg!(unix),
+                    "supported": cfg!(any(unix, windows)),
                 }),
                 &text,
             );

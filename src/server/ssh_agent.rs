@@ -3,9 +3,12 @@
 //! only; adding, removing, and agent locking are refused. Lookups go through the
 //! vault worker without counting as activity, so SSH use never keeps a vault
 //! unlocked, and a locked vault offers no keys.
-// The agent itself is Unix-only; elsewhere this code is still compiled (and
-// tested) but has no caller.
-#![cfg_attr(not(unix), allow(dead_code))]
+//!
+//! On Unix it listens on an owner-only socket; on Windows on a named pipe whose
+//! DACL admits only the current user, which Windows OpenSSH reaches through
+//! `SSH_AUTH_SOCK`.
+// Elsewhere this code is still compiled (and tested) but has no caller.
+#![cfg_attr(not(any(unix, windows)), allow(dead_code))]
 use super::*;
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::oneshot;
@@ -28,7 +31,9 @@ pub(super) static UNAVAILABLE: std::sync::OnceLock<String> = std::sync::OnceLock
 
 /// Where the agent listens: a private directory beside the vaults, or, when that
 /// path is too long for a socket, a private directory in the user's runtime (or
-/// temporary) directory named after the data directory.
+/// temporary) directory named after the data directory. On Windows it is a named
+/// pipe named after the data directory.
+#[cfg(not(windows))]
 pub fn socket_path() -> PathBuf {
     socket_path_for(
         &data_dir(),
@@ -39,6 +44,20 @@ pub fn socket_path() -> PathBuf {
     )
 }
 
+#[cfg(windows)]
+pub fn socket_path() -> PathBuf {
+    pipe_name_for(&data_dir())
+}
+
+/// Pipe names share one namespace for every user and data directory, so the
+/// name is derived from the data directory (which includes the user's profile).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pipe_name_for(data: &std::path::Path) -> PathBuf {
+    let tag = blake3::hash(data.as_os_str().as_encoded_bytes()).to_hex();
+    PathBuf::from(format!(r"\\.\pipe\pm-ssh-agent-{}", &tag[..16]))
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn socket_path_for(data: &std::path::Path, runtime: PathBuf) -> PathBuf {
     let preferred = data.join("agent").join("ssh-agent.sock");
     if preferred.as_os_str().len() <= MAX_SOCKET_PATH {
@@ -158,7 +177,8 @@ fn known_host(known_hosts: &str, blob: &[u8]) -> Option<String> {
 }
 
 fn host_label(blob: &[u8]) -> String {
-    let path = directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh/known_hosts"));
+    let path =
+        directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".ssh").join("known_hosts"));
     path.and_then(|path| fs::read_to_string(path).ok())
         .and_then(|text| known_host(&text, blob))
         .map(|name| format!("{name} ({})", fingerprint(blob)))
@@ -365,6 +385,68 @@ impl Agent {
     pub(super) fn stop(self) {
         self.task.abort();
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(windows)]
+pub(super) struct Agent {
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(windows)]
+impl Agent {
+    /// Creates the pipe with a DACL for the current user only and serves it.
+    /// The first instance must be new, so the agent never shares its name with
+    /// a pipe some other process created first.
+    pub(super) fn start(worker: VaultWorker, approvals: Arc<SshApprovals>) -> Result<Self, String> {
+        use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+        let name = socket_path();
+        let shown = name.display().to_string();
+        let security = crate::file::PrivateSecurityAttributes::new()
+            .map_err(|e| format!("could not secure {shown}: {e}"))?;
+        let create = move |first: bool| -> std::io::Result<NamedPipeServer> {
+            let mut options = ServerOptions::new();
+            options
+                .first_pipe_instance(first)
+                .reject_remote_clients(true);
+            // SAFETY: the attributes are valid and outlive the call.
+            unsafe { options.create_with_security_attributes_raw(&name, security.as_ptr()) }
+        };
+        let mut server = create(true).map_err(|e| format!("could not listen on {shown}: {e}"))?;
+        let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let task = tokio::spawn(async move {
+            loop {
+                let connected = server.connect().await;
+                // Another instance must be waiting before this one is handed
+                // off, or new clients would find no pipe. A persistent error
+                // (such as no free handles) must not spin.
+                let next = loop {
+                    match create(false) {
+                        Ok(next) => break next,
+                        Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    }
+                };
+                let client = std::mem::replace(&mut server, next);
+                if connected.is_err() {
+                    continue;
+                }
+                // Dropping the instance disconnects a client over the limit.
+                let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
+                    continue;
+                };
+                let (worker, approvals) = (worker.clone(), Arc::clone(&approvals));
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    connection(client, worker, approvals).await;
+                });
+            }
+        });
+        Ok(Self { task })
+    }
+
+    /// The pipe disappears once its last instance closes.
+    pub(super) fn stop(self) {
+        self.task.abort();
     }
 }
 
@@ -602,6 +684,22 @@ mod tests {
             assert!(approvals.list().is_empty());
         }
         assert!(!approvals.decide("missing", true));
+    }
+
+    #[test]
+    fn pipe_names_are_stable_and_distinct_per_data_directory() {
+        let data = std::path::Path::new(r"C:\Users\a\AppData\Roaming\password_manager");
+        let name = pipe_name_for(data);
+        let text = name.to_str().unwrap();
+        assert!(text.starts_with(r"\\.\pipe\pm-ssh-agent-"), "{text}");
+        assert_eq!(text.len(), r"\\.\pipe\pm-ssh-agent-".len() + 16);
+        assert_eq!(name, pipe_name_for(data));
+        assert_ne!(
+            name,
+            pipe_name_for(std::path::Path::new(
+                r"C:\Users\b\AppData\Roaming\password_manager"
+            ))
+        );
     }
 
     #[test]

@@ -79,7 +79,8 @@ marked as forwarded by OpenSSH's session binding are refused. The destination
 shown is the one the SSH client reports; the binding signature is not verified,
 because the caller is already a process of the same user. The agent never returns
 private keys, refuses key addition and removal, and checks the peer's user ID on
-an owner-only socket. Keyboard shortcuts only open the site-scoped picker.
+an owner-only socket; on Windows its named pipe has a DACL for the current user
+only, refuses remote clients, and must be the pipe name's first instance. Keyboard shortcuts only open the site-scoped picker.
 Native OTP responses carry structured code, lifetime and counter data rather
 than parsed terminal output. Secret and custom-field data responses preserve
 the stored bytes, including whitespace and empty values.
