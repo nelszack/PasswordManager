@@ -110,13 +110,16 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
             if (!event.isTrusted) return;
             event.preventDefault();
             event.stopPropagation();
-            return control.activate();
+            // Failures are shown on the button itself.
+            control.activate().catch(() => {});
         });
-        control.activate = async () => {
+        // `select` supplies the selection; by default the secure picker window.
+        control.activate = async (select = () => openSecurePicker(kind)) => {
             try {
                 const scope = selectionScope();
-                const selection = await openSecurePicker(kind);
+                const selection = await select();
                 if (selection) onSelection(selection, scope);
+                return Boolean(selection);
             } catch (error) {
                 setIcon(button, "warning");
                 button.title = error?.message || "Could not open secure picker";
@@ -126,26 +129,44 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
                     button.title = title;
                     button.setAttribute("aria-label", title);
                 }, 5000);
+                // Say why in words too, below the field, so it is seen and announced.
+                const rect = input.getBoundingClientRect?.();
+                if (rect && document.body) {
+                    const toast = toastHost(button.title, Math.max(8, rect.left), rect.bottom + 6);
+                    document.body.appendChild(toast);
+                    setTimeout(() => toast.remove(), 5000);
+                }
+                throw error;
             }
         };
+    }
+
+    // The focused field's login control, or else the first visible one.
+    function loginControl(focused, anyKind = true) {
+        const own = focused ? securePickerControls.get(focused) : undefined;
+        if (own && (anyKind || own.kind === "login")) return own;
+        for (const record of positionedControls) {
+            const candidate = securePickerControls.get(record.input);
+            if (candidate?.kind === "login" && isElementVisible(record.input)) return candidate;
+        }
+        return undefined;
     }
 
     // Keyboard shortcut: open the picker for the focused field, or else for the
     // first visible login field on the page. Returns whether a picker opened.
     function activateShortcut(focused) {
-        let control = focused ? securePickerControls.get(focused) : undefined;
-        if (!control) {
-            for (const record of positionedControls) {
-                const candidate = securePickerControls.get(record.input);
-                if (candidate?.kind === "login" && isElementVisible(record.input)) {
-                    control = candidate;
-                    break;
-                }
-            }
-        }
+        const control = loginControl(focused);
         if (!control) return false;
-        control.activate();
+        control.activate().catch(() => {});
         return true;
+    }
+
+    // Fill a login chosen in the toolbar popup. `claim` fetches it from the
+    // extension; resolves to whether a login form was filled.
+    async function fillFromPopup(focused, claim) {
+        const control = loginControl(focused, false);
+        if (!control) return false;
+        return control.activate(claim);
     }
 
     function createSecureCredentialButton(input) {
@@ -171,7 +192,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     function createSecureTotpButton(input) {
-        createSecurePickerButton(input, "totp", "clock", "Choose authenticator code", totp => {
+        createSecurePickerButton(input, "totp", "clock", "Choose one-time code", totp => {
             fillInput(input, totp.code);
             input.focus();
         });
@@ -205,6 +226,7 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
         createSecureTypedButton,
         removeSecurePickerButton,
         activateShortcut,
+        fillFromPopup,
         registerPositionedControl,
         schedulePosition,
         layoutChanged: schedulePosition,
@@ -269,7 +291,7 @@ const UI_TAG = "pm-field-control";
 // !important), and a shadow-context !important rule would override them.
 const HOST_STYLE =
     ":host{position:fixed!important;right:auto!important;bottom:auto!important;width:auto!important;height:auto!important;margin:0!important;padding:0!important;border:0!important;float:none!important;transform:none!important;filter:none!important;clip-path:none!important;opacity:1!important;visibility:visible!important;z-index:2147483647!important;}";
-const BUTTON_STYLE = `button{all:initial;box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:${CONTROL_SIZE}px;height:${CONTROL_SIZE}px;padding:0;margin:0;border:1px solid #c7d3f5;border-radius:6px;background:#eef2fd;color:#2850be;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12);}button:hover{background:#dbe4fb;}button:focus-visible{outline:2px solid #2850be;outline-offset:2px;}svg{display:block;pointer-events:none;}`;
+const BUTTON_STYLE = `button{all:initial;box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:${CONTROL_SIZE}px;height:${CONTROL_SIZE}px;padding:0;margin:0;border:1px solid #c7d3f5;border-radius:6px;background:#eef2fd;color:#2850be;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.12);}button:hover{background:#dbe4fb;}button:focus-visible{outline:2px solid #2850be;outline-offset:2px;}svg{display:block;pointer-events:none;}@media (prefers-color-scheme:dark){button{background:#253252;border-color:#3d4d78;color:#9cb7ff;}button:hover{background:#2f3d63;}button:focus-visible{outline-color:#9cb7ff;}}@media (forced-colors:active){button{background:ButtonFace;border-color:ButtonText;color:ButtonText;forced-color-adjust:none;}button:focus-visible{outline-color:Highlight;}}`;
 const TOAST_STYLE =
     "div{max-width:320px;padding:8px 12px;border-radius:8px;background:#1f2a44;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);}";
 function setImportantStyles(element, values) {

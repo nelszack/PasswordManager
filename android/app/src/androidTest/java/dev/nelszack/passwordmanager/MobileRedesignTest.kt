@@ -1,6 +1,7 @@
 package dev.nelszack.passwordmanager
 
-import android.app.AlertDialog
+import android.content.DialogInterface
+import androidx.appcompat.app.AlertDialog
 import android.app.Dialog
 import android.view.*
 import android.widget.*
@@ -144,7 +145,7 @@ class MobileRedesignTest {
                     screen.matches(it, "15 minutes")
                 }
             )
-            settingsDialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+            settingsDialog.getButton(DialogInterface.BUTTON_NEGATIVE).performClick()
         }
         assertEquals(300, Vault.json("settings_get").getInt("unlock_seconds"))
         screen.back()
@@ -156,7 +157,7 @@ class MobileRedesignTest {
         screen.back()
         val discard = dialog()
         instrumentation.runOnMainSync {
-            discard.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+            discard.getButton(DialogInterface.BUTTON_NEGATIVE).performClick()
         }
         scenario.onActivity { a ->
             assertEquals(
@@ -164,13 +165,13 @@ class MobileRedesignTest {
                 screen
                     .views(a.window.decorView)
                     .filterIsInstance<EditText>()
-                    .first { it.hint?.toString() == "Name" }
+                    .first { screen.label(it) == "Name" }
                     .text
                     .toString(),
             )
         }
         screen.input("Name", "")
-        screen.input("Password / primary secret", "synthetic-draft-password")
+        screen.input("Password", "synthetic-draft-password")
         screen.click("Save item")
         val end = android.os.SystemClock.elapsedRealtime() + 10000
         var rejected = false
@@ -191,7 +192,7 @@ class MobileRedesignTest {
                 screen
                     .views(a.window.decorView)
                     .filterIsInstance<EditText>()
-                    .first { it.hint?.toString() == "Password / primary secret" }
+                    .first { screen.label(it) == "Password" }
                     .text
                     .toString(),
             )
@@ -200,7 +201,7 @@ class MobileRedesignTest {
         screen.back()
         val confirmDiscard = dialog()
         instrumentation.runOnMainSync {
-            confirmDiscard.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            confirmDiscard.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
         }
         screen.waitFor("3 items in your vault")
         assertEquals(3, Vault.commandJson(VaultCommands.search()).getInt("total"))

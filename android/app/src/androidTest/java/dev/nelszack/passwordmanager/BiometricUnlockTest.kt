@@ -43,7 +43,8 @@ class BiometricUnlockTest {
                 assertTrue(cleaned.get())
             }
             instrumentation.waitForIdleSync()
-            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            // The failure shows as a snackbar, not a dialog, and the screen stays open.
+            scenario.onActivity { assertFalse(it.isFinishing) }
             val ran = AtomicBoolean(false)
             val pendingMaterial = ByteArray(70) { 7 }
             lateinit var late: (Unit) -> Unit

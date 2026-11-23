@@ -1,28 +1,66 @@
-body { width: 340px; padding: 16px; display: grid; gap: 12px; }
-h1 { margin: 0; font-size: 18px; }
-h2 { margin: 0 0 10px; font-size: 15px; }
-#statusRow { display: flex; align-items: center; gap: 8px; }
-#statusDot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
-#nativeHint { margin: 6px 0 0; }
-.actions { display: grid; gap: 8px; }
+/* Wide enough for site lists and passphrases, never wider than a zoomed popup. */
+body { width: min(380px, 100vw); max-width: 100%; padding: 16px; display: grid; gap: 12px; }
+h1 { margin: 0; font-size: 17px; flex: 1; min-width: 0; }
+h2 { margin: 0; font-size: 15px; }
+.status { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.dot { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+/* Shape as well as colour: unlocked is filled, locked and problems are rings. */
+.dot.success { background: var(--success); }
+.dot.danger { background: transparent; border: 3px solid var(--danger); }
+.dot.warning { background: transparent; border: 3px solid var(--warning); }
+.dot.muted { background: transparent; border: 3px solid var(--muted); }
+.lead { margin: -4px 0 0; }
+.actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.actions button:only-child, .actions button[hidden] + button { grid-column: 1 / -1; }
 button { width: 100%; }
-.generated { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-#genValue {
+button.small, .row button, .copyline button { width: auto; min-height: 40px; padding: 6px 12px; font-size: 13px; }
+button.icon { width: 40px; flex: none; font-size: 18px; padding: 0; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.section-head button { width: auto; }
+#siteSearch { margin-bottom: 8px; }
+/* Long lists scroll inside the card so feedback and recovery stay reachable. */
+.logins { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 280px; overflow-y: auto; }
+#vaultQuery { margin-bottom: 8px; }
+.logins li { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: Canvas; }
+.logins .who { display: grid; min-width: 0; }
+/* Up to two lines, so accounts that differ only at the end stay distinguishable. */
+.logins .who strong, .logins .who span { overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.dot.locked { background: transparent; border: 3px solid var(--muted); }
+label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.logins .who span { color: var(--muted); font-size: 13px; }
+.logins .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.logins .buttons button { width: auto; min-height: 40px; padding: 6px 12px; font-size: 13px; }
+.add { display: grid; gap: 6px; margin-top: 10px; }
+.add .label, .add label { font-size: 13px; font-weight: 600; }
+.row { display: flex; gap: 8px; }
+.generated { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
+#genValue, #addPassword {
   flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
   background: Field; color: FieldText; font-family: ui-monospace, monospace; font-size: 14px;
   overflow-wrap: anywhere; min-height: 40px;
 }
-#genNew { width: 40px; flex: none; font-size: 18px; padding: 0; }
+#generator summary { font-size: 15px; }
 .range { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin-top: 10px; font-size: 14px; }
 .range input { grid-column: 1 / -1; width: 100%; }
 #genLengthValue { justify-self: end; font-weight: 600; }
-.toggles { display: flex; gap: 16px; margin-top: 6px; font-size: 14px; }
-#generator .hint { margin: 8px 0 0; }
+.toggles { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 6px; font-size: 14px; }
+.toggles.column { flex-direction: column; }
+.more { margin-top: 8px; font-size: 14px; }
+.more summary { font-weight: 500; color: var(--accent); }
+.more label[for] { display: block; margin-top: 8px; font-size: 13px; font-weight: 600; }
+#generator > .hint { margin: 8px 0 0; }
+.steps { margin: 8px 0 12px; padding-left: 20px; display: grid; gap: 8px; font-size: 14px; }
+.copyline { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.copyline code { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px; background: Canvas; border: 1px solid var(--line); font-size: 12px; }
 #neverSave { padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius); font-size: 14px; }
 #neverList { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
 #neverList li { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
 #neverList li span { flex: 1; min-width: 0; }
-#neverList button { width: auto; min-height: 32px; padding: 4px 10px; }
+#neverList button { width: auto; min-height: 40px; padding: 6px 12px; }
 #recovery { display: grid; gap: 8px; }
-#output { font-size: 13px; overflow-wrap: anywhere; }
+#output { font-size: 13px; overflow-wrap: anywhere; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); }
+#output.error { background: transparent; border: 1px solid var(--danger); }
 #output:empty { display: none; }
+footer { margin: 0; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (forced-colors: active) { .dot { border: 2px solid CanvasText; } }

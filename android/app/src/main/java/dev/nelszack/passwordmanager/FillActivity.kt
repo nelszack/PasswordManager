@@ -10,6 +10,9 @@ import android.view.autofill.AutofillValue
 import org.json.JSONArray
 
 class FillActivity : VaultActivity() {
+    // The same Material fields and buttons as the app, in the compact sheet.
+    override val materialWidgets = true
+
     override fun automaticBiometrics() = true
 
     override fun contentScroller(): android.widget.ScrollView =
@@ -65,6 +68,8 @@ class FillActivity : VaultActivity() {
     override fun retainVaultOnStop(): Boolean =
         isFinishing && completedScope?.let(Vault.autofillSession::allows) == true
 
+    override fun delayLockOnLeave(): Boolean = false
+
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         setResult(RESULT_CANCELED)
@@ -103,6 +108,37 @@ class FillActivity : VaultActivity() {
         }
     }
 
+    /**
+     * With more than five choices, adds a search box that narrows them as you type. Add each
+     * choice's text and view to the returned list; a no-match message is announced.
+     */
+    private fun searchable(count: Int, hint: String): MutableList<Pair<String, android.view.View>> {
+        val choices = mutableListOf<Pair<String, android.view.View>>()
+        if (count <= 5) return choices
+        val search = edit(hint)
+        val none = label("")
+        none.accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
+        search.addTextChangedListener(
+            object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val needle = s?.toString()?.trim().orEmpty()
+                    var visible = 0
+                    for ((text, view) in choices) {
+                        val match = needle.isEmpty() || text.contains(needle, ignoreCase = true)
+                        view.visibility = if (match) android.view.View.VISIBLE else android.view.View.GONE
+                        if (match) visible++
+                    }
+                    none.text = if (visible == 0) "Nothing matches “$needle”." else ""
+                }
+            }
+        )
+        return choices
+    }
+
     private fun chooseTyped(form: TypedForm, scope: AutofillScope) {
         task({ Vault.request("typed_choices", "kind" to form.kind) as JSONArray }) { choices ->
             page(if (form.card) "Choose a card" else "Choose an identity")
@@ -112,13 +148,28 @@ class FillActivity : VaultActivity() {
                     if (form.card) "No payment cards are saved in this vault."
                     else "No identities are saved in this vault."
                 )
+            val shown = searchable(choices.length(), if (form.card) "Search cards" else "Search identities")
             for (i in 0 until choices.length()) {
                 val choice = choices.getJSONObject(i)
                 val owner = choice.opt("username") as? String ?: ""
-                button(listOf(choice.getString("name"), owner).filter(String::isNotBlank).joinToString(" · ")) {
+                val title = listOf(choice.getString("name"), owner).filter(String::isNotBlank).joinToString(" · ")
+                button(title) {
                     fillTyped(form, scope, choice.getLong("id"))
                 }
+                    .also { shown += title to it }
             }
+            if (choices.length() == 0)
+                button(if (form.card) "Add a payment card" else "Add an identity") {
+                    startActivity(
+                        android.content.Intent(this, MainActivity::class.java)
+                            .addFlags(
+                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            )
+                            .putExtra(EXTRA_ADD_ITEM_KIND, if (form.card) "payment-card" else "identity")
+                    )
+                    finish()
+                }
             button("Cancel") { finish() }
         }
     }
@@ -196,17 +247,39 @@ class FillActivity : VaultActivity() {
                 return@task
             }
             showSheet()
-            page(if (form.codeOnly) "Choose verification code" else "Choose account")
+            page(if (form.codeOnly) "Choose one-time code" else "Choose account")
             label(java.net.URI(form.origin).host ?: form.origin)
             if (form.hostnameOnly)
                 label("Choose the saved address you want to use. Check any custom port.")
-            if (entries.length() == 0)
+            if (entries.length() == 0) {
                 label(
                     if (form.codeOnly)
                         "No matching authenticator codes. Add this website address to the login that holds its code."
                     else
-                        "No matching logins. Add this website or app to a login in your vault first."
+                        "No saved login matches this site yet. Add this website or app to a login, then try again."
                 )
+                if (!form.codeOnly)
+                    button("Add a login for this site") {
+                        startActivity(
+                            android.content.Intent(this, MainActivity::class.java)
+                                .addFlags(
+                                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                                        android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                )
+                                .putExtra(EXTRA_ADD_LOGIN_ORIGIN, form.origin)
+                        )
+                        finish()
+                    }
+                else
+                    button("Open Password Manager") {
+                        startActivity(
+                            android.content.Intent(this, MainActivity::class.java)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        finish()
+                    }
+            }
+            val choices = searchable(entries.length(), "Search accounts")
             for (i in 0 until entries.length()) {
                 val entry = entries.getJSONObject(i)
                 val selectedOrigin =
@@ -223,17 +296,19 @@ class FillActivity : VaultActivity() {
                         "Login hostname mismatch"
                     }
                 val address = if (form.hostnameOnly) "\nSaved address: $selectedOrigin" else ""
+                val searchText = entry.getString("name") + " " + entry.optString("username")
                 button(
-                    (if (form.codeOnly) "Fill verification code · " else "") +
-                        entry.getString("name") +
-                        " · " +
-                        entry.optString("username") +
-                        address
-                ) {
-                    fillChoice(form, scope, entry)
-                }
+                        (if (form.codeOnly) "Fill one-time code · " else "") +
+                            entry.getString("name") +
+                            " · " +
+                            entry.optString("username") +
+                            address
+                    ) {
+                        fillChoice(form, scope, entry)
+                    }
+                    .also { choices += searchText to it }
                 if (entry.optBoolean("has_totp"))
-                    button("Copy verification code for ${entry.getString("name")} and return") {
+                    button("Copy one-time code for ${entry.getString("name")} and return") {
                         task({
                             Vault.json(
                                 "site_otp",
@@ -245,10 +320,12 @@ class FillActivity : VaultActivity() {
                                 this,
                                 code.getString("code"),
                                 code.getInt("expires_in"),
+                                what = "Code copied",
                             )
                             returnToSite(scope)
                         }
                     }
+                        .also { choices += searchText to it }
             }
             button("Cancel") { finish() }
         }
@@ -311,7 +388,11 @@ class FillActivity : VaultActivity() {
                     )
                     edit("Saved website address", origin)
                 } else null
-            val name = edit("Login name", origin)
+            // Suggest the site's name ("example.com"), not the full origin.
+            val suggested =
+                runCatching { java.net.URI(origin).host?.removePrefix("www.") }.getOrNull()
+                    ?: origin
+            val name = edit("Login name", suggested)
             fun save(
                 id: Long? = null,
                 title: String = name.text.toString(),
@@ -344,7 +425,7 @@ class FillActivity : VaultActivity() {
                 val previousOrigin = if (hostnameOnly) entry.getString("origin") else origin
                 if (entry.optString("username") == username)
                     button("Update ${entry.getString("name")}\n$previousOrigin") {
-                        android.app.AlertDialog.Builder(this)
+                        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                             .setMessage(
                                 "Replace the password for ${entry.getString("name")} at $previousOrigin?"
                             )

@@ -15,15 +15,22 @@ internal object MobilePreferences {
                 "unlock_seconds",
                 "Lock after inactivity",
                 "seconds",
-                "Time without activity before the vault locks. 300 seconds is 5 minutes. Leaving the app or turning off the screen also locks it, except for a temporary completed autofill session.",
+                "Time without activity before the vault locks. 300 seconds is 5 minutes. Turning off the screen locks it at once; leaving the app locks it after the delay below.",
                 15L..86400L,
+            ),
+            MobilePreference(
+                "leave_lock_seconds",
+                "Lock after leaving the app",
+                "seconds",
+                "How long the vault stays unlocked after you switch to another app, so you can copy a code or password and come back without unlocking again. Zero locks immediately. Turning off the screen always locks at once.",
+                0L..300L,
             ),
             MobilePreference(
                 "clipboard_seconds",
                 "Clear copied secrets after",
                 "seconds",
-                "How long a copied secret stays on the clipboard before the app tries to clear it. Verification codes can expire sooner.",
-                1L..300L,
+                "How long a copied secret stays on the clipboard before the app clears it. One-time codes can expire sooner. Zero turns copying off, as on the desktop.",
+                0L..300L,
             ),
             MobilePreference(
                 "history_limit",
@@ -68,7 +75,9 @@ internal object MobilePreferences {
     fun summary(key: String, value: Long) =
         when (key) {
             "unlock_seconds",
-            "clipboard_seconds" -> duration(value)
+            "clipboard_seconds" -> if (value == 0L) "Copying is off" else duration(value)
+            "leave_lock_seconds" ->
+                if (value == 0L) "Immediately" else "After ${duration(value)}"
             "history_limit" ->
                 if (value == 0L) "History off for future password changes"
                 else "$value previous ${if(value==1L) "password" else "passwords"} per item"

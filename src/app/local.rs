@@ -11,9 +11,30 @@ use password_manager::{
         generated_password_output, password_strength_output,
     },
     server::{server, start},
-    vault,
 };
 use std::fs;
+
+/// `section.key = value` for every setting that differs between two configurations.
+fn changed_settings(before: &config::Config, after: &config::Config) -> Vec<String> {
+    let (Ok(toml::Value::Table(old)), Ok(toml::Value::Table(new))) =
+        (toml::Value::try_from(before), toml::Value::try_from(after))
+    else {
+        return Vec::new();
+    };
+    let mut changed = Vec::new();
+    for (section, values) in &new {
+        let Some(values) = values.as_table() else {
+            continue;
+        };
+        for (key, value) in values {
+            let previous = old.get(section).and_then(|table| table.get(key));
+            if previous != Some(value) {
+                changed.push(format!("{section}.{key} = {value}"));
+            }
+        }
+    }
+    changed
+}
 
 pub(super) async fn run(
     command: CliCommands,
@@ -39,17 +60,11 @@ pub(super) async fn run(
             .await;
         }
 
-        CliCommands::Vaults => match vault::list_vaults() {
-            Ok(names) => console.print_data(
-                serde_json::json!(&names),
-                &if names.is_empty() {
-                    "No vaults found. Create one with `pm new`.".into()
-                } else {
-                    names.join("\n")
-                },
-            ),
-            Err(error) => console.exit_error(&error.to_string(), 1),
-        },
+        CliCommands::Vaults {
+            command: None,
+            rename,
+            name,
+        } => super::vaults::list_or_rename(conf, rename.as_deref(), name.as_deref(), console),
         CliCommands::GenerateCommandContract { check } => {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extension");
             for (name, expected) in [
@@ -136,13 +151,32 @@ pub(super) async fn run(
             };
             match generated {
                 Ok(password) => {
+                    let password = zeroize::Zeroizing::new(password);
+                    let (score, rating) = password_manager::password::strength_rating(&password);
                     let (output, warning) = generated_password_output(
-                        password,
+                        password.to_string(),
                         show_stats,
                         should_copy,
                         copy_time.unwrap_or(conf.clipboard.timeout),
                     );
-                    console.print_success(&output);
+                    if console.is_json() {
+                        // Typed data for scripts instead of display text.
+                        console.print_data(
+                            serde_json::json!({
+                                "password": password.as_str(),
+                                "score": score,
+                                "rating": rating,
+                                "copied": should_copy && warning.is_none(),
+                                "copy_error": warning,
+                            }),
+                            "",
+                        );
+                    } else if console.stdout_is_terminal() || show_stats {
+                        console.print_success(&output);
+                    } else {
+                        // In a pipe, print only the value (like `get --password-only`).
+                        console.print_success(password.as_str());
+                    }
                     if let Some(warning) = warning {
                         console.print_warning(&warning);
                     }
@@ -152,11 +186,14 @@ pub(super) async fn run(
         }
         CliCommands::Passcheck { password } => {
             let password = password.unwrap_or_else(|| {
-                rpassword::prompt_password("Password to check: ").unwrap_or_else(|error| {
-                    console.exit_error(&format!("could not read password: {error}"), 1)
-                })
+                password_manager::prompt::hidden("Password to check: ", "password")
+                    .unwrap_or_else(|error| console.exit_error(&error, 1))
             });
-            console.print_success(&password_strength_output(&password));
+            let (score, rating) = password_manager::password::strength_rating(&password);
+            console.print_data(
+                serde_json::json!({"score": score, "rating": rating}),
+                &password_strength_output(&password),
+            );
         }
         CliCommands::Completions { shell, output } => {
             let mut cmd = Cli::command();
@@ -235,6 +272,11 @@ pub(super) async fn run(
                 serde_json::to_value(&effective).expect("config serializes"),
                 &output,
             );
+            // Confirm exactly what changed, after the full listing.
+            let changed = changed_settings(conf, &effective);
+            if !changed.is_empty() {
+                console.print_note(&format!("Saved: {}.", changed.join(", ")));
+            }
             if restart_required {
                 console.print_warning(
                     "restart the server before the updated recovery or SSH agent settings take \

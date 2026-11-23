@@ -335,6 +335,7 @@ ssh_agent=false
 [desktop]
 appearance="dark"
 scale=100
+close_action="ask"
 [sync]
 server_url=""
 automatic=true

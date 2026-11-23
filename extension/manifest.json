@@ -4,7 +4,8 @@
   "version": "1.8",
   "version_name": "0.1.0",
   "description": "Securely connects websites to the local password manager",
-  "minimum_chrome_version": "110",
+  "minimum_chrome_version": "123",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAotiBDIXkD/MvlfUH+6TU75xGmuOegGD+gXpZzUrhTJXHHMDD3TF9g9FFXgvgS4BG0m6yV2Lrn+vCdoxqWYhGe/YtXbvvcbLr0BerT/vzXKjNUzdYpQNGOjgE46eXwUywBIjgsz479GzaXsTSJK12MsFvXNE3MWNTs3ONd8AxXkI5R+d5lv79Pulfh4mm+rrPJvENahGLERSKGxltv7zTvXKkvplmHFQtbJnXkmYU8phfkdMrqjG7Sgq7wInsLSaFO0ElT7zdq7nnoRnnB84bA1Xl+vPm0LmXDKndJ4jp95EqKOCdiTNaH0YsiSDL1gkGfkK0CeQmSD3B6Qc+bPR47wIDAQAB",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -25,6 +26,10 @@
       "128": "icons/icon128.png"
     },
     "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "help.html",
+    "open_in_tab": true
   },
   "background": {
     "service_worker": "background.js"

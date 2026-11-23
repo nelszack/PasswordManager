@@ -119,7 +119,7 @@ test("embedded challenges and Duo redirects retain the original login site", asy
             const picking = browser.context.waitForEvent("page", p => p.url().includes("picker.html"));
             await page.getByRole("button", { name: "Choose saved credentials" }).first().click();
             const picker = await picking;
-            await picker.getByRole("button", { name: "Work" }).click();
+            await picker.getByRole("option", { name: "Work" }).click();
             await expect(page.locator("#password")).toHaveValue("saved-secret");
             url = "https://api-test.duosecurity.com/push";
         }

@@ -33,9 +33,10 @@ function render(data) {
             ? "This site requires proof that it is you. After you continue, confirm with your master password or passkey PIN in the desktop app."
             : "Optional: some sites need this to sign you in without a password. You confirm with your master password or passkey PIN in the desktop app.";
     }
+    element("openDesktop").hidden = !data.locked;
     if (data.locked) {
         element("status").textContent =
-            "Your vault is locked. Unlock it in the desktop app, then try again, or use another provider.";
+            "Your vault is locked. Unlock it in the desktop app; this window continues by itself. Or use another provider.";
         element("confirm").disabled = true;
         return;
     }
@@ -106,7 +107,21 @@ element("cancel").addEventListener("click", () => {
     send({ action: "completePasskeyPrompt", token, selection: { action: "cancel" } }).finally(() => window.close());
 });
 
-send({ action: "getPasskeyPromptData", token }).then(render, error => {
-    element("status").textContent = error.message || "Passkey request expired";
-    element("confirm").disabled = true;
+function load(refresh = false) {
+    return send({ action: "getPasskeyPromptData", token, ...(refresh ? { refresh: true } : {}) }).then(render, error => {
+        element("status").textContent = error.message || "Passkey request expired";
+        element("confirm").disabled = true;
+    });
+}
+element("openDesktop").addEventListener("click", event => {
+    if (event.isTrusted === false) return;
+    PasswordManagerUiTransport.send({ action: "openDesktop" }).then(response => {
+        if (!response?.success) element("status").textContent = response?.error || "Could not open the desktop app";
+    });
 });
+// Continue once the vault is unlocked in the desktop app.
+chrome.runtime.onMessage?.addListener?.(message => {
+    const unlocked = message?.action === "statusChanged" && message.status?.running && !message.status.locked;
+    if (unlocked && !element("openDesktop").hidden && !busy) load(true);
+});
+load();

@@ -1640,7 +1640,8 @@ impl App {
                     }
                     .map_err(Failure::from)?;
                     Ok(Reply::Local(format!(
-                        "Installed at {}. Reload the extension after browser bridge changes.",
+                        "Browser integration is on ({}). Reload the extension; its popup should \
+                         then show your vault as Unlocked.",
                         path.display()
                     )))
                 });
@@ -1725,7 +1726,7 @@ impl App {
                 .map(|item| WatchTarget {
                     choice: Choice {
                         id: *id,
-                        label: format!("{} · {}", id, item.name),
+                        label: item.name.clone(),
                     },
                     revision,
                     session: session.clone(),

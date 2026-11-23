@@ -22,6 +22,10 @@ pub enum NativeAction {
     CreatePasskey,
     GetPasskeyAssertion,
     VerifyPasskeyUser,
+    CopyLoginValue,
+    CopyGenerated,
+    SearchItems,
+    CopyItem,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +39,7 @@ pub struct NativePolicy {
     pub result_shape: &'static str,
 }
 impl NativeAction {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 22] = [
         Self::Status,
         Self::Lock,
         Self::OpenDesktop,
@@ -54,6 +58,10 @@ impl NativeAction {
         Self::CreatePasskey,
         Self::GetPasskeyAssertion,
         Self::VerifyPasskeyUser,
+        Self::CopyLoginValue,
+        Self::CopyGenerated,
+        Self::SearchItems,
+        Self::CopyItem,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -75,6 +83,10 @@ impl NativeAction {
             Self::CreatePasskey => "createPasskey",
             Self::GetPasskeyAssertion => "getPasskeyAssertion",
             Self::VerifyPasskeyUser => "verifyPasskeyUser",
+            Self::CopyLoginValue => "copyLoginValue",
+            Self::CopyGenerated => "copyGenerated",
+            Self::SearchItems => "searchItems",
+            Self::CopyItem => "copyItem",
         }
     }
     pub fn policy(self) -> NativePolicy {
@@ -102,7 +114,9 @@ impl NativeAction {
         let (required_fields, optional_fields, result_shape): (&[&str], &[&str], &str) = match self
         {
             Self::Status => (&[], &[], "status"),
-            Self::Lock | Self::OpenDesktop => (&[], &[], "message"),
+            Self::Lock => (&[], &[], "message"),
+            // With an item ID, the desktop app opens showing that item.
+            Self::OpenDesktop => (&[], &["entryId"], "message"),
             Self::DuoRequests => (&["entryId", "expectedSession"], &[], "duoArray"),
             Self::DuoRespond => (
                 &[
@@ -169,6 +183,28 @@ impl NativeAction {
                 "passkeyCredential",
             ),
             Self::VerifyPasskeyUser => (&["domain", "expectedSession"], &[], "message"),
+            // The desktop service copies with timed clearing; the value never
+            // reaches the browser.
+            Self::CopyLoginValue => (
+                &[
+                    "domain",
+                    "entryId",
+                    "field",
+                    "expectedRevision",
+                    "expectedSession",
+                ],
+                &[],
+                "message",
+            ),
+            Self::CopyGenerated => (&["password"], &[], "message"),
+            // Metadata only (names, usernames, addresses); the popup searches
+            // the whole vault without receiving any secret.
+            Self::SearchItems => (&["query"], &[], "itemPage"),
+            Self::CopyItem => (
+                &["entryId", "field", "expectedRevision", "expectedSession"],
+                &[],
+                "message",
+            ),
         };
         NativePolicy {
             mutates,
@@ -202,8 +238,37 @@ pub fn browser_contract() -> String {
         .into_iter()
         .map(|a| (a.as_str(), a.policy()))
         .collect();
+    use crate::types::ItemKind;
+    let profiles: std::collections::BTreeMap<String, serde_json::Value> = [
+        ItemKind::Login,
+        ItemKind::SecureNote,
+        ItemKind::PaymentCard,
+        ItemKind::Identity,
+        ItemKind::Wifi,
+        ItemKind::SoftwareLicense,
+        ItemKind::SshKey,
+        ItemKind::ApiSecret,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let profile = crate::item_profile::profile(kind);
+        let owner = profile.owner.split(" (").next().unwrap_or(profile.owner);
+        (
+            kind.to_string(),
+            serde_json::json!({
+                "title": profile.title,
+                "owner": owner,
+                "secret": profile.secret_name(),
+            }),
+        )
+    })
+    .collect();
     include_str!("native_contract.template.js")
         .replace("__PROTOCOL_VERSION__", &super::PROTOCOL_VERSION.to_string())
+        .replace(
+            "__ITEM_PROFILES__",
+            &serde_json::to_string_pretty(&profiles).expect("profiles serialize"),
+        )
         .replace(
             "__OPERATIONS__",
             &serde_json::to_string_pretty(&operations).expect("policies serialize"),
@@ -237,6 +302,7 @@ pub fn browser_declarations() -> String {
             "receipt" => "OperationReceipt",
             "passkeyArray" => "PasskeyChoice[]",
             "passkeyCredential" => "PasskeyCredentialJSON",
+            "itemPage" => "ItemPage",
             _ => unreachable!(),
         };
         results.push_str(&format!(

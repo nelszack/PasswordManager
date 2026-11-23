@@ -161,8 +161,40 @@ const PasswordManagerBackgroundPasskeys = {
             return record;
         }
 
+        // After the vault unlocks elsewhere, a locked request looks up its choices again.
+        async function refreshLocked(record) {
+            if (!record.locked) return;
+            const lookup =
+                record.kind === "get"
+                    ? await nativeRequest("getPasskeys", { domain: record.origin, passkeyRequest: record.options })
+                    : await nativeRequest("status");
+            if (!lookup.success) return;
+            if (record.kind === "get") {
+                // As on first lookup: with no passkey for this site, the browser's own
+                // passkey options take over instead of an empty prompt.
+                if (!Array.isArray(lookup.data) || !lookup.data.length) {
+                    finish(record.token, FALLBACK);
+                    return;
+                }
+                record.choices = lookup.data;
+                record.sessionId = lookup.sessionId;
+                const status = await nativeRequest("status");
+                record.canConfirm = status.success === true && status.data?.passkey_verification === true;
+                record.locked = false;
+            } else if (lookup.data?.locked !== true) {
+                record.sessionId = lookup.sessionId || null;
+                record.canConfirm = lookup.data?.passkey_verification === true;
+                record.locked = false;
+            }
+        }
+
         function data(message, sender) {
             const record = current(message, sender);
+            if (message?.refresh === true && record.locked)
+                return refreshLocked(record).then(() => describe(record));
+            return describe(record);
+        }
+        function describe(record) {
             return {
                 success: true,
                 kind: record.kind,

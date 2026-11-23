@@ -65,6 +65,10 @@ struct NativeRequest {
     passkey_request: Option<String>,
     #[serde(default, rename = "verificationToken")]
     verification_token: Option<String>,
+    #[serde(default)]
+    field: Option<crate::types::BrowserCopyField>,
+    #[serde(default)]
+    query: Option<String>,
 }
 
 impl NativeRequest {
@@ -85,6 +89,8 @@ impl NativeRequest {
             ("verificationCode", self.verification_code.is_some()),
             ("passkeyRequest", self.passkey_request.is_some()),
             ("verificationToken", self.verification_token.is_some()),
+            ("field", self.field.is_some()),
+            ("query", self.query.is_some()),
         ];
         if self
             .expected_session
@@ -156,6 +162,7 @@ impl Zeroize for NativeRequest {
         self.approve.zeroize();
         self.passkey_request.zeroize();
         self.verification_token.zeroize();
+        self.query.zeroize();
         *self = Self::default();
     }
 }
@@ -251,6 +258,9 @@ pub fn invoked_directly() -> bool {
 
 /// The add-on ID in the packaged Firefox manifest (`scripts/firefox_manifest.cjs`).
 pub const FIREFOX_EXTENSION_ID: &str = "password-manager@nelszack.dev";
+/// Chrome-family ID fixed by the public `key` in extension/manifest.json, so an
+/// unpacked install has the same ID on every machine and path.
+pub const CHROME_EXTENSION_ID: &str = "gcbamiglphlendkfgibjnnnfgldalnci";
 
 /// The browser-specific allow list for a native host manifest.
 fn manifest_allow_list(extension_id: &str, browser: NativeBrowser) -> (&'static str, Value) {
@@ -267,7 +277,7 @@ pub fn install(extension_id: Option<&str>, browser: NativeBrowser) -> Result<Pat
     let extension_id = match (extension_id, browser) {
         (Some(id), _) => id,
         (None, NativeBrowser::Firefox) => FIREFOX_EXTENSION_ID,
-        (None, _) => return Err("--extension-id is required for Chrome-family browsers".into()),
+        (None, _) => CHROME_EXTENSION_ID,
     };
     validate_extension_id(extension_id, browser)?;
     let base_dirs =
@@ -617,7 +627,9 @@ fn optional_text(value: Option<String>, field: &str, max_length: usize) -> Resul
     Ok(value)
 }
 
-fn launch_desktop() -> Result<(), String> {
+fn launch_desktop(item: Option<usize>) -> Result<(), String> {
+    #[cfg(not(feature = "desktop"))]
+    let _ = item;
     #[cfg(not(feature = "desktop"))]
     return Err(
         "This build has no desktop interface. Install a build with desktop support.".into(),
@@ -628,6 +640,9 @@ fn launch_desktop() -> Result<(), String> {
             .map_err(|error| format!("could not locate the desktop executable: {error}"))?;
         let executable = desktop_executable(&executable)?;
         let mut command = desktop_command(&executable);
+        if let Some(id) = item {
+            command.arg("--open").arg(id.to_string());
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("could not open the desktop app: {error}"))?;
@@ -688,7 +703,7 @@ fn handle_request(client: &AuthenticatedClient, request: NativeRequest) -> Nativ
 fn handle_request_with_launcher(
     client: &AuthenticatedClient,
     mut request: NativeRequest,
-    launch: impl FnOnce() -> Result<(), String>,
+    launch: impl FnOnce(Option<usize>) -> Result<(), String>,
 ) -> NativeResponse {
     let id = request.id;
     let operation_id = request.operation_id.clone();
@@ -699,8 +714,12 @@ fn handle_request_with_launcher(
     let result = (|| {
         request.validate()?;
         if request.action == NativeAction::OpenDesktop {
-            launch()?;
-            return Ok(json!("Desktop app launch requested."));
+            launch(request.entry_id)?;
+            return Ok(json!(if request.entry_id.is_some() {
+                "Opening the item in the desktop app."
+            } else {
+                "Desktop app launch requested."
+            }));
         }
         command_for_request(&mut request).and_then(|command| {
             let mut envelope = RequestEnvelope::new(command)
@@ -938,8 +957,48 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             verification: request.verification_token.take(),
             verified: false,
         }),
+        "copyLoginValue" => Ok(ServerCommand::BrowserCopy {
+            domain: required(request.domain.take(), "domain", 2048)?,
+            id: item_id(request)?,
+            field: request.field.ok_or("missing copy field")?,
+            timeout: clipboard_timeout(),
+        }),
+        "searchItems" => Ok(ServerCommand::List(crate::types::SearchFilter {
+            query: Some(required(request.query.take(), "query", 256)?),
+            list: crate::types::ListOptions {
+                sort: crate::types::SortField::Name,
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        "copyItem" => Ok(ServerCommand::BrowserCopyItem {
+            id: item_id(request)?,
+            field: request.field.ok_or("missing copy field")?,
+            timeout: clipboard_timeout(),
+        }),
+        "copyGenerated" => Ok(ServerCommand::CopyGenerated {
+            value: required(
+                request.password.take().map(SecretString::expose_owned),
+                "password",
+                64 * 1024,
+            )?
+            .into(),
+            timeout: clipboard_timeout(),
+        }),
         _ => Err("unsupported native messaging action".to_string()),
     }
+}
+
+/// The configured clipboard timeout, read without creating or rewriting the
+/// configuration file. A missing or unreadable file uses the default.
+fn clipboard_timeout() -> u8 {
+    let path = crate::file::config_dir().join("config.toml");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<crate::config::Config>(&text).ok())
+        .unwrap_or_default()
+        .clipboard
+        .timeout
 }
 
 fn item_id(request: &NativeRequest) -> Result<usize, String> {

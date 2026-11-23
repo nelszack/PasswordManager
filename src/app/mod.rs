@@ -8,6 +8,7 @@ mod remote;
 mod session;
 mod sync;
 mod totp;
+mod vaults;
 
 pub async fn run(
     command: CliCommands,
@@ -49,13 +50,33 @@ pub async fn run(
                 CliCommands::New { .. } | CliCommands::Unlock { .. }
             ) {
                 if let Err(error) = password_manager::server::start(port) {
-                    console.exit_error(&format!("Could not start the server: {error}"), 1);
+                    let hint = if error.contains("in use") {
+                        format!(
+                            " Another program uses port {port}. Choose a free one with `pm config \
+                             --server-port PORT`, or use `--port PORT` for this command."
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let error = error.trim_end_matches('.');
+                    console.exit_error(&format!("Could not start the server: {error}.{hint}"), 1);
                 }
-                console.print_warning("Started the background server.");
+                // `pm new` reports the created vault itself; unlocking says the server started.
+                if matches!(command, CliCommands::Unlock { .. }) {
+                    console.print_note("Started the background server.");
+                }
             } else {
+                let none_yet = password_manager::vault::list_vaults()
+                    .map(|vaults| vaults.is_empty())
+                    .unwrap_or(false);
                 console.exit_error(
-                    "Server is not running, so no vault is open. Run `pm unlock` to start it \
-                     and open your vault.",
+                    if none_yet {
+                        "No vault yet. Create one with `pm new --name NAME` (it starts the \
+                         background server for you)."
+                    } else {
+                        "Server is not running, so no vault is open. Run `pm unlock` to start \
+                         it and open your vault."
+                    },
                     1,
                 );
             }

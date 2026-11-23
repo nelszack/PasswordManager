@@ -8,10 +8,11 @@ const files = [
     "manifest.json", "background.js", "command_contract.js",
     "background_security.js", "background_state.js", "background_native.js",
     "background_status.js", "background_pending.js", "background_windows.js", "background_pickers.js",
-    "background_prompts.js", "background_router.js", "background_duo.js", "background_passkeys.js",
+    "background_prompts.js", "background_router.js", "background_duo.js", "background_passkeys.js", "background_popup.js",
     "native_protocol.js", "pending_credentials.js", "credential_prompt_state.js", "duo_detection.js",
     "content_runtime.js", "ui_transport.js", "ui_session.js", "common.css",
     "popup.html", "popup.js", "popup_state.js", "popup.css", "password_generator.js",
+    "help.html", "help.css",
     "picker.html", "picker.js", "picker_state.js", "picker.css",
     "credential_prompt.html", "credential_prompt.js", "credential_prompt.css",
     "duo_prompt.html", "duo_prompt.js", "duo_prompt.css",
@@ -28,7 +29,12 @@ for (const file of files) {
     requireAsset(file);
     const source = fs.readFileSync(path.join(root, file), "utf8");
     if (file.endsWith(".html")) {
-        for (const match of source.matchAll(/(?:src|href)=["']([^"']+)["']/g)) requireAsset(match[1]);
+        // In-page anchors ("#setup") and external links (https://…) are not files;
+        // "help.html#setup" names help.html.
+        for (const match of source.matchAll(/(?:src|href)=["']([^"'#][^"']*)["']/g)) {
+            if (/^[a-z][a-z0-9+.-]*:/i.test(match[1])) continue;
+            requireAsset(match[1].split("#")[0]);
+        }
     }
     if (file.endsWith(".js")) {
         for (const call of source.matchAll(/importScripts\(([^)]+)\)/g)) {

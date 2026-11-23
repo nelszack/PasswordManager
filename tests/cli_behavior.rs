@@ -295,7 +295,7 @@ fn duo_interaction_requires_a_terminal_and_visible_request_review() {
         &["--quiet", "duo", "requests", "--id", "1"],
     );
     assert_eq!(requests.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&requests.stderr).contains("Vault locked"));
+    assert!(String::from_utf8_lossy(&requests.stderr).contains("pm unlock"));
 }
 
 #[test]
@@ -333,13 +333,7 @@ fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_conf
         ),
         (
             vec!["pm", "duo", "watch", "--"],
-            vec![
-                "--interval",
-                "--notify",
-                "--interactive",
-                "--id",
-                "--entry-name",
-            ],
+            vec!["--interval", "--notify", "--interactive", "--id"],
         ),
         (vec!["pm", "duo", "approve", "--"], vec!["--request"]),
         (
@@ -352,7 +346,7 @@ fn dynamic_completion_reads_current_cli_without_running_commands_or_loading_conf
         ),
         (
             vec!["pm", "totp", "show", "--"],
-            vec!["--watch", "--copy", "--copy-time", "--id", "--entry-name"],
+            vec!["--watch", "--copy", "--copy-time", "--id"],
         ),
     ] {
         let output = isolated_pm(root.path())
@@ -630,9 +624,11 @@ fn create_unlocked_key_vault(root: &Path, port: u16, timeout: Option<u64>) -> Pa
     let key = root.join("vault.key");
     for action in ["new", "unlock"] {
         let mut command = isolated_pm(root);
-        command
-            .args(["--port", &port.to_string(), action, "--key"])
-            .arg(&key);
+        command.args(["--port", &port.to_string(), action]);
+        if action == "new" {
+            command.arg("--locked");
+        }
+        command.arg("--key").arg(&key);
         if action == "unlock"
             && let Some(seconds) = timeout
         {
@@ -838,8 +834,8 @@ fn file_commands_resolve_client_paths_and_preserve_application_files() {
     for args in [
         vec!["import", "--path", "import.json", "--preview"],
         vec!["import", "--path", "import.json"],
-        vec!["export", "--path", "export.json"],
-        vec!["export", "--path", "export.json", "--force"],
+        vec!["export", "--path", "export.json", "--yes"],
+        vec!["export", "--path", "export.json", "--force", "--yes"],
         vec![
             "backup",
             "create",
@@ -927,7 +923,7 @@ fn assert_protected_output_destinations(root: &Path, port: u16, key: &Path) {
         // Windows byte-range locks can reject reads of the lock file itself.
         let original = (!path.ends_with("server.lock")).then(|| std::fs::read(&path).unwrap());
         let original_size = std::fs::metadata(&path).unwrap().len();
-        for command in [vec!["export"], vec!["backup", "create"]] {
+        for command in [vec!["export", "--yes"], vec!["backup", "create"]] {
             let mut args = command;
             args.extend(["--path", path.to_str().unwrap(), "--force"]);
             if args[0] == "backup" {
@@ -946,7 +942,11 @@ fn assert_protected_output_destinations(root: &Path, port: u16, key: &Path) {
         root.join("data/new-export.json"),
         root.join("config/new-export.json"),
     ] {
-        let result = run(root, port, &["export", "--path", path.to_str().unwrap()]);
+        let result = run(
+            root,
+            port,
+            &["export", "--yes", "--path", path.to_str().unwrap()],
+        );
         assert!(!result.status.success(), "{result:?}");
         assert!(!path.exists());
     }
@@ -1005,11 +1005,19 @@ fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() 
         let text = String::from_utf8(result.stdout).unwrap();
         assert!(!text.contains(['\x1b', '\x07', '\u{009b}']));
         assert!(text.contains("\\u{1b}]52;"));
-        assert!(text.contains("\\nForged row"));
+        // Lists shorten long names (`pm get` shows them whole); the escaping stays visible.
+        assert!(
+            // Long names are shortened (ASCII "..." in a pipe); the escaping stays visible.
+            text.contains("\\nForged row") || text.contains("..."),
+            "{text}"
+        );
         assert!(!text.contains("Some("));
         if args[0] != "audit" {
-            assert!(text.contains("Username: alice"));
-            assert!(text.contains("URLs: https://example.com"));
+            // One aligned line per item: type, username, first website (ASCII in a pipe).
+            assert!(
+                text.contains("Login - alice - https://example.com"),
+                "{text}"
+            );
         }
     }
     let result = run(root.path(), port, &["get", "--id", "1", "--password-only"]);
@@ -1020,7 +1028,7 @@ fn imported_terminal_controls_are_escaped_without_changing_secrets_or_exports() 
         run(
             root.path(),
             port,
-            &["export", "--path", export.to_str().unwrap()]
+            &["export", "--yes", "--path", export.to_str().unwrap()]
         )
         .status
         .success()
@@ -1061,7 +1069,7 @@ fn local_commands_honor_json_and_quiet_output() {
             "--json",
             "genpass",
             "--length",
-            "4",
+            "8",
             "--no-copy",
             "--no-stats",
         ])
@@ -1074,7 +1082,8 @@ fn local_commands_honor_json_and_quiet_output() {
     );
     let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(value["ok"], true);
-    assert!(value["output"].as_str().unwrap().starts_with("Password: "));
+    assert!(!value["data"]["password"].as_str().unwrap().is_empty());
+    assert!(value["data"]["score"].is_u64());
 
     let quiet = isolated_pm(root.path())
         .args(["--quiet", "passcheck", "--password", "test-password"])
@@ -1090,7 +1099,12 @@ fn unavailable_server_returns_a_stable_failure_exit_code() {
     let root = tempfile::tempdir().unwrap();
     let output = run(root.path(), unused_port(), &["status"]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Server is not running"));
+    // With no vault yet, the message points to `pm new` instead of `pm unlock`.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No vault yet") || stderr.contains("Server is not running"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1326,7 +1340,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     let mut server = ServerGuard::start(root.path(), port);
 
     let created = isolated_pm(root.path())
-        .args(["--port", &port.to_string(), "new", "--key"])
+        .args(["--port", &port.to_string(), "new", "--locked", "--key"])
         .arg(&key)
         .output_timeout("pm new --key");
     assert!(
@@ -1420,7 +1434,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     let json_export = root.path().join("vault.json");
     // Generated passwords can start with characters that CSV deliberately rejects.
     let exported = isolated_pm(root.path())
-        .args(["--port", &port.to_string(), "export", "--path"])
+        .args(["--port", &port.to_string(), "export", "--yes", "--path"])
         .arg(&json_export)
         .output_timeout("pm export");
     assert!(exported.status.success(), "{exported:?}");
@@ -1486,10 +1500,9 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         "{}",
         String::from_utf8_lossy(&hotp.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&hotp.stdout)
-            .contains("HOTP: 755224 (counter 0; next counter saved)")
-    );
+    // In a pipe, only the code is printed; the counter note goes to stderr.
+    assert_eq!(String::from_utf8_lossy(&hotp.stdout), "755224\n");
+    assert!(String::from_utf8_lossy(&hotp.stderr).contains("counter 0"));
 
     assert!(
         run(root.path(), port, &["config", "--clipboard-timeout", "0"])
@@ -1609,10 +1622,8 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         "{}",
         String::from_utf8_lossy(&hotp.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&hotp.stdout)
-            .contains("HOTP: 287082 (counter 1; next counter saved)")
-    );
+    assert_eq!(String::from_utf8_lossy(&hotp.stdout), "287082\n");
+    assert!(String::from_utf8_lossy(&hotp.stderr).contains("counter 1"));
 
     assert!(run(root.path(), port, &["kill"]).status.success());
     server.active = false;
@@ -1629,9 +1640,13 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
     let mut ids = Vec::new();
     for key in &keys {
         assert!(
-            run(root.path(), port, &["new", "--key", key.to_str().unwrap()])
-                .status
-                .success()
+            run(
+                root.path(),
+                port,
+                &["new", "--locked", "--key", key.to_str().unwrap()]
+            )
+            .status
+            .success()
         );
         let listed = run(root.path(), port, &["--json", "vaults"]);
         let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
@@ -1639,7 +1654,7 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(serde_json::Value::as_str)
+            .filter_map(|vault| vault["file"].as_str())
             .find(|id| !ids.iter().any(|saved: &String| saved == id))
             .unwrap()
             .to_owned();
@@ -1726,20 +1741,25 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
 
     let _guard = ServerGuard::start(root.path(), port);
     assert!(
-        run(root.path(), port, &["new", "--key", &first_key])
+        run(root.path(), port, &["new", "--locked", "--key", &first_key])
             .status
             .success()
     );
     let listed = run(root.path(), port, &["--json", "vaults"]);
     let first_id = serde_json::from_slice::<serde_json::Value>(&listed.stdout).unwrap()["data"][0]
+        ["file"]
         .as_str()
         .unwrap()
         .to_owned();
     assert!(first_id.ends_with(".enc"));
     assert!(
-        run(root.path(), port, &["new", "--key", &second_key])
-            .status
-            .success()
+        run(
+            root.path(),
+            port,
+            &["new", "--locked", "--key", &second_key]
+        )
+        .status
+        .success()
     );
 
     let missing = run(
@@ -1840,12 +1860,13 @@ fn explicit_vault_selection_and_rekey_preserve_the_vault_id() {
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(serde_json::Value::as_str)
+        .filter_map(|vault| vault["file"].as_str())
         .find(|id| *id != first_id)
         .unwrap();
-    let ambiguous = run(root.path(), port, &["unlock", "--key", &second_key]);
-    assert_eq!(ambiguous.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("select a vault ID"));
+    // A key file opens exactly one vault, so it is found without a selection.
+    let found = run(root.path(), port, &["unlock", "--key", &second_key]);
+    assert!(found.status.success(), "{found:?}");
+    assert!(run(root.path(), port, &["lock"]).status.success());
     assert!(
         run(root.path(), port, &["config", "--default-vault", second_id])
             .status

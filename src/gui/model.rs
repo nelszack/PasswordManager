@@ -11,6 +11,11 @@ use zeroize::Zeroize;
 
 pub use password_manager::item_profile::{KINDS, Profile, profile};
 
+/// The item type's secret name for buttons and messages ("Password", "Card number").
+pub fn secret_label(kind: ItemKind) -> String {
+    profile(kind).secret_name().to_owned()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KindChoice(pub ItemKind);
 impl std::fmt::Display for KindChoice {
@@ -239,8 +244,8 @@ impl Draft {
         }
         if self.replace_password {
             rows.push(
-                "Primary secret · your replacement will replace the latest stored value. Stored \
-                 values stay hidden; secret changes cannot be compared."
+                "Password · your new value replaces the latest saved one. Saved values stay \
+                 hidden, so password changes cannot be compared."
                     .into(),
             );
         }

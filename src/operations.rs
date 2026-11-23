@@ -197,9 +197,8 @@ pub(crate) fn execute_unlocked(
 }
 
 /// Shown once, when a save first uses tags, favorites, or attachments.
-pub(crate) const SCHEMA_UPGRADE_NOTICE: &str = "This vault now uses features (tags, favorites, or attachments) that older versions of \
-     Password Manager cannot open. Update the app on your other devices, including Android, \
-     before they sync this vault.";
+pub(crate) const SCHEMA_UPGRADE_NOTICE: &str = "With tags, favorites, or attachments, older versions of the app \
+     can't open this vault; update other devices before they sync it.";
 
 fn dispatch_unlocked(
     responses: &mut Vec<RpcResponse>,
@@ -229,6 +228,12 @@ fn dispatch_unlocked(
         | ServerCommand::AuthenticatorData(..)
         | ServerCommand::BrowserAuthenticatorData { .. }) => {
             authenticator_command(responses, msg, vault, server_info)
+        }
+        msg @ (ServerCommand::BrowserCopy { .. }
+        | ServerCommand::BrowserCopyItem { .. }
+        | ServerCommand::CopyGenerated { .. }) => {
+            browser_copy(responses, msg, vault, server_info);
+            Deferred::None
         }
         msg @ (ServerCommand::BrowserAutofill
         | ServerCommand::BrowserDuoItems(..)
@@ -354,12 +359,30 @@ fn item_command(
             copy_timeout,
         } => {
             let pass = Zeroizing::new(info.entry.copy.then(|| info.entry.password.clone()));
+            let name = info.entry.name.clone();
             match vault.add_typed_entry(info, server_info) {
                 Ok(true) => {
-                    respond("Item added.", responses);
-                    if let Some(password) = pass.as_deref() {
-                        copy_in_background(password.to_owned(), copy_timeout);
-                    }
+                    // Say what happened to the copy, including a failure.
+                    let copied = match pass.as_deref().filter(|p| !p.is_empty()) {
+                        Some(password) if copy_timeout > 0 => {
+                            Some(crate::clipboard::try_copy_in_background(
+                                password.to_owned(),
+                                copy_timeout,
+                            ))
+                        }
+                        _ => None,
+                    };
+                    let message = match copied {
+                        None => format!("Added \u{201c}{name}\u{201d}."),
+                        Some(Ok(())) => format!(
+                            "Added \u{201c}{name}\u{201d}. Its password is copied; the clipboard clears in {copy_timeout} seconds."
+                        ),
+                        Some(Err(error)) => format!(
+                            "Added \u{201c}{name}\u{201d}, but its password could not be copied: {}.",
+                            crate::clipboard::describe_error(&error)
+                        ),
+                    };
+                    respond(&message, responses);
                 }
                 Ok(false) => respond_conflict("Item already exists.", responses),
                 Err(error) => respond_failed("Add failed", &error, responses),
@@ -367,8 +390,8 @@ fn item_command(
         }
         ServerCommand::Delete(target) => respond_change(
             vault.delete_entry(target, server_info),
-            "Entry moved to trash.",
-            "Entry not found.",
+            "Item moved to trash.",
+            "Item not found.",
             None,
             responses,
         ),
@@ -384,7 +407,7 @@ fn item_command(
         ServerCommand::RestorePassword { target, revision } => respond_change(
             vault.restore_password(target, revision, server_info),
             "Password restored.",
-            "Entry not found.",
+            "Item not found.",
             Some("Password restore failed"),
             responses,
         ),
@@ -399,20 +422,36 @@ fn item_command(
             target,
             copy_timeout,
             reveal_secrets,
-        } => respond_result(
-            vault.target_detail(&target, reveal_secrets),
-            |mut item| {
-                // CLI secret-field reveal does not implicitly reveal the primary secret.
-                item.password = None;
-                if copy_timeout > 0
-                    && let Ok(secret) = vault.get_secret(&target)
-                {
-                    copy_in_background(secret.to_string(), copy_timeout);
+        } => {
+            respond_result(
+                vault.target_detail(&target, reveal_secrets),
+                |mut item| {
+                    // CLI secret-field reveal does not implicitly reveal the primary secret.
+                    item.password = None;
+                    ResponsePayload::Item(item)
+                },
+                responses,
+            );
+            // Report the copy's real outcome instead of assuming it worked.
+            if copy_timeout > 0
+                && responses.last().is_some_and(|response| response.code == 0)
+                && let Ok(secret) = vault.get_secret(&target)
+            {
+                let outcome = if secret.is_empty() {
+                    Err("this item has nothing to copy".to_owned())
+                } else {
+                    crate::clipboard::try_copy_in_background(secret.to_string(), copy_timeout)
+                };
+                if let Some(response) = responses.last_mut() {
+                    response.notice = Some(match outcome {
+                        Ok(()) => {
+                            format!("Copied; the clipboard clears in {copy_timeout} seconds.")
+                        }
+                        Err(error) => format!("Could not copy: {error}"),
+                    });
                 }
-                ResponsePayload::Item(item)
-            },
-            responses,
-        ),
+            }
+        }
         ServerCommand::GetField {
             target,
             name,
@@ -540,12 +579,12 @@ fn authenticator_command(
                 match result {
                     Ok(Some(bits)) if bits < 128 => respond(
                         &format!(
-                            "Authenticator saved. Warning: provider supplied a {bits}-bit secret; RFC 4226 recommends at least 128 bits."
+                            "Authenticator saved. Note: this site issued a short {bits}-bit authenticator key (128 bits is recommended); codes still work and nothing needs to change."
                         ),
                         responses,
                     ),
                     Ok(Some(_)) => respond("Authenticator saved.", responses),
-                    Ok(None) => respond_not_found("Entry not found.", responses),
+                    Ok(None) => respond_not_found("Item not found.", responses),
                     Err(error) => respond_failed("Authenticator setup failed", &error, responses),
                 }
             }
@@ -583,7 +622,7 @@ fn authenticator_command(
             TotpCommand::Remove { target } => respond_change(
                 vault.remove_totp(target, server_info),
                 "Authenticator removed.",
-                "Entry not found or has no authenticator.",
+                "Item not found, or it has no authenticator.",
                 Some("Authenticator removal failed"),
                 responses,
             ),
@@ -621,6 +660,127 @@ fn authenticator_command(
         _ => unreachable!("dispatched by execute_unlocked"),
     }
     Deferred::None
+}
+
+/// Popup copies: the value goes from the vault to the timed clipboard helper.
+fn browser_copy(
+    responses: &mut Vec<RpcResponse>,
+    msg: ServerCommand,
+    vault: &mut Vault,
+    server_info: &mut VaultCredentials,
+) {
+    use crate::types::{BrowserCopyField, OtpMode};
+    let (value, subject, timeout) = match msg {
+        ServerCommand::CopyGenerated { value, timeout } => {
+            (Ok(value.expose_owned()), "Password", timeout)
+        }
+        ServerCommand::BrowserCopyItem { id, field, timeout } => {
+            use crate::types::{BrowserCopyField, OtpMode};
+            let detail = vault.target_detail(&Target::Id(id), false);
+            let kind = detail.as_ref().map(|item| item.kind).unwrap_or_default();
+            let profile = crate::item_profile::profile(kind);
+            let nonempty = |value: String, missing: &str| {
+                if value.is_empty() {
+                    Err(missing.to_owned())
+                } else {
+                    Ok(value)
+                }
+            };
+            let (value, subject) = match field {
+                BrowserCopyField::Username => (
+                    detail
+                        .as_ref()
+                        .map_err(|error| error.to_string())
+                        .and_then(|item| {
+                            nonempty(
+                                item.username.clone().unwrap_or_default(),
+                                "This item has no username.",
+                            )
+                        }),
+                    profile.owner.split(" (").next().unwrap_or(profile.owner),
+                ),
+                BrowserCopyField::Password => (
+                    vault
+                        .get_secret(&Target::Id(id))
+                        .map(|secret| secret.to_string())
+                        .map_err(|error| error.to_string())
+                        .and_then(|secret| nonempty(secret, "This item has nothing to copy.")),
+                    profile.secret_name(),
+                ),
+                BrowserCopyField::Totp => (
+                    match detail.as_ref().ok().and_then(|item| item.otp_mode) {
+                        Some(OtpMode::Totp) => vault
+                            .current_otp(Target::Id(id), server_info)
+                            .map(|code| code.code.to_string())
+                            .map_err(|error| error.to_string()),
+                        Some(OtpMode::Hotp) => Err("Counter-based codes are shown in the desktop \
+                                                   app, so each code is used once."
+                            .to_owned()),
+                        None => Err("This item has no one-time code.".to_owned()),
+                    },
+                    "One-time code",
+                ),
+            };
+            (value, subject, timeout)
+        }
+        ServerCommand::BrowserCopy {
+            domain,
+            id,
+            field,
+            timeout,
+        } => {
+            let value = match vault.browser_login(&domain, id) {
+                None => Err("Login item not found for this site.".to_owned()),
+                Some(login) => match field {
+                    BrowserCopyField::Username => login
+                        .username
+                        .filter(|name| !name.is_empty())
+                        .ok_or_else(|| "This login has no username.".to_owned()),
+                    BrowserCopyField::Password => {
+                        let password = login.password.expose_owned();
+                        if password.is_empty() {
+                            Err("This login has no password.".to_owned())
+                        } else {
+                            Ok(password)
+                        }
+                    }
+                    BrowserCopyField::Totp => {
+                        let mode = vault
+                            .target_detail(&Target::Id(id), false)
+                            .ok()
+                            .and_then(|item| item.otp_mode);
+                        match mode {
+                            Some(OtpMode::Totp) => vault
+                                .current_otp(Target::Id(id), server_info)
+                                .map(|code| code.code.to_string())
+                                .map_err(|error| error.to_string()),
+                            Some(OtpMode::Hotp) => Err("Counter-based codes are filled on the \
+                                                        page so each code is used once."
+                                .to_owned()),
+                            None => Err("This login has no one-time code.".to_owned()),
+                        }
+                    }
+                },
+            };
+            let subject = match field {
+                BrowserCopyField::Username => "Username",
+                BrowserCopyField::Password => "Password",
+                BrowserCopyField::Totp => "One-time code",
+            };
+            (value, subject, timeout)
+        }
+        _ => unreachable!("dispatched by execute_unlocked"),
+    };
+    match value {
+        _ if timeout == 0 => respond_failure(CLIPBOARD_DISABLED, responses),
+        Err(message) => respond_not_found(&message, responses),
+        Ok(value) => respond_copy(
+            crate::clipboard::try_copy_in_background(value, timeout),
+            &format!("{subject} copied. The clipboard clears in {timeout} seconds."),
+            &subject.to_lowercase(),
+            responses,
+        ),
+    }
 }
 
 /// Browser-extension summaries and site-bound logins.
@@ -682,15 +842,15 @@ fn recovery_command(
         }
         ServerCommand::RestoreTrash(id) => respond_change(
             vault.restore_trashed(id, server_info),
-            "Entry restored.",
-            "Trash entry not found.",
+            "Item restored.",
+            "No trashed item has that ID.",
             Some("Restore failed"),
             responses,
         ),
         ServerCommand::PurgeTrash(id) => respond_change(
             vault.purge_trash(id, server_info),
             "Trash purged.",
-            "Trash entry not found.",
+            "No trashed item has that ID.",
             Some("Purge failed"),
             responses,
         ),

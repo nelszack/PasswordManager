@@ -57,8 +57,15 @@ fn run(invoked_as_native_host: bool) {
     if let Err(error) =
         fs::create_dir_all(&config_path).and_then(|_| fs::create_dir_all(&data_path))
     {
-        eprintln!("Error: could not create application directories: {error}");
-        std::process::exit(1);
+        let message = format!("could not create application directories: {error}");
+        // Scripts using --json get the same machine-readable failure as elsewhere.
+        match cli.as_ref() {
+            Some(cli) => Output::new(cli.json, cli.quiet).exit_error(&message, 1),
+            None => {
+                eprintln!("Error: {message}");
+                std::process::exit(1);
+            }
+        }
     }
     let config_file = config_path.join("config.toml");
     if invoked_as_native_host {
@@ -78,6 +85,7 @@ fn run(invoked_as_native_host: bool) {
     }
     let cli = cli.expect("native host returned before CLI dispatch");
     let output = Output::new(cli.json, cli.quiet);
+    password_manager::prompt::use_stdin(cli.password_stdin);
     if let Some(error) = output_error(&cli) {
         output.exit_error(error, 2);
     }
@@ -88,7 +96,8 @@ fn run(invoked_as_native_host: bool) {
         if matches!(
             cli.command,
             Some(CliCommands::Gui {
-                install_shortcut: true
+                install_shortcut: true,
+                ..
             })
         ) {
             match desktop::install_shortcut() {
@@ -99,6 +108,18 @@ fn run(invoked_as_native_host: bool) {
             }
             return;
         }
+        // A window is already open: bring it forward instead of opening another.
+        #[cfg(feature = "desktop")]
+        {
+            let request = match &cli.command {
+                Some(CliCommands::Gui { open: Some(id), .. }) => gui::instance::Request::Open(*id),
+                Some(CliCommands::Gui { search: true, .. }) => gui::instance::Request::Search,
+                _ => gui::instance::Request::Focus,
+            };
+            if gui::instance::forward(request) {
+                return;
+            }
+        }
         #[cfg(not(feature = "desktop"))]
         output.exit_error("This build has no desktop interface. Rebuild with the desktop feature, or run pm --help for CLI commands.", 1);
         #[cfg(feature = "desktop")]
@@ -106,7 +127,11 @@ fn run(invoked_as_native_host: bool) {
             let conf =
                 try_read_config(&config_file).unwrap_or_else(|error| output.exit_error(&error, 1));
             let port = cli.port.unwrap_or(conf.server.port);
-            if let Err(error) = gui::run(conf, client::AuthenticatedClient::new(port)) {
+            let open = match &cli.command {
+                Some(CliCommands::Gui { open, .. }) => *open,
+                _ => None,
+            };
+            if let Err(error) = gui::run(conf, client::AuthenticatedClient::new(port), open) {
                 output.exit_error(&error, 1);
             }
             return;

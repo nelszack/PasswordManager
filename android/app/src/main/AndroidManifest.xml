@@ -9,8 +9,10 @@
         android:icon="@drawable/ic_key" android:theme="@style/PasswordManagerTheme"
         android:allowBackup="false" android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false">
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity android:name=".MainActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
         <activity android:name=".FillActivity" android:exported="false" android:excludeFromRecents="true" android:theme="@style/AutofillSheet" />
         <activity android:name=".CredentialActivity" android:exported="false" android:excludeFromRecents="true" android:enabled="@bool/supports_credentials" tools:targetApi="34" />

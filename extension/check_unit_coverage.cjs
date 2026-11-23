@@ -31,6 +31,7 @@ const thresholds = {
     "background_pending.js": [95, 85],
     "background_pickers.js": [85, 70],
     "background_prompts.js": [90, 65],
+    "background_popup.js": [95, 85],
     "background_router.js": [70, 80],
     "background_status.js": [80, 75],
     "background_duo.js": [90, 75],

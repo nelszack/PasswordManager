@@ -25,13 +25,17 @@ fn parse_operation_id(value: &str) -> Result<String, String> {
     about = "Local encrypted password manager",
     long_about = "Open the desktop vault manager with `pm`, or use a subcommand for the CLI. Both \
                   connect to the same independent background server. Run `pm <COMMAND> --help` \
-                  for command-specific examples and details."
+                  for command-specific examples and details.",
+    after_help = "Get started:\n  pm new --name Personal        create a vault (it stays unlocked)\n  pm add --name github \
+                  --username alice --url https://github.com --generate\n  pm get github --copy          \
+                  copy its password (clears after the timeout)\n  pm lock\nAlready have a vault: pm \
+                  unlock, then pm list.\n\nExit codes: 0 success · 1 failed (vault locked, server not running, operation \
+                  error) · 2 invalid input or wrong password/key · 3 not found · 4 conflict (already \
+                  exists or changed elsewhere) · 5 saved, but storage durability is uncertain.\nWith \
+                  --json, failures print {\"ok\":false,\"error\":…,\"code\":N}."
 )]
 pub struct Cli {
-    /// Override the configured loopback port for this invocation.
-    ///
-    /// The client and server must use the same port. This does not modify the
-    /// configuration file; use `pm config --server-port PORT` for that.
+    /// Use a different server port for this run only (`pm config --server-port` saves one).
     #[arg(long, global = true, help_heading = "Global options", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
     /// Wrap command output in a stable JSON object for scripts.
@@ -50,6 +54,9 @@ pub struct Cli {
         conflicts_with = "json"
     )]
     pub quiet: bool,
+    /// Read hidden values from standard input, one per line, instead of prompting.
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub password_stdin: bool,
     #[command(subcommand)]
     pub command: Option<CliCommands>,
 }
@@ -58,12 +65,13 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
     (
         "Items",
         &[
-            "view",
+            "list",
             "search",
             "get",
             "add",
             "update",
             "delete",
+            "attachment",
             "genpass",
             "passcheck",
         ],
@@ -80,6 +88,8 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "audit",
             "totp",
             "duo",
+            "passkey",
+            "ssh-agent",
             "history",
             "restore-password",
             "trash",
@@ -138,11 +148,86 @@ pub fn cli_parse() -> Cli {
             // Parser diagnostics can contain rejected values, including secrets.
             use std::io::Write;
             let mut stdout = std::io::stdout().lock();
+            // Flag names are safe to report; rejected values never are.
+            use clap::error::{ContextKind, ContextValue};
+            let flag = match error.get(ContextKind::InvalidArg) {
+                Some(ContextValue::String(value))
+                    if value.starts_with('-') && !value.contains(['=', ' ']) =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            };
+            let command = args
+                .iter()
+                .skip(1)
+                .filter_map(|arg| arg.to_str())
+                .find(|arg| !arg.starts_with('-'))
+                .filter(|name| command().find_subcommand(name).is_some())
+                .map(str::to_owned);
+            // A safe reason from parser context: option names, allowed values and
+            // suggestions only, never the rejected value itself.
+            let strings = |kind| match error.get(kind) {
+                Some(ContextValue::String(value)) => vec![value.clone()],
+                Some(ContextValue::Strings(values)) => values.clone(),
+                _ => Vec::new(),
+            };
+            use clap::error::ErrorKind;
+            let reason = match error.kind() {
+                ErrorKind::MissingRequiredArgument => {
+                    let missing = strings(ContextKind::InvalidArg);
+                    (!missing.is_empty()).then(|| format!("Missing {}.", missing.join(", ")))
+                }
+                ErrorKind::ArgumentConflict => {
+                    let prior = strings(ContextKind::PriorArg);
+                    flag.as_ref().zip(prior.first()).map(|(flag, prior)| {
+                        format!("{flag} cannot be used together with {prior}.")
+                    })
+                }
+                ErrorKind::InvalidValue | ErrorKind::ValueValidation => flag.as_ref().map(|flag| {
+                    let valid = strings(ContextKind::ValidValue);
+                    if valid.is_empty() {
+                        format!("Invalid value for {flag}.")
+                    } else {
+                        format!(
+                            "Invalid value for {flag}; use one of: {}.",
+                            valid.join(", ")
+                        )
+                    }
+                }),
+                ErrorKind::UnknownArgument => {
+                    flag.as_ref()
+                        .map(|flag| match strings(ContextKind::SuggestedArg).first() {
+                            Some(suggested) => {
+                                format!("Unknown option {flag}; did you mean {suggested}?")
+                            }
+                            None => format!("Unknown option {flag}."),
+                        })
+                }
+                ErrorKind::InvalidSubcommand => {
+                    Some(match strings(ContextKind::SuggestedSubcommand).first() {
+                        Some(suggested) => format!("Unknown command; did you mean `{suggested}`?"),
+                        None => "Unknown command.".into(),
+                    })
+                }
+                _ => None,
+            };
+            let help = match &command {
+                Some(command) => format!("Run `pm {command} --help` for usage."),
+                None => "Run `pm --help` for usage.".into(),
+            };
             let report = serde_json::json!({
                 "ok": false,
-                "error": "Invalid command arguments. Run pm <COMMAND> --help for usage.",
+                "error": match (reason, &flag, &command) {
+                    (Some(reason), _, _) => format!("{reason} {help}"),
+                    (None, Some(flag), _) => format!("Invalid use of {flag}. {help}"),
+                    (None, None, Some(command)) => format!("Invalid arguments for {command}. {help}"),
+                    (None, None, None) => format!("Invalid command arguments. {help}"),
+                },
                 "code": error.exit_code(),
                 "kind": format!("{:?}", error.kind()),
+                "argument": flag,
+                "command": command,
             });
             let result = writeln!(stdout, "{report}").and_then(|()| stdout.flush());
             if let Err(write_error) = result
@@ -161,10 +246,22 @@ pub fn cli_parse() -> Cli {
 #[derive(Subcommand, Debug)]
 pub enum CliCommands {
     /// Open the desktop vault manager (also the default when no command is given).
+    #[command(
+        after_help = "Examples:\n  pm gui\n  pm gui --search\n\nOnly one window \
+                            runs at a time; launching again brings it forward. Bind `pm gui \
+                            --search` to a key for quick search (for example, in Hyprland: bind \
+                            = SUPER, P, exec, pm gui --search)."
+    )]
     Gui {
         /// Install a Linux application-menu shortcut for this executable and exit.
         #[arg(long)]
         install_shortcut: bool,
+        /// Bring the window forward with the vault search focused.
+        #[arg(long, conflicts_with = "install_shortcut")]
+        search: bool,
+        /// Open the window showing this item ID (after unlocking, if locked).
+        #[arg(long, value_name = "ID", conflicts_with_all = ["install_shortcut", "search"])]
+        open: Option<usize>,
     },
     /// Generate a random password or passphrase without opening the vault.
     #[command(
@@ -172,8 +269,9 @@ pub enum CliCommands {
                       --words 7 --separator .\n  pm genpass --no-symbols --exclude-ambiguous"
     )]
     Genpass {
-        /// Password length; defaults to the configured generator length.
-        #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..))]
+        /// Password length, 8–255 (the same range in every app); defaults to the
+        /// configured generator length.
+        #[arg(short, long, value_parser = clap::value_parser!(u8).range(8..))]
         length: Option<u8>,
         /// Hide password strength/statistics, overriding configuration.
         #[arg(long("no-stats"), default_value_t = false, conflicts_with = "stats")]
@@ -222,12 +320,12 @@ pub enum CliCommands {
             ]
         )]
         passphrase: bool,
-        /// Number of words in a passphrase.
+        /// Number of words in a passphrase, 3–64.
         #[arg(
             long,
             default_value_t = 6,
             requires = "passphrase",
-            value_parser = clap::value_parser!(u8).range(1..)
+            value_parser = clap::value_parser!(u8).range(3..=64)
         )]
         words: u8,
         /// Text placed between passphrase words.
@@ -236,8 +334,8 @@ pub enum CliCommands {
     },
     /// Estimate password strength without storing it.
     #[command(
-        after_help = "Examples:\n  pm passcheck\n  pm passcheck --password 'correct horse battery \
-                      staple'"
+        after_help = "Examples:\n  pm passcheck                       # private prompt\n  printf '%s\\n' \
+                      \"$CANDIDATE\" | pm --password-stdin passcheck"
     )]
     Passcheck {
         /// Password to evaluate; omit to use a private prompt.
@@ -257,12 +355,13 @@ pub enum CliCommands {
     Config(ConfigArgs),
     /// Unlock a vault using a prompted master password or an existing key file.
     #[command(
-        after_help = "Examples:\n  pm unlock\n  pm unlock --timeout 30m\n  pm unlock --key \
-                      ./keys/vault.key"
+        after_help = "Examples:\n  pm unlock\n  pm unlock --vault Work --timeout 30m\n  pm unlock \
+                      --key ./keys/vault.key\n  printf '%s\\n' \"$PASSWORD\" | pm --password-stdin unlock"
     )]
     Unlock {
-        /// Open only this .enc filename from `pm vaults`, avoiding a full scan.
-        #[arg(long)]
+        /// Vault to open, by name or .enc file from `pm vaults`; defaults to the
+        /// configured default vault, or the only vault.
+        #[arg(long = "vault", visible_alias = "vault-file", value_name = "NAME")]
         vault_file: Option<String>,
         /// Read the vault key from this file instead of prompting for a password.
         ///
@@ -283,8 +382,25 @@ pub enum CliCommands {
         #[arg(long, value_parser = parse_operation_id)]
         id: String,
     },
-    /// List opaque vault filenames without decrypting them or requiring a server.
-    Vaults,
+    /// List vaults by name and file without decrypting them or requiring a server.
+    ///
+    /// Names are kept on this device (shared with the desktop app); the
+    /// encrypted .enc files never change. Use a name with `pm unlock --vault`.
+    #[command(
+        after_help = "Examples:\n  pm vaults\n  pm vaults --rename f707a898….enc --name Work\n  pm \
+                      vaults delete Work",
+        args_conflicts_with_subcommands = true
+    )]
+    Vaults {
+        #[command(subcommand)]
+        command: Option<VaultsCommand>,
+        /// Give the vault with this .enc file (or current name) a new display name.
+        #[arg(long, value_name = "VAULT", requires = "name")]
+        rename: Option<String>,
+        /// The new display name used with --rename.
+        #[arg(long, requires = "rename")]
+        name: Option<String>,
+    },
     /// Print shell commands (PowerShell on Windows) that point SSH at the password
     /// manager's agent, or answer a signature waiting for confirmation.
     ///
@@ -340,20 +456,20 @@ pub enum CliCommands {
         command: NativeHostCommands,
     },
     /// Lock the vault, clear its clipboard copy, and stop the background server.
+    #[command(visible_alias = "stop")]
     Kill,
-    /// Move an entry to encrypted trash, or permanently delete an entire vault.
+    /// Move an item to the trash ("Deleted items"); `pm restore` brings it back.
     #[command(
-        after_help = "Examples:\n  pm delete github\n  pm delete --id 12\n  pm \
-                      delete --vault\n  pm delete --vault --key ./keys/vault.key\n  pm delete \
-                      --vault --key ./shared.key --keep-key"
+        after_help = "Examples:\n  pm delete github\n  pm delete --id 12\n\nTo permanently delete a \
+                      whole vault, use `pm vaults delete`."
     )]
     Delete(DeleteArgs),
-    /// List saved password revisions for an entry.
+    /// List an item's password history (saved earlier passwords).
     History {
         #[command(flatten)]
         target: EntryArgs,
     },
-    /// Replace an entry's current password with one of its saved revisions.
+    /// Replace an item's current password with one of its saved revisions.
     RestorePassword {
         #[command(flatten)]
         target: EntryArgs,
@@ -361,15 +477,20 @@ pub enum CliCommands {
         #[arg(long)]
         revision: usize,
     },
-    /// List entries currently held in encrypted trash.
+    /// List items in the trash ("Deleted items" in the apps).
     Trash,
-    /// Restore a trashed entry to the active vault.
+    /// Restore a trashed item to the vault (see `pm restore-password` for revisions).
+    #[command(after_help = "Examples:\n  pm restore github\n  pm restore --id 12")]
+    #[command(group(ArgGroup::new("trashed").required(true).multiple(false).args(["item", "id"])))]
     Restore {
-        /// Stable entry ID shown by `pm trash`.
+        /// Name of the trashed item (as shown by `pm trash`).
+        #[arg(value_name = "NAME")]
+        item: Option<String>,
+        /// Item ID shown by `pm trash`.
         #[arg(long)]
-        id: usize,
+        id: Option<usize>,
     },
-    /// Permanently erase one or all trashed entries.
+    /// Permanently erase one or all trashed items.
     Purge(PurgeArgs),
     /// Report weak, reused, duplicate, stale, breached, or under-protected logins.
     #[command(
@@ -383,7 +504,7 @@ pub enum CliCommands {
         /// Privately check password hash prefixes against Pwned Passwords.
         #[arg(long)]
         breaches: bool,
-        /// Report login entries that do not have a TOTP or HOTP authenticator.
+        /// Report login items that do not have a TOTP or HOTP authenticator.
         #[arg(long)]
         require_totp: bool,
     },
@@ -415,15 +536,26 @@ pub enum CliCommands {
         #[command(subcommand)]
         command: BackupCommands,
     },
-    /// Create an empty vault and leave it locked.
+    /// Create an empty vault and open it.
     ///
-    /// Without `--key`, securely prompts twice for a new master password.
-    #[command(after_help = "Examples:\n  pm new\n  pm new --key ./keys/vault.key")]
+    /// Without `--key`, securely prompts twice for a new master password of at
+    /// least 14 hard-to-guess characters. There is no password reset: keep the
+    /// password safe and create a backup with `pm backup create` once you add items.
+    #[command(
+        after_help = "Examples:\n  pm new --name Personal\n  pm new --name Work --key \
+                      ./keys/work.key\n  pm new --locked"
+    )]
     #[command(visible_aliases = ["init", "create"])]
     New {
+        /// Display name for the vault on this device (shown by `pm vaults`).
+        #[arg(long)]
+        name: Option<String>,
         /// Create a key outside application data; relative paths use the current directory.
         #[arg(long = "key", value_hint = ValueHint::FilePath)]
         key_path: Option<String>,
+        /// Leave the new vault locked instead of opening it.
+        #[arg(long)]
+        locked: bool,
     },
     /// Re-encrypt the unlocked vault with a new master password or key file.
     ///
@@ -446,7 +578,7 @@ pub enum CliCommands {
         #[arg(long)]
         username: Option<String>,
         /// Associate one or more URLs with this item. The first is primary.
-        #[arg(long)]
+        #[arg(long, visible_alias = "add-url")]
         url: Vec<String>,
         /// Item category; login items participate in website credential matching.
         #[arg(long = "type", value_enum, default_value_t = ItemKind::Login)]
@@ -461,27 +593,27 @@ pub enum CliCommands {
         #[arg(long = "secret-field", value_name = "NAME")]
         secret_fields: Vec<String>,
         /// Label the item with a tag; repeat for several (`--tag work --tag aws`).
-        #[arg(long = "tag", value_name = "TAG")]
+        #[arg(long = "tag", visible_alias = "add-tag", value_name = "TAG")]
         tags: Vec<String>,
         /// Mark the item as a favorite.
         #[arg(long)]
         favorite: bool,
-        /// Generate the primary secret instead of prompting for it.
+        /// Generate the password (or other secret) instead of prompting for it.
         #[arg(long = "generate-password", visible_alias = "generate")]
         generate_password: bool,
         #[arg(long("no-copy"), default_value_t = false, conflicts_with = "copy")]
         /// Do not copy a newly added login password, overriding configuration.
         no_copy: bool,
-        /// Copy the newly added primary secret to the clipboard.
+        /// Copy the newly added password (or other secret) to the clipboard.
         #[arg(long("copy"), default_value_t = false)]
         copy: bool,
     },
-    /// List vault items without displaying their primary secrets.
+    /// List vault items; passwords and other secrets stay hidden.
     #[command(
-        after_help = "Examples:\n  pm view\n  pm view --type login --sort name\n  pm view --weak \
-                      --descending\n  pm view --tag work --favorites"
+        after_help = "Examples:\n  pm list\n  pm list --type login --sort modified\n  pm list --weak \
+                      --descending\n  pm list --tag work --favorites"
     )]
-    #[command(visible_aliases = ["list", "ls"])]
+    #[command(name = "list", visible_aliases = ["view", "ls"])]
     View(ListArgs),
     /// Search item metadata and apply optional health/type filters.
     #[command(
@@ -501,20 +633,21 @@ pub enum CliCommands {
         #[command(flatten)]
         metadata: MetadataArgs,
     },
-    /// Display item details, or print its primary secret with `--password-only`.
+    /// Display item details, or print its password with `--password-only`.
     ///
-    /// Details hide the primary secret and secret custom fields.
-    /// Use --reveal-secrets to display secret custom fields. The default form copies the primary
-    /// secret when the configured clipboard timeout is nonzero.
+    /// Details hide the password (or card number, key, …) and secret custom
+    /// fields. Add --copy to copy it with timed clipboard clearing, or
+    /// --reveal-secrets to display secret custom fields.
     #[command(
-        after_help = "Examples:\n  pm get github\n  pm get github --password-only\n  pm get --id 4\n  \
-                      pm get --id 4 --reveal-secrets\n  pm get --id 4 --field recovery-code --copy"
+        after_help = "Examples:\n  pm get github\n  pm get github --copy\n  pm get github \
+                      --password-only\n  pm get --id 4 --reveal-secrets\n  pm get --id 4 --field \
+                      recovery-code --copy"
     )]
     Get {
         #[command(flatten)]
         target: EntryArgs,
-        /// Print only the primary secret, without copying it to the clipboard.
-        #[arg(long)]
+        /// Print only the password (or other secret), for pipes and scripts.
+        #[arg(long, conflicts_with = "copy")]
         password_only: bool,
         /// Display secret custom-field values in item details.
         #[arg(long, conflicts_with_all = ["password_only", "field"])]
@@ -522,8 +655,9 @@ pub enum CliCommands {
         /// Print only this custom field's value (case-insensitive name).
         #[arg(long, conflicts_with = "password_only", value_parser = clap::builder::NonEmptyStringValueParser::new())]
         field: Option<String>,
-        /// Copy the selected custom field instead of printing its value.
-        #[arg(long, requires = "field")]
+        /// Copy the password (or the --field value) to the clipboard; it clears
+        /// after the configured clipboard timeout.
+        #[arg(long)]
         copy: bool,
     },
     /// Import CSV, JSON, Bitwarden JSON, or this application's portable JSON.
@@ -570,12 +704,19 @@ pub enum CliCommands {
     /// A `.json` destination preserves rich metadata; other extensions use
     /// CSV. Both formats contain plaintext secrets and use private permissions.
     Export {
-        /// Destination file; `.json` selects portable JSON, otherwise CSV.
+        /// Destination file ending in `.json` (portable, keeps every detail) or `.csv`
+        /// (for other password managers; loses history and attachments).
         #[arg(long, value_hint = ValueHint::FilePath)]
         path: String,
+        /// The format to write; it must match the file name's extension.
+        #[arg(long, value_enum)]
+        format: Option<ExportFormat>,
         /// Atomically replace an existing plaintext export.
         #[arg(long)]
         force: bool,
+        /// Write the plaintext export without asking (required for scripts).
+        #[arg(long)]
+        yes: bool,
     },
     /// Generate static shell completion definitions.
     #[command(after_help = "Examples:\n  pm completions bash --output \
@@ -620,14 +761,16 @@ pub enum NativeHostCommands {
     )]
     Update,
     /// Register the native host for the browser extension.
-    #[command(after_help = "Examples:\n  pm native-host install --extension-id \
-                            abcdefghijklmnopabcdefghijklmnop --browser chrome\n  pm native-host \
-                            install --browser firefox\n\nReload the extension after installation. \
-                            On Windows, fully close the browser before reinstalling an upgraded \
-                            native host.")]
+    #[command(
+        after_help = "Examples:\n  pm native-host install --browser chrome\n  pm \
+                            native-host install --browser firefox\n  pm native-host install \
+                            --browser chromium --extension-id abcdefghijklmnopabcdefghijklmnop\n\nReload \
+                            the extension after installation. On Windows, fully close the browser \
+                            before reinstalling an upgraded native host."
+    )]
     Install {
-        /// The 32-character ID shown on chrome://extensions. Firefox uses the
-        /// packaged add-on's fixed ID unless another is given.
+        /// Only needed for a repackaged extension: the 32-character ID shown on
+        /// chrome://extensions. By default the bundled extension's fixed ID is used.
         #[arg(long)]
         extension_id: Option<String>,
         /// Browser whose per-user native-messaging registration should be updated.
@@ -738,7 +881,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     #[arg(value_parser = parse_duration)]
     pub unlock_timeout: Option<u64>,
-    /// Maximum prior passwords retained per entry; zero disables history.
+    /// Maximum prior passwords retained per item; zero disables history.
     #[arg(long)]
     pub password_history_limit: Option<usize>,
     /// Automatically purge trash older than this many days; zero disables it.
@@ -755,7 +898,7 @@ pub struct ConfigArgs {
     /// (`pm sync now` still works when this is false).
     #[arg(long)]
     pub sync_automatic: Option<bool>,
-    /// Opaque vault ID selected by default when unlocking (from pm vaults).
+    /// Vault opened by default when unlocking: its .enc file from `pm vaults`.
     #[arg(long)]
     pub default_vault: Option<String>,
 }
@@ -871,14 +1014,15 @@ pub struct ListArgs {
     /// Include only items without a configured authenticator.
     #[arg(long, conflicts_with = "totp")]
     pub no_totp: bool,
-    /// Include only items with a non-empty primary secret and zxcvbn score of 0–2.
+    /// Include only items whose password is weak (strength score 0–2 of 4).
     #[arg(long)]
     pub weak: bool,
     /// Show passwords at least this many days old.
     #[arg(long, value_name = "DAYS")]
     pub stale_days: Option<u64>,
     /// Field used to order results.
-    #[arg(long, value_enum, default_value_t = SortField::Id)]
+    /// (Defaults to name, like the desktop and mobile apps.)
+    #[arg(long, value_enum, default_value_t = SortField::Name)]
     pub sort: SortField,
     /// Reverse the selected sort order.
     #[arg(long)]
@@ -913,50 +1057,81 @@ impl From<ListArgs> for ListOptions {
 }
 
 #[derive(Args, Debug)]
+#[command(group(
+    ArgGroup::new("delete_target")
+        .required(true)
+        .multiple(false)
+        .args(["item", "id", "entry_name", "vault"])
+))]
 pub struct DeleteArgs {
     /// Name of the item to move to encrypted trash.
-    #[arg(
-        value_name = "NAME",
-        conflicts_with_all = ["id", "entry_name", "vault"],
-        required_unless_present_any = ["id", "entry_name", "vault"]
-    )]
+    #[arg(value_name = "NAME")]
     pub item: Option<String>,
-    /// Stable entry ID to move to encrypted trash.
-    #[arg(
-        long,
-        conflicts_with_all = ["vault", "entry_name"],
-        required_unless_present_any = ["entry_name", "vault", "item"]
-    )]
+    /// Item ID to move to encrypted trash.
+    #[arg(long)]
     pub id: Option<usize>,
-    /// Entry name to move to encrypted trash; same as the NAME argument.
-    #[arg(long, conflicts_with_all = ["id","vault"], required_unless_present_any=["id", "vault", "item"])]
+    /// Item name to move to encrypted trash; same as the NAME argument.
+    #[arg(long, hide = true)]
     pub entry_name: Option<String>,
-    /// Permanently delete the entire encrypted vault.
-    #[arg(long, conflicts_with_all = ["id","entry_name"], required_unless_present_any=["id", "entry_name", "item"])]
+    /// Deprecated spelling of `pm vaults delete`.
+    #[arg(long, hide = true)]
     pub vault: bool,
-    /// Select the .enc filename from `pm vaults`; otherwise use the default vault.
-    #[arg(long, requires = "vault")]
+    /// With the deprecated --vault: the vault to delete.
+    #[arg(long, requires = "vault", value_name = "NAME", hide = true)]
     pub vault_file: Option<String>,
-    /// Key file for deleting a key-based vault; otherwise prompts for its password.
-    #[arg(long, requires = "vault", value_hint = ValueHint::FilePath)]
+    /// With the deprecated --vault: the vault's key file.
+    #[arg(long, requires = "vault", value_hint = ValueHint::FilePath, hide = true)]
     pub key: Option<String>,
-    /// Preserve the key file after deleting its vault.
-    ///
-    /// Use this only when the key is intentionally shared or retained as a backup.
-    #[arg(long, requires_all = ["vault", "key"])]
+    /// With the deprecated --vault: keep the key file.
+    #[arg(long, requires_all = ["vault", "key"], hide = true)]
     pub keep_key: bool,
-    /// Confirm permanent vault deletion without prompting (required for scripts).
-    #[arg(long, requires = "vault")]
+    /// With the deprecated --vault: confirm without prompting.
+    #[arg(long, requires = "vault", hide = true)]
     pub yes: bool,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// This application's portable JSON, with every detail.
+    Json,
+    /// Interoperable CSV for other password managers.
+    Csv,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum VaultsCommand {
+    /// Permanently delete a whole vault and every item in it.
+    ///
+    /// Asks you to type `yes` and for the vault's master password (or uses --key).
+    /// This cannot be undone; make an encrypted backup first (`pm backup create`).
+    #[command(
+        after_help = "Examples:\n  pm vaults delete Work\n  pm vaults delete Work --key \
+                      ./keys/work.key\n  pm vaults delete Old --key ./shared.key --keep-key --yes"
+    )]
+    Delete {
+        /// The vault's name or .enc file from `pm vaults`; omit for the default vault.
+        #[arg(value_name = "VAULT")]
+        vault: Option<String>,
+        /// Key file for a key-based vault; otherwise prompts for its master password.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        key: Option<String>,
+        /// Keep the key file after deleting its vault (for shared or backed-up keys).
+        #[arg(long, requires = "key")]
+        keep_key: bool,
+        /// Confirm without prompting (required for scripts).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 #[derive(Args, Debug)]
+#[command(group(ArgGroup::new("purge_target").required(true).multiple(false).args(["id", "all"])))]
 pub struct PurgeArgs {
-    /// Stable entry ID of a trashed entry shown by `pm trash`.
-    #[arg(long, conflicts_with = "all", required_unless_present = "all")]
+    /// ID of a trashed item shown by `pm trash`.
+    #[arg(long)]
     pub id: Option<usize>,
-    /// Permanently erase every entry in trash.
-    #[arg(long, conflicts_with = "id", required_unless_present = "id")]
+    /// Permanently erase every item in trash.
+    #[arg(long)]
     pub all: bool,
     /// Confirm permanent trash deletion without prompting (required for scripts).
     #[arg(long)]
@@ -969,7 +1144,7 @@ pub struct SearchArgs {
     /// names, and non-secret custom-field values.
     #[arg(required_unless_present_any = ["name", "username", "url", "notes", "kind", "totp", "no_totp", "weak", "stale_days", "tags", "favorites"])]
     pub query: Option<String>,
-    /// Require this text in the entry name.
+    /// Require this text in the item name.
     #[arg(long)]
     pub name: Option<String>,
     /// Require this text in the username.
@@ -1028,7 +1203,7 @@ pub enum TotpCommands {
         #[arg(long)]
         watch: bool,
     },
-    /// Remove the authenticator configuration from an entry.
+    /// Remove the authenticator configuration from an item.
     Remove {
         #[command(flatten)]
         target: EntryArgs,
@@ -1041,7 +1216,7 @@ pub enum DuoCommands {
     Enroll {
         #[command(flatten)]
         target: EntryArgs,
-        /// Replace this entry's existing authenticator or Duo enrollment.
+        /// Replace this item's existing authenticator or Duo enrollment.
         #[arg(long)]
         replace: bool,
         /// Override the passcode mode; by default use Duo's enrollment response.
@@ -1101,11 +1276,11 @@ pub struct EntryArgs {
     /// Item name. Matches exactly, or ignoring case when only one item matches.
     #[arg(value_name = "NAME")]
     pub item: Option<String>,
-    /// Select an entry by its stable numeric ID (shown by `pm view`).
+    /// Select an item by its numeric ID (shown by `pm list`).
     #[arg(long)]
     pub id: Option<usize>,
-    /// Select an entry by name; same as the NAME argument.
-    #[arg(long, hide_short_help = true)]
+    /// Select an item by name; same as the NAME argument.
+    #[arg(long, hide = true)]
     pub entry_name: Option<String>,
 }
 
@@ -1117,15 +1292,14 @@ pub struct UpdateArgs {
     /// Replace the username or secondary identifier; an empty value clears it.
     #[arg(long)]
     pub username: Option<String>,
-    /// Prompt for and replace the primary secret.
+    /// Prompt for and replace the password (or other secret).
     #[arg(long, default_value_t = false)]
     pub password: bool,
-    /// Generate the replacement secret instead of prompting for it.
+    /// Generate a replacement password instead of prompting (implies --password).
     #[arg(
         long = "generate-password",
         visible_alias = "generate",
-        default_value_t = false,
-        requires = "password"
+        default_value_t = false
     )]
     pub generate_password: bool,
     /// Replace the primary URL.

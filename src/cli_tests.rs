@@ -28,6 +28,41 @@ fn every_visible_command_and_argument_has_help_text() {
 }
 
 #[test]
+fn root_help_groups_list_every_visible_command_exactly_once() {
+    let mut grouped: Vec<&str> = COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, names)| names.iter().copied())
+        .collect();
+    let mut visible: Vec<String> = Cli::command()
+        .get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(|command| command.get_name().to_owned())
+        .chain(["help".to_owned()])
+        .collect();
+    grouped.sort_unstable();
+    visible.sort_unstable();
+    assert_eq!(grouped, visible);
+}
+
+#[test]
+fn delete_usage_names_one_target_and_update_generate_implies_password() {
+    let mut command = Cli::command();
+    let usage = command
+        .find_subcommand_mut("delete")
+        .unwrap()
+        .render_usage()
+        .to_string();
+    assert!(!usage.contains("--id <ID> --entry-name"), "{usage}");
+    assert!(Cli::try_parse_from(["pm", "update", "github", "--generate"]).is_ok());
+    let cli = Cli::try_parse_from(["pm", "--password-stdin", "unlock", "--vault", "Work"]).unwrap();
+    assert!(cli.password_stdin);
+    assert!(matches!(
+        cli.command,
+        Some(CliCommands::Unlock { vault_file: Some(ref name), .. }) if name == "Work"
+    ));
+}
+
+#[test]
 fn global_port_override_parses_and_rejects_zero() {
     let cli = Cli::try_parse_from(["pm", "--port", "8787", "status"]).unwrap();
     assert_eq!(cli.port, Some(8787));
@@ -326,7 +361,7 @@ fn typed_items_multiple_urls_and_list_options_parse() {
     let export = Cli::try_parse_from(["pm", "export", "--path", "vault.json", "--force"]).unwrap();
     assert!(matches!(
         export.command,
-        Some(CliCommands::Export { path, force }) if path == "vault.json" && force
+        Some(CliCommands::Export { path, force, .. }) if path == "vault.json" && force
     ));
 
     assert!(
@@ -472,8 +507,10 @@ fn get_output_options_require_explicit_secret_disclosure() {
     assert!(
         matches!(cli.command, Some(CliCommands::Get { field: Some(ref name), copy: true, .. }) if name == "recovery-code")
     );
+    // --copy alone now copies the primary secret explicitly.
+    assert!(Cli::try_parse_from(["pm", "get", "--id", "1", "--copy"]).is_ok());
     for flags in [
-        vec!["--copy"],
+        vec!["--copy", "--password-only"],
         vec!["--field", ""],
         vec!["--password-only", "--reveal-secrets"],
         vec!["--field", "token", "--password-only"],

@@ -2210,6 +2210,69 @@ fn tag_and_favorite_filters_narrow_the_item_list() {
     let _ = app.update(Message::FilterFavorites(false));
     let _ = app.update(Message::Search("home".into()));
     assert_eq!(*app.matching_items(), vec![1], "search matches tags");
+
+    // One action clears every filter, including tags and favorites.
+    let _ = app.update(Message::FilterTag(Some("Work".into())));
+    let _ = app.update(Message::FilterFavorites(true));
+    let _ = app.update(Message::FilterKind(Some(ItemKind::Wifi)));
+    assert!(app.matching_items().is_empty());
+    let _ = app.update(Message::ClearFilters);
+    assert_eq!(app.matching_items().len(), 3);
+    assert!(app.query.is_empty() && app.ui.tag.is_none() && !app.ui.favorites_only);
+
+    // Arrow keys select the first item, then move along the list.
+    app.item = None;
+    app.editor = Editor::Closed;
+    let _ = app.update(Message::SelectAdjacent(true));
+    assert!(app.busy(), "selecting an item requests its details");
+}
+
+#[test]
+fn adjacent_selection_follows_list_order_and_stops_at_the_ends() {
+    let mut app = unlocked();
+    let summary = |id: usize| ItemSummary {
+        tags: vec![],
+        favorite: false,
+        id,
+        revision: 1,
+        name: format!("Item {id}"),
+        username: None,
+        kind: ItemKind::Login,
+        urls: vec![],
+        has_totp: false,
+        has_duo: false,
+    };
+    app.query.clear();
+    app.replace_items(vec![summary(1), summary(2), summary(3)]);
+    app.item = None;
+    assert_eq!(app.adjacent_item(true), Some(1));
+    assert_eq!(app.adjacent_item(false), Some(3));
+    app.ui.reverse_items = true;
+    assert_eq!(
+        app.adjacent_item(true),
+        Some(3),
+        "reversed lists start from the end"
+    );
+}
+
+#[test]
+fn closing_an_unlocked_window_asks_whether_to_lock() {
+    let mut app = unlocked();
+    app.editor = Editor::Closed;
+    let id = iced::window::Id::unique();
+    let _ = app.request_close(id);
+    assert_eq!(app.ui.confirm_lock_close, Some(id));
+    let _ = app.update(Message::CloseWindow(true));
+    assert_eq!(app.ui.confirm_lock_close, None);
+    assert_eq!(app.ui.close_after_lock, Some(id));
+    assert!(app.busy(), "locking runs before the window closes");
+
+    let mut keep = unlocked();
+    keep.editor = Editor::Closed;
+    keep.conf.desktop.close_action = password_manager::config::CloseAction::KeepUnlocked;
+    let _ = keep.request_close(id);
+    assert_eq!(keep.ui.confirm_lock_close, None);
+    assert!(!keep.busy());
 }
 
 /// A status reply for the unlocked session the tests use.
@@ -2299,4 +2362,70 @@ fn passkey_requests_are_confirmed_in_the_desktop_without_keeping_the_secret() {
     let _ = app.update(Message::SavePasskeyPin(true));
     assert!(app.busy());
     assert!(app.ui.pin_new.expose().is_empty() && app.ui.pin_confirm.expose().is_empty());
+}
+
+#[test]
+fn bulk_trash_confirms_then_changes_each_selected_item_in_turn() {
+    let mut app = unlocked();
+    app.editor = Editor::Closed;
+    app.query.clear();
+    let summary = |id: usize| ItemSummary {
+        tags: vec![],
+        favorite: false,
+        id,
+        revision: 1,
+        name: format!("Item {id}"),
+        username: None,
+        kind: ItemKind::Login,
+        urls: vec![],
+        has_totp: false,
+        has_duo: false,
+    };
+    app.replace_items(vec![summary(1), summary(2), summary(3)]);
+    let _ = app.update(Message::ToggleSelecting);
+    let _ = app.update(Message::SelectItem(1));
+    let _ = app.update(Message::SelectItem(3));
+    let _ = app.update(Message::SelectItem(1));
+    let _ = app.update(Message::SelectItem(1));
+    assert_eq!(
+        app.ui.selected.iter().copied().collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    // Trash asks first; nothing is sent until confirmed.
+    let _ = app.update(Message::BulkStart(BulkOp::Trash));
+    assert!(app.ui.bulk_confirm);
+    assert!(!app.busy());
+    let _ = app.update(Message::BulkConfirm);
+    assert!(app.busy());
+    assert_eq!(
+        app.ui.bulk.as_ref().unwrap().queue.len(),
+        1,
+        "one sent, one waiting"
+    );
+
+    let session = "a".repeat(64);
+    let done = || {
+        reply(
+            ResponsePayload::Message("Item moved to trash.".into()),
+            Some(&session),
+        )
+    };
+    let _ = app.complete(Job::Bulk, done());
+    assert_eq!(app.ui.bulk.as_ref().unwrap().queue.len(), 0);
+    let _ = app.complete(Job::Bulk, done());
+    assert!(app.ui.bulk.is_none());
+    assert!(app.notice.contains("Moved 2 items"), "{}", app.notice);
+    assert!(!app.ui.selecting && app.ui.selected.is_empty());
+
+    // Tagging needs a tag. (The finished batch reloaded the list; let that settle.)
+    app.request_state = RequestState::Idle;
+    let _ = app.update(Message::ToggleSelecting);
+    let _ = app.update(Message::SelectAllShown);
+    assert_eq!(app.ui.selected.len(), 3);
+    let _ = app.update(Message::BulkStart(BulkOp::Tag(String::new())));
+    assert!(app.ui.bulk.is_none());
+    let _ = app.update(Message::BulkTag("work".into()));
+    let _ = app.update(Message::BulkStart(BulkOp::Tag(String::new())));
+    assert_eq!(app.ui.bulk.as_ref().unwrap().op, BulkOp::Tag("work".into()));
 }

@@ -8,7 +8,17 @@ test("picker derives safe titles, labels, and empty states", () => {
     assert.equal(picker.itemLabel({ name: "Primary", username: "alice" }), "Primary");
     assert.equal(picker.itemLabel({ username: "alice" }), "alice");
     assert.equal(picker.itemLabel({}), "Unnamed item");
-    assert.equal(picker.status([]), "No saved items match this site");
+    assert.match(picker.status([]), /No saved login matches this site/);
+    assert.match(picker.status([], "payment-card"), /No payment cards/);
+    assert.match(picker.status([], "identity"), /No identities/);
+    assert.match(picker.status([], "totp"), /one-time code/);
+    assert.match(picker.status([], "unknown"), /No saved login/);
+    // Each failure gets the recovery that can fix it.
+    assert.equal(picker.failure("The vault is locked. Unlock it, then try again."), "locked");
+    assert.equal(picker.failure("Secure picker expired"), "expired");
+    assert.equal(picker.failure("Native host has exited"), "disconnected");
+    assert.equal(picker.failure("Selection failed"), "other");
+    assert.equal(picker.failure(), "other");
     assert.match(picker.status([{}]), /Enter/);
     assert.equal(picker.initial({ name: " émile" }), "É");
     assert.equal(picker.initial({ name: "!!" }), "•");

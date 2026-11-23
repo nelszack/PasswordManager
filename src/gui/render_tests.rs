@@ -28,8 +28,19 @@ impl widget::Operation for Controls {
     }
 }
 
+/// The window loads the icon font at startup; offscreen renders need it too.
+fn load_icon_font() {
+    iced::advanced::graphics::text::font_system()
+        .write()
+        .expect("font system")
+        .load_font(std::borrow::Cow::Borrowed(include_bytes!(
+            "../../assets/material-icons.ttf"
+        )));
+}
+
 fn render(app: &App, name: &str, width: u32, height: u32, scale: f32) -> Controls {
     use renderer::{Headless, Renderer as _};
+    load_icon_font();
     let size = Size::new(width as f32 / scale, height as f32 / scale);
     let viewport = Rectangle::with_size(size);
     let theme = app.theme();
@@ -159,22 +170,15 @@ fn accessibility_tree_keeps_button_labels_focus_and_passwords_protected() {
             .iter()
             .any(|(id, _)| *id == accessible.update.focus)
     );
-    // The button's visible label must be its descendant, not a sibling orphaned
-    // by the application's keyboard wrapper.
-    let settings = accessible
-        .update
-        .nodes
-        .iter()
-        .find(|(_, node)| node.value() == Some("Settings"))
-        .unwrap()
-        .0;
+    // Tabs show an icon beside their label; the button itself carries the label as
+    // its accessible name, so the decorative icon character is never announced.
     assert!(
         accessible
             .update
             .nodes
             .iter()
             .any(|(_, node)| format!("{:?}", node.role()) == "Button"
-                && node.children().contains(&settings))
+                && node.label() == Some("Settings"))
     );
 }
 
@@ -190,7 +194,7 @@ fn accessible_names_feedback_and_selection_follow_the_visible_form() {
         tree.update
             .nodes
             .iter()
-            .any(|(_, node)| node.label() == Some("Password length (1–255)"))
+            .any(|(_, node)| node.label() == Some("Password length (8–255)"))
     );
     assert!(
         tree.update
@@ -199,23 +203,15 @@ fn accessible_names_feedback_and_selection_follow_the_visible_form() {
             .any(|(_, node)| node.label() == Some("Synthetic item saved")
                 && format!("{:?}", node.live()).contains("Polite"))
     );
-    let generator_label = tree
-        .update
-        .nodes
-        .iter()
-        .find(|(_, node)| node.value() == Some("Generator"))
-        .unwrap()
-        .0;
     assert!(
         tree.update
             .nodes
             .iter()
-            .any(|(_, node)| node.children().contains(&generator_label)
-                && node.is_selected() == Some(true))
+            .any(|(_, node)| node.label() == Some("Generator") && node.is_selected() == Some(true))
     );
     app.generation.passphrase = true;
     let tree = accessibility_tree(&app, None);
-    for label in ["Number of words (1–255)", "Word separator"] {
+    for label in ["Number of words (3–64)", "Word separator"] {
         assert!(
             tree.update
                 .nodes
@@ -443,9 +439,9 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
     let started = Instant::now();
     let first = render(&app, "large-vault", 1060, 800, 1.0);
     assert!(first.1.iter().any(|label| label == "Account 0000"));
-    assert!(first.1.iter().any(|label| label == "Next page"));
+    assert!(first.1.iter().any(|label| label == "Next 200"));
     assert!(!first.1.iter().any(|label| label == "Account 1999"));
-    app.ui.item_page = 39;
+    app.ui.item_page = 9;
     let last = render(&app, "large-vault-last", 1060, 800, 1.0);
     assert!(last.1.iter().any(|label| label == "Account 1999"));
     assert!(!last.1.iter().any(|label| label == "Account 0000"));

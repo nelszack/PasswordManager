@@ -23,6 +23,19 @@ test("the Firefox manifest loads the worker's scripts as an event page with a fi
     assert.throws(() => backgroundImports("// no imports"), /importScripts/);
 });
 
+test("the pinned Chrome key yields the native host's default extension ID", () => {
+    const chrome = JSON.parse(read("manifest.json"));
+    const digest = require("node:crypto")
+        .createHash("sha256")
+        .update(Buffer.from(chrome.key, "base64"))
+        .digest("hex")
+        .slice(0, 32);
+    const id = [...digest].map(c => String.fromCharCode(97 + parseInt(c, 16))).join("");
+    const rust = fs.readFileSync(path.join(__dirname, "../src/native_messaging.rs"), "utf8");
+    assert.ok(rust.includes(`CHROME_EXTENSION_ID: &str = "${id}"`), id);
+    assert.equal(firefoxManifest(chrome, read("background.js")).key, undefined, "Firefox ignores Chrome keys");
+});
+
 test("the Firefox add-on ID matches the native host's default", () => {
     const rust = fs.readFileSync(path.join(__dirname, "../src/native_messaging.rs"), "utf8");
     assert.ok(rust.includes(`FIREFOX_EXTENSION_ID: &str = "${FIREFOX_EXTENSION_ID}"`));

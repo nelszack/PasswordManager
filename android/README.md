@@ -372,6 +372,13 @@ synthetic login form in the test APK and taps a named suggestion through Android
 autofill framework, checking that it fills without another picker. Both bind Rust
 to temporary cache storage before launching UI. They do not exercise a personal
 vault or prove that a particular browser/keyboard renders inline suggestions.
+On a fresh emulator, first select this app as the autofill service
+(`adb shell settings put secure autofill_service
+dev.nelszack.passwordmanager/.VaultAutofillService`) and disable the default
+keyboard (`adb shell ime disable
+com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME`):
+Gboard shows suggestions inline in its own strip, where `AutofillDirectFillTest`
+cannot see them.
 Do not run these isolated classes together: the JNI storage path is cached for
 the lifetime of the process. After testing, force-stop the main app and remove
 only `dev.nelszack.passwordmanager.test`; reopening the main app then restores its

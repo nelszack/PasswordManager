@@ -2,7 +2,10 @@ use super::*;
 use iced::{Color, theme::Palette};
 use password_manager::config::Appearance;
 
+/// Tool results (search, trash, audit) per page.
 pub(super) const PAGE_SIZE: usize = 50;
+/// Vault list items per page; long enough that most vaults scroll as one list.
+pub(super) const ITEM_PAGE_SIZE: usize = 200;
 
 /// Shared bounds for the item list and tool results. Empty lists retain page 1.
 pub(super) struct Page {
@@ -12,13 +15,20 @@ pub(super) struct Page {
 }
 impl Page {
     pub fn new(requested: usize, total: usize) -> Self {
-        let pages = total.div_ceil(PAGE_SIZE).max(1);
+        Self::sized(requested, total, PAGE_SIZE)
+    }
+    /// The vault item list's page window.
+    pub fn items(requested: usize, total: usize) -> Self {
+        Self::sized(requested, total, ITEM_PAGE_SIZE)
+    }
+    fn sized(requested: usize, total: usize, size: usize) -> Self {
+        let pages = total.div_ceil(size).max(1);
         let index = requested.min(pages - 1);
-        let start = index * PAGE_SIZE;
+        let start = index * size;
         Self {
             index,
             pages,
-            range: start..start.saturating_add(PAGE_SIZE).min(total),
+            range: start..start.saturating_add(size).min(total),
         }
     }
 }
@@ -27,27 +37,33 @@ impl Page {
 pub(super) enum SettingsSection {
     #[default]
     Appearance,
+    Vault,
     Security,
     Passwords,
     Recovery,
     Connection,
+    Sync,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Appearance,
+        Self::Vault,
         Self::Security,
         Self::Passwords,
         Self::Recovery,
+        Self::Sync,
         Self::Connection,
     ];
     pub fn title(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Vault => "This vault",
             Self::Security => "Security",
             Self::Passwords => "Passwords",
             Self::Recovery => "Recovery",
-            Self::Connection => "Connection",
+            Self::Connection => "Browser & service",
+            Self::Sync => "Sync",
         }
     }
 }
@@ -63,8 +79,12 @@ pub(super) struct ScaleChoice(pub u16);
 impl std::fmt::Display for ScaleChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label = match self.0 {
-            115 => "Larger",
-            130 => "Largest",
+            // In increasing order, so each step reads larger than the last.
+            115 => "Large",
+            130 => "Larger",
+            150 => "Extra large",
+            175 => "Huge",
+            200 => "Largest",
             _ => "Standard",
         };
         write!(f, "{}% · {label}", self.0)
@@ -83,10 +103,13 @@ pub(super) struct State {
     search_text: std::cell::RefCell<std::collections::HashMap<usize, SearchText>>,
     pub progress: String,
     pub progress_started: Option<Instant>,
-    pub page_input: String,
     pub reverse_items: bool,
     pub item_page: usize,
     pub confirm_close: Option<iced::window::Id>,
+    /// Asking whether to lock before closing this window.
+    pub confirm_lock_close: Option<iced::window::Id>,
+    /// Close this window once the requested lock completes.
+    pub close_after_lock: Option<iced::window::Id>,
     pub transfer_generated: bool,
     pub width: f32,
     pub height: f32,
@@ -96,6 +119,7 @@ pub(super) struct State {
     pub editor_show_secret: bool,
     pub generator_advanced: bool,
     pub shortcuts: bool,
+    pub troubleshooting: bool,
     pub settings_section: SettingsSection,
     pub kind: Option<ItemKind>,
     pub tag: Option<String>,
@@ -114,11 +138,38 @@ pub(super) struct State {
     /// A one-time notice from the service, such as a vault format upgrade.
     pub format_notice: Option<String>,
     pub notice_error: bool,
+    /// The open item's notes are shown (hidden again with other secrets).
+    pub notes_visible: bool,
     pub confirm_stop: bool,
+    /// An item to show as soon as the vault is unlocked and its list loads.
+    pub open_after_unlock: Option<usize>,
+    /// Saved settings only apply after the service restarts.
+    pub restart_needed: bool,
+    /// Start the service again once the current stop finishes.
+    pub restart_after_stop: bool,
     pub active_vault: Option<(String, String)>,
     pub undo_trash: Option<(usize, String)>,
     pub vault_name: String,
     pub master_error: Option<&'static str>,
+    /// Selection mode in the item list, and the chosen item IDs.
+    pub selecting: bool,
+    pub selected: std::collections::BTreeSet<usize>,
+    /// The tag typed for "Add tag" in selection mode.
+    pub bulk_tag: String,
+    /// A bulk move to trash waiting for confirmation.
+    pub bulk_confirm: bool,
+    /// A bulk change in progress: one request at a time.
+    pub bulk: Option<super::Bulk>,
+    /// The master password is shown while typing.
+    pub master_visible: bool,
+    /// The last unlock or create failure, shown under the password field.
+    pub unlock_error: Option<String>,
+    /// The operating system prefers a light theme ("Match system").
+    pub system_light: bool,
+    /// Strength of the new master password, scored when it changes.
+    pub master_strength: Option<super::model::Strength>,
+    /// A generated master passphrase shown once so it can be written down.
+    pub suggested_master: Option<SecretString>,
     pub saved_item: Option<SavedItem>,
 }
 
@@ -138,10 +189,11 @@ impl Default for State {
             search_text: std::cell::RefCell::default(),
             progress: String::new(),
             progress_started: None,
-            page_input: String::new(),
             reverse_items: false,
             item_page: 0,
             confirm_close: None,
+            confirm_lock_close: None,
+            close_after_lock: None,
             transfer_generated: false,
             width: 1060.0,
             height: 760.0,
@@ -151,6 +203,7 @@ impl Default for State {
             editor_show_secret: false,
             generator_advanced: false,
             shortcuts: false,
+            troubleshooting: false,
             settings_section: SettingsSection::default(),
             kind: None,
             tag: None,
@@ -163,8 +216,22 @@ impl Default for State {
             pin_confirm: SecretString::default(),
             format_notice: None,
             notice_error: false,
+            notes_visible: false,
             confirm_stop: false,
+            open_after_unlock: None,
+            restart_needed: false,
+            restart_after_stop: false,
             master_error: None,
+            system_light: false,
+            unlock_error: None,
+            master_visible: false,
+            selecting: false,
+            selected: std::collections::BTreeSet::new(),
+            bulk_tag: String::new(),
+            bulk_confirm: false,
+            bulk: None,
+            master_strength: None,
+            suggested_master: None,
             saved_item: None,
             active_vault: None,
             undo_trash: None,
@@ -180,6 +247,7 @@ pub(super) enum Disclosure {
     Authenticators,
     Generator,
     Shortcuts,
+    Troubleshooting,
 }
 
 impl App {
@@ -188,7 +256,13 @@ impl App {
     }
 
     pub(super) fn theme(&self) -> Theme {
-        match self.settings.appearance {
+        let appearance = match self.settings.appearance {
+            Appearance::System if self.ui.system_light => Appearance::Light,
+            Appearance::System => Appearance::Dark,
+            chosen => chosen,
+        };
+        match appearance {
+            Appearance::System => unreachable!("resolved above"),
             Appearance::Light => Theme::custom_with_fn(
                 "Daylight",
                 Palette {
@@ -259,7 +333,7 @@ impl App {
     }
 
     pub(super) fn scale_factor(&self) -> f32 {
-        f32::from(self.settings.scale.clamp(100, 130)) / 100.0
+        f32::from(self.settings.scale.clamp(100, 200)) / 100.0
     }
 
     pub(super) fn vault_choices(&self) -> Vec<vault_names::Choice> {

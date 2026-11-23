@@ -165,6 +165,20 @@ fn manager() -> Result<&'static mpsc::Sender<ClipboardCommand>, String> {
         .map_err(Clone::clone)
 }
 
+/// A short, readable reason for a clipboard failure. Backend errors such as
+/// "X11 server connection timed out" mean there is no graphical session here.
+pub fn describe_error(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if ["x11", "wayland", "display", "no clipboard"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "no clipboard is available here (no graphical session)".into()
+    } else {
+        error.to_owned()
+    }
+}
+
 pub fn copy_in_background(secret: String, timeout: u8) {
     if let Err(error) = try_copy_in_background(secret, timeout) {
         eprintln!("Warning: could not copy secret: {error}");

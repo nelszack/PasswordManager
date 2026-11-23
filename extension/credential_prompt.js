@@ -7,6 +7,10 @@ const usernameInput = document.getElementById("username");
 const usernameLabel = document.getElementById("usernameLabel");
 const updateButton = document.getElementById("update");
 const updateNote = document.getElementById("updateNote");
+const passwordMask = document.getElementById("passwordMask");
+const passwordInput = document.getElementById("password");
+const revealButton = document.getElementById("revealPassword");
+let passwordEdited = false;
 let completing = false;
 let uncertain = false;
 
@@ -30,6 +34,8 @@ async function complete(action) {
             action,
             name: nameInput.value,
             username: usernameInput.value,
+            // Only a revealed, edited password replaces the captured one.
+            ...(passwordEdited && passwordInput.value ? { password: passwordInput.value } : {}),
         },
     });
     if (response?.success) window.close();
@@ -57,9 +63,15 @@ async function load() {
     usernameInput.hidden = !data.askForUsername;
     usernameLabel.hidden = !data.askForUsername;
     updateButton.hidden = !data.hasAccounts;
+    // One primary action: update when an account matches, otherwise save new.
+    const updateFirst = data.hasAccounts && !data.askForUsername && Boolean(data.updateTarget) && !data.updateNote;
+    updateButton.className = updateFirst ? "primary" : "";
+    document.getElementById("add").className = updateFirst ? "" : "primary";
     if (data.updateTarget?.name) {
         updateButton.textContent = `Update “${data.updateTarget.name}”`;
     }
+    const length = Number(data.passwordLength) || 0;
+    passwordMask.textContent = length ? `${"•".repeat(Math.min(length, 16))} (${length} characters)` : "";
     updateNote.textContent = data.updateNote || "";
     updateNote.hidden = !data.hasAccounts || !data.updateNote;
     form.hidden = false;
@@ -78,6 +90,55 @@ document.getElementById("cancel").addEventListener("click", event => {
 });
 document.getElementById("never").addEventListener("click", event => {
     if (event.isTrusted) complete("never").catch(showError);
+});
+
+// Like the desktop and Android apps, a shown password hides again after 15 seconds
+// without editing, or when this window loses focus. Edits are kept.
+let concealTimer = null;
+function concealPassword() {
+    clearTimeout(concealTimer);
+    passwordInput.hidden = true;
+    passwordMask.hidden = false;
+    revealButton.textContent = "Show";
+}
+function concealLater() {
+    clearTimeout(concealTimer);
+    concealTimer = setTimeout(concealPassword, 15000);
+    concealTimer?.unref?.();
+}
+globalThis.addEventListener?.("blur", () => {
+    if (!passwordInput.hidden) concealPassword();
+});
+
+// Review or correct the captured password before saving.
+revealButton.addEventListener("click", async event => {
+    if (!event.isTrusted) return;
+    if (!passwordInput.hidden) {
+        concealPassword();
+        return;
+    }
+    if (!passwordEdited) {
+        const response = await send({ action: "revealCredentialPassword", token });
+        if (!response?.success) {
+            showError(new Error(response?.error || "Password unavailable"));
+            return;
+        }
+        passwordInput.value = response.password;
+    }
+    passwordInput.hidden = false;
+    passwordMask.hidden = true;
+    revealButton.textContent = "Hide";
+    passwordInput.focus();
+    concealLater();
+});
+passwordInput.addEventListener("input", () => {
+    passwordEdited = true;
+    concealLater();
+    passwordMask.textContent = `${"•".repeat(Math.min(passwordInput.value.length, 16))} (${passwordInput.value.length} characters)`;
+});
+// Escape means "Not now", like closing the window.
+document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && event.isTrusted && !event.repeat) complete("cancel").catch(showError);
 });
 
 document.getElementById("reviewOutcome").addEventListener("click", event => {

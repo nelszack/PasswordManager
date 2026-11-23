@@ -103,23 +103,25 @@ file, and integration workflows described in the
 For the terminal workflow, existing commands work as before:
 
 ```bash
-pm start
-pm new
-pm unlock
+pm new --name Personal
 pm add --name "Example account" --username alice --url https://example.com
 pm view
-pm get --entry-name "Example account"
+pm get "Example account" --copy
 pm lock
+pm unlock
 ```
 
-`pm new` prompts twice for a master password and leaves the new vault locked.
-New passwords must be at least 14 characters and pass a predictability check.
-Entry secrets are entered through hidden prompts. By default, `get` redacts
-secrets in its output and copies the primary secret with timed clipboard cleanup.
+`pm new` prompts twice for a master password, names the vault on this device,
+and opens it (add `--locked` to leave it locked). New passwords must be at least
+14 characters and pass a predictability check. Item secrets are entered through
+hidden prompts; scripts can pipe them with `pm --password-stdin …`. `get` hides
+secrets in its output and copies the password only with `--copy`, clearing the
+clipboard after the configured timeout.
 
 Use `pm status` to check the server and `pm kill` to stop it. The server holds
-one unlocked vault at a time. With multiple vaults, list IDs with `pm vaults`,
-then use `pm unlock --vault-file ID` or configure a default vault.
+one unlocked vault at a time. With several vaults, `pm vaults` lists their names
+and files; open one with `pm unlock --vault NAME` or configure a default vault.
+A key file finds its own vault.
 External-key vaults are also supported; keep keys outside application data and
 separate from the vault. See [vault creation](docs/user-guide.md#create-your-first-vault).
 
@@ -165,18 +167,22 @@ separately, issue a credential per device, and connect with
    `node scripts/package_extension.cjs --browser firefox DIR` (release archives
    include it), load it, and run `pm native-host install --browser firefox`;
    see [Firefox setup](docs/user-guide.md#firefox).
-2. Copy its ID from `chrome://extensions`, then register the native host:
+2. Turn on browser integration in the desktop app (**Settings → Browser &
+   service**), or run:
 
    ```bash
-   pm native-host install --extension-id YOUR_EXTENSION_ID --browser chrome
+   pm native-host install --browser chrome
    ```
 
-   Use `--browser chromium` or `--browser helium` as appropriate, then reload
-   the extension. On Windows, fully exit and reopen Helium after registration.
-3. Start the server and unlock a vault in the desktop app or CLI. Use the key
-   button beside a login field, or `Ctrl+Shift+L`, to choose an account. Edit
-   vaults in the desktop app or CLI. The popup shows status, opens the desktop
-   app to unlock, locks, and reviews uncertain operation outcomes.
+   The extension's ID is fixed by its manifest, so no ID needs copying. Use
+   `--browser chromium` or `--browser helium` as appropriate, then reload the
+   extension. On Windows, fully exit and reopen Helium after registration.
+3. Unlock a vault in the desktop app or CLI. The toolbar popup lists the logins
+   saved for the current site, fills one into the page, copies usernames,
+   passwords, and one-time codes (the desktop service clears the clipboard
+   afterwards), and can save a new login with a generated password. The key
+   button beside a login field, or `Ctrl+Shift+L`, opens the secure account
+   picker.
 
 Autofill and save prompts operate on HTTPS pages. Credentials match saved
 origins, including scheme and port; subdomain sharing requires an explicit
@@ -198,7 +204,7 @@ pm config --password-history-limit 20 --trash-retention-days 30
 
 Defaults include a 12-character generated password, 15-second clipboard cleanup,
 15-minute inactivity lock, ten password revisions, no trash expiration, and
-loopback server port `7878`. Restart the server after changing recovery settings.
+loopback server port `7878`. Restart the server after changing recovery settings (the desktop app offers **Restart service now** under Settings).
 Use `pm config --reset` to restore defaults.
 
 On Linux, configuration lives in `~/.config/password_manager` and data in
@@ -254,3 +260,11 @@ packaging. See the [fuzzing guide](fuzz/README.md) for fuzz targets and reproduc
 
 Android builds, JVM tests/lint, and isolated emulator/phone checks are separate;
 follow [Android development](docs/development.md#android-development).
+
+## Third-party assets
+
+The desktop app's icons come from a small subset of Google's
+[Material Icons](https://github.com/google/material-design-icons)
+(`assets/material-icons.ttf`), used under the Apache License 2.0; see
+`assets/LICENSE-material-icons.txt`. `scripts/subset_icon_font.py` regenerates the
+font and `src/gui/icon_chars.rs` together when an icon is added.

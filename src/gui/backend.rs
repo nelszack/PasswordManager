@@ -72,7 +72,7 @@ pub fn attach(client: &AuthenticatedClient) -> Result<Reply, Failure> {
 pub fn discover_vaults() -> Result<Reply, Failure> {
     Ok(Reply::Vaults {
         vaults: cached_vaults_at(&data_dir(), true)?,
-        names: super::vault_names::Names::read(&config_dir().join("vault-names.json"))
+        names: super::vault_names::Names::read(&super::vault_names::path())
             .map_err(Failure::from)?,
     })
 }
@@ -123,7 +123,7 @@ fn reload_settings_at(path: &std::path::Path) -> Result<Reply, Failure> {
 }
 
 pub fn save_vault_name(id: &str, label: &str) -> Result<Reply, Failure> {
-    super::vault_names::Names::save(&config_dir().join("vault-names.json"), id, label)
+    super::vault_names::Names::save(&super::vault_names::path(), id, label)
         .map(Reply::Names)
         .map_err(Failure::from)
 }
@@ -135,12 +135,13 @@ pub fn open_created(
     password: SecretString,
     timeout: u64,
 ) -> Result<Reply, Failure> {
-    let names = super::vault_names::Names::save(&config_dir().join("vault-names.json"), &id, &name)
-        .map_err(|message| {
+    let names = super::vault_names::Names::save(&super::vault_names::path(), &id, &name).map_err(
+        |message| {
             Failure::from(format!(
                 "Your vault was created but is still locked. {message}"
             ))
-        })?;
+        },
+    )?;
     let reply = request(
         client,
         RequestEnvelope::new(password_manager::types::ServerCommand::Unlock(

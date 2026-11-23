@@ -64,7 +64,8 @@ fn validates_firefox_add_on_ids_and_uses_firefox_allow_lists() {
         manifest_file_name(NativeBrowser::Chrome),
         format!("{HOST_NAME}.json")
     );
-    assert!(install(None, NativeBrowser::Chrome).is_err());
+    // Chrome-family installs default to the ID pinned by the manifest key.
+    validate_extension_id(CHROME_EXTENSION_ID, NativeBrowser::Chrome).unwrap();
 }
 
 #[test]
@@ -602,7 +603,10 @@ fn desktop_launch_does_not_need_a_vault_server_and_preserves_errors() {
         let expected = outcome.clone();
         let request: NativeRequest =
             serde_json::from_value(json!({"id": 91, "action": "openDesktop"})).unwrap();
-        let response = handle_request_with_launcher(&client, request, || outcome);
+        let response = handle_request_with_launcher(&client, request, |item| {
+            assert_eq!(item, None);
+            outcome
+        });
         assert_eq!(response.id, 91);
         assert_eq!(response.success, expected.is_ok());
         assert_eq!(response.error, expected.err());
@@ -612,10 +616,18 @@ fn desktop_launch_does_not_need_a_vault_server_and_preserves_errors() {
         json!({"id": 92, "action": "openDesktop", "domain": "https://example.com"}),
     )
     .unwrap();
-    let response = handle_request_with_launcher(&client, request, || {
+    let response = handle_request_with_launcher(&client, request, |_| {
         panic!("invalid requests must not launch")
     });
     assert!(!response.success);
+    // "Open in desktop app" passes the item ID to the launcher.
+    let request: NativeRequest =
+        serde_json::from_value(json!({"id": 93, "action": "openDesktop", "entryId": 7})).unwrap();
+    let response = handle_request_with_launcher(&client, request, |item| {
+        assert_eq!(item, Some(7));
+        Ok(())
+    });
+    assert!(response.success);
 }
 
 #[cfg(feature = "desktop")]
@@ -796,4 +808,52 @@ fn passkey_requests_need_the_site_and_session_and_map_to_browser_commands() {
         NativeAction::GetPasskeys.policy().allowed_senders,
         ["background"]
     );
+}
+
+#[test]
+fn popup_copies_are_site_bound_and_read_the_configured_timeout() {
+    let valid = json!({
+        "id": 1,
+        "action": "copyLoginValue",
+        "domain": "https://example.com",
+        "entryId": 4,
+        "field": "totp",
+        "expectedRevision": 2,
+        "expectedSession": "a".repeat(64),
+    });
+    let mut parsed: NativeRequest = serde_json::from_value(valid.clone()).unwrap();
+    parsed.validate().unwrap();
+    assert!(matches!(
+        command_for_request(&mut parsed).unwrap(),
+        ServerCommand::BrowserCopy {
+            ref domain,
+            id: 4,
+            field: crate::types::BrowserCopyField::Totp,
+            ..
+        } if domain == "https://example.com"
+    ));
+    for field in ["domain", "field", "expectedSession", "expectedRevision"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        let request: NativeRequest = serde_json::from_value(missing).unwrap();
+        assert!(request.validate().is_err(), "{field}");
+    }
+    let mut notes = valid.clone();
+    notes["field"] = json!("notes");
+    assert!(serde_json::from_value::<NativeRequest>(notes).is_err());
+    // Copies never need an operation ID: repeating one changes nothing.
+    let mut with_operation = valid;
+    with_operation["operationId"] = json!("copy-1");
+    let request: NativeRequest = serde_json::from_value(with_operation).unwrap();
+    assert!(request.validate().is_err());
+
+    let mut generated: NativeRequest = serde_json::from_value(
+        json!({"id": 2, "action": "copyGenerated", "password": "generated"}),
+    )
+    .unwrap();
+    generated.validate().unwrap();
+    assert!(matches!(
+        command_for_request(&mut generated).unwrap(),
+        ServerCommand::CopyGenerated { ref value, .. } if value.expose() == "generated"
+    ));
 }

@@ -34,7 +34,7 @@ impl SyncHost for DesktopHost<'_> {
             Ok(Snapshot {
                 path,
                 id: hex::encode(vault.vault_id()),
-                session: session.session_id().ok_or("Vault locked")?,
+                session: session.session_id().ok_or(crate::protocol::VAULT_LOCKED)?,
                 bytes: std::mem::take(&mut *bytes),
                 state,
             })
@@ -96,11 +96,11 @@ struct Probe {
 async fn probe(worker: &VaultWorker, configured_server: String) -> Result<Probe, String> {
     worker
         .with_session(move |session| {
-            let vault = session.vault().ok_or("Vault locked")?;
+            let vault = session.vault().ok_or(crate::protocol::VAULT_LOCKED)?;
             let path = vault.sync_path()?;
             let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
             Ok(Probe {
-                session: session.session_id().ok_or("Vault locked")?,
+                session: session.session_id().ok_or(crate::protocol::VAULT_LOCKED)?,
                 revision: vault.vault_revision(),
                 binding: binding(&path)?,
                 configured_server,

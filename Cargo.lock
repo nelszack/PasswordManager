@@ -3187,6 +3187,7 @@ dependencies = [
  "rfd",
  "rmp-serde",
  "rpassword",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha1",
@@ -3353,6 +3354,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 name = "pm-client"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "pm-contracts",
  "pm-platform",
  "rmp-serde",

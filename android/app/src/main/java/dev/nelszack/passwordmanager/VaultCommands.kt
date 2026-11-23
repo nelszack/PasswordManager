@@ -206,6 +206,24 @@ object VaultCommands {
                 .put("favorite", favorite),
         )
 
+    /** Adds tags to an item, leaving every other detail (and its existing tags) unchanged. */
+    fun addTags(id: Long, tags: List<String>) =
+        command(
+            "update",
+            JSONObject()
+                .put("entry", JSONObject().put("target", target(id)).put("update", JSONObject()))
+                .put("kind", JSONObject.NULL)
+                .put("add_url", JSONArray())
+                .put("remove_url", JSONArray())
+                .put("clear_urls", false)
+                .put("set_fields", JSONArray())
+                .put("remove_fields", JSONArray())
+                .put("clear_fields", false)
+                .put("add_tags", JSONArray(tags))
+                .put("remove_tags", JSONArray())
+                .put("clear_tags", false),
+        )
+
     /** Deletes an attachment; adding and reading use the bridge's byte requests. */
     fun removeAttachment(id: Long, name: String) =
         command(

@@ -79,6 +79,11 @@ class FakeNode {
             (this.listeners.get(type) || []).filter(candidate => candidate !== listener)
         );
     }
+    // DOM-style dispatch for code that builds its own Event objects.
+    dispatchEvent(event) {
+        for (const listener of [...(this.listeners.get(event.type) || [])]) listener(event);
+        return true;
+    }
     dispatch(type, event = {}) {
         const dispatched = { type, target: this, isTrusted: true, preventDefault() {}, stopPropagation() {}, ...event };
         for (const listener of [...(this.listeners.get(type) || [])]) listener(dispatched);

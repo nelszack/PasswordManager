@@ -17,6 +17,66 @@ impl App {
                 self.ui.favorites_only = value;
                 self.ui.item_page = 0;
             }
+            Message::ToggleSelecting => {
+                self.ui.selecting = !self.ui.selecting;
+                self.ui.selected.clear();
+                self.ui.bulk_confirm = false;
+            }
+            Message::SelectItem(id) if self.ui.selecting => {
+                if !self.ui.selected.remove(&id) {
+                    self.ui.selected.insert(id);
+                }
+                self.ui.bulk_confirm = false;
+            }
+            Message::SelectAllShown if self.ui.selecting => {
+                // The same rows the list shows, including its reverse (Z–A) order.
+                let shown: Vec<usize> = {
+                    let matching = self.matching_items();
+                    let count = matching.len();
+                    let window = presentation::Page::items(self.ui.item_page, count);
+                    window
+                        .range
+                        .map(|offset| {
+                            let index = if self.ui.reverse_items {
+                                count - 1 - offset
+                            } else {
+                                offset
+                            };
+                            self.items[matching[index]].id
+                        })
+                        .collect()
+                };
+                self.ui.selected.extend(shown);
+            }
+            Message::BulkTag(tag) => self.ui.bulk_tag = tag,
+            Message::BulkStart(op) if self.writes_allowed() && !self.ui.selected.is_empty() => {
+                if op == BulkOp::Trash && !self.ui.bulk_confirm {
+                    self.ui.bulk_confirm = true;
+                    return iced::widget::operation::focus("bulk-confirm");
+                }
+                return self.start_bulk(op);
+            }
+            Message::BulkConfirm if self.ui.bulk_confirm => {
+                self.ui.bulk_confirm = false;
+                return self.start_bulk(BulkOp::Trash);
+            }
+            Message::BulkCancel => self.ui.bulk_confirm = false,
+            Message::ClearFilters => {
+                self.query.clear();
+                self.ui.kind = None;
+                self.ui.tag = None;
+                self.ui.favorites_only = false;
+                self.ui.item_page = 0;
+            }
+            Message::SelectAdjacent(next)
+                if self.tab == Tab::Vault
+                    && self.editor.is_none()
+                    && self.connection.session.is_some() =>
+            {
+                if let Some(id) = self.adjacent_item(next) {
+                    return self.navigate(Navigate::Select(id));
+                }
+            }
             Message::AddAttachment if self.writes_allowed() && self.editor.is_none() => {
                 if let Some(item) = &self.item {
                     let id = item.id;
@@ -74,29 +134,10 @@ impl App {
             }
             Message::ItemPage(page) => {
                 self.ui.item_page = page;
-                self.ui.page_input.clear();
             }
-            Message::PageInput(value) => self.ui.page_input = value,
             Message::SortItems(reverse) => {
                 self.ui.reverse_items = reverse;
                 self.ui.item_page = 0;
-                self.ui.page_input.clear();
-            }
-            Message::JumpItemPage => {
-                let pages = self
-                    .matching_items()
-                    .len()
-                    .div_ceil(presentation::PAGE_SIZE)
-                    .max(1);
-                if let Ok(page) = self.ui.page_input.parse::<usize>()
-                    && page > 0
-                    && page <= pages
-                {
-                    self.ui.item_page = page - 1;
-                    self.ui.page_input.clear();
-                } else {
-                    self.report_error(format!("Enter a page number from 1 to {pages}."));
-                }
             }
 
             Message::Search(query) => {
@@ -269,7 +310,17 @@ impl App {
                     self.editor.review(item);
                 }
             }
-            (Job::List, ResponsePayload::ItemPage(page)) => self.replace_items(page.items),
+            (Job::List, ResponsePayload::ItemPage(page)) => {
+                self.replace_items(page.items);
+                // An item asked for while locked (`pm gui --open`, or the extension's
+                // "Open in desktop app") opens once the unlocked list arrives.
+                if let Some(id) = self.ui.open_after_unlock.take() {
+                    if self.items.iter().any(|item| item.id == id) {
+                        return self.navigate(Navigate::Select(id));
+                    }
+                    self.notice = "That item is not in this vault.".into();
+                }
+            }
             (Job::SavedList, ResponsePayload::ItemPage(page)) => {
                 let selected = self.ui.saved_item.take().and_then(|saved| {
                     let mut matches = page.items.iter().filter(|item| {
@@ -311,9 +362,20 @@ impl App {
                 }
                 self.workspace.selected = Some(workflows::Choice {
                     id: item.id,
-                    label: format!("{} · {}", item.id, item.name),
+                    label: item.name.clone(),
                 });
+                // Time-based codes show live, with a countdown, as soon as the item opens.
+                let live_code = item.otp_mode == Some(password_manager::types::OtpMode::Totp)
+                    && !item.has_duo
+                    && self.writes_allowed()
+                    && self.workspace.otp.watch.is_none();
                 self.item = Some(item);
+                if live_code {
+                    return self.update(Message::Workflow(workflows::Event::Toggle(
+                        workflows::Toggle::WatchOtp,
+                        true,
+                    )));
+                }
                 return self.fetch_selected_duo();
             }
             (Job::Field(target), ResponsePayload::Secret(value)) => {
@@ -344,6 +406,7 @@ impl App {
             (Job::Favorite(id), _) => {
                 return self.refresh_item(id, ItemIntent::View, incremental);
             }
+            (Job::Bulk, _) => return self.next_bulk(),
             (Job::SaveEditor, _) => {
                 if let Some(id) = self.editor.as_ref().and_then(|draft| draft.id) {
                     self.notice = "Item saved. You can configure its authenticators below.".into();
@@ -394,13 +457,120 @@ impl App {
                     self.load_items()
                 };
             }
-            (Job::Copy, _) => self.notice = "Secret copied with timed clipboard cleanup.".into(),
+            (Job::Copy, _) => {
+                let label = self.item.as_ref().map_or_else(
+                    || "Password".to_owned(),
+                    |item| model::secret_label(item.kind),
+                );
+                self.notice = format!(
+                    "{label} copied. The clipboard clears in {} seconds.",
+                    self.conf.clipboard.timeout
+                );
+            }
             _ => {
                 self.notice =
                     "The server returned an unexpected response. Refresh the vault.".into()
             }
         }
         Task::none()
+    }
+
+    /// The item after (or before) the selection in list order, moving the page
+    /// along; the first or last item when nothing is selected.
+    pub(super) fn adjacent_item(&mut self, next: bool) -> Option<usize> {
+        let order: Vec<usize> = {
+            let matching = self.matching_items();
+            let mut ids: Vec<usize> = matching.iter().map(|&index| self.items[index].id).collect();
+            if self.ui.reverse_items {
+                ids.reverse();
+            }
+            ids
+        };
+        let current = self
+            .item
+            .as_ref()
+            .and_then(|item| order.iter().position(|id| *id == item.id));
+        let position = match (current, next) {
+            (Some(position), true) => (position + 1).min(order.len().checked_sub(1)?),
+            (Some(position), false) => position.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => order.len().checked_sub(1)?,
+        };
+        if current == Some(position) {
+            return None;
+        }
+        self.ui.item_page = position / presentation::ITEM_PAGE_SIZE;
+        order.get(position).copied()
+    }
+
+    /// Queue the selected items for one bulk change, in list order.
+    fn start_bulk(&mut self, op: BulkOp) -> Task<Message> {
+        let queue: std::collections::VecDeque<(usize, u64)> = self
+            .items
+            .iter()
+            .filter(|item| self.ui.selected.contains(&item.id))
+            .map(|item| (item.id, item.revision))
+            .collect();
+        let op = match op {
+            BulkOp::Tag(_) => {
+                let tag = self.ui.bulk_tag.trim().to_owned();
+                if tag.is_empty() {
+                    self.report_error("Type a tag to add, then choose Add tag.");
+                    return Task::none();
+                }
+                BulkOp::Tag(tag)
+            }
+            op => op,
+        };
+        self.ui.bulk = Some(Bulk {
+            op,
+            total: queue.len(),
+            queue,
+        });
+        self.next_bulk()
+    }
+
+    /// Send the next bulk change, or report the finished batch.
+    fn next_bulk(&mut self) -> Task<Message> {
+        let Some(bulk) = self.ui.bulk.as_mut() else {
+            return Task::none();
+        };
+        let Some((id, revision)) = bulk.queue.pop_front() else {
+            let bulk = self.ui.bulk.take().expect("checked above");
+            let items = if bulk.total == 1 { "item" } else { "items" };
+            self.notice = match bulk.op {
+                BulkOp::Favorite(true) => format!("Added {} {items} to favorites.", bulk.total),
+                BulkOp::Favorite(false) => {
+                    format!("Removed {} {items} from favorites.", bulk.total)
+                }
+                BulkOp::Tag(tag) => format!("Tagged {} {items} “{tag}”.", bulk.total),
+                BulkOp::Trash => format!(
+                    "Moved {} {items} to encrypted trash. Restore them from Tools → Deleted items.",
+                    bulk.total
+                ),
+            };
+            self.ui.selected.clear();
+            self.ui.selecting = false;
+            self.ui.bulk_tag.clear();
+            return self.load_items();
+        };
+        let command = match &bulk.op {
+            BulkOp::Trash => ServerCommand::Delete(Target::Id(id)),
+            op => {
+                let mut change = TypedUpdate::from(EntryUpdate {
+                    target: Target::Id(id),
+                    update: EntryChanges::default(),
+                    password: None,
+                });
+                match op {
+                    BulkOp::Favorite(value) => change.favorite = Some(*value),
+                    BulkOp::Tag(tag) => change.add_tags = vec![tag.clone()],
+                    BulkOp::Trash => unreachable!("handled above"),
+                }
+                ServerCommand::Update(change)
+            }
+        };
+        self.request(Job::Bulk, command, Some(revision))
     }
 
     pub(super) fn load_items(&mut self) -> Task<Message> {

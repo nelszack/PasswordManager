@@ -83,6 +83,7 @@ where
     class: Theme::Class<'a>,
     status: Option<Status>,
     accessibility_selected: Option<bool>,
+    accessibility_label: Option<String>,
 }
 
 enum OnPress<'a, Message> {
@@ -121,7 +122,15 @@ where
             class: Theme::default(),
             status: None,
             accessibility_selected: None,
+            accessibility_label: None,
         }
+    }
+
+    /// Names the button for assistive technology when its visible content is
+    /// abbreviated (for example, a list row whose text is shortened to fit).
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
     }
 
     /// Exposes the selection state of this navigation or item button.
@@ -275,6 +284,7 @@ where
             layout.bounds(),
             &Accessible {
                 role: Role::Button,
+                label: self.accessibility_label.as_deref(),
                 selected: self.accessibility_selected,
                 disabled: self.on_press.is_none(),
                 ..Accessible::default()

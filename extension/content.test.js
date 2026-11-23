@@ -19,6 +19,10 @@ async function contentEnvironment(t) {
           consumePendingCredentials: { success: true, pending: null },
           openCredentialPrompt: { success: true, skipped: true },
           setPendingCredentials: { success: true },
+          claimPopupFill: chrome.claimPopupFill || {
+            success: true,
+            payload: { username: "alice@example.com", password: "synthetic-secret" },
+          },
         };
         queueMicrotask(() => callback?.(responses[message.action]));
       },
@@ -442,4 +446,36 @@ test("the fill shortcut opens the login picker only from the extension in the fo
   assert.equal(pickerRequests()[0].kind, "login");
   env.controller.dispose();
   assert.equal(env.chrome.runtime._listeners.size, 0, "dispose removes every runtime listener");
+});
+
+test("the toolbar popup fills the top frame's login form only through a claimed token", async (t) => {
+  const env = await contentEnvironment(t);
+  env.dom.flushFrames();
+  const ask = (message, sender = { id: "extension-id" }) =>
+    new Promise((resolve) => {
+      let answered = false;
+      for (const listener of env.chrome.runtime._listeners) {
+        if (listener(message, sender, (value) => resolve(value)) === true) answered = true;
+      }
+      if (!answered) resolve("ignored");
+    });
+  assert.equal(await ask({ action: "pmPopupFill", token: "t" }, { id: "other-extension" }), "ignored");
+  assert.equal(await ask({ action: "pmPopupFill", token: 5 }), "ignored");
+  const filled = await ask({ action: "pmPopupFill", token: "t" });
+  assert.equal(filled.success, true, filled.error);
+  await env.settle();
+  assert.equal(env.username.value, "alice@example.com");
+  assert.equal(env.password.value, "synthetic-secret");
+  assert.equal(env.messages.at(-1).action, "claimPopupFill");
+  assert.equal(env.messages.filter((message) => message.action === "openSecurePicker").length, 0);
+
+  env.chrome.claimPopupFill = { success: false, error: "Fill request expired" };
+  const expired = await ask({ action: "pmPopupFill", token: "t" });
+  assert.deepEqual({ ...expired }, { success: false, error: "Fill request expired" });
+
+  env.dom.window.top = {};
+  assert.equal(await ask({ action: "pmPopupFill", token: "t" }), "ignored", "embedded frames never fill");
+  env.dom.window.top = env.dom.window;
+  env.controller.dispose();
+  assert.equal(await ask({ action: "pmPopupFill", token: "t" }), "ignored", "a disposed page stays inert");
 });

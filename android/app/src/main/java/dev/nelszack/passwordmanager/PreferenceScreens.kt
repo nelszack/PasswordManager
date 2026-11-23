@@ -1,6 +1,6 @@
 package dev.nelszack.passwordmanager
 
-import android.app.AlertDialog
+import android.content.DialogInterface
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import org.json.JSONObject
@@ -15,7 +15,8 @@ internal class PreferenceScreens(private val host: ManagementActivity) {
                 label("Tap a preference to see what it means and change its value.")
                 for ((title, keys) in
                     listOf(
-                        "Locking & clipboard" to setOf("unlock_seconds", "clipboard_seconds"),
+                        "Locking & clipboard" to
+                            setOf("unlock_seconds", "leave_lock_seconds", "clipboard_seconds"),
                         "History & recovery" to setOf("history_limit", "trash_days"),
                         "Password generation" to setOf("generator_length", "passphrase_words"),
                     )) {
@@ -51,6 +52,7 @@ internal class PreferenceScreens(private val host: ManagementActivity) {
                 .edit()
                 .putLong("unlock_seconds", saved.getLong("unlock_seconds"))
                 .putInt("clipboard_seconds", saved.getInt("clipboard_seconds"))
+                .putLong("leave_lock_seconds", saved.optLong("leave_lock_seconds", 30))
                 .apply()
             Vault.touch()
         }
@@ -124,7 +126,7 @@ internal class PreferenceScreens(private val host: ManagementActivity) {
                 content.addView(presets)
             }
             val dialog =
-                AlertDialog.Builder(this)
+                com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                     .setTitle(field.title)
                     .setView(ScrollView(this).apply { addView(content) })
                     .setNegativeButton("Cancel", null)
@@ -137,13 +139,13 @@ internal class PreferenceScreens(private val host: ManagementActivity) {
                 dialog.window?.setSoftInputMode(
                     android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
                 )
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                     val value = input.text.toString().toLongOrNull()
                     if (value == null || value !in field.range) {
                         input.error = "Enter ${field.range.first}–${field.range.last} ${field.unit}"
                         input.requestFocus()
                     } else {
-                        val save = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                        val save = dialog.getButton(DialogInterface.BUTTON_POSITIVE)
                         save.isEnabled = false
                         val body = JSONObject(current.toString()).put(field.key, value)
                         task({ runCatching { Vault.json("settings_save", "settings" to body) } }) {
@@ -152,11 +154,11 @@ internal class PreferenceScreens(private val host: ManagementActivity) {
                                 { saved ->
                                     remember(saved)
                                     dialog.dismiss()
-                                    show()
+                                    show(back)
                                 },
                                 { error ->
                                     save.isEnabled = true
-                                    input.error = error.message ?: "Could not save"
+                                    MobileUi.layoutOf(input)?.error = friendlyError(error.message)
                                 },
                             )
                         }

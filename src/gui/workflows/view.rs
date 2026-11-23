@@ -71,6 +71,7 @@ fn path<'a>(
         styles::label(label),
         row![
             text_input("Choose or enter a file path", value)
+                .accessibility_label(label)
                 .padding(10)
                 .on_input_maybe(
                     enabled.then_some(move |value: String| event(Event::Field(key, value.into())))
@@ -344,15 +345,38 @@ pub(super) fn account_authenticators<'a>(
                 .otp_timeout(app.conf.clipboard.timeout)
                 .is_ok_and(|timeout| timeout.is_some());
         let code = state.otp_result_for(app);
-        form = form.push(text("One-time password").size(19)).push(
+        let time_based = item.otp_mode == Some(password_manager::types::OtpMode::Totp);
+        form = form.push(text("One-time code").size(19));
+        // Time-based codes are shown live; a counter-based code is shown only on
+        // request, because showing it uses it up.
+        form = form.push(if time_based {
             row![
-                action("Show code", Action::ShowOtp(false), writes),
-                action("Copy code", Action::ShowOtp(true), writes && copy_enabled),
-                styles::primary("Hide code", AppMessage::HideSecrets, code.is_some()),
+                styles::primary("Copy code", AppMessage::CopyOtp, writes && copy_enabled),
+                action(
+                    "Show code",
+                    Action::ShowOtp(false),
+                    writes && code.is_none()
+                ),
             ]
             .spacing(8)
-            .wrap(),
-        );
+            .wrap()
+        } else {
+            row![
+                action(
+                    "Show next code",
+                    Action::ShowOtp(false),
+                    writes && code.is_none()
+                ),
+                action(
+                    "Copy next code",
+                    Action::ShowOtp(true),
+                    writes && copy_enabled
+                ),
+                styles::action("Hide code", AppMessage::HideSecrets, code.is_some()),
+            ]
+            .spacing(8)
+            .wrap()
+        });
         if let Some(code) = code {
             form = form.push(text(code.code.expose()).size(26)).push(
                 text(
@@ -361,10 +385,12 @@ pub(super) fn account_authenticators<'a>(
                             format!("HOTP counter {counter}; its next counter has been saved.")
                         })
                         .unwrap_or_else(|| {
-                            format!(
-                                "TOTP: {} seconds remaining when fetched.",
-                                code.expires_in.unwrap_or_default()
-                            )
+                            let seconds = code.expires_in.unwrap_or_default();
+                            if state.otp.watch.is_some() {
+                                format!("Changes in {seconds} seconds · updates by itself")
+                            } else {
+                                format!("Valid for about {seconds} more seconds")
+                            }
                         }),
                 )
                 .size(14),
@@ -543,12 +569,27 @@ pub(super) fn view<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage
     let unlocked = enabled && app.connection.running && app.connection.session.is_some();
     let writes = unlocked && app.recovery.id().is_none();
     let server_writes = enabled && app.connection.running && app.recovery.id().is_none();
+    // Name, account and website tell two same-named items apart; the ID is the tiebreaker.
     let choices: Vec<Choice> = app
         .items
         .iter()
-        .map(|item| Choice {
-            id: item.id,
-            label: format!("{} · {}", item.id, item.name),
+        .map(|item| {
+            let mut parts = vec![item.name.clone()];
+            if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
+                parts.push(username.to_owned());
+            }
+            if let Some(host) = item.urls.first().and_then(|url| {
+                url.split("://")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+            }) {
+                parts.push(host.to_owned());
+            }
+            parts.push(format!("#{}", item.id));
+            Choice {
+                id: item.id,
+                label: parts.join(" · "),
+            }
         })
         .collect();
     if state.section == Section::Overview {
@@ -726,7 +767,8 @@ fn files_form<'a>(
         enabled,
     ));
     if let Err(message) = readiness {
-        form = form.push(text(message).size(14).style(text::danger));
+        // Not an error yet: it says what is still needed before the action can run.
+        form = form.push(text(message).size(14));
     }
     match state.files.file_operation {
         FileOperation::Backup => {
@@ -841,7 +883,8 @@ fn security_form<'a>(
     let readiness = state.prepare(operation, app);
     let credentials_ready = readiness.is_ok();
     if let Err(message) = readiness {
-        form = form.push(text(message).size(14).style(text::danger));
+        // Not an error yet: it says what is still needed before the action can run.
+        form = form.push(text(message).size(14));
     }
     form.push(text("Vault credentials").size(19))
         .push(
@@ -904,11 +947,15 @@ fn search_form<'a>(
     unlocked: bool,
 ) -> Column<'a, AppMessage> {
     let mut kinds = vec!["All types".to_owned()];
-    kinds.extend(model::KINDS.iter().map(ToString::to_string));
+    kinds.extend(
+        model::KINDS
+            .iter()
+            .map(|kind| model::profile(*kind).title.to_owned()),
+    );
     let selected = state
         .search
         .kind
-        .map(|kind| kind.to_string())
+        .map(|kind| model::profile(kind).title.to_owned())
         .unwrap_or_else(|| "All types".into());
     let mut form = form.push(text("Search metadata, notes, and non-secret custom fields").size(18));
     for (label, value, key) in [
@@ -949,7 +996,7 @@ fn search_form<'a>(
             event(Event::Kind(
                 model::KINDS
                     .iter()
-                    .find(|kind| kind.to_string() == value)
+                    .find(|kind| model::profile(**kind).title == value)
                     .copied(),
             ))
         })
@@ -1003,7 +1050,7 @@ fn search_form<'a>(
         .padding(10),
     )
     .push(toggle(
-        "Only weak primary secrets",
+        "Only weak passwords",
         state.search.weak,
         Toggle::Weak,
         enabled,
@@ -1088,15 +1135,22 @@ fn browser_form<'a>(
     form: Column<'a, AppMessage>,
     enabled: bool,
 ) -> Column<'a, AppMessage> {
-    form.push(text("Register the browser extension").size(19))
+    form.push(text("Connect your browser").size(19))
         .push(
             text(
-                "Load extension/ as an unpacked extension first, then enter its ID. For \
-             Firefox, load the packaged Firefox build; its ID can stay empty. Reload the \
-             extension afterward. On Windows, fully close the browser before installing or \
-             updating its native host.",
+                "1. Install the extension: load the extension folder in your browser (for \
+                 Firefox, the packaged Firefox build).\n2. Choose your browser below and select \
+                 Turn on browser integration.\n3. Reload the extension. Its toolbar popup then \
+                 shows Unlocked while this vault is open.",
             )
             .size(14),
+        )
+        .push(
+            text(
+                "On Windows, fully close the browser first. The extension ID is filled in for \
+                 you; enter one only for a repackaged extension.",
+            )
+            .size(13),
         )
         .push(
             pick_list(
@@ -1112,21 +1166,25 @@ fn browser_form<'a>(
             .placeholder("Browser to register")
             .padding(10),
         )
+        .push(
+            row![
+                styles::primary(
+                    "Turn on browser integration",
+                    AppMessage::Workflow(Event::Run(Action::InstallHost)),
+                    enabled
+                ),
+                action("Repair after an update", Action::UpdateHost, enabled),
+            ]
+            .spacing(10)
+            .wrap(),
+        )
         .push(field(
-            "Extension ID (32 characters; optional for Firefox)",
+            "Repackaged extension ID (optional, 32 characters)",
             &state.browser.extension_id,
             Field::ExtensionId,
             false,
             enabled,
         ))
-        .push(
-            row![
-                action("Register browser bridge", Action::InstallHost, enabled),
-                action("Update registered bridge", Action::UpdateHost, enabled),
-            ]
-            .spacing(10)
-            .wrap(),
-        )
         .push(action(
             "Install application-menu shortcut (Linux)",
             Action::Shortcut,
@@ -1288,13 +1346,15 @@ fn results<'a>(state: &'a State, app: &'a App) -> Element<'a, AppMessage> {
             )
             .push(
                 row![
-                    button("Previous page").padding([7, 8]).on_press_maybe(
-                        (enabled && window.index > 0)
-                            .then_some(event(Event::ResultPage(window.index.saturating_sub(1))))
+                    styles::action(
+                        "Previous page",
+                        event(Event::ResultPage(window.index.saturating_sub(1))),
+                        enabled && window.index > 0,
                     ),
-                    button("Next page").padding([7, 8]).on_press_maybe(
-                        (enabled && window.index + 1 < window.pages)
-                            .then_some(event(Event::ResultPage(window.index + 1)))
+                    styles::action(
+                        "Next page",
+                        event(Event::ResultPage(window.index + 1)),
+                        enabled && window.index + 1 < window.pages,
                     ),
                 ]
                 .spacing(8)
@@ -1345,7 +1405,7 @@ fn audit_rows(
     [
         ("Weak passwords", report.weak.as_slice()),
         ("Old passwords", report.stale.as_slice()),
-        ("Missing authenticators", report.missing_totp.as_slice()),
+        ("No one-time code set up", report.missing_totp.as_slice()),
         ("Breach check incomplete", report.unchecked.as_slice()),
     ]
     .into_iter()
@@ -1377,29 +1437,45 @@ fn audit_rows(
 }
 
 fn overview(app: &App) -> Element<'_, AppMessage> {
-    let card = |title: &'static str, description: &'static str, value: Event| {
-        button(column![text(title).size(17), text(description).size(14)].spacing(6))
-            .padding(12)
-            .width(iced::Length::Fixed(if app.compact() {
-                (app.ui.width - 72.0).min(760.0)
-            } else {
-                195.0
-            }))
-            .style(quiet_button)
-            .on_press_maybe((!app.busy()).then_some(event(value)))
+    // Each card leads with its icon, so the grid can be scanned at a glance.
+    let card = |glyph: char, title: &'static str, description: &'static str, value: Event| {
+        button(
+            column![
+                row![
+                    crate::gui::styles::icon(glyph).size(20),
+                    text(title).size(17)
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                text(description).size(14)
+            ]
+            .spacing(6),
+        )
+        .accessible_name(format!("{title}. {description}"))
+        .padding(12)
+        .width(iced::Length::Fixed(if app.compact() {
+            (app.ui.width - 72.0).min(760.0)
+        } else {
+            195.0
+        }))
+        .style(quiet_button)
+        .on_press_maybe((!app.busy()).then_some(event(value)))
     };
     let recovery = row![
         card(
+            crate::gui::icon_chars::HEALTH_AND_SAFETY,
             "Vault health",
             "Find weak, reused, and exposed passwords.",
             Event::Section(Section::Audit)
         ),
         card(
+            crate::gui::icon_chars::DELETE,
             "Deleted items",
             "Restore an item or empty encrypted trash.",
             Event::Section(Section::Trash)
         ),
         card(
+            crate::gui::icon_chars::HISTORY,
             "Password history",
             "Recover a previous password for an item.",
             Event::Section(Section::Recovery)
@@ -1409,21 +1485,25 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
     .wrap();
     let files = row![
         card(
+            crate::gui::icon_chars::BACKUP,
             "Encrypted backup",
             "Save a complete encrypted copy of your vault.",
             Event::FileOperation(FileOperation::Backup)
         ),
         card(
+            crate::gui::icon_chars::RESTORE,
             "Restore a backup",
             "Recover a separate vault from an encrypted backup.",
             Event::FileOperation(FileOperation::Restore)
         ),
         card(
+            crate::gui::icon_chars::FILE_UPLOAD,
             "Import items",
             "Bring passwords from another manager.",
             Event::FileOperation(FileOperation::Import)
         ),
         card(
+            crate::gui::icon_chars::FILE_DOWNLOAD,
             "Export items",
             "Create a portable plaintext export.",
             Event::FileOperation(FileOperation::Export)
@@ -1433,21 +1513,25 @@ fn overview(app: &App) -> Element<'_, AppMessage> {
     .wrap();
     let advanced = row![
         card(
+            crate::gui::icon_chars::TUNE,
             "CLI utilities",
             "Look up an operation or save shell completions.",
             Event::Section(Section::Utilities)
         ),
         card(
+            crate::gui::icon_chars::SEARCH,
             "Advanced search",
             "Search notes, fields, types, and password age.",
             Event::Section(Section::Search)
         ),
         card(
+            crate::gui::icon_chars::KEY,
             "Vault security",
             "Change credentials or manage a vault.",
             Event::Section(Section::Security)
         ),
         card(
+            crate::gui::icon_chars::LANGUAGE,
             "Browser connection",
             "Connect your browser extension.",
             Event::Section(Section::Browser)
@@ -1539,8 +1623,8 @@ pub(super) fn report(payload: &ResponsePayload) -> String {
             let mut output = format!("{heading}\n{detail}\n");
             for (name, entries) in [
                 ("Weak password", &report.weak),
-                ("Stale password", &report.stale),
-                ("Missing authenticator", &report.missing_totp),
+                ("Old password", &report.stale),
+                ("No one-time code set up", &report.missing_totp),
                 ("Breach check incomplete", &report.unchecked),
             ] {
                 for entry in entries {
@@ -1550,7 +1634,7 @@ pub(super) fn report(payload: &ResponsePayload) -> String {
                             " · username: {}",
                             entry.username.as_deref().unwrap_or("(none)")
                         ));
-                    } else if name == "Stale password" {
+                    } else if name == "Old password" {
                         output.push_str(&format!(" (last changed {})", entry.password_changed));
                     }
                 }

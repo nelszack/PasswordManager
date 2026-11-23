@@ -224,12 +224,11 @@ async fn displayed_trash_ids_select_the_same_items_for_restore_and_purge() {
     let listing = crate::client::render_response(&result.responses[0].payload);
     let ids: Vec<usize> = listing
         .lines()
-        .map(|line| {
-            let id = line.strip_prefix('#').unwrap();
-            id.split_once(' ').unwrap().0.parse().unwrap()
-        })
+        .filter_map(|line| line.strip_prefix('#'))
+        .map(|id| id.split_once(' ').unwrap().0.parse().unwrap())
         .collect();
     assert_eq!(ids, [17, 42]);
+    assert!(listing.contains("pm restore --id"));
 
     for command in [
         ServerCommand::RestoreTrash(ids[0]),

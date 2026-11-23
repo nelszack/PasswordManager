@@ -109,6 +109,19 @@ module.exports.create = function create({ onInvalidated = () => {} } = {}) {
         fillInput,
         openSecurePicker: kind => pickers.open({ kind }),
         openCredentialPrompt: (username, password) => prompts.open({ username, password }),
+        // Fetch a login the toolbar popup asked this page to fill.
+        claimPopupFill: token =>
+            new Promise((resolve, reject) => {
+                try {
+                    chrome.runtime.sendMessage({ action: "claimPopupFill", token }, response => {
+                        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                        else if (!response?.success) reject(new Error(response?.error || "Could not fill"));
+                        else resolve(response.payload);
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            }),
         dispose,
     };
 };

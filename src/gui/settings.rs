@@ -36,6 +36,7 @@ pub struct SettingsDraft {
     pub default_vault: String,
     pub appearance: Appearance,
     pub scale: u16,
+    pub close_action: password_manager::config::CloseAction,
     pub sync_server: String,
     pub sync_automatic: bool,
     pub ssh_agent: bool,
@@ -57,6 +58,7 @@ impl From<&Config> for SettingsDraft {
             default_vault: conf.unlock.vault_id.clone().unwrap_or_default(),
             appearance: conf.desktop.appearance,
             scale: conf.desktop.scale,
+            close_action: conf.desktop.close_action,
             sync_server: conf.sync.server_url.clone(),
             sync_automatic: conf.sync.automatic,
             ssh_agent: conf.server.ssh_agent,
@@ -91,6 +93,7 @@ impl SettingsDraft {
             default_vault,
             appearance,
             scale,
+            close_action,
             sync_server,
             sync_automatic,
             ssh_agent,
@@ -184,6 +187,8 @@ impl SettingsDraft {
             desktop_appearance: (self.appearance != base.desktop.appearance)
                 .then_some(self.appearance),
             desktop_scale: (self.scale != base.desktop.scale).then_some(self.scale),
+            desktop_close_action: (self.close_action != base.desktop.close_action)
+                .then_some(self.close_action),
             sync_server_url: (self.sync_server != base.sync.server_url)
                 .then(|| self.sync_server.clone()),
             sync_automatic: (self.sync_automatic != base.sync.automatic)
@@ -206,6 +211,7 @@ impl SettingsDraft {
             || self.default_vault != previous.default_vault
             || self.appearance != previous.appearance
             || self.scale != previous.scale
+            || self.close_action != previous.close_action
             || self.sync_server != previous.sync_server
             || self.sync_automatic != previous.sync_automatic
             || self.ssh_agent != previous.ssh_agent
@@ -225,7 +231,7 @@ impl App {
         match message {
             Message::SettingsSection(section) => {
                 self.ui.settings_section = section;
-                if section == presentation::SettingsSection::Security
+                if section == presentation::SettingsSection::Vault
                     && let Some(id) = &self.connection.vault
                 {
                     self.ui.vault_name = self.names.label(id, &self.connection.vaults);
@@ -236,7 +242,10 @@ impl App {
                 );
             }
             Message::Appearance(value) => self.settings.appearance = value,
-            Message::InterfaceScale(value) if [100, 115, 130].contains(&value) => {
+            Message::CloseBehavior(value) => self.settings.close_action = value,
+            Message::InterfaceScale(value)
+                if password_manager::config::DESKTOP_SCALES.contains(&value) =>
+            {
                 self.settings.scale = value;
                 return widgets::ensure_focus_visible();
             }

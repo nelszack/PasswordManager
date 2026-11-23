@@ -7,6 +7,8 @@
     "use strict";
     const protocolVersion = __PROTOCOL_VERSION__;
     const operations = Object.freeze(__OPERATIONS__);
+    // Per-type labels shared with the desktop app, CLI and Android (item_profile.rs).
+    const itemProfiles = Object.freeze(__ITEM_PROFILES__);
     const kinds = new Set(["login", "secure-note", "payment-card", "identity", "wifi", "software-license", "ssh-key", "api-secret"]);
     const outcomeStates = new Set(["pending", "committed", "committed_durability_unknown", "failed", "unknown"]);
     const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -47,6 +49,8 @@
                 case "verificationCode": valid = text(value) && /^\d{0,6}$/.test(value); break;
                 case "verificationToken": valid = text(value) && /^[a-f0-9]{64}$/.test(value); break;
                 case "passkeyRequest": valid = bounded(value, 65536) && value.startsWith("{"); break;
+                case "field": valid = ["username", "password", "totp"].includes(value); break;
+                case "query": valid = bounded(value, 256, true) && value.trim().length > 0; break;
                 default: valid = false;
             }
             if (!valid) fail("Invalid native request field");
@@ -92,10 +96,11 @@
             case "duoArray": valid = Array.isArray(data) && data.every(duoRequest); break;
             case "receipt": valid = receipt(data); break;
             case "passkeyArray": valid = Array.isArray(data) && data.every(choice => object(choice) && positive(choice.id) && integer(choice.revision) && text(choice.rp_id) && typeof choice.user_name === "string" && typeof choice.display_name === "string"); break;
+            case "itemPage": valid = object(data) && Array.isArray(data.items) && data.items.every(summary) && integer(data.total); break;
             case "passkeyCredential": valid = object(data) && text(data.id) && data.rawId === data.id && data.type === "public-key" && object(data.response) && text(data.response.clientDataJSON) && object(data.clientExtensionResults); break;
         }
         if (!valid) fail("Invalid native operation result");
         return data;
     }
-    return { protocolVersion, operations, validateRequest, validateResult };
+    return { protocolVersion, operations, itemProfiles, validateRequest, validateResult };
 });

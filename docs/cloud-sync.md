@@ -22,7 +22,7 @@ pm sync connect https://sync.example.com --token-file ./device-token
 Omit `--token-file` to enter the token in a hidden prompt. Failed connection
 attempts preserve the existing local connection and credential.
 
-In the desktop app, **Settings → Connection → Cloud sync** also exposes the
+In the desktop app, **Settings → Sync** also exposes the
 server URL and private device-credential input. Save the URL with your settings,
 then save the credential. Server installation and updates are separate admin tasks.
 
@@ -36,7 +36,7 @@ using Keystore; the desktop uses a private `sync-token` file.
 
 ## Enable an existing local vault
 
-Unlock the vault and choose **Enable for open vault**, or run `pm sync enable`.
+Unlock the vault and choose **Turn on sync** under Settings → Sync, or run `pm sync enable`.
 On the desktop service, saved changes synchronize automatically while that vault
 is unlocked, even after the desktop window closes. Repeat for each vault you want
 synchronized. When automatic sync stops on a conflict, or on a cloud copy this

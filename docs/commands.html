@@ -43,6 +43,8 @@
       <pre><code>Usage: pm gui [OPTIONS]</code></pre>
       <dl class="flags">
         <dt><code>--install-shortcut</code></dt><dd>Install a Linux application-menu shortcut for this executable and exit</dd>
+        <dt><code>--search</code></dt><dd>Bring the window forward with the vault search focused</dd>
+        <dt><code>--open &lt;ID&gt;</code></dt><dd>Open the window showing this item ID (after unlocking, if locked)</dd>
       </dl>
     </section>
     <section class="command" id="pm-genpass">
@@ -50,7 +52,7 @@
       <p>Generate a random password or passphrase without opening the vault</p>
       <pre><code>Usage: pm genpass [OPTIONS]</code></pre>
       <dl class="flags">
-        <dt><code>-l, --length &lt;LENGTH&gt;</code></dt><dd>Password length; defaults to the configured generator length</dd>
+        <dt><code>-l, --length &lt;LENGTH&gt;</code></dt><dd>Password length, 8–255 (the same range in every app); defaults to the configured generator length</dd>
         <dt><code>--no-stats</code></dt><dd>Hide password strength/statistics, overriding configuration Default: <code>false</code>.</dd>
         <dt><code>--stats</code></dt><dd>Show password strength/statistics, overriding configuration Default: <code>false</code>.</dd>
         <dt><code>--no-copy</code></dt><dd>Do not copy the generated value, overriding configuration Default: <code>false</code>.</dd>
@@ -63,7 +65,7 @@
         <dt><code>--symbols &lt;SYMBOLS&gt;</code></dt><dd>Use this exact symbol set instead of the built-in set</dd>
         <dt><code>--exclude-ambiguous</code></dt><dd>Exclude visually ambiguous characters such as 0, O, 1, and l</dd>
         <dt><code>--passphrase</code></dt><dd>Generate a word-based passphrase instead of a character password</dd>
-        <dt><code>--words &lt;WORDS&gt;</code></dt><dd>Number of words in a passphrase Default: <code>6</code>.</dd>
+        <dt><code>--words &lt;WORDS&gt;</code></dt><dd>Number of words in a passphrase, 3–64 Default: <code>6</code>.</dd>
         <dt><code>--separator &lt;SEPARATOR&gt;</code></dt><dd>Text placed between passphrase words Default: <code>-</code>.</dd>
       </dl>
     </section>
@@ -91,12 +93,12 @@ Supplying no options displays the effective configuration. Boolean settings acce
         <dt><code>--password-copy &lt;PASSWORD_COPY&gt;</code></dt><dd>Copy newly added login passwords by default</dd>
         <dt><code>--clipboard-timeout &lt;CLIPBOARD_TIMEOUT&gt;</code></dt><dd>Seconds before automatically clearing values copied to the clipboard</dd>
         <dt><code>--unlock-timeout &lt;UNLOCK_TIMEOUT&gt;</code></dt><dd>Default inactivity duration before auto-lock (for example 15m or 1h)</dd>
-        <dt><code>--password-history-limit &lt;PASSWORD_HISTORY_LIMIT&gt;</code></dt><dd>Maximum prior passwords retained per entry; zero disables history</dd>
+        <dt><code>--password-history-limit &lt;PASSWORD_HISTORY_LIMIT&gt;</code></dt><dd>Maximum prior passwords retained per item; zero disables history</dd>
         <dt><code>--trash-retention-days &lt;TRASH_RETENTION_DAYS&gt;</code></dt><dd>Automatically purge trash older than this many days; zero disables it</dd>
         <dt><code>--server-port &lt;SERVER_PORT&gt;</code></dt><dd>Set the default loopback port used by the server and client</dd>
         <dt><code>--ssh-agent &lt;SSH_AGENT&gt;</code></dt><dd>Serve Ed25519 SSH keys from the unlocked vault through a local SSH agent (restart the server to apply)</dd>
         <dt><code>--sync-automatic &lt;SYNC_AUTOMATIC&gt;</code></dt><dd>Let the running server synchronize sync-enabled vaults in the background (`pm sync now` still works when this is false)</dd>
-        <dt><code>--default-vault &lt;DEFAULT_VAULT&gt;</code></dt><dd>Opaque vault ID selected by default when unlocking (from pm vaults)</dd>
+        <dt><code>--default-vault &lt;DEFAULT_VAULT&gt;</code></dt><dd>Vault opened by default when unlocking: its .enc file from `pm vaults`</dd>
       </dl>
     </section>
     <section class="command" id="pm-unlock">
@@ -104,7 +106,7 @@ Supplying no options displays the effective configuration. Boolean settings acce
       <p>Unlock a vault using a prompted master password or an existing key file</p>
       <pre><code>Usage: pm unlock [OPTIONS]</code></pre>
       <dl class="flags">
-        <dt><code>--vault-file &lt;VAULT_FILE&gt;</code></dt><dd>Open only this .enc filename from `pm vaults`, avoiding a full scan</dd>
+        <dt><code>--vault &lt;NAME&gt;</code></dt><dd>Vault to open, by name or .enc file from `pm vaults`; defaults to the configured default vault, or the only vault</dd>
         <dt><code>--key &lt;KEY&gt;</code></dt><dd>Read the vault key from this file instead of prompting for a password.
 
 Relative paths resolve from the current directory.</dd>
@@ -123,8 +125,28 @@ Zero disables automatic locking for this unlock session. If omitted, uses the co
     </section>
     <section class="command" id="pm-vaults">
       <h2><code>pm vaults</code></h2>
-      <p>List opaque vault filenames without decrypting them or requiring a server</p>
-      <pre><code>Usage: pm vaults</code></pre>
+      <p>List vaults by name and file without decrypting them or requiring a server.
+
+Names are kept on this device (shared with the desktop app); the encrypted .enc files never change. Use a name with `pm unlock --vault`.</p>
+      <pre><code>Usage: pm vaults [OPTIONS]
+       vaults &lt;COMMAND&gt;</code></pre>
+      <dl class="flags">
+        <dt><code>--rename &lt;VAULT&gt;</code></dt><dd>Give the vault with this .enc file (or current name) a new display name</dd>
+        <dt><code>--name &lt;NAME&gt;</code></dt><dd>The new display name used with --rename</dd>
+      </dl>
+    </section>
+    <section class="command" id="pm-vaults-delete">
+      <h2><code>pm vaults delete</code></h2>
+      <p>Permanently delete a whole vault and every item in it.
+
+Asks you to type `yes` and for the vault&#39;s master password (or uses --key). This cannot be undone; make an encrypted backup first (`pm backup create`).</p>
+      <pre><code>Usage: pm vaults delete [OPTIONS] [VAULT]</code></pre>
+      <dl class="flags">
+        <dt><code>VAULT &lt;VAULT&gt;</code></dt><dd>The vault&#39;s name or .enc file from `pm vaults`; omit for the default vault</dd>
+        <dt><code>--key &lt;KEY&gt;</code></dt><dd>Key file for a key-based vault; otherwise prompts for its master password</dd>
+        <dt><code>--keep-key</code></dt><dd>Keep the key file after deleting its vault (for shared or backed-up keys)</dd>
+        <dt><code>--yes</code></dt><dd>Confirm without prompting (required for scripts)</dd>
+      </dl>
     </section>
     <section class="command" id="pm-ssh-agent">
       <h2><code>pm ssh-agent</code></h2>
@@ -281,7 +303,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
       <p>Register the native host for the browser extension</p>
       <pre><code>Usage: pm native-host install [OPTIONS]</code></pre>
       <dl class="flags">
-        <dt><code>--extension-id &lt;EXTENSION_ID&gt;</code></dt><dd>The 32-character ID shown on chrome://extensions. Firefox uses the packaged add-on&#39;s fixed ID unless another is given</dd>
+        <dt><code>--extension-id &lt;EXTENSION_ID&gt;</code></dt><dd>Only needed for a repackaged extension: the 32-character ID shown on chrome://extensions. By default the bundled extension&#39;s fixed ID is used</dd>
         <dt><code>--browser &lt;BROWSER&gt;</code></dt><dd>Browser whose per-user native-messaging registration should be updated Default: <code>chrome</code>.</dd>
       </dl>
     </section>
@@ -292,62 +314,53 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     </section>
     <section class="command" id="pm-delete">
       <h2><code>pm delete</code></h2>
-      <p>Move an entry to encrypted trash, or permanently delete an entire vault</p>
-      <pre><code>Usage: pm delete [OPTIONS] [NAME]</code></pre>
+      <p>Move an item to the trash (&quot;Deleted items&quot;); `pm restore` brings it back</p>
+      <pre><code>Usage: pm delete &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;|--vault&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Name of the item to move to encrypted trash</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID to move to encrypted trash</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Entry name to move to encrypted trash; same as the NAME argument</dd>
-        <dt><code>--vault</code></dt><dd>Permanently delete the entire encrypted vault</dd>
-        <dt><code>--vault-file &lt;VAULT_FILE&gt;</code></dt><dd>Select the .enc filename from `pm vaults`; otherwise use the default vault</dd>
-        <dt><code>--key &lt;KEY&gt;</code></dt><dd>Key file for deleting a key-based vault; otherwise prompts for its password</dd>
-        <dt><code>--keep-key</code></dt><dd>Preserve the key file after deleting its vault.
-
-Use this only when the key is intentionally shared or retained as a backup.</dd>
-        <dt><code>--yes</code></dt><dd>Confirm permanent vault deletion without prompting (required for scripts)</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Item ID to move to encrypted trash</dd>
       </dl>
     </section>
     <section class="command" id="pm-history">
       <h2><code>pm history</code></h2>
-      <p>List saved password revisions for an entry</p>
+      <p>List an item&#39;s password history (saved earlier passwords)</p>
       <pre><code>Usage: pm history &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
       </dl>
     </section>
     <section class="command" id="pm-restore-password">
       <h2><code>pm restore-password</code></h2>
-      <p>Replace an entry&#39;s current password with one of its saved revisions</p>
+      <p>Replace an item&#39;s current password with one of its saved revisions</p>
       <pre><code>Usage: pm restore-password --revision &lt;REVISION&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--revision &lt;REVISION&gt;</code></dt><dd>Revision number shown by `pm history`</dd>
       </dl>
     </section>
     <section class="command" id="pm-trash">
       <h2><code>pm trash</code></h2>
-      <p>List entries currently held in encrypted trash</p>
+      <p>List items in the trash (&quot;Deleted items&quot; in the apps)</p>
       <pre><code>Usage: pm trash</code></pre>
     </section>
     <section class="command" id="pm-restore">
       <h2><code>pm restore</code></h2>
-      <p>Restore a trashed entry to the active vault</p>
-      <pre><code>Usage: pm restore --id &lt;ID&gt;</code></pre>
+      <p>Restore a trashed item to the vault (see `pm restore-password` for revisions)</p>
+      <pre><code>Usage: pm restore &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID shown by `pm trash`</dd>
+        <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Name of the trashed item (as shown by `pm trash`)</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Item ID shown by `pm trash`</dd>
       </dl>
     </section>
     <section class="command" id="pm-purge">
       <h2><code>pm purge</code></h2>
-      <p>Permanently erase one or all trashed entries</p>
-      <pre><code>Usage: pm purge [OPTIONS]</code></pre>
+      <p>Permanently erase one or all trashed items</p>
+      <pre><code>Usage: pm purge [OPTIONS] &lt;--id &lt;ID&gt;|--all&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Stable entry ID of a trashed entry shown by `pm trash`</dd>
-        <dt><code>--all</code></dt><dd>Permanently erase every entry in trash</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>ID of a trashed item shown by `pm trash`</dd>
+        <dt><code>--all</code></dt><dd>Permanently erase every item in trash</dd>
         <dt><code>--yes</code></dt><dd>Confirm permanent trash deletion without prompting (required for scripts)</dd>
       </dl>
     </section>
@@ -358,7 +371,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <dl class="flags">
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Report passwords at least this many days old</dd>
         <dt><code>--breaches</code></dt><dd>Privately check password hash prefixes against Pwned Passwords</dd>
-        <dt><code>--require-totp</code></dt><dd>Report login entries that do not have a TOTP or HOTP authenticator</dd>
+        <dt><code>--require-totp</code></dt><dd>Report login items that do not have a TOTP or HOTP authenticator</dd>
       </dl>
     </section>
     <section class="command" id="pm-totp">
@@ -372,8 +385,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <pre><code>Usage: pm totp set &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
       </dl>
     </section>
     <section class="command" id="pm-totp-duo">
@@ -382,8 +394,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <pre><code>Usage: pm totp duo [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--mode &lt;MODE&gt;</code></dt><dd>Passcode type accepted by your organization; cannot be inferred from the link Default: <code>hotp</code>.</dd>
       </dl>
     </section>
@@ -393,8 +404,7 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
       <pre><code>Usage: pm totp show [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--copy</code></dt><dd>Copy the generated code instead of only printing it</dd>
         <dt><code>--copy-time &lt;COPY_TIME&gt;</code></dt><dd>Seconds before clearing the copied code; defaults to clipboard configuration</dd>
         <dt><code>--watch</code></dt><dd>Keep displaying the current TOTP code and countdown until Ctrl+C</dd>
@@ -402,12 +412,11 @@ Use this only when the key is intentionally shared or retained as a backup.</dd>
     </section>
     <section class="command" id="pm-totp-remove">
       <h2><code>pm totp remove</code></h2>
-      <p>Remove the authenticator configuration from an entry</p>
+      <p>Remove the authenticator configuration from an item</p>
       <pre><code>Usage: pm totp remove &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo">
@@ -423,9 +432,8 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
       <pre><code>Usage: pm duo enroll [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
-        <dt><code>--replace</code></dt><dd>Replace this entry&#39;s existing authenticator or Duo enrollment</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
+        <dt><code>--replace</code></dt><dd>Replace this item&#39;s existing authenticator or Duo enrollment</dd>
         <dt><code>--mode &lt;MODE&gt;</code></dt><dd>Override the passcode mode; by default use Duo&#39;s enrollment response</dd>
       </dl>
     </section>
@@ -435,8 +443,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
       <pre><code>Usage: pm duo requests &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
       </dl>
     </section>
     <section class="command" id="pm-duo-watch">
@@ -445,8 +452,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
       <pre><code>Usage: pm duo watch [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--interval &lt;INTERVAL&gt;</code></dt><dd>Seconds between polls. Polling does not extend the vault unlock timeout Default: <code>5</code>.</dd>
         <dt><code>--notify</code></dt><dd>Show passive desktop alerts via notify-send if installed</dd>
         <dt><code>--interactive</code></dt><dd>Review and approve/deny in this terminal with a/d, Enter to skip, or q to quit</dd>
@@ -458,8 +464,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
       <pre><code>Usage: pm duo approve [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID; omit when exactly one request is pending</dd>
       </dl>
     </section>
@@ -469,8 +474,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
       <pre><code>Usage: pm duo deny [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--request &lt;REQUEST&gt;</code></dt><dd>Exact pending request ID; omit when exactly one request is pending</dd>
       </dl>
     </section>
@@ -480,8 +484,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
       <pre><code>Usage: pm duo remove &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
       </dl>
     </section>
     <section class="command" id="pm-backup">
@@ -514,12 +517,14 @@ Restore validates the entire backup before writing a vault.</p>
     </section>
     <section class="command" id="pm-new">
       <h2><code>pm new</code></h2>
-      <p>Create an empty vault and leave it locked.
+      <p>Create an empty vault and open it.
 
-Without `--key`, securely prompts twice for a new master password.</p>
+Without `--key`, securely prompts twice for a new master password of at least 14 hard-to-guess characters. There is no password reset: keep the password safe and create a backup with `pm backup create` once you add items.</p>
       <pre><code>Usage: pm new [OPTIONS]</code></pre>
       <dl class="flags">
+        <dt><code>--name &lt;NAME&gt;</code></dt><dd>Display name for the vault on this device (shown by `pm vaults`)</dd>
         <dt><code>--key &lt;KEY_PATH&gt;</code></dt><dd>Create a key outside application data; relative paths use the current directory</dd>
+        <dt><code>--locked</code></dt><dd>Leave the new vault locked instead of opening it</dd>
       </dl>
     </section>
     <section class="command" id="pm-rekey">
@@ -546,22 +551,22 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
         <dt><code>--secret-field &lt;NAME&gt;</code></dt><dd>Prompt privately for the value of this custom field</dd>
         <dt><code>--tag &lt;TAG&gt;</code></dt><dd>Label the item with a tag; repeat for several (`--tag work --tag aws`)</dd>
         <dt><code>--favorite</code></dt><dd>Mark the item as a favorite</dd>
-        <dt><code>--generate-password</code></dt><dd>Generate the primary secret instead of prompting for it</dd>
+        <dt><code>--generate-password</code></dt><dd>Generate the password (or other secret) instead of prompting for it</dd>
         <dt><code>--no-copy</code></dt><dd>Do not copy a newly added login password, overriding configuration Default: <code>false</code>.</dd>
-        <dt><code>--copy</code></dt><dd>Copy the newly added primary secret to the clipboard Default: <code>false</code>.</dd>
+        <dt><code>--copy</code></dt><dd>Copy the newly added password (or other secret) to the clipboard Default: <code>false</code>.</dd>
       </dl>
     </section>
-    <section class="command" id="pm-view">
-      <h2><code>pm view</code></h2>
-      <p>List vault items without displaying their primary secrets</p>
-      <pre><code>Usage: pm view [OPTIONS]</code></pre>
+    <section class="command" id="pm-list">
+      <h2><code>pm list</code></h2>
+      <p>List vault items; passwords and other secrets stay hidden</p>
+      <pre><code>Usage: pm list [OPTIONS]</code></pre>
       <dl class="flags">
         <dt><code>--type &lt;KIND&gt;</code></dt><dd>Include only items of this category</dd>
         <dt><code>--totp</code></dt><dd>Include only items with a configured authenticator</dd>
         <dt><code>--no-totp</code></dt><dd>Include only items without a configured authenticator</dd>
-        <dt><code>--weak</code></dt><dd>Include only items with a non-empty primary secret and zxcvbn score of 0–2</dd>
+        <dt><code>--weak</code></dt><dd>Include only items whose password is weak (strength score 0–2 of 4)</dd>
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old</dd>
-        <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results Default: <code>id</code>.</dd>
+        <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results. (Defaults to name, like the desktop and mobile apps.) Default: <code>name</code>.</dd>
         <dt><code>--descending</code></dt><dd>Reverse the selected sort order</dd>
         <dt><code>--tag &lt;TAG&gt;</code></dt><dd>Include only items with this tag; repeat to require several</dd>
         <dt><code>--favorites</code></dt><dd>Include only favorite items</dd>
@@ -573,16 +578,16 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
       <pre><code>Usage: pm search [OPTIONS] [QUERY]</code></pre>
       <dl class="flags">
         <dt><code>QUERY &lt;QUERY&gt;</code></dt><dd>Case-insensitive text matched across name, username, URLs, notes, custom-field names, and non-secret custom-field values</dd>
-        <dt><code>--name &lt;NAME&gt;</code></dt><dd>Require this text in the entry name</dd>
+        <dt><code>--name &lt;NAME&gt;</code></dt><dd>Require this text in the item name</dd>
         <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Require this text in the username</dd>
         <dt><code>--url &lt;URL&gt;</code></dt><dd>Require this text in the URL</dd>
         <dt><code>--notes &lt;NOTES&gt;</code></dt><dd>Require this text in the notes</dd>
         <dt><code>--type &lt;KIND&gt;</code></dt><dd>Include only items of this category</dd>
         <dt><code>--totp</code></dt><dd>Include only items with a configured authenticator</dd>
         <dt><code>--no-totp</code></dt><dd>Include only items without a configured authenticator</dd>
-        <dt><code>--weak</code></dt><dd>Include only items with a non-empty primary secret and zxcvbn score of 0–2</dd>
+        <dt><code>--weak</code></dt><dd>Include only items whose password is weak (strength score 0–2 of 4)</dd>
         <dt><code>--stale-days &lt;DAYS&gt;</code></dt><dd>Show passwords at least this many days old</dd>
-        <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results Default: <code>id</code>.</dd>
+        <dt><code>--sort &lt;SORT&gt;</code></dt><dd>Field used to order results. (Defaults to name, like the desktop and mobile apps.) Default: <code>name</code>.</dd>
         <dt><code>--descending</code></dt><dd>Reverse the selected sort order</dd>
         <dt><code>--tag &lt;TAG&gt;</code></dt><dd>Include only items with this tag; repeat to require several</dd>
         <dt><code>--favorites</code></dt><dd>Include only favorite items</dd>
@@ -595,13 +600,12 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
       <dl class="flags">
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Replace the item&#39;s display name</dd>
         <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Replace the username or secondary identifier; an empty value clears it</dd>
-        <dt><code>--password</code></dt><dd>Prompt for and replace the primary secret Default: <code>false</code>.</dd>
-        <dt><code>--generate-password</code></dt><dd>Generate the replacement secret instead of prompting for it Default: <code>false</code>.</dd>
+        <dt><code>--password</code></dt><dd>Prompt for and replace the password (or other secret) Default: <code>false</code>.</dd>
+        <dt><code>--generate-password</code></dt><dd>Generate a replacement password instead of prompting (implies --password) Default: <code>false</code>.</dd>
         <dt><code>--url &lt;URL&gt;</code></dt><dd>Replace the primary URL</dd>
         <dt><code>--notes &lt;NOTES&gt;</code></dt><dd>Replace the notes text; an empty value clears it</dd>
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--type &lt;KIND&gt;</code></dt><dd>Change the item&#39;s category</dd>
         <dt><code>--add-url &lt;ADD_URL&gt;</code></dt><dd>Add another URL without replacing the primary URL</dd>
         <dt><code>--remove-url &lt;REMOVE_URL&gt;</code></dt><dd>Remove a matching primary or additional URL</dd>
@@ -619,18 +623,17 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
     </section>
     <section class="command" id="pm-get">
       <h2><code>pm get</code></h2>
-      <p>Display item details, or print its primary secret with `--password-only`.
+      <p>Display item details, or print its password with `--password-only`.
 
-Details hide the primary secret and secret custom fields. Use --reveal-secrets to display secret custom fields. The default form copies the primary secret when the configured clipboard timeout is nonzero.</p>
+Details hide the password (or card number, key, …) and secret custom fields. Add --copy to copy it with timed clipboard clearing, or --reveal-secrets to display secret custom fields.</p>
       <pre><code>Usage: pm get [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
-        <dt><code>--password-only</code></dt><dd>Print only the primary secret, without copying it to the clipboard</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
+        <dt><code>--password-only</code></dt><dd>Print only the password (or other secret), for pipes and scripts</dd>
         <dt><code>--reveal-secrets</code></dt><dd>Display secret custom-field values in item details</dd>
         <dt><code>--field &lt;FIELD&gt;</code></dt><dd>Print only this custom field&#39;s value (case-insensitive name)</dd>
-        <dt><code>--copy</code></dt><dd>Copy the selected custom field instead of printing its value</dd>
+        <dt><code>--copy</code></dt><dd>Copy the password (or the --field value) to the clipboard; it clears after the configured clipboard timeout</dd>
       </dl>
     </section>
     <section class="command" id="pm-import">
@@ -660,8 +663,7 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
       <pre><code>Usage: pm attachment add [OPTIONS] --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--path &lt;PATH&gt;</code></dt><dd>File to attach (at most 5 MiB)</dd>
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Attachment name; defaults to the file&#39;s name</dd>
       </dl>
@@ -672,8 +674,7 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
       <pre><code>Usage: pm attachment save [OPTIONS] --name &lt;NAME&gt; --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Attachment name (case-insensitive), as listed by `pm get`</dd>
         <dt><code>--path &lt;PATH&gt;</code></dt><dd>Destination file</dd>
         <dt><code>--force</code></dt><dd>Replace an existing file</dd>
@@ -685,8 +686,7 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
       <pre><code>Usage: pm attachment remove --name &lt;NAME&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
-        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an entry by its stable numeric ID (shown by `pm view`)</dd>
-        <dt><code>--entry-name &lt;ENTRY_NAME&gt;</code></dt><dd>Select an entry by name; same as the NAME argument</dd>
+        <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Attachment name (case-insensitive)</dd>
       </dl>
     </section>
@@ -697,8 +697,10 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
 A `.json` destination preserves rich metadata; other extensions use CSV. Both formats contain plaintext secrets and use private permissions.</p>
       <pre><code>Usage: pm export [OPTIONS] --path &lt;PATH&gt;</code></pre>
       <dl class="flags">
-        <dt><code>--path &lt;PATH&gt;</code></dt><dd>Destination file; `.json` selects portable JSON, otherwise CSV</dd>
+        <dt><code>--path &lt;PATH&gt;</code></dt><dd>Destination file ending in `.json` (portable, keeps every detail) or `.csv` (for other password managers; loses history and attachments)</dd>
+        <dt><code>--format &lt;FORMAT&gt;</code></dt><dd>The format to write; it must match the file name&#39;s extension</dd>
         <dt><code>--force</code></dt><dd>Atomically replace an existing plaintext export</dd>
+        <dt><code>--yes</code></dt><dd>Write the plaintext export without asking (required for scripts)</dd>
       </dl>
     </section>
     <section class="command" id="pm-completions">

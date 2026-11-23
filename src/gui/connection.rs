@@ -153,12 +153,26 @@ impl App {
                 self.connection.vault = Some(vault);
             }
             Message::Master(password) => {
+                self.ui.unlock_error = None;
                 self.ui.master_error = if self.connection.creating {
                     password_manager::encryption::validate_new_password(password.expose()).err()
                 } else {
                     None
                 };
+                self.ui.master_strength = (self.connection.creating && !password.is_empty())
+                    .then(|| password_manager::password::strength_rating(password.expose()));
+                if self.ui.suggested_master.as_ref() != Some(&password) {
+                    self.ui.suggested_master = None;
+                }
                 self.connection.master = password;
+            }
+            Message::SuggestMaster if self.connection.creating => {
+                if let Ok(phrase) = password_manager::password::generate_passphrase(6, "-") {
+                    let phrase = SecretString::from(phrase);
+                    self.connection.confirmation = phrase.clone();
+                    self.ui.suggested_master = Some(phrase.clone());
+                    return self.update(Message::Master(phrase));
+                }
             }
             Message::ConfirmMaster(password) => self.connection.confirmation = password,
             Message::KeyPath(path) => self.connection.key_path = path,
@@ -182,6 +196,8 @@ impl App {
                 }
                 self.connection.master.zeroize();
                 self.connection.confirmation.zeroize();
+                self.ui.suggested_master = None;
+                self.ui.master_strength = None;
                 self.connection.key_path.zeroize();
                 self.notice.clear();
                 self.ui.notice_error = false;
@@ -285,6 +301,12 @@ impl App {
                     name: self.ui.vault_name.trim().to_owned(),
                 });
                 return self.request(Job::Create, ServerCommand::New(key), None);
+            }
+            Message::Restart if self.recovery.id().is_none() => {
+                self.ui.confirm_stop = false;
+                self.ui.restart_after_stop = true;
+                self.clear_vault();
+                return self.request(Job::Stop, ServerCommand::Kill, None);
             }
             Message::Stop if self.recovery.id().is_none() => {
                 self.ui.confirm_stop = false;

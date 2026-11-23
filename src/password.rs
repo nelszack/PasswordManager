@@ -136,7 +136,9 @@ pub fn generated_password_output(
         output.push_str(&password_strength_output(&pass));
     }
     let warning = if copy {
-        copy_with_timeout(&pass, copy_time).err()
+        copy_with_timeout(&pass, copy_time)
+            .err()
+            .map(|error| format!("Not copied: {}.", crate::clipboard::describe_error(&error)))
     } else {
         None
     };

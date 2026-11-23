@@ -17,6 +17,8 @@ function firefoxManifest(manifest, backgroundSource) {
     if (typeof worker !== "string") throw new Error("Chrome manifest has no background service worker");
     const result = structuredClone(manifest);
     delete result.minimum_chrome_version;
+    // Chrome derives the fixed extension ID from "key"; Firefox uses the gecko ID.
+    delete result.key;
     result.background = { scripts: [...backgroundImports(backgroundSource), worker] };
     result.browser_specific_settings = {
         gecko: { id: FIREFOX_EXTENSION_ID, strict_min_version: FIREFOX_MIN_VERSION },

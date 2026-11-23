@@ -1,14 +1,45 @@
 use crate::{protocol::ResponsePayload, terminal::metadata};
+use pm_contracts::item_profile::profile;
+use pm_contracts::vault::{ItemDetail, ItemPage};
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+static ASCII: AtomicBool = AtomicBool::new(false);
+static WIDTH: AtomicUsize = AtomicUsize::new(100);
+
+/// Plain ASCII punctuation instead of typographic glyphs (pipes, TERM=dumb, PM_PLAIN,
+/// non-UTF-8 locales). Only text this module adds changes; item data never does.
+pub fn set_ascii(on: bool) {
+    ASCII.store(on, Ordering::Relaxed);
+}
+
+/// The terminal width that list columns fit into.
+pub fn set_width(columns: usize) {
+    WIDTH.store(columns.clamp(40, 400), Ordering::Relaxed);
+}
+
+/// Whether plain ASCII output is active.
+pub fn ascii() -> bool {
+    ASCII.load(Ordering::Relaxed)
+}
+
+fn glyph(unicode: &'static str, ascii: &'static str) -> &'static str {
+    if ASCII.load(Ordering::Relaxed) {
+        ascii
+    } else {
+        unicode
+    }
+}
+
+fn dot() -> &'static str {
+    glyph(" · ", " - ")
+}
 
 pub fn render(payload: &ResponsePayload) -> String {
     match payload {
         ResponsePayload::Message(message) => message.clone(),
-        ResponsePayload::CloudVaults(vaults) => {
-            serde_json::to_string_pretty(vaults).expect("cloud vaults serialize")
-        }
-        ResponsePayload::CloudConflicts(review) => {
-            serde_json::to_string_pretty(review).expect("cloud conflicts serialize")
-        }
+        ResponsePayload::CloudVaults(vaults) => cloud_vaults(vaults),
+        ResponsePayload::CloudConflicts(review) => cloud_conflicts(review),
         ResponsePayload::Secret(secret) => secret.expose().to_owned(),
         ResponsePayload::Status(status) => format!(
             "Status: {}\nVersion: {}{}{}{}",
@@ -82,94 +113,8 @@ pub fn render(payload: &ResponsePayload) -> String {
                     "The server has no retained outcome. Inspect the vault; do not assume the change failed.",
             }
         ),
-        ResponsePayload::ItemPage(page) => {
-            if page.items.is_empty() {
-                return "No items. Add one with `pm add --name NAME` or import with `pm import`."
-                    .into();
-            }
-            let mut listing: String = page
-                .items
-                .iter()
-                .map(|item| {
-                    let mut block = format!(
-                        "#{} {}{} ({}{})\n",
-                        item.id,
-                        if item.favorite { "★ " } else { "" },
-                        metadata(&item.name).as_str(),
-                        item.kind,
-                        if item.has_totp { ", OTP" } else { "" }
-                    );
-                    if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
-                        block += &format!("   Username: {}\n", metadata(username).as_str());
-                    }
-                    if !item.urls.is_empty() {
-                        block += &format!("   URLs: {}\n", urls(&item.urls));
-                    }
-                    if !item.tags.is_empty() {
-                        block += &format!("   Tags: {}\n", tags(&item.tags));
-                    }
-                    block
-                })
-                .collect();
-            let shown = page.items.len();
-            let count = if shown == page.total {
-                format!("{shown} {}", if shown == 1 { "item" } else { "items" })
-            } else {
-                format!("{shown} of {} items", page.total)
-            };
-            listing += &format!("\n{count}. Show one with `pm get NAME` or `pm get --id ID`.\n");
-            listing
-        }
-        ResponsePayload::Item(item) => {
-            let mut lines = vec![
-                format!("Name:     {}", metadata(&item.name).as_str()),
-                format!("Type:     {}", item.kind),
-            ];
-            if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
-                lines.push(format!("Username: {}", metadata(username).as_str()));
-            }
-            if !item.urls.is_empty() {
-                lines.push(format!("URLs:     {}", urls(&item.urls)));
-            }
-            if !item.tags.is_empty() {
-                lines.push(format!("Tags:     {}", tags(&item.tags)));
-            }
-            if item.favorite {
-                lines.push("Favorite: yes".into());
-            }
-            if !item.attachments.is_empty() {
-                lines.push("Attachments:".into());
-                lines.extend(
-                    item.attachments.iter().map(|a| {
-                        format!("  {} ({})", metadata(&a.name).as_str(), byte_size(a.size))
-                    }),
-                );
-            }
-            lines.push(format!(
-                "Password: {}",
-                item.password
-                    .as_ref()
-                    .map(|v| metadata(v.expose()).to_string())
-                    .unwrap_or_else(|| "<hidden> (use --password-only to print it)".into())
-            ));
-            if let Some(notes) = item.notes.as_ref().filter(|n| !n.expose().is_empty()) {
-                lines.push(format!("Notes:    {}", metadata(notes.expose()).as_str()));
-            }
-            if !item.fields.is_empty() {
-                lines.push("Custom fields:".into());
-                lines.extend(item.fields.iter().map(|f| {
-                    format!(
-                        "  {}: {}",
-                        metadata(&f.name).as_str(),
-                        f.value
-                            .as_ref()
-                            .map(|v| metadata(v.expose()).to_string())
-                            .unwrap_or_else(|| "<hidden> (use --reveal-secrets)".into())
-                    )
-                }));
-            }
-            lines.join("\n") + "\n"
-        }
+        ResponsePayload::ItemPage(page) => item_page(page, None),
+        ResponsePayload::Item(item) => item_detail(item),
         ResponsePayload::Audit(report) => audit(report),
         ResponsePayload::ImportReport(report) => import_report(report),
         ResponsePayload::History(page) => {
@@ -181,11 +126,14 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .enumerate()
                 .map(|(index, changed)| {
                     format!(
-                        "{}. changed {}\n",
+                        "Revision {}  changed {}\n",
                         index + 1,
                         metadata(&timestamp(changed)).as_str()
                     )
                 })
+                .chain(std::iter::once(
+                    "\nRestore one with `pm restore-password NAME --revision N`.\n".to_owned(),
+                ))
                 .collect()
         }
         ResponsePayload::Trash(page) => {
@@ -196,13 +144,17 @@ pub fn render(payload: &ResponsePayload) -> String {
                 .iter()
                 .map(|item| {
                     format!(
-                        "#{} {} ({}) deleted {}\n",
+                        "#{:<4} {}  ({}, deleted {})\n",
                         item.id,
                         metadata(&item.name).as_str(),
-                        item.kind,
+                        profile(item.kind).title,
                         metadata(&timestamp(&item.deleted)).as_str(),
                     )
                 })
+                .chain(std::iter::once(
+                    "\nRestore one with `pm restore --id ID`; erase one with `pm purge --id ID`.\n"
+                        .to_owned(),
+                ))
                 .collect()
         }
         _ => serde_json::to_string_pretty(payload).unwrap_or_default(),
@@ -210,91 +162,141 @@ pub fn render(payload: &ResponsePayload) -> String {
 }
 
 pub fn audit(findings: &crate::vault::AuditReport) -> String {
+    use std::fmt::Write;
     if findings.total == 0 {
         return "No login items to assess. Add or import a login before checking vault health.\n"
             .into();
     }
-    let score = findings.score;
-    let healthy = findings.healthy;
-    let weak = &findings.weak;
-    let reused = &findings.reused;
-    let duplicates = &findings.duplicates;
-    let stale = &findings.stale;
-    let missing_totp = &findings.missing_totp;
-    let breached_entries = &findings.breached;
-    let breach_error = findings.breach_error.as_deref();
+    fn plural(count: usize, one: &str, many: &str) -> String {
+        format!("{count} {}", if count == 1 { one } else { many })
+    }
+    // One row per login, with ID, name and username in aligned columns across
+    // the whole report, so every section reads as the same table.
+    let everyone: Vec<&crate::vault::AuditLabel> = findings
+        .weak
+        .iter()
+        .chain(findings.reused.iter().flatten())
+        .chain(findings.duplicates.iter().flatten())
+        .chain(findings.stale.iter())
+        .chain(findings.missing_totp.iter())
+        .chain(findings.breached.iter().map(|(entry, _)| entry))
+        .collect();
+    let id_width = everyone
+        .iter()
+        .map(|entry| entry.id.to_string().len() + 1)
+        .max()
+        .unwrap_or(2);
+    let name_width = everyone
+        .iter()
+        .map(|entry| cells(metadata(&entry.name).as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(40);
+    let label = |entry: &crate::vault::AuditLabel| -> String {
+        let name = elide(metadata(&entry.name).as_str(), 40);
+        let pad = " ".repeat(name_width.saturating_sub(cells(&name)));
+        let user = entry
+            .username
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(|u| metadata(u).to_string())
+            .unwrap_or_default();
+        let id = format!("#{}", entry.id);
+        format!("{id:<id_width$}  {name}{pad}  {user}")
+            .trim_end()
+            .to_owned()
+    };
+    // Each reused or duplicate group is numbered, with one member per line.
+    let groups = |groups: &[Vec<crate::vault::AuditLabel>]| -> Vec<String> {
+        groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, group)| {
+                std::iter::once(format!("Group {}:", index + 1))
+                    .chain(group.iter().map(|entry| format!("  {}", label(entry))))
+            })
+            .collect()
+    };
     let mut report = format!(
-        "Health score: {score}/100 ({healthy}/{} login entries have no detected issues).\nAudit: {} weak entries, {} reused-password groups, {} duplicate-login groups, {} stale entries, {} missing TOTP, {} breached entries.\n",
-        findings.total,
-        weak.len(),
-        reused.len(),
-        duplicates.len(),
-        stale.len(),
-        missing_totp.len(),
-        breached_entries.len(),
+        "Vault health: {}/100{}{} of {} have no issues\n",
+        findings.score,
+        dot(),
+        findings.healthy,
+        plural(findings.total, "login", "logins"),
     );
-    for entry in weak {
-        report.push_str(&format!(
-            "Weak: {}. {} ({})\n",
-            entry.id,
-            metadata(&entry.name).as_str(),
-            optional_metadata(entry.username.as_deref())
-        ));
-    }
-    for entries in reused {
-        let labels = entries
+    let mut section = |title: String, lines: Vec<String>| {
+        if !lines.is_empty() {
+            let _ = write!(report, "\n{title}:\n");
+            for line in lines {
+                let _ = writeln!(report, "  {line}");
+            }
+        }
+    };
+    section(
+        format!("Weak passwords ({})", findings.weak.len()),
+        findings.weak.iter().map(&label).collect(),
+    );
+    section(
+        format!(
+            "Reused passwords ({})",
+            plural(findings.reused.len(), "group", "groups")
+        ),
+        groups(&findings.reused),
+    );
+    section(
+        format!(
+            "Duplicate logins ({})",
+            plural(findings.duplicates.len(), "group", "groups")
+        ),
+        groups(&findings.duplicates),
+    );
+    section(
+        format!("Old passwords ({})", findings.stale.len()),
+        findings
+            .stale
             .iter()
-            .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        report.push_str(&format!("Reused password: {labels}\n"));
-    }
-    for entries in duplicates {
-        let labels = entries
+            .map(|entry| {
+                format!(
+                    "{}  (changed {})",
+                    label(entry),
+                    metadata(&timestamp(&entry.password_changed)).as_str()
+                )
+            })
+            .collect(),
+    );
+    section(
+        format!("No one-time code set up ({})", findings.missing_totp.len()),
+        findings.missing_totp.iter().map(&label).collect(),
+    );
+    section(
+        format!("Found in known breaches ({})", findings.breached.len()),
+        findings
+            .breached
             .iter()
-            .map(|entry| format!("{}. {}", entry.id, metadata(&entry.name).as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        report.push_str(&format!("Duplicate login: {labels}\n"));
-    }
-    for entry in stale {
-        report.push_str(&format!(
-            "Stale password: {}. {} (last changed {})\n",
-            entry.id,
-            metadata(&entry.name).as_str(),
-            metadata(&timestamp(&entry.password_changed)).as_str()
-        ));
-    }
-    for entry in missing_totp {
-        report.push_str(&format!(
-            "Missing TOTP: {}. {}\n",
-            entry.id,
-            metadata(&entry.name).as_str()
-        ));
-    }
-    for (entry, count) in breached_entries {
-        report.push_str(&format!(
-            "Breached password: {}. {} (seen {count} times)\n",
-            entry.id,
-            metadata(&entry.name).as_str()
-        ));
-    }
-    if let Some(error) = breach_error {
-        report.push_str(&format!("Breach check unavailable: {error}\n"));
+            .map(|(entry, count)| format!("{}  (seen {count} times)", label(entry)))
+            .collect(),
+    );
+    if let Some(error) = &findings.breach_error {
+        let _ = write!(
+            report,
+            "\nBreach check unavailable: {}\n",
+            metadata(error).as_str()
+        );
     }
     if !findings.unchecked.is_empty() {
-        report.push_str(&format!(
-            "Breach checks incomplete: {} of {} login entries checked successfully.\n",
+        let _ = write!(
+            report,
+            "\nBreach checks incomplete: {} of {} checked.\n",
             findings.total - findings.unchecked.len(),
-            findings.total
-        ));
+            plural(findings.total, "login", "logins")
+        );
         for entry in &findings.unchecked {
-            report.push_str(&format!(
-                "Unchecked breach status: {}. {}\n",
-                entry.id,
-                metadata(&entry.name).as_str()
-            ));
+            let _ = writeln!(report, "  Not checked: {}", label(entry));
         }
+    }
+    if findings.healthy < findings.total {
+        report +=
+            "\nFix one with `pm update --id ID --generate`, or open it with `pm get --id ID`.\n";
     }
     report
 }
@@ -334,13 +336,6 @@ fn import_report(report: &crate::vault::ImportReport) -> String {
     output
 }
 
-fn optional_metadata(value: Option<&str>) -> String {
-    value
-        .filter(|v| !v.is_empty())
-        .map(|v| metadata(v).to_string())
-        .unwrap_or_else(|| "—".into())
-}
-
 fn byte_size(bytes: u64) -> String {
     match bytes {
         0..1024 => format!("{bytes} B"),
@@ -359,7 +354,7 @@ fn tags(values: &[String]) -> String {
 
 fn urls(values: &[String]) -> String {
     if values.is_empty() {
-        "—".into()
+        glyph("—", "-").into()
     } else {
         values
             .iter()
@@ -369,31 +364,330 @@ fn urls(values: &[String]) -> String {
     }
 }
 
-/// Show RFC 3339 instants as `YYYY-MM-DD HH:MM UTC`; leave anything else unchanged.
+/// Show RFC 3339 instants in the local time zone as `YYYY-MM-DD HH:MM ZONE`;
+/// leave anything that is not a timestamp unchanged.
 fn timestamp(value: &str) -> String {
-    let utc = value.ends_with('Z') || value.ends_with("+00:00");
-    match (value.get(..10), value.get(10..11), value.get(11..16)) {
-        (Some(date), Some("T"), Some(time)) if utc => format!("{date} {time} UTC"),
-        _ => value.to_owned(),
+    timestamp_in(value, &jiff::tz::TimeZone::system())
+}
+
+fn timestamp_in(value: &str, zone: &jiff::tz::TimeZone) -> String {
+    match value.parse::<jiff::Timestamp>() {
+        Ok(instant) => instant
+            .to_zoned(zone.clone())
+            .strftime("%Y-%m-%d %H:%M %Z")
+            .to_string(),
+        Err(_) => value.to_owned(),
     }
+}
+
+/// Item list: one aligned line per item so long vaults stay scannable.
+/// `empty` replaces the empty-vault hint when a search or filter matched nothing.
+pub fn item_page(page: &ItemPage, empty: Option<&str>) -> String {
+    if page.items.is_empty() {
+        return empty
+            .unwrap_or(
+                "This vault has no items yet. Add one with `pm add --name NAME`, or import with \
+                 `pm import --path FILE`.",
+            )
+            .to_owned();
+    }
+    let names: Vec<String> = page
+        .items
+        .iter()
+        .map(|item| {
+            format!(
+                "{}{}",
+                if item.favorite {
+                    glyph("★ ", "* ")
+                } else {
+                    ""
+                },
+                metadata(&item.name).as_str()
+            )
+        })
+        .collect();
+    let id_width = page
+        .items
+        .iter()
+        .map(|item| item.id.to_string().len())
+        .max()
+        .unwrap_or(1);
+    // Columns fit the terminal; long values are shortened here, while `pm get`
+    // and --json keep them whole.
+    let width = WIDTH.load(Ordering::Relaxed);
+    let names: Vec<String> = names
+        .into_iter()
+        .map(|name| elide(&name, (width / 3).clamp(16, 60)))
+        .collect();
+    let name_width = names.iter().map(|name| cells(name)).max().unwrap_or(0);
+    let details_width = width.saturating_sub(id_width + name_width + 5).max(20);
+    let mut listing = String::new();
+    for (item, name) in page.items.iter().zip(names) {
+        let mut details = vec![profile(item.kind).title.to_owned()];
+        if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
+            details.push(metadata(username).to_string());
+        }
+        if let Some(url) = item.urls.first() {
+            details.push(metadata(url).to_string());
+        }
+        if item.has_totp {
+            details.push("one-time code".into());
+        }
+        for tag in &item.tags {
+            details.push(format!("#{}", metadata(tag).as_str()));
+        }
+        let pad = " ".repeat(name_width.saturating_sub(cells(&name)));
+        listing += &format!(
+            "#{:<id_width$}  {name}{pad}  {}\n",
+            item.id,
+            elide(&details.join(dot()), details_width)
+        );
+    }
+    let shown = page.items.len();
+    let count = if shown == page.total {
+        format!("{shown} {}", if shown == 1 { "item" } else { "items" })
+    } else {
+        format!("{shown} of {} items", page.total)
+    };
+    listing + &format!("\n{count}. Show one with `pm get NAME` or `pm get --id ID`.\n")
+}
+
+static REVEAL_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Show item notes in details (the CLI's `get --reveal-secrets`); hidden by default,
+/// as in the desktop and mobile apps.
+pub fn reveal_notes(reveal: bool) {
+    REVEAL_NOTES.store(reveal, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn item_detail(item: &ItemDetail) -> String {
+    let profile = profile(item.kind);
+    let mut rows: Vec<(String, String)> = vec![
+        ("Name".into(), metadata(&item.name).to_string()),
+        ("ID".into(), item.id.to_string()),
+        ("Type".into(), profile.title.into()),
+    ];
+    if let Some(username) = item.username.as_deref().filter(|u| !u.is_empty()) {
+        rows.push((short_label(profile.owner), metadata(username).to_string()));
+    }
+    if !item.urls.is_empty() {
+        let label = if item.urls.len() == 1 {
+            "Website"
+        } else {
+            "Websites"
+        };
+        rows.push((label.into(), urls(&item.urls)));
+    }
+    if item.has_secret || item.password.is_some() {
+        rows.push((
+            short_label(profile.secret),
+            item.password
+                .as_ref()
+                .map(|v| metadata(v.expose()).to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} (hidden; add --password-only to print it)",
+                        glyph("••••••••", "********")
+                    )
+                }),
+        ));
+    }
+    if item.has_totp {
+        let kind = match item.otp_mode {
+            Some(pm_contracts::types::OtpMode::Hotp) => "counter-based",
+            _ => "time-based",
+        };
+        rows.push((
+            "One-time code".into(),
+            format!("{kind}; run `pm totp show --id {}`", item.id),
+        ));
+    }
+    if item.has_duo {
+        rows.push((
+            "Duo Push".into(),
+            format!("enrolled; run `pm duo requests --id {}`", item.id),
+        ));
+    }
+    if !item.tags.is_empty() {
+        rows.push(("Tags".into(), tags(&item.tags)));
+    }
+    if item.favorite {
+        rows.push(("Favorite".into(), "yes".into()));
+    }
+    if let Some(notes) = item.notes.as_ref().filter(|n| !n.expose().is_empty()) {
+        let shown = REVEAL_NOTES.load(std::sync::atomic::Ordering::Relaxed);
+        rows.push((
+            "Notes".into(),
+            if shown {
+                metadata(notes.expose()).to_string()
+            } else {
+                "(hidden; add --reveal-secrets)".into()
+            },
+        ));
+    }
+    for field in &item.fields {
+        rows.push((
+            metadata(&field.name).to_string(),
+            field
+                .value
+                .as_ref()
+                .map(|v| metadata(v.expose()).to_string())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} (hidden; add --reveal-secrets)",
+                        glyph("••••••••", "********")
+                    )
+                }),
+        ));
+    }
+    for attachment in &item.attachments {
+        rows.push((
+            "Attachment".into(),
+            format!(
+                "{} ({})",
+                metadata(&attachment.name).as_str(),
+                byte_size(attachment.size)
+            ),
+        ));
+    }
+    rows.push(("Modified".into(), timestamp(&item.modified)));
+    rows.push(("Created".into(), timestamp(&item.created)));
+    let width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count() + 1)
+        .max()
+        .unwrap_or(0)
+        .min(24);
+    rows.into_iter()
+        .map(|(label, value)| format!("{:<width$}  {value}\n", format!("{label}:")))
+        .collect()
+}
+
+/// Terminal cells a string occupies: wide East Asian characters and emoji take
+/// two, combining marks none.
+fn cells(value: &str) -> usize {
+    value
+        .chars()
+        .map(|c| match c as u32 {
+            0x0300..=0x036F | 0x200B..=0x200F | 0xFE00..=0xFE0F => 0,
+            0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFD => 2,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// At most `limit` cells, ending in "…" ("..." in ASCII output) when shortened.
+fn elide(value: &str, limit: usize) -> String {
+    if cells(value) <= limit {
+        return value.to_owned();
+    }
+    let marker = glyph("…", "...");
+    let reserved = cells(marker);
+    let mut out = String::new();
+    let mut used = 0;
+    for c in value.chars() {
+        let width = cells(&c.to_string());
+        if used + width + reserved > limit {
+            break;
+        }
+        used += width;
+        out.push(c);
+    }
+    out + marker
+}
+
+/// Drop parenthetical editor guidance: "Identity number (optional)" -> "Identity number".
+fn short_label(label: &str) -> String {
+    label.split(" (").next().unwrap_or(label).to_owned()
+}
+
+fn cloud_vaults(vaults: &[pm_contracts::cloud::RemoteVault]) -> String {
+    if vaults.is_empty() {
+        return "No vaults are on the sync server yet. Upload this one with `pm sync enable`."
+            .into();
+    }
+    let mut text = String::new();
+    for vault in vaults {
+        text += &format!(
+            "{}  version {}  {}\n",
+            metadata(&vault.id).as_str(),
+            metadata(&vault.version).as_str(),
+            byte_size(vault.size)
+        );
+    }
+    text + "\nDownload one with `pm sync pull ID`.\n"
+}
+
+fn cloud_conflicts(review: &pm_contracts::cloud::ConflictReview) -> String {
+    if review.items.is_empty() {
+        return "No conflicts: this device and the cloud agree.".into();
+    }
+    let mut text = String::new();
+    for item in &review.items {
+        text += &format!(
+            "Item {}: this device \"{}\"{}cloud \"{}\"\n",
+            item.id,
+            metadata(&item.local).as_str(),
+            dot(),
+            metadata(&item.remote).as_str()
+        );
+        for field in &item.fields {
+            text += &format!(
+                "  {}: this device {}{}cloud {}\n",
+                metadata(&field.field).as_str(),
+                metadata(&field.local).as_str(),
+                dot(),
+                metadata(&field.remote).as_str()
+            );
+        }
+    }
+    let example = review
+        .items
+        .first()
+        .and_then(|item| item.fields.first().map(|field| (item.id, field)))
+        .map(|(id, field)| format!(" --choose {id}:{}:local", metadata(&field.field).as_str()))
+        .unwrap_or_default();
+    text + &format!(
+        "\nResolve with `pm sync resolve --review {}{example}` (one --choose per field; local \
+         or remote).\n",
+        metadata(&review.token).as_str()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn timestamps_are_shortened_only_when_utc() {
+    fn timestamps_use_the_given_zone_and_leave_other_text_alone() {
+        let utc = jiff::tz::TimeZone::UTC;
         assert_eq!(
-            super::timestamp("2026-11-19T04:11:18.793348284+00:00"),
+            super::timestamp_in("2026-11-19T04:11:18.793348284+00:00", &utc),
             "2026-11-19 04:11 UTC"
         );
-        assert_eq!(
-            super::timestamp("2026-11-19T04:11:18Z"),
-            "2026-11-19 04:11 UTC"
+        let plus_one = jiff::tz::TimeZone::fixed(jiff::tz::offset(1));
+        assert!(
+            super::timestamp_in("2026-11-19T04:11:18Z", &plus_one).starts_with("2026-11-19 05:11")
         );
+        assert_eq!(super::timestamp_in("yesterday", &utc), "yesterday");
+    }
+
+    #[test]
+    fn empty_lists_distinguish_an_empty_vault_from_no_matches() {
+        let page = pm_contracts::vault::ItemPage {
+            items: vec![],
+            total: 0,
+        };
+        assert!(super::item_page(&page, None).contains("no items yet"));
         assert_eq!(
-            super::timestamp("2026-11-19T04:11:18+02:00"),
-            "2026-11-19T04:11:18+02:00"
+            super::item_page(&page, Some("No items match.")),
+            "No items match."
         );
-        assert_eq!(super::timestamp("yesterday"), "yesterday");
     }
 }

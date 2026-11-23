@@ -19,10 +19,11 @@
       <input id="confirmCrossOrigin" type="checkbox">
       <span id="crossOriginText"></span>
     </label>
-    <input id="search" type="search" autocomplete="off" placeholder="Search" aria-label="Find an account" aria-controls="items">
+    <input id="search" type="search" autocomplete="off" placeholder="Search" aria-label="Find an account"
+      role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="items">
     <p id="status" class="hint" role="status" aria-live="polite">Loading…</p>
-    <div id="items" role="group" aria-label="Saved items"></div>
-    <div id="recovery" class="card" hidden><p>Open the desktop app to unlock your vault or configure browser integration.</p><p class="hint">After reconnecting, retry here. If this window expires, reopen it from the website.</p><button id="retry" type="button" class="primary">Retry</button></div>
+    <div id="items" role="listbox" aria-label="Saved items"></div>
+    <div id="recovery" class="card" hidden><p>Unlock your vault in the desktop app. This window retries by itself once it is unlocked.</p><p class="hint">If this window expires, reopen it from the website.</p><button id="openDesktop" type="button" class="primary">Open desktop app</button><button id="retry" type="button">Retry now</button></div>
     <button id="cancel" type="button">Cancel <kbd>Esc</kbd></button>
   </main>
   <script src="picker_state.js"></script>

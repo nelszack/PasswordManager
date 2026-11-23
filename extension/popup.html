@@ -13,37 +13,114 @@
   <header class="brand">
     <img src="icons/icon32.png" alt="">
     <h1>Password Manager</h1>
-  </header>
-
-  <div id="statusCard" class="card">
-    <div id="statusRow" role="status" aria-live="polite">
-      <span id="statusDot"></span>
+    <div id="statusRow" class="status" role="status" aria-live="polite">
+      <span id="statusDot" class="dot" aria-hidden="true"></span>
       <strong id="statusText">Checking…</strong>
     </div>
-    <p id="nativeHint" class="hint">Checking the local vault connection…</p>
-  </div>
+  </header>
+
+  <p id="nativeHint" class="hint lead">Checking the local vault connection…</p>
+
+  <!-- Feedback sits near the top so it is never scrolled out of view. -->
+  <div id="output" role="status" aria-live="polite"></div>
+
+  <section id="setupCard" class="card" aria-labelledby="setupTitle" hidden>
+    <h2 id="setupTitle">Connect to the desktop app</h2>
+    <ol class="steps">
+      <li>In the desktop app, open <strong>Settings → Browser &amp; service → Set up browser integration…</strong>, choose this browser, and turn it on. Or run:
+        <div class="copyline">
+          <code id="setupCommand">pm native-host install --browser chrome</code>
+          <button id="copySetupCommand" class="small" aria-label="Copy setup command">Copy</button>
+        </div>
+      </li>
+      <li>Reload this extension, then check again.</li>
+    </ol>
+    <button id="retryBtn" class="primary">Check again</button>
+    <p class="hint">Don't have the desktop app yet? <a href="help.html#setup" target="_blank" rel="noopener">See how to install it</a>.</p>
+    <details class="more">
+      <summary>Using a repackaged extension?</summary>
+      <p class="hint">Register this extension ID instead of the default one:</p>
+      <div class="copyline">
+        <code id="extensionId"></code>
+        <button id="copyExtensionId" class="small" aria-label="Copy extension ID">Copy</button>
+      </div>
+    </details>
+  </section>
 
   <div class="actions">
     <button id="openDesktopBtn" class="primary">Open desktop app</button>
+    <button id="reconnectBtn" hidden>Reconnect</button>
     <button id="lockBtn" disabled>Lock vault</button>
   </div>
 
-  <section id="generator" class="card" aria-labelledby="generatorTitle">
-    <h2 id="generatorTitle">Generate a password</h2>
+  <section id="siteSection" class="card" aria-labelledby="siteTitle" hidden>
+    <div class="section-head">
+      <h2 id="siteTitle">Logins for this site</h2>
+      <button id="addLoginBtn" class="quiet small" aria-expanded="false" aria-controls="addForm">Add</button>
+    </div>
+    <label for="siteSearch" class="visually-hidden">Search this site's logins</label>
+    <input id="siteSearch" type="search" placeholder="Search this site's logins" autocomplete="off" hidden>
+    <ul id="siteList" class="logins" aria-label="Logins for this site"></ul>
+    <p id="siteEmpty" class="hint" hidden></p>
+    <form id="addForm" class="add" hidden>
+      <label for="addName">Name</label>
+      <input id="addName" autocomplete="off" required maxlength="200">
+      <label for="addUsername">Username or email</label>
+      <input id="addUsername" autocomplete="off" maxlength="400">
+      <label class="check"><input id="addOwn" type="checkbox"> I already have a password for this site</label>
+      <div id="addGeneratedRow">
+        <span class="label">Generated password</span>
+        <div class="generated">
+          <output id="addPassword" aria-live="polite"></output>
+          <button id="addRegenerate" type="button" class="quiet icon" aria-label="Generate another password">↻</button>
+        </div>
+        <p class="hint">Saved with this site's address. Use the site's sign-up form to set it as your password.</p>
+      </div>
+      <div id="addOwnRow" hidden>
+        <label for="addOwnPassword">Password for this login</label>
+        <input id="addOwnPassword" type="password" autocomplete="off" maxlength="4096">
+      </div>
+      <div class="row">
+        <button id="addSave" type="submit" class="primary">Save login</button>
+        <button id="addCancel" type="button">Cancel</button>
+      </div>
+    </form>
+  </section>
+
+  <section id="vaultSearch" class="card" aria-labelledby="vaultSearchTitle" hidden>
+    <h2 id="vaultSearchTitle">Search all items</h2>
+    <label for="vaultQuery" class="visually-hidden">Search all items by name, username, or website</label>
+    <input id="vaultQuery" type="search" placeholder="Name, username, or website" autocomplete="off">
+    <ul id="vaultResults" class="logins" aria-label="Search results"></ul>
+    <p id="vaultEmpty" class="hint" role="status" aria-live="polite" hidden></p>
+  </section>
+
+  <details id="generator" class="card" aria-labelledby="generatorTitle">
+    <summary id="generatorTitle">Generate a password</summary>
     <div class="generated">
       <output id="genValue" aria-live="polite"></output>
-      <button id="genNew" class="quiet" title="Generate another" aria-label="Generate another password">↻</button>
+      <button id="genNew" class="quiet icon" title="Generate another" aria-label="Generate another password">↻</button>
     </div>
     <button id="genCopy">Copy password</button>
     <label class="range">Length <span id="genLengthValue"></span>
-      <input id="genLength" type="range" min="8" max="64" step="1">
+      <input id="genLength" type="range" min="8" max="255" step="1">
     </label>
     <div class="toggles">
       <label><input id="genSymbols" type="checkbox"> Symbols</label>
       <label><input id="genPassphrase" type="checkbox"> Use words</label>
     </div>
-    <p class="hint">These settings are also used by the ✨ button on sign-up forms.</p>
-  </section>
+    <details class="more">
+      <summary>More options</summary>
+      <div class="toggles column">
+        <label><input id="genUppercase" type="checkbox"> Uppercase letters</label>
+        <label><input id="genDigits" type="checkbox"> Digits</label>
+        <label><input id="genAmbiguous" type="checkbox"> Avoid look-alike characters (0, O, 1, l)</label>
+      </div>
+      <label for="genSeparator">Word separator</label>
+      <input id="genSeparator" maxlength="16" autocomplete="off">
+    </details>
+    <p class="hint">Saved in this browser and also used by the ✨ button on sign-up forms.</p>
+  </details>
 
   <details id="neverSave" hidden>
     <summary>Sites that never offer to save (<span id="neverCount">0</span>)</summary>
@@ -61,9 +138,13 @@
     </div>
   </section>
 
-  <div id="output" role="status" aria-live="polite"></div>
+  <footer class="hint">
+    <span id="shortcuts"></span>
+    <a id="helpLink" href="help.html" target="_blank" rel="noopener">Help &amp; troubleshooting</a>
+  </footer>
 
   <script src="password_generator.js"></script>
+  <script src="command_contract.js"></script>
   <script src="popup_state.js"></script>
   <script src="popup.js"></script>
 </body>

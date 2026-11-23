@@ -398,10 +398,10 @@ test("only the popup may acknowledge unknown outcomes and content scripts cannot
     assert.equal((await env.message({ action: "acknowledgeUnknownOperation", operationId: "unchecked", inspected: true }, popup)).success, false);
 });
 
-test("only the extension popup can launch the desktop app", async () => {
+test("only the extension popup and picker can launch the desktop app", async () => {
     const env = securityEnvironment();
     await new Promise(resolve => setImmediate(resolve));
-    for (const sender of [env.sender, env.pickerSender,
+    for (const sender of [env.sender,
         { id: "other-extension", url: env.context.chrome.runtime.getURL("popup.html") }]) {
         assert.equal((await env.message({ action: "openDesktop" }, sender)).success, false);
     }
@@ -410,6 +410,18 @@ test("only the extension popup can launch the desktop app", async () => {
     assert.equal((await env.message({ action: "openDesktop" }, popup)).success, true);
     assert.equal(env.requests.at(-1).action, "openDesktop");
     assert.equal(env.requests.at(-1).operationId, undefined);
+    // The popup may name a valid item to open; other senders and bad IDs are refused.
+    assert.equal((await env.message({ action: "openDesktop", id: 7 }, popup)).success, true);
+    assert.equal(env.requests.at(-1).entryId, 7);
+    const picker = { id: env.context.chrome.runtime.id, url: env.context.chrome.runtime.getURL("picker.html") };
+    const sent = env.requests.length;
+    for (const [request, sender] of [
+        [{ action: "openDesktop", id: 7 }, picker],
+        [{ action: "openDesktop", id: 0 }, popup],
+        [{ action: "openDesktop", id: "7" }, popup],
+    ])
+        assert.equal((await env.message(request, sender)).success, false);
+    assert.equal(env.requests.length, sent);
 });
 
 test("the extension cannot unlock or switch vaults", async () => {

@@ -315,7 +315,12 @@ class VaultAutofillService : AutofillService() {
                             request,
                             form,
                             0,
-                            if (reusable) "Choose account" else "Unlock",
+                            if (reusable) "Choose account"
+                            else
+                                "Unlock to fill " +
+                                    (runCatching { java.net.URI(form.origin).host }
+                                            .getOrNull()
+                                            ?.removePrefix("www.") ?: "this app"),
                             "Password Manager",
                         )
                     )
@@ -335,7 +340,7 @@ class VaultAutofillService : AutofillService() {
                         val username = entry.opt("username") as? String ?: ""
                         val subtitle =
                             (if (port > 0 && port != 443) "Port $port · " else "") +
-                                (if (form.codeOnly) "Verification code · " else "") +
+                                (if (form.codeOnly) "One-time code · " else "") +
                                 name
                         builder.addDataset(
                             AutofillSuggestions.suggestion(

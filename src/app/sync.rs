@@ -29,8 +29,8 @@ pub(super) async fn run(
                     cloud::read_token_file(&path).unwrap_or_else(|e| console.exit_error(&e, 1))
                 }
                 None => zeroize::Zeroizing::new(
-                    rpassword::prompt_password("Device token: ")
-                        .unwrap_or_else(|e| console.exit_error(&e.to_string(), 1)),
+                    password_manager::prompt::hidden("Device token: ", "device token")
+                        .unwrap_or_else(|e| console.exit_error(&e, 1)),
                 ),
             };
             let config = conf.clone();

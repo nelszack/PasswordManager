@@ -390,7 +390,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             let result = if let Err(e) = request.validate() {
                 Err(e)
             } else if session.is_none() {
-                Err("Vault locked.".into())
+                Err(crate::protocol::VAULT_LOCKED.into())
             } else if request.expected_session.is_some() && request.expected_session != session {
                 Err("Unlock session changed; try the passkey request again".into())
             } else if !worker.passkey_confirmation().0 {

@@ -655,9 +655,18 @@ mod tests {
         assert_eq!(outcome.report.breached[0].0.id, 1);
         assert_eq!(outcome.report.unchecked[0].id, 2);
         let rendered = crate::client::presentation::audit(&outcome.report);
-        assert!(rendered.contains("Breached password: 1. Account 1 (seen 42 times)"));
-        assert!(rendered.contains("Unchecked breach status: 2. Account 2"));
-        assert!(rendered.contains("1 of 2 login entries checked successfully"));
+        assert!(
+            rendered.contains("Found in known breaches (1):"),
+            "{rendered}"
+        );
+        // Rows are aligned columns: ID, name, username.
+        assert!(rendered.contains("#1  Account 1"), "{rendered}");
+        assert!(rendered.contains("(seen 42 times)"), "{rendered}");
+        assert!(
+            rendered.contains("Not checked: #2  Account 2"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("1 of 2 logins checked"), "{rendered}");
         for password in passwords {
             assert!(!rendered.contains(password));
         }

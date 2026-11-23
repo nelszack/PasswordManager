@@ -119,6 +119,10 @@ test("duplicate decisions cannot save twice and a closing window cannot cancel a
 test("untrusted, expired and invalid prompts cannot write to the vault", async () => {
     const env = environment(); const { token } = await env.open();
     assert.equal(env.service.data({ token }, env.sender).success, false);
+    assert.equal(env.service.reveal({ token }, env.sender).success, false, "pages cannot read the capture");
+    assert.ok(env.service.data({ token }, env.popup).data.passwordLength > 0);
+    assert.equal(typeof env.service.reveal({ token }, env.popup).password, "string");
+    assert.equal(env.service.reveal({ token: "other" }, env.popup).success, false);
     await assert.rejects(env.service.complete({ token }, env.sender), /Invalid credential prompt sender/);
     env.timers[0]();
     await assert.rejects(env.complete(token), /expired/);

@@ -20,6 +20,20 @@
 
 Run `pm` without arguments, or `pm gui`, to open the Iced desktop interface.
 The same executable also runs every CLI command and the background server.
+Only one window runs at a time: launching it again, or choosing **Open desktop
+app** in the browser extension, brings the existing window forward (on the
+password field when the vault is locked). `pm gui --search` brings it forward with
+the vault search focused; bind it to a key in your desktop, for example in
+Hyprland: `bind = SUPER, P, exec, pm gui --search`. `pm gui --open ID` shows one
+item (after you unlock, if the vault is locked); the extension's **Open** button on a
+search result uses it. On Linux, a tray icon (shown by Waybar, KDE, and other
+StatusNotifierItem hosts) shows whether the vault is locked, opens the window on
+click, locks the vault on middle-click, and offers Open, Lock vault and Close window
+in its menu.
+
+In the item list, **Select** turns on selection mode: click items to choose them
+(or **Select all shown**), then add them to favorites, add a tag, or move them to
+trash in one step. Moving several items to trash lists them and asks first.
 Opening the GUI starts the server when needed; closing the GUI does not stop
 it. `pm --help`, scripted commands, native messaging, and the server do not open
 windows or require a graphical session. Builds made with
@@ -152,9 +166,17 @@ items explains that there is nothing to assess and does not display a score.
 Choose **Shortcuts** for the keyboard guide. Ctrl (Command on macOS) + F searches.
 With that same modifier, N creates an item, S saves the current item or settings,
 1–4 switches between Vault, Generator, Tools, and Settings, E edits the selected
-item, and L locks the vault. Ctrl/Command+Shift+C copies the selected item's username;
-Ctrl/Command+Shift+O opens its first website. These companion actions operate
-on saved item details, not unsaved drafts.
+item, and L locks the vault. Ctrl/Command+Shift+C copies the selected item's username,
+Shift+P its password (or card number, key, …), Shift+T its current one-time code,
+and Shift+O opens its first website. Up and Down select the previous or next item,
+also while the search box has focus. These companion actions operate on saved
+item details, not unsaved drafts. Time-based one-time codes appear as soon as an
+item opens and count down by themselves.
+
+When you close the window while a vault is unlocked, the app asks whether to lock
+it or keep it available to the browser extension and `pm`; choose a default in
+**Settings → Security**. **Settings → Appearance** can follow the system's light or
+dark setting and offers text sizes up to 200%.
 Tab / Shift+Tab moves between controls; Enter / Space activates buttons and
 checkboxes. Arrow keys, Home, and End change selection-list values. Keyboard
 focus has a visible outline and scrolls into view in forms. Escape hides
@@ -194,7 +216,7 @@ after saving, unless the current connection uses a temporary port. The separate
 **Temporary connection port** control connects to an existing server without
 changing the saved port or starting a new server. Vault filenames appear on the
 unlock screen after connecting; the disconnected screen hides them. Recovery changes
-require a server restart. **Settings → Connection** provides **Stop local service…** and **Start local service**. Stopping requires confirmation because it locks the vault, discards an open draft, and disconnects the CLI and extension. Closing the window leaves the existing server
+require a server restart. **Settings → Browser & service** provides **Stop local service…** and **Start local service**. Stopping requires confirmation because it locks the vault, discards an open draft, and disconnects the CLI and extension. Closing the window leaves the existing server
 and lock policy in effect.
 
 The local service notifies the window of CLI/extension locks and vault
@@ -373,8 +395,12 @@ the desired vault, and unlock it. See [cloud setup and troubleshooting](cloud-sy
 ### Find, edit, and recover items
 
 Use the bottom navigation to switch between **Vault**, **Tools**, and **Settings**.
-The vault list searches as you type. Swipe the type filters horizontally to see
-all eight types. Open an item to reveal or copy its password, verification code,
+The vault list searches as you type, and the search box stays at the top while the
+list scrolls. Swipe the type filters horizontally to see all eight types. Long-press
+an item to copy its username, password, or code without opening it. **Select items**
+lets you tap several items, then **Add tag…** or **Move to trash** (restore them from
+**Tools → Deleted items**). Long-press the app icon for **Search vault** and
+**Generate** shortcuts. Open an item to reveal or copy its password, one-time code,
 notes, or custom fields. Passwords and notes start hidden; copy actions do not
 require revealing them first. TOTP codes refresh for each copy and display an
 expiry countdown when shown. HOTP generation is an explicit action that advances
@@ -383,16 +409,19 @@ the saved counter.
 The details screen also lists attachments: tap one to save a copy, or use
 **Add attachment** to store a file of up to 5 MiB.
 
-Choose **Add item** or **Edit item** for typed editing, multiple website addresses,
+Choose the floating **Add item** button or **Edit item** for typed editing, multiple website addresses,
 notes, comma-separated tags, the favorite mark, and custom fields. A new item
 starts with the fields suggested for its type, such as **Expiry** and **Security
 code** for a payment card; blank suggestions are not saved. The **★ Favorites**
 filter chip lists starred items, the tag picker below the chips lists items with
-one tag, and an item's details screen can star or unstar it directly. **Tools →
+one tag, and the star at the top of an item's details screen marks or unmarks it. **Tools →
 Advanced search** can require several tags or favorites only. **Save item** and **Cancel** stay at the bottom while
 the form scrolls. Back and Cancel ask before discarding changed drafts. A failed
-save keeps your draft so you can correct the problem. Leaving the app or locking
-still clears sensitive views; a draft is not a saved recovery copy.
+save keeps your draft so you can correct the problem. Switching to another app
+keeps the screen and any draft until **Lock after leaving the app** (Mobile
+settings, 30 seconds by default; 0 locks at once) runs out. Rotating the phone
+keeps the screen. Turning off the screen, locking, or the inactivity timeout
+clears sensitive views; a draft is not a saved recovery copy.
 
 **Tools** groups generation, advanced search, vault health, vault credentials,
 deleted items, files/backups, sync controls, and mobile preferences. Password
@@ -625,7 +654,7 @@ pm view --tag work --favorites
 
 Tags organize items without changing how they are matched or filled. Each item
 can have up to 32 tags of up to 64 bytes; tags cannot contain commas, and
-duplicates that differ only by case are merged. `--tag` (repeatable) on `view`
+duplicates that differ only by case are merged. `--tag` (repeatable) on `list`
 or `search` lists only items carrying every given tag, and `--favorites` lists
 only starred items. The general search term also matches tags.
 
@@ -750,7 +779,7 @@ A vault with attachments uses vault document schema 3, like tags.
 The general search term matches any non-secret field. Field-specific filters are
 combined, so every supplied filter must match. Matching is case-insensitive.
 The `--type`, `--totp`, `--no-totp`, `--weak`, and `--stale-days` filters work with both
-`view` and `search`. Supported types are `login`, `secure-note`,
+`list` and `search`. Supported types are `login`, `secure-note`,
 `payment-card`, `identity`, `wifi`, `software-license`, `ssh-key`, and
 `api-secret`. TOTP and weakness filters apply across item types; `--no-totp`
 also includes non-login items without authenticators. Add `--type login` to limit
@@ -772,15 +801,18 @@ with `--id ID` from `pm view`. When several items share a name, the command stop
 and lists their IDs instead of guessing. `--entry-name NAME` is an equivalent
 spelling of the positional name.
 
-`get` prints item details with the primary secret and secret custom fields hidden. It copies a non-empty primary secret when the clipboard timeout is
-nonzero. Use `--password-only` to print just the primary secret without copying.
-Use `--reveal-secrets` to display secret custom-field values, or `--field NAME`
-to print one custom field by its case-insensitive name. Add `--copy` to copy that
-field without printing its value; this requires a nonzero clipboard timeout and
-reports clipboard failures. These field options do not copy the primary secret.
-`--json` returns structured data and respects the selected reveal option.
+`get` prints item details with the password (or card number, key, …) and secret
+custom fields hidden, using labels for the item's type. It never touches the
+clipboard unless you add `--copy`, which copies the password and clears it after
+the clipboard timeout. Use `--password-only` to print just the password for a
+pipe. Use `--reveal-secrets` to display secret custom-field values, or `--field
+NAME` to print one custom field by its case-insensitive name; with `--copy`, that
+field is copied instead of printed. Copying requires a nonzero clipboard timeout
+and reports clipboard failures. `--json` returns structured data and respects the
+selected reveal option.
 
 ```bash
+pm get github --copy
 pm get --id 3 --reveal-secrets
 pm get --id 3 --field recovery-code
 pm get --id 3 --field recovery-code --copy
@@ -1136,16 +1168,28 @@ pm lock
 pm unlock --timeout 15m
 ```
 
-To avoid trying every vault's password KDF, list the opaque vault IDs and select
-one explicitly. Listing works without a running server and does not decrypt files:
+With several vaults, choose one by name. `pm vaults` lists each vault's
+device-local name (shared with the desktop app) and its `.enc` file; it works
+without a running server and does not decrypt anything. A key file finds its own
+vault, so `--key` needs no selection:
 
 ```bash
 pm vaults
-pm unlock --vault-file 0123456789abcdef0123456789abcdef.enc
-pm unlock --vault-file 0123456789abcdef0123456789abcdef.enc --key ./keys/vault.key
+pm vaults --rename 0123456789abcdef0123456789abcdef.enc --name Work
+pm unlock --vault Work
+pm unlock --key ./keys/vault.key
+pm vaults delete Work          # permanently delete a whole vault (asks first)
 ```
 
-The selector accepts one `.enc` filename from the application data directory.
+`pm --json vaults` returns one object per vault, `{"file": "….enc", "name":
+"Work", "default": true}`; earlier versions returned only the `.enc` file names,
+so scripts should read `.data[].file`.
+
+`--vault` accepts a name (ignoring case) or one `.enc` filename from the
+application data directory; `--vault-file` is the older spelling. With several
+vaults and no selection or default, `pm unlock` says so before asking for a
+password. Scripts can supply the password on standard input:
+`printf '%s\n' "$PASSWORD" | pm --password-stdin unlock --vault Work`.
 Missing files, unreadable keys, invalid headers, unsupported versions, and invalid
 authenticated records produce specific errors. A wrong password and modified
 ciphertext cannot be distinguished by authentication alone. Omitting the selector
@@ -1254,12 +1298,12 @@ still available:
 
 ```bash
 pm import --path backup.csv --new
-pm export --path backup.csv
+pm export --path backup.csv          # asks you to type "export" first
 pm import --path bitwarden.json --new
-pm export --path backup.json
+pm export --path backup.json --yes   # scripts confirm with --yes
 
 # Plaintext exports do not overwrite files unless explicitly requested
-pm export --path backup.json --force
+pm export --path backup.json --force --yes
 ```
 
 Preview an import without creating or changing entries, then choose how exact
@@ -1604,15 +1648,19 @@ origin the browser reports, and older versions do not report them.
 1. Build or install `pm` at a stable path, then load the `extension` folder as
    an unpacked extension in Chrome, Chromium, or Helium on Linux, macOS, or
    Windows. For Firefox, see [Firefox](#firefox).
-2. Copy its 32-character ID from `chrome://extensions` and register the native
-   host:
+2. In the desktop app, open **Settings → Browser & service → Set up browser
+   integration**, choose your browser, and select **Turn on browser
+   integration**. From a terminal, the same step is:
 
    ```bash
-   pm native-host install --extension-id YOUR_EXTENSION_ID --browser chrome
+   pm native-host install --browser chrome
    ```
 
-   Use `--browser chromium` for Chromium or `--browser helium` for Helium.
-   Reload the extension after installing the host.
+   The manifest's public key fixes the extension ID, so no ID needs copying;
+   pass `--extension-id` only for a repackaged extension. Use `--browser
+   chromium` for Chromium or `--browser helium` for Helium. Reload the extension
+   after installing the host. If the popup says "Not connected", it shows the
+   command for your browser and a **Check again** button.
 
    On Windows, `--browser helium` automatically uses Helium's
    Chromium-compatible native-messaging registry location. Fully exit Helium,

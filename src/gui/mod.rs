@@ -6,13 +6,18 @@ mod discovery;
 mod editor;
 mod file_picker;
 mod generator;
+#[rustfmt::skip]
+mod icon_chars;
+pub(crate) mod instance;
 mod items;
 mod model;
 mod presentation;
 mod settings;
 mod state;
 mod styles;
-mod vault_names;
+#[cfg(target_os = "linux")]
+mod tray;
+use password_manager::vault_names;
 mod view;
 mod website;
 mod widgets;
@@ -45,7 +50,8 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 /// Safety poll while the server pushes changes (it also sends a heartbeat).
 const SUBSCRIBED_STATUS_INTERVAL: Duration = Duration::from_secs(30);
 
-pub fn run(conf: Config, client: AuthenticatedClient) -> Result<(), String> {
+/// `open` shows that item once the vault is unlocked (`pm gui --open ID`).
+pub fn run(conf: Config, client: AuthenticatedClient, open: Option<usize>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     crate::desktop::detach_private_console();
     #[cfg(target_os = "linux")]
@@ -53,15 +59,17 @@ pub fn run(conf: Config, client: AuthenticatedClient) -> Result<(), String> {
         return Err("No desktop display is available. Run pm --help for CLI commands.".into());
     }
     iced::application(
-        move || App::boot(conf.clone(), client.clone()),
+        move || App::boot(conf.clone(), client.clone(), open),
         App::update,
         App::view,
     )
     .title("Password Manager")
+    // Icons on buttons, tabs and lists (a 5 KB Material Icons subset).
+    .font(include_bytes!("../../assets/material-icons.ttf").as_slice())
     .theme(App::theme)
     .scale_factor(App::scale_factor)
     .window(iced::window::Settings {
-        size: iced::Size::new(1060.0, 760.0),
+        size: saved_window_size().unwrap_or(iced::Size::new(1060.0, 760.0)),
         exit_on_close_request: false,
         min_size: Some(iced::Size::new(480.0, 480.0)),
         icon: Some(
@@ -83,6 +91,21 @@ pub fn run(conf: Config, client: AuthenticatedClient) -> Result<(), String> {
     .subscription(App::subscription)
     .run()
     .map_err(|error| format!("could not open the desktop interface: {error}"))
+}
+
+fn window_size_path() -> Option<std::path::PathBuf> {
+    // Unit tests send close messages in-process; they must never touch the real config folder.
+    (!cfg!(test)).then(|| password_manager::file::config_dir().join("window.json"))
+}
+
+/// The size the window had when it last closed, within sensible bounds.
+fn saved_window_size() -> Option<iced::Size> {
+    let text = std::fs::read_to_string(window_size_path()?).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let width = value["width"].as_f64()? as f32;
+    let height = value["height"].as_f64()? as f32;
+    ((480.0..=8000.0).contains(&width) && (480.0..=8000.0).contains(&height))
+        .then(|| iced::Size::new(width, height))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +154,8 @@ enum Job {
     Save,
     SaveEditor,
     Favorite(usize),
+    /// One step of a bulk change from the item list's selection mode.
+    Bulk,
     Delete,
     Copy,
     Stop,
@@ -154,6 +179,22 @@ enum Job {
     CloudList,
     CloudConflicts,
     CloudResolve,
+}
+
+/// What a bulk change does to each selected item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BulkOp {
+    Favorite(bool),
+    Tag(String),
+    Trash,
+}
+
+/// A bulk change: the items still to change, in order.
+#[derive(Clone, Debug)]
+struct Bulk {
+    op: BulkOp,
+    queue: std::collections::VecDeque<(usize, u64)>,
+    total: usize,
 }
 
 /// Work that must use freshly reloaded preferences, so a setting changed by the
@@ -184,6 +225,16 @@ enum Navigate {
 #[derive(Clone)]
 enum Message {
     Tick(Instant),
+    /// The operating system switched between light and dark.
+    SystemTheme(iced::theme::Mode),
+    /// Another launch asked this window to come forward.
+    Raise(instance::Request),
+    /// Quit from the tray menu; asks first like closing the window.
+    Quit,
+    /// Escape: close the topmost panel or confirmation, and hide secrets.
+    Escape,
+    /// Show or hide the master password while typing it.
+    RevealMaster(bool),
     /// `true`: the server pushed a status record; `false`: the push stream ended.
     StatusPushed(bool),
     Cloud(password_manager::cloud::Action),
@@ -208,9 +259,34 @@ enum Message {
     VaultName(String),
     RenameVault,
     CopyUsername,
+    /// Copy the open item's current one-time code.
+    CopyOtp,
+    /// Select the next (`true`) or previous matching item in the list.
+    SelectAdjacent(bool),
+    /// Reset the search, type, tag, and favorites filters.
+    ClearFilters,
+    /// Turn the item list's selection mode on or off.
+    ToggleSelecting,
+    /// Select or unselect one item in selection mode.
+    SelectItem(usize),
+    /// Select every item the list currently shows.
+    SelectAllShown,
+    BulkTag(String),
+    /// Start a bulk change (trash asks first).
+    BulkStart(BulkOp),
+    BulkConfirm,
+    BulkCancel,
+    /// Show or hide the open item's notes.
+    ToggleNotes,
+    /// Run the vault search over every detail (Tools → Advanced search).
+    SearchEverything,
+    /// Open a Settings section.
+    OpenSettings(presentation::SettingsSection),
     OpenWebsite(usize),
     Master(SecretString),
     ConfirmMaster(SecretString),
+    /// Fill both master password fields with a generated passphrase.
+    SuggestMaster,
     KeyPath(SecretString),
     UnlockTimeout(String),
     BrowseKey,
@@ -290,6 +366,9 @@ enum Message {
     CloseRequested(iced::window::Id),
     ConfirmClose,
     CancelClose,
+    /// Lock (`true`) or keep the vault unlocked, then close the asking window.
+    CloseWindow(bool),
+    CloseBehavior(password_manager::config::CloseAction),
     SettingChanged(SettingsField, String),
     SettingToggled(SettingsToggle, bool),
     SaveSettings,
@@ -304,8 +383,6 @@ enum Message {
     Disclosure(presentation::Disclosure),
     FilterKind(Option<ItemKind>),
     ItemPage(usize),
-    PageInput(String),
-    JumpItemPage,
     SortItems(bool),
     ScrollPane(String, f32),
     SettingsSection(presentation::SettingsSection),
@@ -314,6 +391,8 @@ enum Message {
     OpenTools(workflows::Section),
     OpenFileTool(workflows::FileOperation),
     ConfirmStop(bool),
+    /// Stop and start the local service so saved settings apply.
+    Restart,
     Workflow(workflows::Event),
     OpenToolItem(usize),
     OpenItemTools(usize),
@@ -440,16 +519,28 @@ impl App {
         }
     }
 
-    fn boot(conf: Config, client: AuthenticatedClient) -> (Self, Task<Message>) {
+    fn boot(
+        conf: Config,
+        client: AuthenticatedClient,
+        open: Option<usize>,
+    ) -> (Self, Task<Message>) {
         let mut app = Self::new(conf, client);
+        app.ui.open_after_unlock = open;
         app.connection.connect_after_discovery = true;
         let task = app.refresh_vaults();
-        (app, task)
+        (
+            app,
+            Task::batch([task, iced::system::theme().map(Message::SystemTheme)]),
+        )
     }
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::time::every(self.tick_interval()).map(Message::Tick),
+            iced::system::theme_changes().map(Message::SystemTheme),
+            Subscription::run(instance::requests),
+            #[cfg(target_os = "linux")]
+            Subscription::run(tray::events),
             self.status_subscription(),
             iced::event::listen_with(|event, status, _| match event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
@@ -459,8 +550,19 @@ impl App {
                         {
                             Some(Message::FocusNext(modifiers.shift()))
                         }
-                        keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                            Some(Message::HideSecrets)
+                        keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
+                        // Arrow keys move through the item list unless a control
+                        // (a text editor, list, or slider) used them.
+                        keyboard::Key::Named(
+                            named @ (keyboard::key::Named::ArrowDown
+                            | keyboard::key::Named::ArrowUp),
+                        ) if status == iced::event::Status::Ignored
+                            && !modifiers.command()
+                            && !modifiers.alt() =>
+                        {
+                            Some(Message::SelectAdjacent(
+                                named == keyboard::key::Named::ArrowDown,
+                            ))
                         }
                         keyboard::Key::Character(c)
                             if modifiers.command() && c.eq_ignore_ascii_case("l") =>
@@ -480,6 +582,20 @@ impl App {
                                 && c.eq_ignore_ascii_case("o") =>
                         {
                             Some(Message::OpenWebsite(0))
+                        }
+                        keyboard::Key::Character(c)
+                            if modifiers.command()
+                                && modifiers.shift()
+                                && c.eq_ignore_ascii_case("p") =>
+                        {
+                            Some(Message::Copy)
+                        }
+                        keyboard::Key::Character(c)
+                            if modifiers.command()
+                                && modifiers.shift()
+                                && c.eq_ignore_ascii_case("t") =>
+                        {
+                            Some(Message::CopyOtp)
                         }
                         keyboard::Key::Character(c) if modifiers.command() => match c
                             .to_lowercase()
@@ -592,6 +708,16 @@ impl App {
             self.ui.progress = match job {
                 Job::Save | Job::SaveEditor => "Saving item…".into(),
                 Job::Favorite(_) => "Updating favorites…".into(),
+                Job::Bulk => self.ui.bulk.as_ref().map_or_else(
+                    || "Updating items…".into(),
+                    |bulk| {
+                        format!(
+                            "Updating item {} of {}…",
+                            bulk.total - bulk.queue.len(),
+                            bulk.total
+                        )
+                    },
+                ),
                 Job::Attachment(_) => "Updating attachments…".into(),
                 Job::Unlock => "Unlocking vault…".into(),
                 Job::Create => "Creating encrypted vault…".into(),
@@ -692,6 +818,7 @@ impl App {
 
     fn hide_secrets(&mut self) {
         self.ui.editor_show_secret = false;
+        self.ui.notes_visible = false;
         self.workspace.hide_secrets();
         if let Some(draft) = self.editor.as_mut() {
             // Multiline input is deliberately visible while editing. Focus
@@ -731,6 +858,12 @@ impl App {
         self.ui.undo_trash = None;
         self.ui.active_vault = None;
         self.ui.saved_item = None;
+        // Item IDs belong to one vault: selections and bulk work never carry over.
+        self.ui.selecting = false;
+        self.ui.selected.clear();
+        self.ui.bulk_confirm = false;
+        self.ui.bulk_tag.clear();
+        self.ui.bulk = None;
 
         self.ui.transfer_generated = false;
         self.ui.confirm_stop = false;
@@ -740,6 +873,8 @@ impl App {
         self.connection.creation = None;
         self.connection.master.zeroize();
         self.connection.confirmation.zeroize();
+        self.ui.suggested_master = None;
+        self.ui.master_strength = None;
         self.connection.key_path.zeroize();
         self.generation.value.clear();
         self.generation.stats.clear();
@@ -773,10 +908,18 @@ impl App {
         }
         match message {
             Message::CloseRequested(id) => return self.request_close(id),
-            Message::CancelClose => self.ui.confirm_close = None,
+            Message::CancelClose => {
+                self.ui.confirm_close = None;
+                self.ui.confirm_lock_close = None;
+            }
+            Message::CloseWindow(lock) => {
+                if let Some(id) = self.ui.confirm_lock_close.take() {
+                    return self.close_window(id, lock);
+                }
+            }
             Message::ConfirmClose => {
                 if let Some(id) = self.ui.confirm_close.take() {
-                    return iced::window::close(id);
+                    return self.close_and_remember(id);
                 }
             }
             message @ (Message::Cloud(..)
@@ -797,6 +940,24 @@ impl App {
                 return self.request(Job::Lock, ServerCommand::Lock(true), None);
             }
             Message::HideSecrets => self.hide_secrets(),
+            Message::Escape => {
+                self.hide_secrets();
+                self.ui.master_visible = false;
+                // Close the topmost transient panel, newest first.
+                if self.ui.shortcuts {
+                    self.ui.shortcuts = false;
+                } else if self.ui.confirm_lock_close.is_some() || self.ui.confirm_close.is_some() {
+                    self.ui.confirm_lock_close = None;
+                    self.ui.confirm_close = None;
+                } else if self.delete_confirm {
+                    self.delete_confirm = false;
+                } else if self.remove_attachment.is_some() {
+                    self.remove_attachment = None;
+                } else if self.ui.confirm_stop {
+                    self.ui.confirm_stop = false;
+                }
+            }
+            Message::RevealMaster(visible) => self.ui.master_visible = visible,
             Message::FocusNext(backwards) => {
                 let focus = if backwards {
                     iced::widget::operation::focus_previous()
@@ -824,6 +985,39 @@ impl App {
                 self.ui.height = size.height;
             }
             Message::DismissFormatNotice => self.ui.format_notice = None,
+            Message::SystemTheme(mode) => {
+                self.ui.system_light = mode == iced::theme::Mode::Light;
+            }
+            Message::Quit => {
+                return iced::window::latest()
+                    .and_then(|id| Task::done(Message::CloseRequested(id)));
+            }
+            Message::Raise(request) => {
+                let raise = iced::window::latest().and_then(iced::window::gain_focus);
+                self.ui.shortcuts = false;
+                // Locked: the password field. Search: the vault search.
+                let focus = if self.connection.session.is_none() && self.connection.running {
+                    self.tab = Tab::Vault;
+                    if let instance::Request::Open(id) = request {
+                        self.ui.open_after_unlock = Some(id);
+                    }
+                    iced::widget::operation::focus("master-password")
+                } else if request == instance::Request::Search && self.connection.session.is_some()
+                {
+                    self.focus_search()
+                } else if let instance::Request::Open(id) = request {
+                    self.tab = Tab::Vault;
+                    if self.connection.session.is_none() {
+                        // Service stopped: open the item after it starts and unlocks.
+                        self.ui.open_after_unlock = Some(id);
+                        return raise;
+                    }
+                    return raise.chain(self.navigate(Navigate::Select(id)));
+                } else {
+                    Task::none()
+                };
+                return raise.chain(focus);
+            }
             Message::DismissNotice => {
                 self.ui.undo_trash = None;
                 self.notice.clear();
@@ -836,6 +1030,15 @@ impl App {
             | Message::Copy
             | Message::CopyField(..)
             | Message::CopyUsername
+            | Message::SelectAdjacent(..)
+            | Message::ClearFilters
+            | Message::ToggleSelecting
+            | Message::SelectItem(..)
+            | Message::SelectAllShown
+            | Message::BulkTag(..)
+            | Message::BulkStart(..)
+            | Message::BulkConfirm
+            | Message::BulkCancel
             | Message::Delete
             | Message::FilterKind(..)
             | Message::FilterTag(..)
@@ -848,10 +1051,8 @@ impl App {
             | Message::CancelRemoveAttachment
             | Message::HideField(..)
             | Message::ItemPage(..)
-            | Message::JumpItemPage
             | Message::Navigate(..)
             | Message::OpenWebsite(..)
-            | Message::PageInput(..)
             | Message::ReapplyConflict
             | Message::Reveal
             | Message::RevealField(..)
@@ -862,6 +1063,7 @@ impl App {
             Message::ConfirmStop(value) => self.ui.confirm_stop = value,
             message @ (Message::SettingsSection(..)
             | Message::Appearance(..)
+            | Message::CloseBehavior(..)
             | Message::InterfaceScale(..)
             | Message::SettingChanged(..)
             | Message::SettingToggled(..)
@@ -873,9 +1075,11 @@ impl App {
                 return self.focus_search();
             }
             Message::OpenFileTool(operation) => {
+                self.ui.shortcuts = false;
                 return self.open_tools(workflows::Event::FileOperation(operation));
             }
             Message::OpenTools(section) => {
+                self.ui.shortcuts = false;
                 return self.open_tools(workflows::Event::Section(section));
             }
             Message::Workflow(workflows::Event::Run(action))
@@ -907,6 +1111,25 @@ impl App {
                 return self.navigate(Navigate::Select(id));
             }
             Message::OpenItemTools(id) => return self.open_item_tools(id),
+            Message::ToggleNotes => self.ui.notes_visible = !self.ui.notes_visible,
+            Message::SearchEverything => {
+                self.workspace.search.query = self.query.clone();
+                return self.open_tools(workflows::Event::Section(workflows::Section::Search));
+            }
+            Message::OpenSettings(section) => {
+                self.ui.shortcuts = false;
+                let task = self.switch_tab(Tab::Settings);
+                return task.chain(self.update(Message::SettingsSection(section)));
+            }
+            Message::CopyOtp
+                if self.tab == Tab::Vault
+                    && self.editor.is_none()
+                    && self.item.as_ref().is_some_and(|item| item.has_totp) =>
+            {
+                return self.update(Message::Workflow(workflows::Event::Run(
+                    workflows::Action::ShowOtp(true),
+                )));
+            }
             message @ (Message::Connect
             | Message::RefreshVaults
             | Message::ReloadSettings
@@ -915,6 +1138,7 @@ impl App {
             | Message::Vault(..)
             | Message::Master(..)
             | Message::ConfirmMaster(..)
+            | Message::SuggestMaster
             | Message::KeyPath(..)
             | Message::UnlockTimeout(..)
             | Message::BrowseKey
@@ -927,7 +1151,8 @@ impl App {
             | Message::PinConfirm(..)
             | Message::SavePasskeyPin(..)
             | Message::Create
-            | Message::Stop) => return self.update_connection(message),
+            | Message::Stop
+            | Message::Restart) => return self.update_connection(message),
             Message::Tab(tab) => return self.switch_tab(tab),
             Message::Discard => {
                 let destination = self.editor.take_deferred();
@@ -1008,7 +1233,7 @@ impl App {
     }
 
     /// Ask before closing over a request in flight or unsaved edits.
-    fn request_close(&mut self, id: iced::window::Id) -> Task<Message> {
+    pub(super) fn request_close(&mut self, id: iced::window::Id) -> Task<Message> {
         if self.busy()
             || self.editor.as_ref().is_some_and(|draft| draft.dirty)
             || self.settings.is_dirty()
@@ -1016,8 +1241,46 @@ impl App {
             self.ui.confirm_close = Some(id);
             self.hide_secrets();
             iced::widget::operation::focus("keep-window-open")
+        } else if self.connection.session.is_some() {
+            use password_manager::config::CloseAction;
+            match self.conf.desktop.close_action {
+                CloseAction::Ask => {
+                    self.ui.confirm_lock_close = Some(id);
+                    self.hide_secrets();
+                    iced::widget::operation::focus("lock-and-close")
+                }
+                CloseAction::Lock => self.close_window(id, true),
+                CloseAction::KeepUnlocked => self.close_and_remember(id),
+            }
         } else {
-            iced::window::close(id)
+            self.close_and_remember(id)
+        }
+    }
+
+    /// Close the window, remembering its size for the next launch.
+    fn close_and_remember(&self, id: iced::window::Id) -> Task<Message> {
+        // Resize events are in app units, which the app's own scale enlarges.
+        let (width, height) = (
+            self.ui.width * self.scale_factor(),
+            self.ui.height * self.scale_factor(),
+        );
+        if let Some(path) = window_size_path()
+            && width >= 480.0
+            && height >= 480.0
+        {
+            let size = serde_json::json!({"width": width, "height": height});
+            let _ = std::fs::write(path, size.to_string());
+        }
+        iced::window::close(id)
+    }
+
+    /// Close after locking, or right away while keeping the vault unlocked.
+    fn close_window(&mut self, id: iced::window::Id, lock: bool) -> Task<Message> {
+        if lock && self.connection.running && self.connection.session.is_some() {
+            self.ui.close_after_lock = Some(id);
+            self.request(Job::Lock, ServerCommand::Lock(true), None)
+        } else {
+            self.close_and_remember(id)
         }
     }
 
@@ -1039,10 +1302,33 @@ impl App {
                 if job == Job::SavedList {
                     self.ui.saved_item = None;
                 }
-                if matches!(job, Job::Create | Job::Unlock) {
+                // A follow-up chosen for this request must not run on a later, unrelated one.
+                if job == Job::Lock {
+                    self.ui.close_after_lock = None;
+                }
+                if job == Job::Stop {
+                    self.ui.restart_after_stop = false;
+                }
+                if job == Job::Bulk
+                    && let Some(bulk) = self.ui.bulk.take()
+                {
+                    let done = bulk.total - bulk.queue.len() - 1;
+                    self.report_error(format!(
+                        "Stopped after {done} of {} items: {}",
+                        bulk.total, error.message
+                    ));
+                    return self.load_items();
+                }
+                let at_field = matches!(job, Job::Create | Job::Unlock);
+                if at_field {
                     self.connection.creation = None;
+                    // Shown beside the password field as well as in the status bar.
+                    self.ui.unlock_error = Some(error.message.clone());
                 }
                 self.report_error(error.message);
+                if at_field {
+                    return iced::widget::operation::focus("master-password");
+                }
                 if matches!(job, Job::Workflow(_)) {
                     self.stop_tool_watches();
                 }
@@ -1136,6 +1422,7 @@ impl App {
             Disclosure::Authenticators => &mut self.ui.editor_authenticators,
             Disclosure::Generator => &mut self.ui.generator_advanced,
             Disclosure::Shortcuts => &mut self.ui.shortcuts,
+            Disclosure::Troubleshooting => &mut self.ui.troubleshooting,
         };
         *expanded = !*expanded;
         if !*expanded {
@@ -1180,7 +1467,7 @@ impl App {
                 .find(|item| item.id == id)
                 .map(|item| workflows::Choice {
                     id,
-                    label: format!("{} · {}", item.id, item.name),
+                    label: item.name.clone(),
                 });
         self.workspace.result = None;
         self.workspace.prepared = None;
@@ -1203,13 +1490,13 @@ impl App {
             if let Some(item) = &self.item {
                 self.workspace.selected = Some(workflows::Choice {
                     id: item.id,
-                    label: format!("{} · {}", item.id, item.name),
+                    label: item.name.clone(),
                 });
             }
             return self.fetch_selected_duo();
         }
         if tab == Tab::Settings {
-            if self.ui.settings_section == presentation::SettingsSection::Security
+            if self.ui.settings_section == presentation::SettingsSection::Vault
                 && let Some(id) = &self.connection.vault
             {
                 self.ui.vault_name = self.names.label(id, &self.connection.vaults);
@@ -1269,9 +1556,10 @@ impl App {
                         String::new()
                     };
                     self.conf = conf;
+                    self.ui.restart_needed |= restart_required;
                     self.notice = if restart_required {
-                        "Settings saved. Restart the server to apply recovery and SSH agent settings. The lock \
-                         timeout applies on the next unlock."
+                        "Settings saved. Restart the local service to apply recovery and SSH agent \
+                         settings. The lock timeout applies on the next unlock."
                     } else {
                         "Settings saved. The lock timeout applies on the next unlock."
                     }
@@ -1295,12 +1583,12 @@ impl App {
                     }
                 }
                 Reply::Copied => {
+                    let seconds = self.conf.clipboard.timeout;
                     self.notice = if job == Job::UsernameCopied {
-                        "Username copied. The clipboard will clear automatically."
+                        format!("Username copied. The clipboard clears in {seconds} seconds.")
                     } else {
-                        "Generated value copied with timed clipboard cleanup."
-                    }
-                    .into();
+                        format!("Password copied. The clipboard clears in {seconds} seconds.")
+                    };
                 }
                 Reply::Names(names) => {
                     self.names = names;
@@ -1482,7 +1770,10 @@ impl App {
                 | Job::Save
                 | Job::SaveEditor
                 | Job::SavedList
-                | Job::UsernameValue),
+                | Job::UsernameValue
+                | Job::Favorite(..)
+                | Job::Attachment(..)
+                | Job::Bulk),
                 payload,
             ) => {
                 return self.complete_item(job, payload, incremental, changed_id);
@@ -1524,9 +1815,20 @@ impl App {
             (Job::Stop, _) => {
                 self.clear_vault();
                 self.connection.running = false;
+                self.ui.restart_needed = false;
+                if std::mem::take(&mut self.ui.restart_after_stop) {
+                    self.notice = "Restarting the local service…".into();
+                    return self.connect();
+                }
                 self.notice = "Server stopped.".into();
             }
+            (Job::Lock, _) if self.ui.close_after_lock.is_some() => {
+                self.clear_vault();
+                let id = self.ui.close_after_lock.take().expect("checked above");
+                return self.close_and_remember(id);
+            }
             (Job::Create | Job::Unlock | Job::Lock, _) => {
+                self.ui.unlock_error = None;
                 let known = if job == Job::Unlock {
                     self.connection
                         .vault
@@ -1568,6 +1870,9 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // The tray mirrors the state each frame shows (a cheap atomic store).
+        #[cfg(target_os = "linux")]
+        tray::set_state(self.connection.running, self.connection.session.is_some());
         view::view(self)
     }
 }

@@ -214,7 +214,7 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/login`);
         const loginPicker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await loginPicker.getByRole("button", { name: /Alice/ }).click();
+        await loginPicker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
         await browser.context.serviceWorkers()[0].evaluate(() => { globalThis.lastAutomaticPromptResult = null; });
@@ -237,7 +237,7 @@ test.describe("extended credential flows", () => {
         });
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await picker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
     });
@@ -251,7 +251,7 @@ test.describe("extended credential flows", () => {
                 input.replaceWith(input.cloneNode());
             }
         });
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await picker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await expect(page.locator("#password")).toHaveValue("saved-password");
     });
@@ -264,7 +264,7 @@ test.describe("extended credential flows", () => {
             const form = document.querySelector("#login");
             form.replaceWith(form.cloneNode(true));
         });
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await picker.getByRole("option", { name: /Alice/ }).click();
         await expect.poll(() => picker.isClosed()).toBe(true);
         await expect(page.locator("#username")).toHaveValue("");
         await expect(page.locator("#password")).toHaveValue("");
@@ -278,13 +278,13 @@ test.describe("extended credential flows", () => {
                 <input id="secondPassword" type="password" autocomplete="current-password">`);
         });
         const picker = await openPicker(browser.context, page.locator("#secondUsername + pm-field-control").getByRole("button"));
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await picker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#secondUsername")).toHaveValue("alice@example.com");
         await expect(page.locator("#secondPassword")).toHaveValue("saved-password");
         await expect(page.locator("#username")).toHaveValue("");
         await expect(page.locator("#password")).toHaveValue("");
         const second = await openPicker(browser.context, page.locator("#secondPassword + pm-field-control").getByRole("button"));
-        await second.getByRole("button", { name: /Bob/ }).click();
+        await second.getByRole("option", { name: /Bob/ }).click();
         await expect(page.locator("#secondUsername")).toHaveValue("bob@example.com");
         await expect(page.locator("#secondPassword")).toHaveValue("bob-password");
         await expect(page.locator("#username")).toHaveValue("");
@@ -298,7 +298,7 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/login`);
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await picker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#password")).toHaveValue("saved-password");
         await page.locator("#password").fill("edited-autofilled-password");
         const prompt = await openPrompt(browser.context, page.locator("#submit"));
@@ -311,7 +311,7 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/picker-username`);
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }));
-        await picker.getByRole("button", { name: /Alice/ }).click();
+        await picker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#username")).toHaveValue("alice@example.com");
         await page.locator("#next").click();
         await expect(page).toHaveURL(`${origin}/picker-password`);
@@ -409,8 +409,8 @@ test.describe("extended credential flows", () => {
     test("TOTP is fetched only after secure picker selection", async () => {
         await page.goto(`${origin}/totp`);
         const totpPicker = await openPicker(browser.context,
-            page.getByRole("button", { name: "Choose authenticator code" }));
-        await totpPicker.getByRole("button", { name: /Alice/ }).click();
+            page.getByRole("button", { name: "Choose one-time code" }));
+        await totpPicker.getByRole("option", { name: /Alice/ }).click();
         await expect(page.locator("#totp")).toHaveValue("123456");
     });
 
@@ -501,7 +501,7 @@ test.describe("extended credential flows", () => {
         const sameFrame = page.frameLocator("#loginFrame");
         const framePicker = await openPicker(browser.context,
             sameFrame.getByRole("button", { name: "Choose saved credentials" }).first());
-        await framePicker.getByRole("button", { name: /Alice/ }).click();
+        await framePicker.getByRole("option", { name: /Alice/ }).click();
         await expect(sameFrame.locator("#username")).toHaveValue("alice@example.com");
     });
 
@@ -518,7 +518,7 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/simple`);
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose saved credentials" }).first());
-        const selection = picker.getByRole("button", { name: /Bob/ });
+        const selection = picker.getByRole("option", { name: /Bob/ });
         await expect(selection).toBeVisible();
         const before = readNativeRequests(browser.nativeLog).filter(request => request.action === "getLoginItem").length;
         await page.goto(`http://localhost:${server.address().port}/simple`);
@@ -534,7 +534,7 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/dynamic-shadow`);
         await expect(page.locator("#shadowHost")).toBeAttached();
         const picker = await openPicker(browser.context, page.getByRole("button", { name: "Choose saved credentials" }).first());
-        await picker.getByRole("button", { name: /Bob/ }).click();
+        await picker.getByRole("option", { name: /Bob/ }).click();
         await expect(page.locator("#shadowUser")).toHaveValue("bob@example.com");
         await expect(page.locator("#shadowPassword")).toHaveValue("bob-password");
         await page.locator("#shadowPassword").fill("shadow-new-password");
@@ -586,7 +586,7 @@ test.describe("extended credential flows", () => {
         await page.goto(`${origin}/identity-names`);
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose identity" }).first());
-        await picker.getByRole("button", { name: "Home identity" }).click();
+        await picker.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#f1")).toHaveValue("Alice");
         await expect(page.locator("#f2")).toHaveValue("Example");
     });
@@ -605,7 +605,7 @@ test.describe("extended credential flows", () => {
                 }
             });
         });
-        await picker.getByRole("button", { name: "Home identity" }).click();
+        await picker.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#fullName")).toHaveValue("Alice Example");
         await expect(page.locator("#email")).toHaveValue("alice@example.com");
         await expect(page.locator("#address")).toHaveValue("123 Example Street");
@@ -627,7 +627,7 @@ test.describe("extended credential flows", () => {
         });
         const picker = await openPicker(browser.context,
             page.locator("#shipName + pm-field-control").getByRole("button"));
-        await picker.getByRole("button", { name: "Home identity" }).click();
+        await picker.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#shipName")).toHaveValue("Alice");
         await expect(page.locator("#shipLast")).toHaveValue("Example");
         await expect(page.locator("#billName")).toHaveValue("Other");
@@ -648,7 +648,7 @@ test.describe("extended credential flows", () => {
         });
         const picker = await openPicker(browser.context,
             page.getByRole("button", { name: "Choose identity" }).first());
-        await picker.getByRole("button", { name: "Home identity" }).click();
+        await picker.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#loginEmail")).toHaveValue("login@example.com");
         await expect(page.locator("#emailPassword")).toHaveValue("keep-password");
         await expect(page.locator("#emailCode")).toHaveValue("123456");
@@ -666,12 +666,12 @@ test.describe("extended credential flows", () => {
                 <select id="unmatched" autocomplete="address-line1"><option value="keep">Keep</option></select>`;
         });
         const picker = await openPicker(browser.context, page.locator("#address + pm-field-control").getByRole("button"));
-        await picker.getByRole("button", { name: "Home identity" }).click();
+        await picker.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#firstName")).toHaveValue("Alice");
         await expect(page.locator("#nameSelect")).toHaveValue("example");
         await expect(page.locator("#unmatched")).toHaveValue("keep");
         const next = await openPicker(browser.context, page.locator("#nameSelect + pm-field-control").getByRole("button"));
-        await next.getByRole("button", { name: "Home identity" }).click();
+        await next.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#nameSelect")).toHaveValue("example");
     });
 
@@ -682,7 +682,7 @@ test.describe("extended credential flows", () => {
         await expect(picker.locator("#destination")).toHaveText(`Fill on: ${origin}`);
         await expect(page.locator("#fullName")).toHaveValue("");
         await expect(page.getByText("Home identity")).toHaveCount(0);
-        await picker.getByRole("button", { name: "Home identity" }).click();
+        await picker.getByRole("option", { name: "Home identity" }).click();
         await expect(page.locator("#fullName")).toHaveValue("Alice Example");
         await expect(page.locator("#email")).toHaveValue("alice@example.com");
         await expect(page.locator("#address")).toHaveValue("123 Example Street");
@@ -696,11 +696,11 @@ test.describe("extended credential flows", () => {
         const embeddedOrigin = `http://localhost:${server.address().port}`;
         await expect(picker.locator("#destination")).toHaveText(`Fill on: ${embeddedOrigin}`);
         await expect(picker.locator("#crossOriginText")).toContainText(origin);
-        await picker.getByRole("button", { name: "Test Visa" }).click();
+        await picker.getByRole("option", { name: "Test Visa" }).click();
         await expect(picker.locator("#status")).toContainText("Confirm");
         await expect(frame.locator("#card")).toHaveValue("");
         await picker.locator("#confirmCrossOrigin").check();
-        await picker.getByRole("button", { name: "Test Visa" }).click();
+        await picker.getByRole("option", { name: "Test Visa" }).click();
         await expect(frame.locator("#card")).toHaveValue("4111111111111111");
     });
 
@@ -807,7 +807,7 @@ test("stopping the extension worker closes orphan secret decisions on its next s
             const page = browser.context.pages()[0] || await browser.context.newPage();
             await page.goto(`${origin}/simple`);
             const picker = await openPicker(browser.context, page.getByRole("button", { name: "Choose saved credentials" }).first());
-            await expect(picker.getByRole("button", { name: /Example/ })).toBeVisible();
+            await expect(picker.getByRole("option", { name: /Example/ })).toBeVisible();
             const cdp = await browser.context.newCDPSession(page);
             await cdp.send("ServiceWorker.enable");
             await cdp.send("ServiceWorker.stopAllWorkers");
