@@ -339,7 +339,7 @@ def main():
             subprocess.run(["xdotool", "windowsize", xwindow,
                             str(1060 * args.scale // 100), str(760 * args.scale // 100)], env=env, check=True)
             time.sleep(0.5)
-        pm("new", "--key", str(key))
+        pm("new", "--key", str(key), "--locked")
         pm("unlock", "--key", str(key), "--timeout", "0")
         # Tabs are disabled while the app refreshes after the external unlock,
         # so a click that races that refresh is retried rather than lost.
