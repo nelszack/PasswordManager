@@ -28,18 +28,38 @@ mkdir -p "$out/screens"
 "${adb[@]}" install -r "$apks/app-debug-androidTest.apk" >/dev/null
 # The autofill tests fill a synthetic form through this app's service.
 "${adb[@]}" shell settings put secure autofill_service "$app/$app.VaultAutofillService"
+# A dozing or locked emulator delays activity lifecycle changes past the
+# tests' waits (ActivityScenario.moveToState); keep it awake and unlocked.
+"${adb[@]}" shell svc power stayon true
+"${adb[@]}" shell input keyevent KEYCODE_WAKEUP
+"${adb[@]}" shell wm dismiss-keyguard >/dev/null 2>&1 || true
 
 failed=()
+flaky=()
+attempt() {
+    "${adb[@]}" shell am force-stop "$app"
+    "${adb[@]}" shell am instrument -w "$@" "$runner" | tr -d '\r'
+}
+# Emulator timing occasionally misses a lifecycle wait. Like the browser
+# suite's single CI retry, a failed class runs once more in a fresh process;
+# passing only then is reported as flaky (first log kept), never hidden.
 run() {
     local name="$1"
     shift
-    "${adb[@]}" shell am force-stop "$app"
     echo "=== $name"
-    "${adb[@]}" shell am instrument -w "$@" "$runner" | tr -d '\r' >"$out/$name.txt"
-    tail -n 3 "$out/$name.txt"
+    attempt "$@" >"$out/$name.txt"
     if ! grep -q '^OK (' "$out/$name.txt"; then
-        failed+=("$name")
+        mv "$out/$name.txt" "$out/$name.attempt1.txt"
+        grep -m 3 -E 'Error|Exception' "$out/$name.attempt1.txt" || true
+        echo "--- $name failed; retrying once"
+        attempt "$@" >"$out/$name.txt"
+        if grep -q '^OK (' "$out/$name.txt"; then
+            flaky+=("$name")
+        else
+            failed+=("$name")
+        fi
     fi
+    tail -n 3 "$out/$name.txt"
 }
 
 run MobileIntegrationTest -e class "$app.MobileIntegrationTest"
@@ -61,6 +81,10 @@ for file in $("${adb[@]}" shell run-as "$app" ls cache | tr -d '\r' | grep '^red
 done
 echo "Screenshots: $(find "$out/screens" -name '*.png' | wc -l) in $out/screens"
 
+if ((${#flaky[@]})); then
+    echo "Flaky (failed, then passed on retry; see *.attempt1.txt): ${flaky[*]}"
+    echo "::warning::Flaky instrumentation classes: ${flaky[*]}"
+fi
 if ((${#failed[@]})); then
     echo "Failed: ${failed[*]}" >&2
     exit 1
