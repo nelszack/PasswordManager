@@ -98,7 +98,7 @@ impl Sandbox {
             }
             thread::sleep(Duration::from_millis(10));
         };
-        let mut read = |file: &mut std::fs::File| {
+        let read = |file: &mut std::fs::File| {
             let mut bytes = Vec::new();
             file.rewind().unwrap();
             file.read_to_end(&mut bytes).unwrap();
@@ -451,7 +451,7 @@ fn subcommands(sandbox: &Sandbox, path: &[String]) -> Option<Vec<String>> {
         if !in_commands || !line.starts_with("  ") || line.starts_with("   ") {
             continue;
         }
-        let name = line.trim_start().split_whitespace().next().unwrap_or("");
+        let name = line.split_whitespace().next().unwrap_or("");
         // Example lines start with `pm`; `help` only repeats the help text.
         if !name.is_empty()
             && name != "help"
