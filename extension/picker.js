@@ -4,6 +4,7 @@ const status = document.getElementById("status");
 const title = document.getElementById("title");
 const confirmation = document.getElementById("confirmCrossOrigin");
 let crossOrigin = false;
+let pickerKind = "login";
 let savedItems = [];
 let visibleItems = [];
 let activeIndex = -1;
@@ -44,9 +45,11 @@ async function load(retry = false) {
     document.getElementById("crossOriginText").textContent =
         `Allow filling ${response.origin}, embedded in ${response.topOrigin}`;
     savedItems = response.items;
-    recovery.hidden = response.items.length > 0;
+    // Zero matches is a normal state; the unlock card is only for errors (shown by showError).
+    recovery.hidden = true;
     search.hidden = response.items.length < 2;
     readyAt = Date.now() + INPUT_GUARD_MS;
+    pickerKind = response.kind;
     renderItems();
     setTimeout(() => {
         for (const button of items.children) button.disabled = false;
@@ -64,10 +67,12 @@ function renderItems() {
     status.textContent =
         query && !visibleItems.length
             ? "No accounts match this search. Clear the search to show all accounts."
-            : PasswordManagerPickerState.status(savedItems);
+            : PasswordManagerPickerState.status(savedItems, pickerKind);
     visibleItems.forEach((item, index) => {
         const button = document.createElement("button");
         button.type = "button";
+        button.id = `pm-option-${index}`;
+        button.setAttribute("role", "option");
         const avatar = document.createElement("span");
         avatar.className = "avatar";
         avatar.setAttribute("aria-hidden", "true");
@@ -98,17 +103,27 @@ function highlight(index) {
     activeIndex = index;
     Array.from(items.children).forEach((button, position) => {
         button.className = position === index ? "active" : "";
+        button.setAttribute("aria-selected", String(position === index));
         if (position === index) button.setAttribute("aria-current", "true");
         else button.removeAttribute?.("aria-current");
     });
+    // Screen readers announce the highlighted account while focus stays in search.
+    const active = items.children[index];
+    if (active?.id) search.setAttribute("aria-activedescendant", active.id);
+    else search.removeAttribute?.("aria-activedescendant");
 }
 
 function showError(error) {
     savedItems = [];
     visibleItems = [];
     items.replaceChildren();
-    recovery.hidden = false;
-    status.textContent = error?.message || "Picker unavailable";
+    const message = error?.message || "Picker unavailable";
+    const kind = PasswordManagerPickerState.failure(message);
+    // Offer only the recovery that can help with this failure.
+    recovery.hidden = kind === "expired";
+    document.getElementById("openDesktop").hidden = kind !== "locked" && kind !== "disconnected";
+    status.textContent =
+        kind === "expired" ? `${message}. Close this window and choose the field's key button again.` : message;
 }
 
 async function cancel() {
@@ -145,6 +160,18 @@ document.addEventListener("keydown", event => {
 });
 
 search.addEventListener("input", renderItems);
+document.getElementById("openDesktop")?.addEventListener("click", async event => {
+    if (!event.isTrusted) return;
+    const response = await send({ action: "openDesktop" });
+    status.textContent = response?.success
+        ? "Unlock your vault in the desktop app; this window will continue."
+        : response?.error || "Could not open the desktop app";
+});
+// Continue automatically once the vault is unlocked elsewhere.
+chrome.runtime.onMessage?.addListener?.(message => {
+    const unlocked = message?.action === "statusChanged" && message.status?.running && !message.status.locked;
+    if (unlocked && !recovery.hidden) load(true).catch(showError);
+});
 document.getElementById("retry").addEventListener("click", event => {
     if (event.isTrusted) load(true).catch(showError);
 });

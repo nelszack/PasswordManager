@@ -21,6 +21,9 @@ pub(super) struct MobileSettings {
     pub trash_days: u64,
     pub generator_length: u8,
     pub passphrase_words: u8,
+    /// Seconds the vault stays unlocked after leaving the app; 0 locks at once.
+    /// Turning the screen off always locks immediately.
+    pub leave_lock_seconds: u64,
 }
 
 impl Default for MobileSettings {
@@ -32,6 +35,7 @@ impl Default for MobileSettings {
             trash_days: 0,
             generator_length: 24,
             passphrase_words: 6,
+            leave_lock_seconds: 30,
         }
     }
 }
@@ -58,11 +62,13 @@ impl MobileSettings {
 
     fn validate(&self) -> Result<(), String> {
         if !(15..=86400).contains(&self.unlock_seconds)
-            || !(1..=300).contains(&self.clipboard_seconds)
+            // Zero turns copying off, as the desktop clipboard timeout does.
+            || self.clipboard_seconds > 300
             || self.history_limit > 1000
             || self.trash_days > 36500
             || self.generator_length == 0
             || !(1..=64).contains(&self.passphrase_words)
+            || self.leave_lock_seconds > 300
         {
             return Err("Settings outside supported limits".into());
         }

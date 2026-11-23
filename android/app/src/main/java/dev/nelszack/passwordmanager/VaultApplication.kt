@@ -43,6 +43,13 @@ object Vault {
     @Volatile private var nativeClipboardSeconds: Int? = null
     internal val clipboardSeconds
         get() = nativeClipboardSeconds ?: settings.getInt("clipboard_seconds", 30)
+    @Volatile private var nativeLeaveSeconds: Long? = null
+    /** Seconds the vault stays unlocked after leaving the app; 0 locks at once. */
+    internal val leaveLockSeconds
+        get() = (nativeLeaveSeconds ?: settings.getLong("leave_lock_seconds", 30)).coerceIn(0, 300)
+    // Leaving the app locks without touching the clipboard: a password copied to paste
+    // into another app must survive the switch; the clipboard timer clears it.
+    private val leaveLock = Runnable { lock(clearClipboard = false) }
 
     internal val autofillSession = AutofillSession { android.os.SystemClock.elapsedRealtime() }
     @Volatile
@@ -92,7 +99,9 @@ object Vault {
                 main.removeCallbacks(expire)
                 main.postDelayed(expire, seconds * 1000L)
             }
-            nativeClipboardSeconds = data.getInt("clipboard_seconds").coerceIn(1, 300)
+            nativeClipboardSeconds = data.getInt("clipboard_seconds").coerceIn(0, 300)
+            if (data.has("leave_lock_seconds"))
+                nativeLeaveSeconds = data.getLong("leave_lock_seconds").coerceIn(0, 300)
         }
         return data
     }
@@ -159,7 +168,34 @@ object Vault {
         }
     }
 
-    fun lock() {
+    /**
+     * The app went to the background. Locks now, or after the configured delay so a quick switch
+     * to another app (to read a code, or paste a password) keeps the screen and any draft. Returns
+     * whether the vault stays unlocked for now.
+     */
+    fun leftApp(): Boolean {
+        main.removeCallbacks(leaveLock)
+        val seconds = leaveLockSeconds
+        if (seconds == 0L) {
+            lock(clearClipboard = false)
+            return false
+        }
+        main.postDelayed(leaveLock, seconds * 1000L)
+        return true
+    }
+
+    /** The app is visible again before the delayed lock ran. */
+    fun returnedToApp() {
+        main.removeCallbacks(leaveLock)
+    }
+
+    /**
+     * Locks now. Explicit locks and screen-off also clear our clipboard copy; leaving
+     * the app ([clearClipboard] false) keeps it so it can be pasted elsewhere.
+     */
+    fun lock(clearClipboard: Boolean = true) {
+        main.removeCallbacks(leaveLock)
+        if (clearClipboard) SecretClipboard.clearOnLock(context)
         runCatching { NativeBridge.invalidate() }
         autofillSession.clear()
         primaryUnlock = false
@@ -199,6 +235,8 @@ class VaultApplication : Application() {
 abstract class SecureActivity : FragmentActivity() {
     @Volatile private var generation = 0L
     @Volatile private var active = true
+    /** Bumped each time the screen leaves view, so callbacks from an earlier visit are stale. */
+    @Volatile private var visit = 0L
     private val lockReceiver =
         object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -231,9 +269,16 @@ abstract class SecureActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         active = true
+        Vault.returnedToApp()
     }
 
     protected open fun retainVaultOnStop(): Boolean = false
+
+    /**
+     * Leaving waits for the configured leave-lock delay. Handoff surfaces shown over another
+     * app (the autofill sheet) lock at once instead when left without completing.
+     */
+    protected open fun delayLockOnLeave(): Boolean = true
 
     protected open fun uiRevision(): Long = 0L
 
@@ -242,14 +287,29 @@ abstract class SecureActivity : FragmentActivity() {
     protected open fun onWorkFinished() {}
 
     override fun onStop() {
+        super.onStop()
+        // Rotation and other configuration changes recreate the screen; they are not leaving.
+        if (isChangingConfigurations) return
+        visit++
+        // While the delayed lock waits, the screen stays live: reveal timers still hide
+        // secrets, codes keep refreshing, and saves finish (all hidden from screenshots and
+        // recents by FLAG_SECURE). The lock broadcast clears everything when it runs.
+        if (!retainVaultOnStop()) {
+            if (delayLockOnLeave()) {
+                if (Vault.leftApp()) return
+            } else Vault.lock(clearClipboard = false)
+        }
         active = false
         generation++
-        super.onStop()
-        if (!retainVaultOnStop()) Vault.lock()
         clearSecrets()
     }
 
     override fun onDestroy() {
+        // A screen kept live through the leave-lock delay still ends here: late work is dropped.
+        if (!isChangingConfigurations) {
+            active = false
+            generation++
+        }
         ui.removeCallbacksAndMessages(null)
         unregisterReceiver(lockReceiver)
         super.onDestroy()
@@ -261,25 +321,63 @@ abstract class SecureActivity : FragmentActivity() {
 
     protected open fun clearSecrets() {}
 
+    /** Failures appear as a snackbar with the reason; they never block the screen. */
     protected open fun showFailure(error: Throwable) {
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Password Manager")
-            .setMessage(error.message ?: "Operation failed")
-            .setPositiveButton("OK", null)
+        val message = friendlyError(error.message)
+        val root = findViewById<android.view.View>(android.R.id.content)
+        if (root == null) {
+            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
+        com.google.android.material.snackbar.Snackbar.make(
+                root,
+                message,
+                com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE,
+            )
+            .setAction("OK") {}
+            .apply { (view.findViewById<android.widget.TextView>(com.google.android.material.R.id.snackbar_text))?.maxLines = 6 }
             .show()
     }
 
-    internal fun <T> sessionCallback(onDiscard: () -> Unit = {}, action: (T) -> Unit): (T) -> Unit {
+    /** Plain-language wording for common vault errors, with the original text kept otherwise. */
+    internal fun friendlyError(message: String?): String {
+        val text = message?.trim().orEmpty()
+        return when {
+            text.isEmpty() -> "Something went wrong. Try again."
+            text.contains("incorrect password", ignoreCase = true) ->
+                "That password or key file doesn't open this vault. Check it and try again."
+            text.contains("locked", ignoreCase = true) ->
+                "Your vault locked. Unlock it, then try again."
+            text.contains("Unable to resolve host", ignoreCase = true) ||
+                text.contains("timeout", ignoreCase = true) ->
+                "The sync server couldn't be reached. Check your connection; your local vault still works."
+            else -> text.replaceFirstChar { it.uppercase() }
+        }
+    }
+
+    /**
+     * Wraps a late callback so it runs only while this screen and session are current. By default
+     * it must also arrive in the same visit: an authentication result started before leaving the
+     * app is dropped. Timers that only hide secrets or refresh codes pass [acrossVisits] so they keep
+     * working during the leave-lock delay.
+     */
+    internal fun <T> sessionCallback(
+        onDiscard: () -> Unit = {},
+        acrossVisits: Boolean = false,
+        action: (T) -> Unit,
+    ): (T) -> Unit {
         val ticket = generation
         val screen = uiRevision()
+        val started = visit
         return { value ->
             if (
                 isFinishing ||
+                    (!acrossVisits && started != visit) ||
                     isDestroyed ||
                     !active ||
                     ticket != generation ||
                     screen != uiRevision() ||
-                    !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+                    !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.CREATED)
             ) {
                 onDiscard()
             } else {
@@ -328,7 +426,8 @@ abstract class SecureActivity : FragmentActivity() {
                         !isDestroyed &&
                         ticket == generation &&
                         screen == uiRevision() &&
-                        lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+                        // Still created: a screen kept during the leave-lock delay finishes its work.
+                        lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.CREATED)
                 )
                     result.fold({ value ->
                         runCatching { done(value) }.onFailure(::showFailure)

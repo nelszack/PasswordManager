@@ -9,6 +9,7 @@
   --success: light-dark(#16803c, #6fd394);
   --on-success: light-dark(white, #0d1f14);
   --danger: light-dark(#b42318, #ff9b91);
+  --warning: light-dark(#9a5b00, #f5b748);
   --muted: light-dark(#4d5869, #a7b1c2);
   --edge: light-dark(#68758b, #8c99af);
   --line: light-dark(#d6dce6, #2e384a);
@@ -26,10 +27,10 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .55; cursor: default; }
-button.primary, #add {
+button.primary {
   background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600;
 }
-button.success, #update, .approve {
+button.success, .approve {
   background: var(--success); border-color: var(--success); color: var(--on-success); font-weight: 600;
 }
 button.quiet { background: transparent; border-color: transparent; color: var(--accent); }

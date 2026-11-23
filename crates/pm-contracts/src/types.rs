@@ -99,9 +99,10 @@ impl Zeroize for ServerCommand {
             Self::Totp(command) => command.zeroize(),
             Self::Duo(command) => command.zeroize(),
             Self::BrowserLogins(origin) | Self::BrowserDuoItems(origin) => origin.zeroize(),
-            Self::BrowserLogin { domain, .. } | Self::BrowserAuthenticatorData { domain, .. } => {
-                domain.zeroize()
-            }
+            Self::BrowserLogin { domain, .. }
+            | Self::BrowserAuthenticatorData { domain, .. }
+            | Self::BrowserCopy { domain, .. } => domain.zeroize(),
+            Self::CopyGenerated { value, .. } => value.zeroize(),
             Self::RestorePassword { target, .. } => target.zeroize(),
             Self::BrowserPasskeyCreate { verification, .. }
             | Self::BrowserPasskeyGet { verification, .. } => verification.zeroize(),
@@ -198,6 +199,26 @@ pub enum ServerCommand {
         domain: String,
         id: usize,
     },
+    /// Copy a site-matched login's value with timed clipboard clearing, so the
+    /// browser never holds the secret. Counter-based codes are refused.
+    BrowserCopy {
+        domain: String,
+        id: usize,
+        field: BrowserCopyField,
+        timeout: u8,
+    },
+    /// Copy any item's main secret (chosen in the popup's vault search) with
+    /// timed clearing; the value never reaches the browser.
+    BrowserCopyItem {
+        id: usize,
+        field: BrowserCopyField,
+        timeout: u8,
+    },
+    /// Copy a value the browser generated, with timed clipboard clearing.
+    CopyGenerated {
+        value: SecretString,
+        timeout: u8,
+    },
     BrowserDuoItems(String),
     /// WebAuthn for a browser-verified origin; `request` is the page's options
     /// as WebAuthn JSON.
@@ -250,6 +271,10 @@ impl ServerCommand {
                 | Self::BrowserAutofillItem(_)
                 | Self::BrowserLogins(_)
                 | Self::BrowserLogin { .. }
+                // Copies leave the vault unchanged and are safe to repeat.
+                | Self::BrowserCopy { .. }
+                | Self::BrowserCopyItem { .. }
+                | Self::CopyGenerated { .. }
                 | Self::BrowserDuoItems(_)
                 | Self::BrowserPasskeys { .. }
                 | Self::BrowserPasskeyGet { .. }
@@ -339,6 +364,8 @@ impl ServerCommand {
                 | Self::ManagementCopy { id, .. }
                 | Self::BrowserLogin { id, .. }
                 | Self::BrowserAuthenticatorData { id, .. }
+                | Self::BrowserCopy { id, .. }
+                | Self::BrowserCopyItem { id, .. }
                 | Self::BrowserPasskeyGet { id, .. }
                 | Self::BrowserAutofillItem(id) => Some(*id),
                 _ => None,
@@ -713,6 +740,16 @@ pub enum TotpCommand {
         target: Target,
         copy_timeout: Option<u8>,
     },
+}
+
+/// What the browser popup may copy from a login matched to the current site.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCopyField {
+    Username,
+    Password,
+    /// The current time-based code.
+    Totp,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

@@ -8,10 +8,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private const val ROW_PAGE_SIZE = 50
+/** Set by the autofill sheet: the site to add a login for. */
+internal const val EXTRA_ADD_LOGIN_ORIGIN = "dev.nelszack.passwordmanager.ADD_LOGIN_ORIGIN"
+/** From an empty card or identity picker: open a new item of that type after unlocking. */
+internal const val EXTRA_ADD_ITEM_KIND = "dev.nelszack.passwordmanager.ADD_ITEM_KIND"
 /** Matches the vault's per-attachment limit. */
 private const val MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
-/** Filter-chip value selecting favorites rather than an item type. */
-private const val FAVORITES = "\u0000favorites"
 
 open class MainActivity : ManagementActivity() {
     override fun showItems(message: String) {
@@ -22,18 +24,77 @@ open class MainActivity : ManagementActivity() {
         detail(id)
     }
 
+    // Returns to the vault list when unlocked, or the start screen when locked.
+    // Only the Lock button locks (see lockNow).
     override fun showHome() {
-        Vault.lock()
-        home()
+        navigate("Vault")
     }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        home()
+        takeAddRequest(intent)
+        if (!openShortcut()) home()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeAddRequest(intent)
+        if (openShortcut()) return
+        if (pendingAddOrigin != null || pendingAddKind != null || pendingShortcut != null) home()
+    }
+
+    /** Launcher shortcut: "search" opens the vault with search focused after unlock. */
+    private var pendingShortcut: String? = null
+
+    /** The generator needs no unlock, so its shortcut opens it at once. */
+    private fun openShortcut(): Boolean {
+        if (pendingShortcut != "generate") return false
+        pendingShortcut = null
+        generator(back = { showHome() })
+        return true
+    }
+
+    private var pendingAddKind: String? = null
+
+    /** A site autofill couldn't fill: offer to add a login for it after unlocking. */
+    private var pendingAddOrigin: String? = null
+
+    private fun takeAddRequest(intent: Intent?) {
+        when (intent?.action) {
+            "dev.nelszack.passwordmanager.SHORTCUT_SEARCH" -> pendingShortcut = "search"
+            "dev.nelszack.passwordmanager.SHORTCUT_GENERATE" -> pendingShortcut = "generate"
+        }
+        intent?.getStringExtra(EXTRA_ADD_ITEM_KIND)?.let { kind ->
+            intent.removeExtra(EXTRA_ADD_ITEM_KIND)
+            if (kind in setOf("payment-card", "identity")) pendingAddKind = kind
+        }
+        val origin = intent?.getStringExtra(EXTRA_ADD_LOGIN_ORIGIN) ?: return
+        intent.removeExtra(EXTRA_ADD_LOGIN_ORIGIN)
+        if (origin.length <= 2048 && origin.none(Char::isISOControl)) pendingAddOrigin = origin
     }
 
     override fun onSessionLocked() {
         home()
+    }
+
+    override fun onUnlockCancelled() {
+        home()
+    }
+
+    // The unlock form starts the fingerprint prompt by itself. Opening the app goes
+    // straight to it once; after Lock or Cancel you choose when to unlock.
+    private var openedFresh = true
+
+    override fun automaticBiometrics() = true
+
+    override fun lockNow() {
+        openedFresh = false
+        super.lockNow()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) openedFresh = true
     }
 
     override fun onResume() {
@@ -41,17 +102,30 @@ open class MainActivity : ManagementActivity() {
         // A browser-scoped grant does not unlock the vault-management screen.
         if (Vault.autofillSession.hasGrant()) Vault.lock()
         if (layout.childCount == 0) home()
+        // Returning from Android's autofill settings shows whether it is now on.
+        else settingsShown?.let(::settingsHome)
     }
 
     private var searchText = ""
     private var selectedKind: String? = null
+    /** Favorites combine with the type, tag, and text filters. */
+    private var favoritesOnly = false
     private var selectedTag: String? = null
     private var queryVersion = 0L
     private var pendingSearch: Runnable? = null
     private var codeTick: Runnable? = null
+    /** Where the list was scrolled when an item was opened. */
+    private var listScroll: Int? = null
+    /** Selection mode in the vault list, and the chosen item IDs (like the desktop app). */
+    private var selecting = false
+    private val selectedIds = linkedSetOf<Long>()
+
+    /** Settings is showing (with its unlock state), so a return from system settings refreshes it. */
+    private var settingsShown: Boolean? = null
 
     override fun onPageChanged(title: String) {
         super.onPageChanged(title)
+        settingsShown = null
         pendingSearch?.let(ui::removeCallbacks)
         pendingSearch = null
         codeTick?.let(ui::removeCallbacks)
@@ -68,6 +142,7 @@ open class MainActivity : ManagementActivity() {
         searchText = ""
         selectedKind = null
         selectedTag = null
+        favoritesOnly = false
         super.clearSecrets()
     }
 
@@ -86,19 +161,37 @@ open class MainActivity : ManagementActivity() {
         rootNavigation("Vault", false)
         label("YOUR PRIVATE VAULT", 12f)
         label(if (selectedVault.isBlank()) "Bring your vault\nwith you." else "Welcome back.", 32f)
-        label("Your passwords, verification codes and important details, together on this device.")
+        if (selectedVault.isNotBlank())
+            label(VaultNames.label(this, selectedVault, listOf(selectedVault)), 18f)
+        label("Your passwords, one-time codes and important details, together on this device.")
+        pendingAddOrigin?.let {
+            notice("Unlock to add a login for ${Uri.parse(it).host ?: it}.")
+        }
+        pendingAddKind?.let {
+            notice(if (it == "payment-card") "Unlock to add a payment card." else "Unlock to add an identity.")
+        }
         if (selectedVault.isNotBlank()) {
+            val fingerprint = DeviceKeys.enabled(this, selectedVault)
             notice(
-                if (DeviceKeys.enabled(this, selectedVault))
-                    "Fingerprint unlock is set up on this device."
+                if (fingerprint) "Fingerprint unlock is set up on this device."
                 else "Unlock with your master password or key file."
             )
-            primary("Unlock vault") { unlock({ syncAndOpen() }) }
+            primary(if (fingerprint) "Unlock with fingerprint" else "Unlock vault") {
+                allowAutomaticBiometrics()
+                unlock({ syncAndOpen() })
+            }
+            // Opening the app goes straight to the fingerprint prompt.
+            if (fingerprint && openedFresh) {
+                openedFresh = false
+                allowAutomaticBiometrics()
+                val start = sessionCallback<Unit> { unlock({ syncAndOpen() }) }
+                layout.post { start(Unit) }
+            }
         } else primary("Set up your vault") { setupVault() }
         actionRow(
             "Add or restore a vault",
             "Import an existing vault, connect to sync or start fresh",
-            "+",
+            "add",
         ) {
             setupVault()
         }
@@ -106,7 +199,7 @@ open class MainActivity : ManagementActivity() {
         actionRow(
             "Password generator",
             "Create a strong password without opening your vault",
-            "G",
+            "generate",
         ) {
             generator(back = { home() })
         }
@@ -123,17 +216,19 @@ open class MainActivity : ManagementActivity() {
         page("Add your vault")
         pageBack = { home() }
         label("Choose how you want to get started.")
+        actionRow("Create a new vault", "Start fresh with a master password", "add") { create() }
         actionRow(
-            "Cloud sync settings / download vault",
-            "Connect to your server and download an encrypted vault",
-            "S",
+            "I already have a vault",
+            "Download it from your sync server",
+            "sync",
         ) {
             connection()
         }
-        actionRow("Open a local vault", "Choose a vault already stored on this device", "V") {
+        section("More options")
+        actionRow("Open a vault on this device", "Choose a vault already stored here", "vault") {
             unlock({ syncAndOpen() })
         }
-        actionRow("Import encrypted vault", "Open an existing .enc vault from a file", "I") {
+        actionRow("Import a vault file", "Open an existing .enc vault file", "open") {
             pickFile(16 * 1024 * 1024) { bytes ->
                 task({
                     try {
@@ -147,14 +242,13 @@ open class MainActivity : ManagementActivity() {
                 }
             }
         }
-        actionRow("Create vault", "Start a new vault with a master password", "+") { create() }
-        actionRow("Restore encrypted backup", "Recover a complete vault from a backup", "R") {
+        actionRow("Restore an encrypted backup", "Recover a complete vault from a backup", "restore") {
             restoreBackup()
         }
         actionRow(
-            "External-key vault tools",
-            "Generate or use a key file instead of a password",
-            "K",
+            "Use a key file instead of a password",
+            "Create or open a vault protected by a key file",
+            "key",
         ) {
             createKeyVault()
         }
@@ -168,17 +262,18 @@ open class MainActivity : ManagementActivity() {
         actionRow(
             "Password generator",
             "Passwords and passphrases, generated on this device",
-            "G",
+            "generate",
         ) {
             generator(back = { lockedTools() })
         }
-        actionRow("Add or restore a vault", "Import, download or restore encrypted data", "+") {
+        actionRow("Add or restore a vault", "Import, download or restore encrypted data", "add") {
             setupVault()
         }
     }
 
     private fun settingsHome(unlocked: Boolean) {
         page("Settings")
+        settingsShown = unlocked
         rootNavigation("Settings", unlocked)
         label("Make the app work the way you do.")
         section("Security")
@@ -187,7 +282,7 @@ open class MainActivity : ManagementActivity() {
             if (selectedVault.isNotBlank() && DeviceKeys.enabled(this, selectedVault))
                 "Enabled on this device"
             else "Set up fingerprint unlock for your vault",
-            "B",
+            "biometric",
         ) {
             unlock({
                 rootNavigation("Settings", true)
@@ -202,10 +297,18 @@ open class MainActivity : ManagementActivity() {
             preferences { settingsHome(unlocked) }
         }
         section("Autofill")
+        // Says whether setup worked, not just where to do it.
+        val autofillOn =
+            runCatching {
+                    getSystemService(android.view.autofill.AutofillManager::class.java)
+                        ?.hasEnabledAutofillServices() == true
+                }
+                .getOrDefault(false)
         actionRow(
-            "Enable password autofill",
-            "Choose Password Manager as your Android autofill service",
-            "A",
+            if (autofillOn) "Password autofill: on" else "Turn on password autofill",
+            if (autofillOn) "Password Manager is your autofill service. Tap to change it."
+            else "Not set up yet. Choose Password Manager as your Android autofill service.",
+            "autofill",
         ) {
             startActivity(
                 Intent(
@@ -230,7 +333,7 @@ open class MainActivity : ManagementActivity() {
         actionRow(
             "Cloud sync settings / download vault",
             "Server connection and encrypted cloud vaults",
-            "S",
+            "sync",
         ) {
             connection()
         }
@@ -242,7 +345,36 @@ open class MainActivity : ManagementActivity() {
                 files()
             }
         }
+        section("Help")
+        actionRow("Help & tips", "Autofill, sync, backups, and what to do if you're stuck") {
+            help(unlocked)
+        }
         label("Password Manager · ${packageManager.getPackageInfo(packageName,0).versionName}", 12f)
+    }
+
+    private fun help(unlocked: Boolean) {
+        page("Help & tips")
+        pageBack = { settingsHome(unlocked) }
+        for ((title, body) in
+            listOf(
+                "Copy without opening an item" to
+                    "Long-press an item in your vault list to copy its username, password or one-time code.",
+                "Autofill in apps and browsers" to
+                    "In Settings, choose “Turn on password autofill” and pick Password Manager (the row then reads “Password autofill: on”). When you sign in, tap the suggestion above the keyboard. If nothing matches, add the website or app to the login.",
+                "Switching apps" to
+                    "The vault stays unlocked briefly after you leave the app (Mobile settings → Lock after leaving the app), so you can paste a code and come back. Turning off the screen always locks it.",
+                "Clipboard" to
+                    "Copied passwords and codes are cleared after the time in Mobile settings, and when the vault locks.",
+                "Sync with other devices" to
+                    "Sync stores only encrypted vaults on your own server. You need its HTTPS address and a device credential from whoever runs it.",
+                "Backups" to
+                    "Tools → Files & backups creates an encrypted backup that restores everything. Keep its password safe.",
+                "Forgot the master password?" to
+                    "There is no reset. A key-file vault opens with its key file, and an encrypted backup opens with its own backup password.",
+            )) {
+            section(title)
+            label(body, 15f)
+        }
     }
 
     private fun biometricSettings() {
@@ -255,7 +387,7 @@ open class MainActivity : ManagementActivity() {
         )
         if (enabled)
             button("Disable biometric unlock") {
-                confirm("Disable fingerprint unlock for this vault on this device?") {
+                confirm("Disable fingerprint unlock for this vault on this device?", "Disable") {
                     DeviceKeys.disable(this, selectedVault)
                     biometricSettings()
                 }
@@ -289,40 +421,191 @@ open class MainActivity : ManagementActivity() {
                         val result = Vault.json("sync", *syncArgs(), "if_enabled" to true)
                         if (result.optBoolean("disabled")) "" else "Synchronized"
                     }
-                    .getOrElse { "Using local vault. Sync pending: ${it.message}" }
+                    .getOrElse { "Using the vault on this device; sync will retry. ${friendlyError(it.message)}" }
         }) { message ->
             items(message = message)
             offerRecoveryCleanup()
         }
     }
 
+    /** Copy actions for a list row, so a value can be copied without opening the item. */
+    private fun quickCopy(entry: JSONObject) {
+        val id = entry.getLong("id")
+        val name = entry.getString("name")
+        val username = entry.opt("username") as? String ?: ""
+        val profile = runCatching { Vault.itemProfiles()[entry.getString("kind")] }.getOrNull()
+        val owner = profile?.optString("owner")?.substringBefore(" (")?.ifBlank { null } ?: "Username"
+        val secret = profile?.optString("secret")?.substringBefore(" (")?.ifBlank { null } ?: "Password"
+        val choices = mutableListOf<Pair<String, () -> Unit>>()
+        if (username.isNotBlank())
+            choices += "Copy ${owner.replaceFirstChar { it.lowercase() }}" to
+                { SecretClipboard.copy(this, username, what = "$owner copied") }
+        choices +=
+            "Copy ${secret.replaceFirstChar { it.lowercase() }}" to
+                {
+                    task({ Vault.commandJson(VaultCommands.item(id)).optString("password") }) {
+                        if (it.isNotEmpty()) SecretClipboard.copy(this, it, what = "$secret copied")
+                        else notice("$name has nothing to copy.")
+                    }
+                }
+        if (VaultCommands.authenticatorMode(entry) == "totp" || entry.optBoolean("has_totp"))
+            choices +=
+                "Copy one-time code" to
+                    {
+                        task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) {
+                            SecretClipboard.copy(
+                                this,
+                                it.getString("code"),
+                                it.getInt("expires_in"),
+                                what = "Code copied",
+                            )
+                        }
+                    }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(name)
+            .setItems(choices.map { it.first }.toTypedArray()) { _, which ->
+                guarded { choices[which].second() }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun create() {
         page("Create vault")
         pageBack = { setupVault() }
-        label("Choose a master password you can remember. Use at least 14 characters.")
+        val vaultName = edit("Vault name", "Personal vault")
+        label("Choose a master password you can remember. Use at least 14 characters, such as several unrelated words.")
         val password = edit("Master password (at least 14 characters)", secret = true)
-        val confirmation = edit("Confirm password", secret = true)
-        primary("Create") {
-            check(password.text.toString() == confirmation.text.toString()) {
-                "Passwords do not match"
+        val strength = label("", 13f)
+        strength.accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
+        val confirmation = edit("Confirm master password", secret = true)
+        var suggested = ""
+        lateinit var suggestion: android.widget.TextView
+        button("Suggest a passphrase") {
+            task({ Vault.json("generate", "passphrase" to true, "words" to 6, "separator" to "-") }) {
+                val phrase = it.getString("password")
+                suggested = phrase
+                password.setText(phrase)
+                confirmation.setText(phrase)
+                // One current suggestion, shown so it can be written down; a new one replaces it.
+                suggestion.text = "Your new master password:\n$phrase\nWrite it down before you continue."
+                suggestion.visibility = android.view.View.VISIBLE
+            }
+        }
+        suggestion = label("", 16f).apply { visibility = android.view.View.GONE }
+        password.addTextChangedListener(
+            object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    // Editing the password retires the suggestion, so only the value in use shows.
+                    if (suggested.isNotEmpty() && s?.toString() != suggested) {
+                        suggested = ""
+                        suggestion.text = ""
+                        suggestion.visibility = android.view.View.GONE
+                    }
+                }
+            }
+        )
+        var problem: String? = "Enter a master password."
+        var check: Runnable? = null
+        val checkLater = sessionCallback<String> { typed ->
+            if (typed != password.text.toString()) return@sessionCallback
+            task({ Vault.json("passcheck", "password" to typed) }) { result ->
+                if (typed != password.text.toString()) return@task
+                problem = result.optString("master_problem").takeIf { it.isNotBlank() && it != "null" }
+                strength.text =
+                    "Strength: ${result.optString("rating")}" +
+                        (problem?.let { " · ${it.replaceFirstChar(Char::uppercase)}" } ?: " · Good to use")
+            }
+        }
+        password.addTextChangedListener(
+            object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val typed = s?.toString().orEmpty()
+                    check?.let(ui::removeCallbacks)
+                    problem = if (typed.length < 14) "use at least 14 characters" else problem
+                    strength.text = if (typed.isEmpty()) "" else if (typed.length < 14)
+                        "${14 - typed.length} more characters needed" else "Checking strength…"
+                    if (typed.length >= 14) {
+                        check = Runnable { checkLater(typed) }
+                        ui.postDelayed(check!!, 300)
+                    }
+                }
+            }
+        )
+        notice(
+            "There is no password reset. If you forget this password, the vault cannot be opened. Write it down somewhere safe, and create an encrypted backup once you add items (Tools → Files & backups)."
+        )
+        primary("Create vault") {
+            VaultNames.problem(vaultName.text.toString())?.let {
+                vaultName.error = it
+                vaultName.requestFocus()
+                return@primary
+            }
+            if (password.text.length < 14 || problem != null) {
+                // Checked before submitting, so nothing typed is lost.
+                password.error = (problem ?: "Use at least 14 characters").replaceFirstChar(Char::uppercase)
+                password.requestFocus()
+                return@primary
+            }
+            if (password.text.toString() != confirmation.text.toString()) {
+                confirmation.error = "The passwords don't match yet."
+                confirmation.requestFocus()
+                return@primary
             }
             val supplied = password.text.toString()
-            password.text.clear()
-            confirmation.text.clear()
+            val label = vaultName.text.toString()
             task({ Vault.json("create", "password" to supplied) }) {
+                password.text.clear()
+                confirmation.text.clear()
                 selectedVault = it.getString("vault")
-                items()
+                VaultNames.save(this, selectedVault, label)
+                items(message = "Vault “${label.trim()}” is ready. Add your first item below.")
             }
         }
         button("Back") { home() }
     }
 
     private fun items(query: String = searchText, message: String = "") {
+        pendingAddKind?.let { kind ->
+            pendingAddKind = null
+            typedEditor(null, JSONObject().put("kind", kind))
+            return
+        }
+        pendingAddOrigin?.let { origin ->
+            pendingAddOrigin = null
+            val host = runCatching { Uri.parse(origin).host }.getOrNull()?.removePrefix("www.")
+            typedEditor(
+                null,
+                JSONObject()
+                    .put("kind", "login")
+                    .put("name", host ?: origin)
+                    .put("urls", JSONArray().put(origin)),
+            )
+            return
+        }
         searchText = query
         page("Your vault")
         rootNavigation("Vault")
         if (message.isNotBlank()) notice(message)
         val search = edit("Search your vault", searchText)
+        // Search stays pinned at the top while the list scrolls.
+        pinHeader(MobileUi.layoutOf(search) ?: search)
+        if (pendingShortcut == "search") {
+            pendingShortcut = null
+            search.post {
+                search.requestFocus()
+                getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                    .showSoftInput(search, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
         search.setSingleLine(true)
         search.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         val filters =
@@ -339,7 +622,6 @@ open class MainActivity : ManagementActivity() {
         val options =
             listOf(
                 "All" to null,
-                "★ Favorites" to FAVORITES,
                 "Logins" to "login",
                 "Notes" to "secure-note",
                 "Cards" to "payment-card",
@@ -350,7 +632,81 @@ open class MainActivity : ManagementActivity() {
                 "API secrets" to "api-secret",
             )
         val count = label("Loading your items…", 13f)
-        primary("Add item") { typedEditor(null) }
+        // Selection mode: tap rows to choose them, then tag or trash them together.
+        val chosen = MobileUi.text(this, "", 14f, muted = true)
+        lateinit var tagChosen: android.widget.Button
+        lateinit var trashChosen: android.widget.Button
+        fun updateChosen() {
+            val n = selectedIds.size
+            chosen.text = if (n == 0) "Tap items to select them" else "$n selected"
+            tagChosen.isEnabled = n > 0
+            trashChosen.isEnabled = n > 0
+            trashChosen.text = if (n == 0) "Move to trash" else "Move $n to trash"
+        }
+        if (selecting) {
+            val bar = android.widget.LinearLayout(this).apply { gravity = android.view.Gravity.CENTER_VERTICAL }
+            bar.addView(chosen, android.widget.LinearLayout.LayoutParams(0, -2, 1f))
+            bar.addView(
+                MobileUi.textButton(this, "Done") {
+                    selecting = false
+                    selectedIds.clear()
+                    items()
+                }
+            )
+            pinHeader(bar)
+            tagChosen =
+                MobileUi.button(this, "Add tag…", false) {
+                    val ids = selectedIds.toList()
+                    val input = android.widget.EditText(this).apply { hint = "Tag (separate several with commas)" }
+                    track(
+                        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                            .setTitle("Add a tag to ${ids.size} items")
+                            .setView(input)
+                            .setNegativeButton("Cancel", null)
+                            .setPositiveButton("Add tag") { _, _ ->
+                                val tags = VaultCommands.parseTags(input.text.toString())
+                                if (tags.isEmpty()) return@setPositiveButton
+                                task({
+                                    ids.forEach { Vault.command(VaultCommands.addTags(it, tags)) }
+                                    syncAfterChange()
+                                }) {
+                                    selecting = false
+                                    selectedIds.clear()
+                                    items(message = "Tagged ${ids.size} items “${tags.joinToString(", ")}”.")
+                                }
+                            }
+                            .show()
+                    )
+                }
+            trashChosen =
+                MobileUi.button(this, "Move to trash", false, danger = true) {
+                    val ids = selectedIds.toList()
+                    confirm(
+                        "Move ${ids.size} items to encrypted trash? You can restore them from Deleted items.",
+                        "Move to trash",
+                    ) {
+                        task({
+                            ids.forEach { Vault.command(VaultCommands.delete(it)) }
+                            syncAfterChange()
+                        }) {
+                            selecting = false
+                            selectedIds.clear()
+                            items(message = "Moved ${ids.size} items to the trash. Restore them from Deleted items.")
+                        }
+                    }
+                }
+            pinActions(tagChosen, trashChosen)
+            updateChosen()
+        } else {
+            pinHeader(
+                MobileUi.textButton(this, "Select items") {
+                    selecting = true
+                    selectedIds.clear()
+                    items()
+                }.apply { contentDescription = "Select several items to tag or move to trash" }
+            )
+            floatingAction("Add item") { typedEditor(null) }
+        }
         // Filled once the full list loads, when any item has Duo Push enrolled.
         val duoShortcut =
             android.widget.LinearLayout(this).apply {
@@ -386,16 +742,49 @@ open class MainActivity : ManagementActivity() {
                         )
                         .filter(String::isNotBlank)
                         .joinToString(" · ")
+                val itemId = entry.getLong("id")
                 rows.addView(
                     MobileUi.row(
-                        this,
-                        name,
-                        summary,
-                        if (type == "login") name.take(1).uppercase()
-                        else MobileUi.kindBadge(type),
-                    ) {
-                        guarded { detail(entry.getLong("id")) }
-                    }
+                            this,
+                            name,
+                            summary,
+                            // The initial comes from the name itself, not the favorite star.
+                            if (type == "login") MobileUi.initial(entry.getString("name"), type)
+                            else MobileUi.kindBadge(type),
+                        ) {
+                            listScroll = scrollPosition()
+                            guarded { detail(itemId) }
+                        }
+                        .apply {
+                            val spoken = name + if (summary.isBlank()) "" else ", $summary"
+                            if (selecting) {
+                                val plain = background
+                                fun show(picked: Boolean) {
+                                    background =
+                                        if (picked) MobileUi.shape(this@MainActivity, R.color.pm_accent_soft) else plain
+                                    isActivated = picked
+                                    contentDescription = (if (picked) "Selected, " else "Not selected, ") + spoken
+                                }
+                                show(itemId in selectedIds)
+                                setOnClickListener {
+                                    if (!selectedIds.remove(itemId)) selectedIds.add(itemId)
+                                    show(itemId in selectedIds)
+                                    updateChosen()
+                                }
+                                return@apply
+                            }
+                            // Long-press copies without opening the item.
+                            setOnLongClickListener {
+                                guarded { quickCopy(entry) }
+                                true
+                            }
+                            contentDescription = spoken
+                            // TalkBack offers the copy actions directly.
+                            androidx.core.view.ViewCompat.addAccessibilityAction(this, "Copy…") { _, _ ->
+                                guarded { quickCopy(entry) }
+                                true
+                            }
+                        }
                 )
             }
             if (end < entries.length()) {
@@ -407,6 +796,23 @@ open class MainActivity : ManagementActivity() {
                         addRows(entries, end, version)
                     }
                 rows.addView(more)
+                // Load the next page as the list scrolls near it; the button stays for TalkBack.
+                more.viewTreeObserver.addOnScrollChangedListener(
+                    object : android.view.ViewTreeObserver.OnScrollChangedListener {
+                        override fun onScrollChanged() {
+                            if (more.parent !== rows) {
+                                if (more.viewTreeObserver.isAlive)
+                                    more.viewTreeObserver.removeOnScrollChangedListener(this)
+                                return
+                            }
+                            val visible = android.graphics.Rect()
+                            if (more.getGlobalVisibleRect(visible)) {
+                                more.viewTreeObserver.removeOnScrollChangedListener(this)
+                                more.post { if (more.parent === rows) more.performClick() }
+                            }
+                        }
+                    }
+                )
             }
         }
         lateinit var load: () -> Unit
@@ -456,14 +862,14 @@ open class MainActivity : ManagementActivity() {
             searchText = needle
             val kind = selectedKind
             val tag = selectedTag
-            val favorites = kind == FAVORITES
-            val filtered = needle.isNotBlank() || kind != null || tag != null
+            val favorites = favoritesOnly
+            val filtered = needle.isNotBlank() || kind != null || tag != null || favorites
             val version = ++queryVersion
             task({
                 Vault.commandJson(
                     VaultCommands.search(
                         query = needle.ifBlank { null },
-                        kind = kind.takeUnless { favorites },
+                        kind = kind,
                         sort = "name",
                         tags = listOfNotNull(tag),
                         favorite = if (favorites) true else null,
@@ -506,50 +912,59 @@ open class MainActivity : ManagementActivity() {
                     rows.addView(
                         MobileUi.text(
                             this,
-                            if (filtered) "Try another search or choose All."
+                            if (filtered) "Nothing matches the search and filters you chose."
                             else "Add your first login, note or other important detail.",
                             15f,
                             muted = true,
                         )
                     )
+                    if (filtered)
+                        rows.addView(
+                            MobileUi.button(this, "Clear all filters") {
+                                searchText = ""
+                                selectedKind = null
+                                selectedTag = null
+                                favoritesOnly = false
+                                items()
+                            }
+                        )
                 }
                 addRows(entries, 0, version)
+                // Returning from an item keeps your place in the list.
+                listScroll?.let(::restoreScroll)
+                listScroll = null
             }
         }
         fun drawChips() {
             chips.removeAllViews()
+            // Favorites is its own toggle; the type chips choose one type.
+            chips.addView(
+                MobileUi.chip(this, "★ Favorites", favoritesOnly) {
+                        favoritesOnly = !favoritesOnly
+                        load()
+                    }
+                    .apply {
+                        contentDescription = "Favorites only"
+                        layoutParams =
+                            android.widget.LinearLayout.LayoutParams(-2, -2).apply {
+                                marginEnd = MobileUi.dp(this@MainActivity, 8)
+                            }
+                    }
+            )
             for ((title, kind) in options) chips.addView(
-                MobileUi.button(this, title) {
+                MobileUi.chip(this, title, selectedKind == kind) {
                         selectedKind = kind
                         pendingSearch?.let(ui::removeCallbacks)
                         pendingSearch = null
-                        // Rebuild only the chips; typing keeps its focus and selection.
+                        // Update only the type chips; typing keeps its focus and selection.
                         for (i in 0 until chips.childCount) {
-                            val chip = chips.getChildAt(i) as android.widget.Button
-                            val active = chip.tag == kind.orEmpty()
-                            chip.isSelected = active
-                            chip.background =
-                                MobileUi.shape(
-                                    this,
-                                    if (active) R.color.pm_accent_soft else R.color.pm_surface,
-                                    outline = !active,
-                                    radius = 20,
-                                )
+                            val chip = chips.getChildAt(i) as? com.google.android.material.chip.Chip
+                            if (chip?.tag != null) chip.isChecked = chip.tag == kind.orEmpty()
                         }
                         load()
                     }
                     .apply {
                         tag = kind.orEmpty()
-                        isSelected = selectedKind == kind
-                        minHeight = MobileUi.dp(this@MainActivity, 44)
-                        minimumHeight = minHeight
-                        background =
-                            MobileUi.shape(
-                                this@MainActivity,
-                                if (isSelected) R.color.pm_accent_soft else R.color.pm_surface,
-                                outline = !isSelected,
-                                radius = 20,
-                            )
                         layoutParams =
                             android.widget.LinearLayout.LayoutParams(-2, -2).apply {
                                 marginEnd = MobileUi.dp(this@MainActivity, 8)
@@ -587,12 +1002,30 @@ open class MainActivity : ManagementActivity() {
             } else false
         }
         // A filtered first load cannot list every tag, so read them separately.
-        if (searchText.isNotBlank() || selectedKind != null || selectedTag != null)
+        if (searchText.isNotBlank() || selectedKind != null || selectedTag != null || favoritesOnly)
             task({ Vault.commandJson(VaultCommands.search(sort = "name")).getJSONArray("items") }) {
                 if (tagFilter.parent === layout) drawTags(it)
             }
         load()
     }
+
+    /** Plain-language names for sync conflict fields, matching the desktop app. */
+    private fun conflictFieldTitle(field: String) =
+        when (field) {
+            "password" -> "Password (or the item's main secret)"
+            "notes" -> "Notes"
+            "metadata" -> "Type, websites and custom fields"
+            "history" -> "Password history"
+            "authenticator" -> "Authenticator"
+            "duo" -> "Duo enrollment"
+            "lifecycle" -> "Active or deleted"
+            "created" -> "Created"
+            "item" -> "Item presence"
+            "name" -> "Name"
+            "username" -> "Username"
+            "url" -> "Website"
+            else -> field
+        }
 
     private fun conflicts() {
         task({ Vault.json("cloud_conflicts", *syncArgs()) }) { review ->
@@ -601,38 +1034,70 @@ open class MainActivity : ManagementActivity() {
                 "Choose which version to keep for every differing field. Protected values remain hidden. Both original vaults are backed up before applying."
             )
             val choices = mutableListOf<() -> JSONObject>()
+            val groups = mutableListOf<Pair<com.google.android.material.button.MaterialButtonToggleGroup, IntArray>>()
             val entries = review.getJSONArray("items")
+            if (entries.length() > 0) {
+                val all = android.widget.LinearLayout(this).apply { orientation = android.widget.LinearLayout.HORIZONTAL }
+                layout.addView(all, MobileUi.margins(this))
+                fun chooseAll(side: Int) = groups.forEach { (group, ids) -> group.check(ids[side]) }
+                all.addView(
+                    MobileUi.textButton(this, "Keep all from this device") { chooseAll(0) },
+                    android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+                all.addView(
+                    MobileUi.textButton(this, "Keep all from cloud") { chooseAll(1) },
+                    android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+            }
             for (i in 0 until entries.length()) {
                 val item = entries.getJSONObject(i)
-                label("${item.optString("local")} / ${item.optString("remote")}", 20f)
+                // The same plain-language names the desktop app uses.
+                section(item.optString("local").substringBefore(" · ").ifBlank { "Item ${item.getLong("id")}" })
+                label("This device: ${item.optString("local")}\nCloud: ${item.optString("remote")}", 14f)
                 val fields = item.getJSONArray("fields")
                 if (fields.length() == 0) label("Separate items: both are kept, nothing to choose.")
                 for (j in 0 until fields.length()) {
                     val field = fields.getJSONObject(j)
-                    label(
-                        "${field.getString("field")}\nLocal: ${field.getString("local")}\nCloud: ${field.getString("remote")}"
-                    )
-                    val selection =
-                        android.widget.Spinner(this).apply {
-                            adapter =
-                                android.widget.ArrayAdapter(
-                                    this@MainActivity,
-                                    android.R.layout.simple_spinner_dropdown_item,
-                                    listOf("Choose…", "Local", "Cloud"),
-                                )
+                    val title = conflictFieldTitle(field.getString("field"))
+                    label("$title\nThis device: ${field.getString("local")}\nCloud: ${field.getString("remote")}")
+                    val group =
+                        com.google.android.material.button.MaterialButtonToggleGroup(this).apply {
+                            isSingleSelection = true
+                            contentDescription = "Version of $title to keep"
                         }
-                    layout.addView(selection)
+                    val ids =
+                        listOf("Keep this device", "Keep cloud")
+                            .map { text ->
+                                com.google.android.material.button.MaterialButton(
+                                        this,
+                                        null,
+                                        com.google.android.material.R.attr.materialButtonOutlinedStyle,
+                                    )
+                                    .apply {
+                                        id = android.view.View.generateViewId()
+                                        this.text = text
+                                        group.addView(
+                                            this,
+                                            android.widget.LinearLayout.LayoutParams(
+                                                0,
+                                                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                                                1f,
+                                            ),
+                                        )
+                                    }
+                                    .id
+                            }
+                            .toIntArray()
+                    layout.addView(group, MobileUi.margins(this))
+                    groups.add(group to ids)
                     choices.add {
-                        check(selection.selectedItemPosition > 0) {
-                            "Choose a version for every field"
+                        check(group.checkedButtonId != android.view.View.NO_ID) {
+                            "Choose a version for every field ($title)"
                         }
                         JSONObject()
                             .put("id", item.getLong("id"))
                             .put("field", field.getString("field"))
-                            .put(
-                                "side",
-                                if (selection.selectedItemPosition == 1) "local" else "remote",
-                            )
+                            .put("side", if (group.checkedButtonId == ids[0]) "local" else "remote")
                     }
                 }
             }
@@ -665,7 +1130,7 @@ open class MainActivity : ManagementActivity() {
         for (i in 0 until attachments.length()) {
             val attachment = attachments.getJSONObject(i)
             val name = attachment.getString("name")
-            actionRow(name, "${MobileUi.byteSize(attachment.getLong("size"))} · Save a copy", "F") {
+            actionRow(name, "${MobileUi.byteSize(attachment.getLong("size"))} · Save a copy", "file") {
                 destination(name) { uri ->
                     unlock({
                         task({
@@ -685,7 +1150,7 @@ open class MainActivity : ManagementActivity() {
                 }
             }
             button("Remove $name") {
-                confirm("Remove the attachment \"$name\"? This cannot be undone.") {
+                confirm("Remove the attachment \"$name\"? This cannot be undone.", "Remove") {
                     task({
                         runCatching {
                             Vault.command(
@@ -695,7 +1160,7 @@ open class MainActivity : ManagementActivity() {
                             afterToolChange()
                         }
                     }) { result ->
-                        result.fold({ detail(id) }, { notice(it.message ?: "Could not remove") })
+                        result.fold({ detail(id) }, { showFailure(it) })
                     }
                 }
             }
@@ -729,7 +1194,7 @@ open class MainActivity : ManagementActivity() {
                             afterToolChange()
                         }
                     }) { result ->
-                        result.fold({ detail(id) }, { notice(it.message ?: "Could not attach file") })
+                        result.fold({ detail(id) }, { showFailure(it) })
                     }
                 })
             }
@@ -737,8 +1202,18 @@ open class MainActivity : ManagementActivity() {
     }
 
     private fun detail(id: Long) {
-        task({ Vault.commandJson(VaultCommands.item(id)) }) { entry ->
+        task({ Vault.commandJson(VaultCommands.item(id)) to Vault.itemProfiles() }) {
+            (entry, profiles) ->
             page("Item details")
+            val profile = profiles[entry.getString("kind")]
+            // "Identity number (optional)" -> "Identity number"
+            fun shortLabel(key: String, fallback: String) =
+                profile?.optString(key)?.substringBefore(" (")?.ifBlank { null } ?: fallback
+            val ownerLabel = shortLabel("owner", "Username")
+            val secretLabel = shortLabel("secret", "Password")
+            val secretWord =
+                if (secretLabel.length > 1 && secretLabel[1].isUpperCase()) secretLabel
+                else secretLabel.replaceFirstChar { it.lowercase() }
             pageBack = { items() }
             label(entry.getString("name"), 28f)
             label(MobileUi.kindLabel(entry.getString("kind")).uppercase(), 12f)
@@ -746,7 +1221,10 @@ open class MainActivity : ManagementActivity() {
             if (tags.isNotEmpty()) label("Tags: ${tags.joinToString(", ")}", 14f)
             if (!entry.optBoolean("is_passkey")) {
                 val starred = entry.optBoolean("favorite")
-                button(if (starred) "★ Remove from favorites" else "☆ Add to favorites") {
+                barAction(
+                    if (starred) R.drawable.pm_icon_star else R.drawable.pm_icon_star_border,
+                    if (starred) "Remove from favorites" else "Add to favorites",
+                ) {
                     task({
                         runCatching {
                             Vault.command(
@@ -755,89 +1233,100 @@ open class MainActivity : ManagementActivity() {
                             )
                         }
                     }) { result ->
-                        result.fold({ detail(id) }, { notice(it.message ?: "Could not update") })
+                        result.fold({ detail(id) }, { showFailure(it) })
                     }
                 }
             }
             val user = entry.opt("username") as? String ?: ""
             if (user.isNotBlank()) {
-                section("Username / owner")
+                section(ownerLabel)
                 label(user, 20f)
-                button("Copy username") { SecretClipboard.copy(this, user) }
+                button("Copy ${ownerLabel.replaceFirstChar { it.lowercase() }}") {
+                    SecretClipboard.copy(this, user, what = "$ownerLabel copied")
+                }
             }
             if (entry.optBoolean("has_secret")) {
-                section(if (entry.getString("kind") == "login") "Password" else "Primary secret")
+                section(secretLabel)
                 val value = label("••••••••••••", 23f)
                 var visible = false
                 lateinit var reveal: android.widget.Button
+                fun conceal() {
+                    value.text = "••••••••••••"
+                    visible = false
+                    reveal.text = "Show $secretWord"
+                }
+                // Like the desktop app, a revealed secret hides itself after 15 seconds.
+                val hideLater = sessionCallback<Unit>(acrossVisits = true) { if (visible) conceal() }
+                val hideTask = Runnable { hideLater(Unit) }
                 val actions =
                     pairedActions(
-                        "Show password",
-                        "Copy password",
+                        "Show $secretWord",
+                        "Copy $secretWord",
                         {
                             if (visible) {
-                                value.text = "••••••••••••"
-                                visible = false
-                                reveal.text = "Show password"
+                                ui.removeCallbacks(hideTask)
+                                conceal()
                             } else
                                 task({
                                     Vault.commandJson(VaultCommands.item(id)).getString("password")
                                 }) {
                                     value.text = it
                                     visible = true
-                                    reveal.text = "Hide password"
+                                    reveal.text = "Hide $secretWord"
+                                    ui.removeCallbacks(hideTask)
+                                    ui.postDelayed(hideTask, 15_000)
                                 }
                         },
                         {
                             task({
                                 Vault.commandJson(VaultCommands.item(id)).getString("password")
                             }) {
-                                SecretClipboard.copy(this, it)
+                                SecretClipboard.copy(this, it, what = "$secretLabel copied")
                             }
                         },
                     )
                 reveal = actions.first
             }
             if (VaultCommands.authenticatorMode(entry) == "totp") {
-                section("Verification code")
+                section("One-time code")
                 val codeView = label("••• •••", 28f)
-                val lifetime = label("Tap to show a fresh code.", 13f)
-                pairedActions(
-                    "Show authenticator code",
-                    "Copy verification code",
-                    {
-                        task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) { code ->
-                            val expires =
-                                android.os.SystemClock.elapsedRealtime() +
-                                    code.getInt("expires_in") * 1000L
-                            codeView.text = code.getString("code")
-                            codeTick?.let(ui::removeCallbacks)
-                            val tick =
-                                sessionCallback<Unit> {
-                                    val seconds =
-                                        ((expires - android.os.SystemClock.elapsedRealtime() +
-                                                999) / 1000)
-                                            .coerceAtLeast(0)
-                                    lifetime.text =
-                                        if (seconds > 0) "$seconds seconds remaining"
-                                        else "Expired — tap to refresh."
-                                    if (seconds == 0L) codeView.text = "••• •••"
-                                    else codeTick?.let { ui.postDelayed(it, 1000) }
-                                }
-                            codeTick = Runnable { tick(Unit) }
-                            codeTick?.run()
-                        }
-                    },
-                    {
-                        task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) {
-                            SecretClipboard.copy(
-                                this,
-                                it.getString("code"),
-                                it.getInt("expires_in"),
-                            )
-                        }
-                    },
-                )
+                val lifetime = label("Loading a fresh code…", 13f)
+                codeView.importantForAccessibility =
+                    android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                // Time-based codes show at once and refresh by themselves while visible.
+                lateinit var showCode: () -> Unit
+                showCode = {
+                    task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) { code ->
+                        val expires =
+                            android.os.SystemClock.elapsedRealtime() +
+                                code.getInt("expires_in") * 1000L
+                        codeView.text = code.getString("code").chunked(3).joinToString(" ")
+                        codeTick?.let(ui::removeCallbacks)
+                        val tick =
+                            sessionCallback<Unit>(acrossVisits = true) {
+                                val seconds =
+                                    ((expires - android.os.SystemClock.elapsedRealtime() + 999) /
+                                            1000)
+                                        .coerceAtLeast(0)
+                                lifetime.text = "Changes in $seconds seconds"
+                                if (seconds == 0L) showCode()
+                                else codeTick?.let { ui.postDelayed(it, 1000) }
+                            }
+                        codeTick = Runnable { tick(Unit) }
+                        codeTick?.run()
+                    }
+                }
+                showCode()
+                button("Copy one-time code") {
+                    task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) {
+                        SecretClipboard.copy(
+                            this,
+                            it.getString("code"),
+                            it.getInt("expires_in"),
+                            what = "Code copied",
+                        )
+                    }
+                }
             }
             if (entry.optBoolean("has_duo")) {
                 section("Duo Push")
@@ -872,6 +1361,15 @@ open class MainActivity : ManagementActivity() {
                 if (hidden) {
                     var shown = false
                     lateinit var reveal: android.widget.Button
+                    // Revealed values hide again after 15 seconds, like the password.
+                    val hideField = sessionCallback<Unit>(acrossVisits = true) {
+                        if (shown) {
+                            shown = false
+                            value.text = "••••••••"
+                            reveal.text = "Show $name"
+                        }
+                    }
+                    val hideFieldTask = Runnable { hideField(Unit) }
                     val actions =
                         pairedActions(
                             "Show $name",
@@ -880,6 +1378,8 @@ open class MainActivity : ManagementActivity() {
                                 shown = !shown
                                 value.text = if (shown) field.optString("value") else "••••••••"
                                 reveal.text = if (shown) "Hide $name" else "Show $name"
+                                ui.removeCallbacks(hideFieldTask)
+                                if (shown) ui.postDelayed(hideFieldTask, 15_000)
                             },
                             { SecretClipboard.copy(this, field.optString("value")) },
                         )
@@ -891,15 +1391,27 @@ open class MainActivity : ManagementActivity() {
                 section("Notes")
                 val value = label("Notes hidden")
                 var visible = false
-                pairedActions(
-                    "Show / hide notes",
+                lateinit var toggleNotes: android.widget.Button
+                val hideNotes = sessionCallback<Unit>(acrossVisits = true) {
+                    if (visible) {
+                        visible = false
+                        value.text = "Notes hidden"
+                        toggleNotes.text = "Show notes"
+                    }
+                }
+                val hideNotesTask = Runnable { hideNotes(Unit) }
+                toggleNotes = pairedActions(
+                    "Show notes",
                     "Copy notes",
                     {
                         visible = !visible
                         value.text = if (visible) notes else "Notes hidden"
+                        toggleNotes.text = if (visible) "Hide notes" else "Show notes"
+                        ui.removeCallbacks(hideNotesTask)
+                        if (visible) ui.postDelayed(hideNotesTask, 60_000)
                     },
                     { SecretClipboard.copy(this, notes) },
-                )
+                ).first
             }
             section("Manage item")
             if (!entry.optBoolean("is_passkey")) primary("Edit item") { typedEditor(entry) }
@@ -907,18 +1419,22 @@ open class MainActivity : ManagementActivity() {
             actionRow("Authenticator & Duo", "Manage codes, enrollment and push requests") {
                 authenticator(id)
             }
-            button("Delete item") {
-                confirm(
-                    "Move this item to encrypted trash? You can restore it from Deleted items."
-                ) {
-                    task({
-                        Vault.command(VaultCommands.delete(id))
-                        syncAfterChange()
-                    }) {
-                        items(message = it)
+            MobileUi.button(this, "Move to trash", danger = true) {
+                    guarded {
+                        confirm(
+                            "Move this item to encrypted trash? You can restore it from Deleted items.",
+                            "Move to trash",
+                        ) {
+                            task({
+                                Vault.command(VaultCommands.delete(id))
+                                syncAfterChange()
+                            }) {
+                                items(message = it)
+                            }
+                        }
                     }
                 }
-            }
+                .also(layout::addView)
         }
     }
 
@@ -926,8 +1442,12 @@ open class MainActivity : ManagementActivity() {
         page("Encrypted cloud sync")
         pageBack = { navigate("Settings") }
         label("Connect to your sync server to keep encrypted vaults available across devices.")
+        label(
+            "You need the server's HTTPS address and a device credential. Whoever runs your sync server creates one credential per device (see “Cloud sync” in the user guide). The server only ever stores encrypted vaults.",
+            13f,
+        )
         val server = edit("HTTPS server URL", settings.getString("server", "").orEmpty())
-        val token = edit("Per-device credential (leave blank to keep)", secret = true)
+        val token = edit("Device credential (leave blank to keep the saved one)", secret = true)
         label(
             "The credential field clears when you connect. If the connection fails, paste the credential again to retry. A blank field keeps a previously saved credential."
         )
@@ -954,24 +1474,33 @@ open class MainActivity : ManagementActivity() {
         }
         button("List cloud vaults") {
             task({ Vault.request("cloud_list", *syncArgs()) as JSONArray }) { vaults ->
+                if (vaults.length() == 0) notice("No vaults on this server yet. Turn on sync for a vault on another device first.")
                 for (i in 0 until vaults.length()) {
-                    val id = vaults.getJSONObject(i).getString("id")
-                    for (copy in listOf(false, true)) button(
-                        if (copy) "Download comparison copy of $id" else "Download $id"
-                    ) {
+                    val vault = vaults.getJSONObject(i)
+                    val id = vault.getString("id")
+                    // Names stay on each device, so the server only knows a short ID and size.
+                    val title = "Cloud vault ${id.take(8)}"
+                    fun download(copy: Boolean) =
                         task({
                             Vault.json("cloud_download", *syncArgs(), "id" to id, "copy" to copy)
                         }) {
                             selectedVault = it.getString("vault")
                             home()
                         }
+                    actionRow(title, "${MobileUi.byteSize(vault.optLong("size"))} · Tap to download", "sync") {
+                        download(false)
                     }
+                    layout.addView(
+                        MobileUi.textButton(this, "Download a comparison copy instead") { download(true) }
+                            .apply { contentDescription = "Download a comparison copy of $title" },
+                        MobileUi.margins(this),
+                    )
                 }
             }
         }
         label(
             "Conflicts preserve both encrypted copies. Unlock the vault and use Review sync conflicts to reconcile changes."
         )
-        button("Back") { home() }
+        button("Back") { navigate("Settings") }
     }
 }

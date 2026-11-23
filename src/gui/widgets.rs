@@ -16,13 +16,17 @@ pub(super) fn text_input<'a>(
     placeholder: &str,
     value: &str,
 ) -> iced::widget::TextInput<'a, Message> {
-    iced::widget::text_input(placeholder, value).style(|theme: &Theme, status| {
-        let mut style = iced::widget::text_input::default(theme, status);
-        style.border.radius = 8.0.into();
-        style.placeholder =
-            super::presentation::blend(theme.palette().background, theme.palette().text, 0.68);
-        style
-    })
+    // Every field has a name for screen readers; callers whose placeholder is only
+    // an example (such as a sample URL) override it with `accessibility_label`.
+    iced::widget::text_input(placeholder, value)
+        .accessibility_label(placeholder)
+        .style(|theme: &Theme, status| {
+            let mut style = iced::widget::text_input::default(theme, status);
+            style.border.radius = 8.0.into();
+            style.placeholder =
+                super::presentation::blend(theme.palette().background, theme.palette().text, 0.68);
+            style
+        })
 }
 
 /// Keep the scrollbar distinguishable in every appearance, including High contrast.
@@ -411,6 +415,11 @@ impl<'a> Button<'a> {
     }
     pub fn selected(mut self, selected: bool) -> Self {
         self.inner = self.inner.accessibility_selected(selected);
+        self
+    }
+    /// The full name screen readers announce when the visible text is shortened.
+    pub fn accessible_name(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.accessibility_label(name);
         self
     }
     pub fn padding(mut self, padding: impl Into<Padding>) -> Self {

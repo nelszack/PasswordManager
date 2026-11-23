@@ -12,6 +12,9 @@ mod mobile {
         Err("Use the mobile application's clipboard action".into())
     }
     pub fn copy_in_background(_: String, _: u8) {}
+    pub fn describe_error(error: &str) -> String {
+        error.to_owned()
+    }
     pub fn clear_owned() -> Result<(), String> {
         Ok(())
     }

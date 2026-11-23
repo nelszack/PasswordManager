@@ -137,7 +137,7 @@ test("passkeys register and sign in through the real native host and vault", asy
     realStack();
     await withPasskeySite(({ runPm, root }) => {
         const keyPath = path.join(root, "vault.key");
-        runPm("new", "--key", keyPath);
+        runPm("new", "--locked", "--key", keyPath);
         runPm("unlock", "--key", keyPath, "--timeout", "0");
     }, async ({ browser, page, origin, runPm, port }) => {
         let opened = browser.context.waitForEvent("page", popup => popup.url().includes("passkey_prompt.html"));
@@ -228,7 +228,7 @@ test("a key-file vault confirms with this device's passkey PIN", async () => {
     const pin = "864213";
     await withPasskeySite(async ({ runPm, root, environment }) => {
         const keyPath = path.join(root, "vault.key");
-        runPm("new", "--key", keyPath);
+        runPm("new", "--locked", "--key", keyPath);
         runPm("unlock", "--key", keyPath, "--timeout", "0");
         expect((await terminal(environment, `${PM_BINARY} passkey set-pin`, [pin, pin])).output).toContain("Passkey PIN set");
     }, async ({ browser, page, origin, runPm, environment }) => {

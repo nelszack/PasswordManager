@@ -11,6 +11,9 @@ import org.json.JSONArray
 abstract class VaultActivity : SecureActivity() {
     protected lateinit var layout: LinearLayout
     protected open val modernUi = false
+    /** Material fields and buttons; the compact autofill sheet uses them without the app scaffold. */
+    protected open val materialWidgets: Boolean
+        get() = modernUi
     @Volatile private var screenRevision = 0L
 
     override fun uiRevision() = screenRevision
@@ -24,6 +27,17 @@ abstract class VaultActivity : SecureActivity() {
     private var originalUnlockOnly = false
 
     protected open fun automaticBiometrics() = false
+
+    /** Cancel on the unlock form; screens inside the app return instead of closing. */
+    protected open fun onUnlockCancelled() {
+        setResult(RESULT_CANCELED)
+        finish()
+    }
+
+    /** Offer fingerprint unlock again, for example when the app is opened. */
+    protected fun allowAutomaticBiometrics() {
+        offeredBiometrics = false
+    }
 
     protected open fun contentScroller(): ScrollView = ScrollView(this)
 
@@ -41,7 +55,9 @@ abstract class VaultActivity : SecureActivity() {
         layout =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(24, 40, 24, 24)
+                // Density-independent padding, so the sheet looks the same on every screen.
+                val side = MobileUi.dp(this@VaultActivity, 20)
+                setPadding(side, MobileUi.dp(this@VaultActivity, 16), side, MobileUi.dp(this@VaultActivity, 16))
                 importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
             }
         setContentView(contentScroller().apply { addView(layout) })
@@ -58,7 +74,7 @@ abstract class VaultActivity : SecureActivity() {
     }
 
     internal fun label(value: String, size: Float = 16f): TextView {
-        if (modernUi)
+        if (materialWidgets)
             return MobileUi.text(this, value, size, muted = size < 18f, bold = size >= 18f).apply {
                 layoutParams = MobileUi.margins(this@VaultActivity, 12)
                 this@VaultActivity.layout.addView(this)
@@ -72,7 +88,7 @@ abstract class VaultActivity : SecureActivity() {
     }
 
     internal fun button(title: String, action: () -> Unit): Button {
-        if (modernUi)
+        if (materialWidgets)
             return MobileUi.button(
                     this,
                     title,
@@ -92,7 +108,7 @@ abstract class VaultActivity : SecureActivity() {
     }
 
     internal fun edit(hint: String, value: String = "", secret: Boolean = false): EditText {
-        if (modernUi) return MobileUi.field(this, layout, hint, value, secret)
+        if (materialWidgets) return MobileUi.field(this, layout, hint, value, secret)
         return EditText(this).apply {
             this.hint = hint
             setText(value)
@@ -147,21 +163,25 @@ abstract class VaultActivity : SecureActivity() {
                 return@task
             }
             val names = (0 until vaults.length()).map { vaults.getString(it) }
+            val labels = names.map { VaultNames.label(this, it, names) }
             val spinner =
                 Spinner(this).apply {
                     adapter =
                         ArrayAdapter(
                             this@VaultActivity,
                             android.R.layout.simple_spinner_dropdown_item,
-                            names,
+                            labels,
                         )
+                    contentDescription = "Vault to unlock"
+                    minimumHeight = (resources.displayMetrics.density * 48).toInt()
                     setSelection(names.indexOf(selectedVault).coerceAtLeast(0))
                 }
-            layout.addView(spinner)
+            // With one vault, name it instead of offering a choice.
+            if (names.size == 1) label(labels[0], 20f) else layout.addView(spinner)
             val biometricStatus = label("")
             val password = edit("Master password", secret = true)
             fun chosen() = names[spinner.selectedItemPosition].also { selectedVault = it }
-            button("Unlock with password") {
+            val unlockWithPassword = {
                 val name = chosen()
                 val supplied = password.text.toString()
                 password.text.clear()
@@ -169,6 +189,16 @@ abstract class VaultActivity : SecureActivity() {
                     done()
                 }
             }
+            // The keyboard's Done key unlocks, like the button.
+            password.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            password.setOnEditorActionListener { _, action, _ ->
+                if (action == android.view.inputmethod.EditorInfo.IME_ACTION_DONE &&
+                        password.text.isNotEmpty()) {
+                    guarded(unlockWithPassword)
+                    true
+                } else false
+            }
+            button("Unlock with password") { unlockWithPassword() }
             button("Unlock with key file") {
                 val name = chosen()
                 pickFile { bytes ->
@@ -225,10 +255,7 @@ abstract class VaultActivity : SecureActivity() {
                     override fun onNothingSelected(parent: AdapterView<*>?) {}
                 }
             refreshBiometricStatus()
-            button("Cancel") {
-                setResult(RESULT_CANCELED)
-                finish()
-            }
+            button("Cancel") { onUnlockCancelled() }
             if (
                 !originalUnlockOnly &&
                     automaticBiometrics() &&

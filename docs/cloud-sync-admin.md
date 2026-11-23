@@ -124,7 +124,7 @@ or single-use pairing-code exchange.
 
 An upload names the remote version it started from. The server atomically rejects
 stale uploads. If both local and remote contents changed, neither copy is
-replaced. Review differences in **Settings → Connection → Cloud sync → Review
+replaced. Review differences in **Settings → Sync → Review
 conflicts**. The desktop shows local and cloud labels side by side. Choose all
 local, all cloud, or select a side for each differing field, then choose **Apply
 selected values and sync**. Save or discard unfinished item edits first.

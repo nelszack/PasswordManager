@@ -90,27 +90,44 @@ pub fn validate_new_password(password: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Prompt twice for a new secret. `label` names it ("master password", "PIN").
 pub fn try_prompt_for_confirmed_password(
+    label: &str,
     require_minimum: bool,
     retry: impl Fn(&str),
 ) -> Result<String, String> {
+    let first = if require_minimum {
+        format!("New {label} (14+ characters, hard to guess): ")
+    } else {
+        format!("New {label}: ")
+    };
+    let second = format!("Re-enter the new {label}: ");
+    let (first, second) = (first.as_str(), second.as_str());
+    if crate::prompt::from_stdin() {
+        // Scripts supply the value once; validation failures cannot be retried.
+        let value = crate::prompt::hidden(first, label)?;
+        if require_minimum {
+            validate_new_password(&value).map_err(|error| format!("{error}."))?;
+        }
+        return Ok(value);
+    }
     loop {
-        let mut p1 = Zeroizing::new(
-            rpassword::prompt_password("Enter a password: ")
-                .map_err(|error| format!("could not read password: {error}"))?,
-        );
-        let mut p2 = Zeroizing::new(
-            rpassword::prompt_password("Re-enter the password: ")
-                .map_err(|error| format!("could not read password confirmation: {error}"))?,
-        );
+        let mut p1 = Zeroizing::new(crate::prompt::hidden(first, label)?);
         if require_minimum && let Err(error) = validate_new_password(&p1) {
+            // Explain the rule immediately instead of after a second prompt.
             retry(&format!("{error}. Try again."));
-        } else if p1 == p2 {
+            p1.zeroize();
+            continue;
+        }
+        let mut p2 = Zeroizing::new(crate::prompt::hidden(
+            second,
+            &format!("{label} confirmation"),
+        )?);
+        if p1 == p2 {
             p2.zeroize();
             return Ok(std::mem::take(&mut *p1));
-        } else {
-            retry("Passwords don't match. Try again.");
         }
+        retry("The two entries don't match. Try again.");
         p1.zeroize();
         p2.zeroize();
     }

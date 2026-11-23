@@ -8,4 +8,5 @@
     <color name="pm_on_accent">@android:color/system_accent1_800</color>
     <color name="pm_accent_soft">@android:color/system_accent1_700</color>
     <color name="pm_outline">@android:color/system_neutral2_600</color>
+    <color name="pm_edge">@android:color/system_neutral2_400</color>
 </resources>

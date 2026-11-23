@@ -36,7 +36,7 @@ internal object MobileUi {
         GradientDrawable().apply {
             setColor(color(context, fill))
             cornerRadius = dp(context, radius).toFloat()
-            if (outline) setStroke(dp(context, 1), color(context, R.color.pm_outline))
+            if (outline) setStroke(dp(context, 1), color(context, R.color.pm_edge))
         }
 
     fun ripple(
@@ -69,34 +69,68 @@ internal object MobileUi {
     fun margins(context: Context, bottom: Int = 10) =
         LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(context, bottom) }
 
+    /**
+     * A Material 3 button: filled for the main action, outlined otherwise, and outlined in the
+     * error color for destructive actions.
+     */
     fun button(
         context: Context,
         title: String,
         primary: Boolean = false,
         danger: Boolean = false,
         action: () -> Unit,
-    ) =
-        Button(context).apply {
+    ): Button {
+        val style =
+            if (primary) com.google.android.material.R.attr.materialButtonStyle
+            else com.google.android.material.R.attr.materialButtonOutlinedStyle
+        return com.google.android.material.button.MaterialButton(context, null, style).apply {
             text = title
             isAllCaps = false
             textSize = 15f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             minHeight = dp(context, 52)
             minimumHeight = dp(context, 52)
-            minWidth = 0
-            stateListAnimator = null
-            setPadding(dp(context, 18), dp(context, 12), dp(context, 18), dp(context, 12))
-            gravity = Gravity.CENTER
-            background =
-                ripple(context, if (primary) R.color.pm_accent else R.color.pm_surface, !primary)
-            setTextColor(
-                color(
-                    context,
-                    if (primary) R.color.pm_on_accent
-                    else if (danger) R.color.pm_danger else R.color.pm_text,
-                )
-            )
+            insetTop = 0
+            insetBottom = 0
+            cornerRadius = dp(context, 14)
+            if (danger) {
+                val red = ColorStateList.valueOf(color(context, R.color.pm_danger))
+                setTextColor(red)
+                strokeColor = red
+            } else if (!primary) {
+                strokeColor = ColorStateList.valueOf(color(context, R.color.pm_edge))
+                setTextColor(color(context, R.color.pm_text))
+            }
             layoutParams = margins(context)
+            setOnClickListener { action() }
+        }
+    }
+
+    /** A Material text button, for low-emphasis actions such as the app bar's Lock. */
+    fun textButton(context: Context, title: String, action: () -> Unit): Button =
+        com.google.android.material.button.MaterialButton(
+                context,
+                null,
+                com.google.android.material.R.attr.borderlessButtonStyle,
+            )
+            .apply {
+                text = title
+                isAllCaps = false
+                textSize = 15f
+                minHeight = dp(context, 48)
+                minimumHeight = dp(context, 48)
+                insetTop = 0
+                insetBottom = 0
+                setOnClickListener { action() }
+            }
+
+    /** A Material filter chip for list filters. */
+    fun chip(context: Context, title: String, checked: Boolean, action: () -> Unit) =
+        com.google.android.material.chip.Chip(context).apply {
+            text = title
+            isCheckable = true
+            isChecked = checked
+            isCheckedIconVisible = true
+            setEnsureMinTouchTargetSize(true)
             setOnClickListener { action() }
         }
 
@@ -107,7 +141,15 @@ internal object MobileUi {
         badge: String = "",
         action: () -> Unit,
     ): Button =
-        button(context, title, action = action).apply {
+        Button(context).apply {
+            isAllCaps = false
+            textSize = 15f
+            stateListAnimator = null
+            setPadding(dp(context, 18), dp(context, 12), dp(context, 18), dp(context, 12))
+            background = ripple(context)
+            setTextColor(color(context, R.color.pm_text))
+            layoutParams = margins(context)
+            setOnClickListener { action() }
             val value = if (subtitle.isBlank()) title else "$title\n$subtitle"
             text =
                 SpannableString(value).apply {
@@ -150,6 +192,7 @@ internal object MobileUi {
             compoundDrawablePadding = dp(context, 12)
         }
 
+    /** A Material outlined text field; secret fields get a show/hide toggle. */
     fun field(
         context: Context,
         parent: LinearLayout,
@@ -157,21 +200,29 @@ internal object MobileUi {
         value: String,
         secret: Boolean,
     ): EditText {
-        val caption =
-            text(context, hint, 13f, muted = true, bold = true).apply {
-                layoutParams = margins(context, 6)
-            }
-        parent.addView(caption)
-        val container =
-            LinearLayout(context).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                background = shape(context, outline = true, radius = 12)
-                layoutParams = margins(context, 16)
-            }
+        val box =
+            com.google.android.material.textfield.TextInputLayout(
+                    context,
+                    null,
+                    com.google.android.material.R.attr.textInputOutlinedStyle,
+                )
+                .apply {
+                    this.hint = hint
+                    boxStrokeColor = color(context, R.color.pm_accent)
+                    setBoxCornerRadii(
+                        dp(context, 12).toFloat(),
+                        dp(context, 12).toFloat(),
+                        dp(context, 12).toFloat(),
+                        dp(context, 12).toFloat(),
+                    )
+                    if (secret)
+                        endIconMode =
+                            com.google.android.material.textfield.TextInputLayout.END_ICON_PASSWORD_TOGGLE
+                    layoutParams = margins(context, 16)
+                }
         val input =
-            EditText(context).apply {
+            com.google.android.material.textfield.TextInputEditText(box.context).apply {
                 id = View.generateViewId()
-                this.hint = hint
                 setText(value)
                 isSaveEnabled = false
                 inputType =
@@ -182,50 +233,27 @@ internal object MobileUi {
                         android.text.InputType.TYPE_CLASS_TEXT or
                             android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-                background = null
                 textSize = 16f
-                setTextColor(color(context, R.color.pm_text))
-                setHintTextColor(color(context, R.color.pm_muted))
-                setPadding(dp(context, 14), dp(context, 14), dp(context, 12), dp(context, 14))
-                minHeight = dp(context, 52)
-                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                minHeight = dp(context, 56)
             }
-        caption.labelFor = input.id
-        container.addView(input)
-        if (secret)
-            container.addView(
-                button(context, "Show") {
-                        val visible = input.transformationMethod == null
-                        input.transformationMethod =
-                            if (visible)
-                                android.text.method.PasswordTransformationMethod.getInstance()
-                            else null
-                        input.setSelection(input.text.length)
-                        val toggle = container.getChildAt(1) as Button
-                        toggle.text = if (visible) "Show" else "Hide"
-                        toggle.contentDescription = "${toggle.text} $hint"
-                    }
-                    .apply {
-                        contentDescription = "Show $hint"
-                        textSize = 12f
-                        minWidth = 0
-                        background = null
-                        setTextColor(color(context, R.color.pm_accent))
-                        layoutParams = LinearLayout.LayoutParams(dp(context, 64), -2)
-                        setPadding(0, 0, 0, 0)
-                    }
-            )
-        parent.addView(container)
+        box.addView(input)
+        parent.addView(box)
         return input
     }
 
-    /** Changes the caption and hint of an input made by [field]. */
+    /** Changes the label of an input made by [field] (the show/hide toggle follows it). */
     fun relabel(input: EditText, label: String) {
-        input.hint = label
-        val container = input.parent as? android.view.ViewGroup ?: return
-        val parent = container.parent as? android.view.ViewGroup ?: return
-        val caption = parent.getChildAt(parent.indexOfChild(container) - 1) as? TextView
-        if (caption?.labelFor == input.id) caption.text = label
+        layoutOf(input)?.hint = label
+    }
+
+    /** The Material field wrapping [input], if it has one. */
+    fun layoutOf(input: View): com.google.android.material.textfield.TextInputLayout? {
+        var parent = input.parent
+        while (parent != null) {
+            if (parent is com.google.android.material.textfield.TextInputLayout) return parent
+            parent = parent.parent
+        }
+        return null
     }
 
     fun date(value: String): String = runCatching {
@@ -263,6 +291,20 @@ internal object MobileUi {
             "key" to R.drawable.pm_icon_key,
             "add" to R.drawable.pm_icon_add,
             "open" to R.drawable.pm_icon_open,
+            "vault" to R.drawable.pm_icon_vault,
+            "biometric" to R.drawable.pm_icon_lock,
+            "generate" to R.drawable.pm_icon_generate,
+            "autofill" to R.drawable.pm_icon_autofill,
+            "files" to R.drawable.pm_icon_folder,
+            "file" to R.drawable.pm_icon_file,
+            // Item types. Names, never letters, so a login's initial is never an icon.
+            "type-note" to R.drawable.pm_icon_note,
+            "type-card" to R.drawable.pm_icon_card,
+            "type-identity" to R.drawable.pm_icon_identity,
+            "type-wifi" to R.drawable.pm_icon_wifi,
+            "type-license" to R.drawable.pm_icon_license,
+            "type-ssh" to R.drawable.pm_icon_terminal,
+            "type-api" to R.drawable.pm_icon_code,
         )
 
     /** Logins show their first letter; other types show their type badge. */
@@ -273,13 +315,13 @@ internal object MobileUi {
 
     fun kindBadge(kind: String) =
         when (kind) {
-            "secure-note" -> "N"
-            "payment-card" -> "C"
-            "identity" -> "ID"
-            "wifi" -> "W"
-            "software-license" -> "K"
-            "ssh-key" -> "S"
-            "api-secret" -> "A"
+            "secure-note" -> "type-note"
+            "payment-card" -> "type-card"
+            "identity" -> "type-identity"
+            "wifi" -> "type-wifi"
+            "software-license" -> "type-license"
+            "ssh-key" -> "type-ssh"
+            "api-secret" -> "type-api"
             else -> "L"
         }
 

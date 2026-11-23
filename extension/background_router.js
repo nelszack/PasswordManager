@@ -15,6 +15,7 @@ const PasswordManagerBackgroundRouter = {
         pendingCredentials,
         duo,
         passkeys,
+        popup,
     }) {
         function sendAction(action, fields, sendResponse, refreshAfter = false) {
             nativeRequest(action, fields)
@@ -65,6 +66,7 @@ const PasswordManagerBackgroundRouter = {
             openCredentialPrompt: { handle: (request, sender) => prompts.open(request, sender) },
             reviewCredentialPrompt: { handle: (request, sender) => prompts.review(request, sender) },
             getCredentialPromptData: { handle: (request, sender) => prompts.data(request, sender) },
+            revealCredentialPassword: { handle: (request, sender) => prompts.reveal(request, sender) },
             completeCredentialPrompt: {
                 handle: (request, sender) => prompts.complete(request, sender),
                 failure: operationFailure,
@@ -76,6 +78,17 @@ const PasswordManagerBackgroundRouter = {
             getPasskeyPromptData: { handle: (request, sender) => passkeys.data(request, sender) },
             completePasskeyPrompt: { handle: (request, sender) => passkeys.complete(request, sender) },
             cancelPasskeyRequest: { handle: (request, sender) => passkeys.cancel(request, sender) },
+            popupLogins: { handle: (request, sender) => popup.logins(request, sender) },
+            popupCopy: { handle: (request, sender) => popup.copy(request, sender) },
+            popupSearch: { handle: (request, sender) => popup.search(request, sender) },
+            popupCopyItem: { handle: (request, sender) => popup.copyItem(request, sender) },
+            popupCopyGenerated: { handle: (request, sender) => popup.copyGenerated(request, sender) },
+            popupFill: { handle: (request, sender) => popup.fill(request, sender) },
+            popupSave: {
+                handle: (request, sender) => popup.save(request, sender),
+                failure: operationFailure,
+            },
+            claimPopupFill: { handle: (request, sender) => popup.claim(request, sender) },
         };
 
         function handleRequest(request, sender, sendResponse) {
@@ -145,16 +158,22 @@ const PasswordManagerBackgroundRouter = {
                 return true;
             }
             if (request.action === "openDesktop") {
-                const trusted = security.securePickerSender(
+                const trusted = ["popup.html", "picker.html", "passkey_prompt.html"].some(path =>
+                    security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL(path))
+                );
+                // Only the popup may name an item to open ("Open in desktop app").
+                const item = request.id;
+                const fromPopup = security.securePickerSender(
                     sender,
                     chrome.runtime.id,
                     chrome.runtime.getURL("popup.html")
                 );
-                if (!trusted) {
+                const validItem = item === undefined || (fromPopup && Number.isSafeInteger(item) && item > 0);
+                if (!trusted || !validItem) {
                     sendResponse({ success: false, error: "Invalid desktop launch request" });
                     return false;
                 }
-                sendAction("openDesktop", {}, sendResponse);
+                sendAction("openDesktop", item === undefined ? {} : { entryId: item }, sendResponse);
                 return true;
             }
             if (request.action === "lockVault") {
@@ -169,6 +188,7 @@ const PasswordManagerBackgroundRouter = {
                 prompts.invalidate();
                 duo.invalidate();
                 passkeys.invalidate();
+                popup?.invalidate();
                 sendAction("lock", {}, sendResponse, true);
                 return true;
             }

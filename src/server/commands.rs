@@ -174,7 +174,7 @@ fn handle_command(
         ),
         ServerCommand::PasskeyDecision { id, secret } => {
             if session.is_locked() {
-                respond_failure("Vault locked.", responses);
+                respond_failure(crate::protocol::VAULT_LOCKED, responses);
                 return;
             }
             // Only a request from this unlock session can be answered here.
@@ -336,7 +336,7 @@ fn handle_command(
         mut msg => {
             if session.is_locked() {
                 msg.zeroize();
-                respond_failure("Vault locked.", responses);
+                respond_failure(crate::protocol::VAULT_LOCKED, responses);
                 return;
             }
             // A passkey response reports user verification only after the

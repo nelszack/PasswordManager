@@ -4,6 +4,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.View
 import android.widget.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,7 +28,7 @@ abstract class ManagementActivity : VaultActivity() {
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        scaffold = MobileScaffold(this, layout, { navigate(it) }, { showHome() })
+        scaffold = MobileScaffold(this, layout, { navigate(it) }, { lockNow() })
         onBackPressedDispatcher.addCallback(
             this,
             object : androidx.activity.OnBackPressedCallback(true) {
@@ -53,6 +54,7 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     protected fun rootNavigation(tab: String, unlocked: Boolean = true) {
+        rootTab = tab
         pageBack =
             if (tab == "Vault") null
             else {
@@ -61,9 +63,26 @@ abstract class ManagementActivity : VaultActivity() {
         scaffold.root(tab, unlocked)
     }
 
+    /** The root tab the person last chose; Back from a page returns there. */
+    private var rootTab = "Vault"
+
     override fun onPageChanged(title: String) {
         scaffold.page(title)
-        pageBack = { navigate("Tools") }
+        val tab = rootTab
+        pageBack = { navigate(tab) }
+    }
+
+    /** The app bar's Lock button: lock, then show the start screen. */
+    internal open fun lockNow() {
+        Vault.lock()
+        showHome()
+    }
+
+    /** The list's scroll position, so returning from an item keeps your place. */
+    internal fun scrollPosition() = if (::scaffold.isInitialized) scaffold.scroll.scrollY else 0
+
+    internal fun restoreScroll(y: Int) {
+        if (::scaffold.isInitialized) scaffold.scroll.post { scaffold.scroll.scrollTo(0, y) }
     }
 
     override fun onWorkStarted() {
@@ -85,8 +104,23 @@ abstract class ManagementActivity : VaultActivity() {
         if (::scaffold.isInitialized) scaffold.clear()
     }
 
+    /** Pins two actions below the page, such as Save and Cancel or bulk actions. */
+    internal fun pinActions(first: View, second: View) = scaffold.pin(first, second)
+
+    /** Keeps [view] (such as the vault search) visible above the scrolling page. */
+    internal fun pinHeader(view: View) = scaffold.pinHeader(view)
+
+    /** The page's floating creation button (removed by the next page). */
+    internal fun floatingAction(label: String, action: () -> Unit) =
+        scaffold.floatingAction(label) { guarded(action) }
+
+    /** An icon action in the app bar for the current page (removed by the next page). */
+    internal fun barAction(icon: Int, description: String, action: () -> Unit) =
+        scaffold.barAction(icon, description) { guarded(action) }
+
     internal fun section(title: String) {
-        label(title, 18f)
+        // Headings let TalkBack users move through a screen by section.
+        label(title, 18f).also { androidx.core.view.ViewCompat.setAccessibilityHeading(it, true) }
     }
 
     internal fun primary(title: String, action: () -> Unit) =
@@ -129,6 +163,8 @@ abstract class ManagementActivity : VaultActivity() {
             background = MobileUi.shape(this@ManagementActivity, R.color.pm_accent_soft)
             val p = MobileUi.dp(this@ManagementActivity, 14)
             setPadding(p, p, p, p)
+            // Status and results are announced without moving focus.
+            accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
     }
 
@@ -154,8 +190,24 @@ abstract class ManagementActivity : VaultActivity() {
     private var documentAction: ((Uri) -> Unit)? = null
 
     protected fun choice(title: String, values: List<String>, selected: String? = null): Spinner {
-        label(title)
+        val heading = label(title)
         return Spinner(this).apply {
+            // TalkBack announces the purpose with the value, and the visible title labels it.
+            id = View.generateViewId()
+            heading.labelFor = id
+            contentDescription = title
+            androidx.core.view.ViewCompat.setAccessibilityDelegate(
+                this,
+                object : androidx.core.view.AccessibilityDelegateCompat() {
+                    override fun onInitializeAccessibilityNodeInfo(
+                        host: View,
+                        info: androidx.core.view.accessibility.AccessibilityNodeInfoCompat,
+                    ) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.contentDescription = "$title: ${(host as Spinner).selectedItem ?: ""}"
+                    }
+                },
+            )
             adapter =
                 ArrayAdapter(
                     this@ManagementActivity,
@@ -204,19 +256,20 @@ abstract class ManagementActivity : VaultActivity() {
             this@ManagementActivity.layout.addView(this)
         }
 
-    internal fun confirm(message: String, action: () -> Unit) {
+    /** Asks before an action; [verb] names it on the button ("Move to trash"). */
+    internal fun confirm(message: String, verb: String = "Continue", action: () -> Unit) {
         val dialog =
-            AlertDialog.Builder(this)
+            com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setMessage(message)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Confirm") { _, _ -> guarded(action) }
+                .setPositiveButton(verb) { _, _ -> guarded(action) }
                 .create()
         track(dialog)
         dialog.show()
     }
 
     /** Dialogs are dismissed with other secrets when the vault locks. */
-    internal fun track(dialog: AlertDialog) {
+    internal fun track(dialog: android.app.Dialog) {
         dialogs.add(dialog)
         dialog.setOnDismissListener { dialogs.remove(dialog) }
     }
@@ -254,7 +307,7 @@ abstract class ManagementActivity : VaultActivity() {
         actionRow("Advanced search", "Filter by type, website or password health", "search") {
             advancedSearch()
         }
-        actionRow("Password generator", "Strong passwords and memorable passphrases", "G") {
+        actionRow("Password generator", "Strong passwords and memorable passphrases", "generate") {
             generator()
         }
         section("Security")
@@ -266,7 +319,7 @@ abstract class ManagementActivity : VaultActivity() {
         }
         section("Recovery & data")
         actionRow("Deleted items", "Restore items or review your trash", "restore") { trash() }
-        actionRow("Files & backups", "Encrypted backups and import / export", "B") { files() }
+        actionRow("Files & backups", "Encrypted backups and import / export", "files") { files() }
         actionRow("Sync controls", "Connection status and synchronization", "sync") { syncControls() }
         actionRow("Mobile settings", "Locking, clipboard and generator preferences") {
             preferences(back = { tools() })
@@ -274,44 +327,67 @@ abstract class ManagementActivity : VaultActivity() {
     }
 
     /** Opens the item editor once the shared per-type labels are available. */
-    protected fun typedEditor(entry: JSONObject?) {
-        task({ Vault.itemProfiles() }) { profiles -> typedEditor(entry, profiles) }
+    /** Edits [entry], or adds a new item starting from [prefill] (for example a website). */
+    protected fun typedEditor(entry: JSONObject?, prefill: JSONObject? = null) {
+        task({ Vault.itemProfiles() }) { profiles -> typedEditor(entry, profiles, prefill) }
     }
 
-    private fun typedEditor(entry: JSONObject?, profiles: Map<String, JSONObject>) {
+    private fun typedEditor(
+        entry: JSONObject?,
+        profiles: Map<String, JSONObject>,
+        prefill: JSONObject? = null,
+    ) {
         page(if (entry == null) "Add item" else "Edit item")
+        // Initial values: the item being edited, or the suggested new item.
+        val values = entry ?: prefill
         val kind =
             choice(
                 "Item type",
                 kinds.map { profiles[it]?.optString("title") ?: MobileUi.kindLabel(it) },
-                entry?.optString("kind")?.let { profiles[it]?.optString("title") ?: MobileUi.kindLabel(it) },
+                values?.optString("kind")?.let { profiles[it]?.optString("title") ?: MobileUi.kindLabel(it) },
             )
         val guidance = label("")
         section("Item details")
-        val name = edit("Name", entry?.optString("name").orEmpty())
-        val username = edit("Username / owner", entry?.opt("username") as? String ?: "")
+        val name = edit("Name", values?.optString("name").orEmpty())
+        val username = edit("Username / owner", values?.opt("username") as? String ?: "")
         val password =
-            edit("Password / primary secret", entry?.opt("password") as? String ?: "", true)
-        val urls = entry?.optJSONArray("urls") ?: JSONArray()
+            edit("Password / primary secret", values?.opt("password") as? String ?: "", true)
+        // Generation sits beside the password it fills, and asks before replacing one.
+        val generate =
+            button("Generate password") {
+                val fill = { task({ Vault.json("generate") }) { password.setText(it.getString("password")) } }
+                if (password.text.isEmpty()) fill()
+                else confirm("Replace the password in this form with a new generated one?", "Replace") { fill() }
+            }
+        val urls = values?.optJSONArray("urls") ?: JSONArray()
         val websites =
             edit(
                 "Websites (one per line)",
                 (0 until urls.length()).joinToString("\n") { urls.getString(it) },
             )
+        websites.inputType =
+            android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_URI or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
         websites.isSingleLine = false
         websites.minLines = 2
-        val notes = edit("Notes", entry?.opt("notes") as? String ?: "", true)
+        // Notes are ordinary text while you type; the item screen hides them until shown.
+        val notes = edit("Notes", values?.opt("notes") as? String ?: "")
+        notes.inputType =
+            android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         notes.isSingleLine = false
         notes.minLines = 3
         val tags =
             edit(
                 "Tags (comma-separated)",
-                entry?.let { VaultCommands.tags(it).joinToString(", ") }.orEmpty(),
+                values?.let { VaultCommands.tags(it).joinToString(", ") }.orEmpty(),
             )
         val favorite =
             CheckBox(this).apply {
                 text = "Favorite"
-                isChecked = entry?.optBoolean("favorite") ?: false
+                isChecked = values?.optBoolean("favorite") ?: false
                 minHeight = MobileUi.dp(this@ManagementActivity, 48)
             }
         layout.addView(favorite)
@@ -339,7 +415,7 @@ abstract class ManagementActivity : VaultActivity() {
                 }
             val removed =
                 CheckBox(this).apply {
-                    text = "Remove this field"
+                    text = "Remove this field when saving"
                     minHeight = MobileUi.dp(this@ManagementActivity, 48)
                 }
             row.addView(secret)
@@ -347,23 +423,42 @@ abstract class ManagementActivity : VaultActivity() {
             fieldRows.addView(row)
             return Field(fieldName, fieldValue, secret, removed).also(rows::add)
         }
-        val fields = entry?.optJSONArray("fields") ?: JSONArray()
+        val fields = values?.optJSONArray("fields") ?: JSONArray()
         for (i in 0 until fields.length()) field(fields.getJSONObject(i))
         button("Add custom field") { field(null) }
         // A new item starts with its type's suggested fields (the names card and
         // identity autofill recognize). Untouched suggestions follow a type change
         // and blank ones are not saved.
         val suggestions = mutableMapOf<Field, String>()
+        // A row left blank (a suggestion, or one added and never filled in) is not saved.
         fun untouched(row: Field) =
-            suggestions[row] == row.name.text.toString() &&
+            (suggestions[row] == row.name.text.toString() || row.name.text.isBlank()) &&
                 row.value.text.isEmpty() &&
                 !row.removed.isChecked
         fun applyProfile(kindValue: String) {
             val profile = profiles[kindValue] ?: return
+            // Card numbers, identity numbers, notes, keys and licenses come from elsewhere.
+            generate.visibility =
+                if (kindValue in setOf("login", "wifi", "api-secret")) View.VISIBLE else View.GONE
             guidance.text = profile.optString("guidance")
             name.hint = profile.optString("name_hint", "Name")
             MobileUi.relabel(username, profile.optString("owner", "Username / owner"))
+            // Logins usually use an email address; other types keep the plain keyboard.
+            username.inputType =
+                android.text.InputType.TYPE_CLASS_TEXT or
+                    if (kindValue == "login") android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                    else android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             MobileUi.relabel(password, profile.optString("secret", "Password / primary secret"))
+            // Card numbers get the number pad; other secrets stay hidden text.
+            password.inputType =
+                if (kindValue == "payment-card")
+                    android.text.InputType.TYPE_CLASS_NUMBER or
+                        android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                else
+                    android.text.InputType.TYPE_CLASS_TEXT or
+                        android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            for (input in listOf(name, username, password))
+                input.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_NEXT
             if (entry != null || !suggestions.keys.all(::untouched)) return
             for (row in suggestions.keys) {
                 fieldRows.removeView(row.name.parent.parent as android.view.View)
@@ -389,9 +484,6 @@ abstract class ManagementActivity : VaultActivity() {
 
                 override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
             }
-        button("Generate password") {
-            task({ Vault.json("generate") }) { password.setText(it.getString("password")) }
-        }
         var saving = false
         fun currentDraft() =
             listOf(
@@ -410,7 +502,7 @@ abstract class ManagementActivity : VaultActivity() {
         val original = currentDraft()
         fun leave() {
             if (saving) return
-            if (currentDraft() != original) confirm("Discard your unsaved changes?") { showItems() }
+            if (currentDraft() != original) confirm("Discard your unsaved changes?", "Discard") { showItems() }
             else showItems()
         }
         pageBack = { leave() }
@@ -524,14 +616,14 @@ abstract class ManagementActivity : VaultActivity() {
                     change(VaultCommands.restoreTrash(id)) { trash() }
                 }
                 button("Permanently delete ${item.getString("name")}") {
-                    confirm("Permanently erase this deleted item? This cannot be undone.") {
+                    confirm("Permanently erase this deleted item? This cannot be undone.", "Erase forever") {
                         change(VaultCommands.purgeTrash(id), confirmed = true) { trash() }
                     }
                 }
             }
             if (entries.length() > 0)
                 button("Empty trash") {
-                    confirm("Permanently erase every item in trash?") {
+                    confirm("Permanently erase every item in trash? This cannot be undone.", "Erase all") {
                         change(VaultCommands.purgeTrash(null), confirmed = true) { trash() }
                     }
                 }
@@ -552,12 +644,8 @@ abstract class ManagementActivity : VaultActivity() {
             page("Authenticator")
             pageBack = { showDetail(id) }
             label("Current mode: " + (mode ?: "None"))
-            if (mode == "totp")
-                button("Show current verification code") {
-                    task({ Vault.commandJson(VaultCommands.authenticatorCode(id)) }) { result ->
-                        codeResult(result, id)
-                    }
-                }
+            // The item screen shows time-based codes live, with a countdown.
+            if (mode == "totp") button("Show the live code") { showDetail(id) }
             if (mode == "hotp")
                 button("Generate next HOTP code") {
                     confirm(
@@ -576,10 +664,16 @@ abstract class ManagementActivity : VaultActivity() {
             val config = edit("Base32 secret or otpauth URI", secret = true)
             button("Save authenticator") {
                 val supplied = config.text.toString().trim()
-                config.text.clear()
-                confirm("Replace this item's authenticator configuration?") {
-                    change(VaultCommands.setAuthenticator(id, supplied)) { authenticator(id) }
+                if (supplied.isEmpty()) {
+                    MobileUi.layoutOf(config)?.error = "Paste the setup key or otpauth:// link first."
+                    config.requestFocus()
+                    return@button
                 }
+                MobileUi.layoutOf(config)?.error = null
+                // The entry stays until the save succeeds (the screen then reloads), so
+                // canceling or a failed save never loses it.
+                val save = { change(VaultCommands.setAuthenticator(id, supplied)) { authenticator(id) } }
+                if (mode == null) save() else confirm("Replace this item's authenticator?", "Replace") { save() }
             }
             if (mode != null)
                 button("Remove authenticator") {
@@ -603,7 +697,7 @@ abstract class ManagementActivity : VaultActivity() {
                 "Consumed HOTP counter: ${result.getLong("counter")}"
             else "Valid for ${result.getInt("expires_in")} seconds"
         )
-        button("Copy verification code") {
+        button("Copy one-time code") {
             if (result.opt("counter") is Number)
                 SecretClipboard.copy(this, result.getString("code"), 30)
             else
@@ -627,29 +721,76 @@ abstract class ManagementActivity : VaultActivity() {
         task({ Vault.json("settings_get") }) { defaults ->
             page("Password generator")
             pageBack = back ?: { navigate("Tools") }
-            val phrase = toggle("Generate a passphrase")
-            val length = edit("Password length", defaults.getInt("generator_length").toString())
-            val words = edit("Passphrase words", defaults.getInt("passphrase_words").toString())
+            // The result comes first, with its actions beside it.
+            val result = edit("Generated password")
+            result.typeface = android.graphics.Typeface.MONOSPACE
+            val assessment = label("")
+            lateinit var copy: Button
+            val actions =
+                pairedActions(
+                    "Generate again",
+                    "Copy",
+                    { generateNow() },
+                    {
+                        if (result.text.isEmpty()) notice("Generate a password first.")
+                        else SecretClipboard.copy(this, result.text.toString(), what = "Password copied")
+                    },
+                )
+            copy = actions.second
+            if (use != null) primary("Use this password") { use(result.text.toString()) }
+            section("Options")
+            val phrase = toggle("Use words (passphrase)")
+            val length = edit("Length (characters)", defaults.getInt("generator_length").toString())
+            val words = edit("Number of words", defaults.getInt("passphrase_words").toString())
+            for (number in listOf(length, words))
+                number.inputType = android.text.InputType.TYPE_CLASS_NUMBER
             val separator = edit("Word separator", "-")
-            val upper = toggle("Uppercase", true)
-            val lower = toggle("Lowercase", true)
+            val upper = toggle("Uppercase letters", true)
+            val lower = toggle("Lowercase letters", true)
             val digits = toggle("Digits", true)
             val symbols = toggle("Symbols", true)
             val symbolSet = edit("Allowed symbols", "!@#$%^&*-_=+")
-            val ambiguous = toggle("Exclude ambiguous characters")
-            val result = edit("Generated value", secret = true)
-            val assessment = label("")
-            button("Generate") {
+            val ambiguous = toggle("Avoid look-alike characters (0, O, 1, l)")
+            // Show only the options that apply to the chosen mode.
+            fun show(input: EditText, visible: Boolean) {
+                val container = input.parent as? android.view.View ?: return
+                val parent = container.parent as? android.view.ViewGroup ?: return
+                val state = if (visible) android.view.View.VISIBLE else android.view.View.GONE
+                container.visibility = state
+                parent.getChildAt(parent.indexOfChild(container) - 1)?.visibility = state
+            }
+            fun applyMode() {
+                val words_ = phrase.isChecked
+                show(length, !words_)
+                show(symbolSet, !words_ && symbols.isChecked)
+                show(words, words_)
+                show(separator, words_)
+                for (box in listOf(upper, lower, digits, symbols, ambiguous))
+                    box.visibility = if (words_) android.view.View.GONE else android.view.View.VISIBLE
+            }
+            fun number(input: EditText, range: IntRange): Int? {
+                val value = input.text.toString().trim().toIntOrNull()
+                if (value == null || value !in range) {
+                    input.error = "Enter ${range.first}–${range.last}"
+                    input.requestFocus()
+                    return null
+                }
+                input.error = null
+                return value
+            }
+            generateNow = generate@{
                 val usePhrase = phrase.isChecked
+                val chars =
+                    if (usePhrase) defaults.getInt("generator_length")
+                    else number(length, 8..255) ?: return@generate
+                val count =
+                    if (usePhrase) number(words, 3..64) ?: return@generate
+                    else defaults.getInt("passphrase_words")
                 val options =
                     arrayOf(
                         "passphrase" to usePhrase,
-                        "length" to
-                            (if (usePhrase) defaults.getInt("generator_length")
-                            else length.text.toString().toInt()),
-                        "words" to
-                            (if (usePhrase) words.text.toString().toInt()
-                            else defaults.getInt("passphrase_words")),
+                        "length" to chars,
+                        "words" to count,
                         "separator" to separator.text.toString(),
                         "uppercase" to upper.isChecked,
                         "lowercase" to lower.isChecked,
@@ -658,25 +799,40 @@ abstract class ManagementActivity : VaultActivity() {
                         "symbols" to symbolSet.text.toString(),
                         "exclude_ambiguous" to ambiguous.isChecked,
                     )
-                task({ Vault.json("generate", *options) }) {
-                    result.setText(it.getString("password"))
-                    assessment.text = it.getString("assessment")
+                task({ runCatching { Vault.json("generate", *options) } }) { outcome ->
+                    outcome.fold(
+                        {
+                            result.setText(it.getString("password"))
+                            assessment.text = it.getString("assessment")
+                            copy.isEnabled = true
+                        },
+                        { error -> assessment.text = friendlyError(error.message) },
+                    )
                 }
             }
-            button("Assess value locally") {
+            for (box in listOf(phrase, upper, lower, digits, symbols, ambiguous))
+                box.setOnCheckedChangeListener { _, _ ->
+                    applyMode()
+                    generateNow()
+                }
+            for (input in listOf(length, words, separator, symbolSet))
+                input.setOnEditorActionListener { _, _, _ ->
+                    generateNow()
+                    false
+                }
+            applyMode()
+            generateNow()
+            button("Check this password's strength") {
                 val supplied = result.text.toString()
                 task({ Vault.json("passcheck", "password" to supplied) }) {
                     assessment.text = it.getString("assessment")
                 }
             }
-            button("Copy generated value") {
-                check(result.text.isNotEmpty())
-                SecretClipboard.copy(this, result.text.toString())
-            }
-            if (use != null) button("Use generated value") { use(result.text.toString()) }
-            button("Back") { (back ?: { navigate("Tools") })() }
         }
     }
+
+    /** Regenerates with the generator screen's current options. */
+    private var generateNow: () -> Unit = {}
 
     private fun advancedSearch() {
         page("Advanced search")
@@ -695,8 +851,8 @@ abstract class ManagementActivity : VaultActivity() {
                 "Authenticator",
                 listOf(
                     "any" to "Any",
-                    "present" to "Has verification codes",
-                    "missing" to "No verification codes",
+                    "present" to "Has one-time codes",
+                    "missing" to "No one-time codes",
                 ),
             )
         val weak = toggle("Weak passwords only")
@@ -791,7 +947,19 @@ abstract class ManagementActivity : VaultActivity() {
                         "breached",
                         "unchecked",
                     )) {
-                    label(key.replace('_', ' '), 20f)
+                    label(
+                        when (key) {
+                            "weak" -> "Weak passwords"
+                            "reused" -> "Reused passwords"
+                            "duplicates" -> "Duplicate logins"
+                            "stale" -> "Old passwords"
+                            "missing_totp" -> "No one-time code set up"
+                            "breached" -> "Found in known breaches"
+                            "unchecked" -> "Not checked for breaches"
+                            else -> key.replace('_', ' ')
+                        },
+                        20f,
+                    )
                     fun findings(value: Any?) {
                         when (value) {
                             is JSONArray -> for (i in 0 until value.length()) findings(value.opt(i))
@@ -819,7 +987,12 @@ abstract class ManagementActivity : VaultActivity() {
         task({ Vault.json("sync_status") }) { state ->
             page("Sync controls")
             label(
-                "Configured: ${state.getBoolean("configured")}\nEnabled: ${state.getBoolean("enabled")}\nLocal changes: ${state.getBoolean("local_changed")}"
+                when {
+                    !state.getBoolean("configured") -> "Sync isn't set up on this device yet."
+                    !state.getBoolean("enabled") -> "Sync is off for this vault."
+                    state.getBoolean("local_changed") -> "Sync is on. This device has changes to upload."
+                    else -> "Sync is on and up to date with the last check."
+                }
             )
             button("Check server for changes") {
                 task({ Vault.json("sync_check", *syncArgs()) }) { result ->
@@ -896,9 +1069,9 @@ abstract class ManagementActivity : VaultActivity() {
         if (requestCode == CREATE_DOCUMENT || requestCode == OPEN_DOCUMENT) {
             val action = documentAction
             documentAction = null
+            // Cancelling the file chooser leaves you where you were.
             if (resultCode == RESULT_OK && data?.data != null)
                 guarded { action?.invoke(requireNotNull(data.data)) }
-            else showHome()
         }
     }
 

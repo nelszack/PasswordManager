@@ -35,7 +35,9 @@ impl Default for SyncConfig {
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Appearance {
+    /// Follow the operating system's light or dark setting.
     #[default]
+    System,
     Dark,
     Light,
     HighContrast,
@@ -44,6 +46,7 @@ pub enum Appearance {
 impl std::fmt::Display for Appearance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::System => "Match system",
             Self::Dark => "Dark",
             Self::Light => "Light",
             Self::HighContrast => "High contrast",
@@ -51,17 +54,43 @@ impl std::fmt::Display for Appearance {
     }
 }
 
+/// What closing the desktop window does while a vault is unlocked.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseAction {
+    /// Ask each time: lock, or keep the vault open for the browser and CLI.
+    #[default]
+    Ask,
+    Lock,
+    KeepUnlocked,
+}
+
+impl std::fmt::Display for CloseAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ask => "Ask each time",
+            Self::Lock => "Lock the vault",
+            Self::KeepUnlocked => "Keep it unlocked for the browser and CLI",
+        })
+    }
+}
+
+/// Text and control sizes offered by the desktop app, in percent.
+pub const DESKTOP_SCALES: [u16; 6] = [100, 115, 130, 150, 175, 200];
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct DesktopConfig {
     pub appearance: Appearance,
     pub scale: u16,
+    pub close_action: CloseAction,
 }
 
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
-            appearance: Appearance::Dark,
+            appearance: Appearance::System,
+            close_action: CloseAction::Ask,
             scale: 100,
         }
     }
@@ -110,6 +139,7 @@ pub struct ConfigChanges {
     pub clear_default_vault: bool,
     pub desktop_appearance: Option<Appearance>,
     pub desktop_scale: Option<u16>,
+    pub desktop_close_action: Option<CloseAction>,
     pub sync_server_url: Option<String>,
     pub sync_automatic: Option<bool>,
     pub ssh_agent: Option<bool>,
@@ -330,9 +360,12 @@ pub fn try_update(
     if let Some(appearance) = modify.desktop_appearance {
         config.desktop.appearance = appearance;
     }
+    if let Some(action) = modify.desktop_close_action {
+        config.desktop.close_action = action;
+    }
     if let Some(scale) = modify.desktop_scale {
-        if ![100, 115, 130].contains(&scale) {
-            return Err("interface scale must be 100, 115, or 130 percent".into());
+        if !DESKTOP_SCALES.contains(&scale) {
+            return Err("interface scale must be 100, 115, 130, 150, 175, or 200 percent".into());
         }
         config.desktop.scale = scale;
     }

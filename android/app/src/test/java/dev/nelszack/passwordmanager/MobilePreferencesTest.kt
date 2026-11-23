@@ -14,5 +14,8 @@ class MobilePreferencesTest {
         assertTrue(MobilePreferences.summary("history_limit", 0).contains("off"))
         assertEquals("24 characters", MobilePreferences.summary("generator_length", 24))
         assertEquals("6 words", MobilePreferences.summary("passphrase_words", 6))
+        assertEquals("Immediately", MobilePreferences.summary("leave_lock_seconds", 0))
+        assertEquals("After 30 seconds", MobilePreferences.summary("leave_lock_seconds", 30))
+        assertTrue(MobilePreferences.fields.any { it.key == "leave_lock_seconds" && 300L in it.range })
     }
 }

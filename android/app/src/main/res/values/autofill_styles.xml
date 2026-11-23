@@ -1,5 +1,8 @@
 <resources>
-    <style name="AutofillSheet" parent="android:style/Theme.Material.Light.Dialog.NoActionBar">
+    <style name="AutofillSheet" parent="Theme.Material3.DayNight.Dialog">
+        <item name="colorPrimary">@color/pm_accent</item>
+        <item name="colorOnPrimary">@color/pm_on_accent</item>
+        <item name="colorOutline">@color/pm_edge</item>
         <item name="android:windowCloseOnTouchOutside">true</item>
         <item name="android:windowSoftInputMode">stateAlwaysHidden|adjustResize</item>
         <item name="android:windowBackground">@drawable/autofill_sheet</item>

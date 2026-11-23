@@ -23,7 +23,7 @@ internal class DuoScreens(private val host: ManagementActivity) {
             button("Enroll Duo") {
                 val link = activation.text.toString().trim()
                 activation.text.clear()
-                confirm("Consume this activation link and enroll this item?") {
+                confirm("Consume this activation link and enroll this item?", "Enroll") {
                     task({
                         val command =
                             VaultCommands.duoEnroll(

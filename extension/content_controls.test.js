@@ -132,8 +132,8 @@ test("controls live in a closed shadow root after their field and keep their acc
     assert.equal(host.getAttribute("class"), null);
     const button = host.attachedShadow.querySelectorAll("button")[0];
     assert.equal(button.type, "button");
-    assert.equal(button.getAttribute("aria-label"), "Choose authenticator code");
-    assert.equal(button.title, "Choose authenticator code");
+    assert.equal(button.getAttribute("aria-label"), "Choose one-time code");
+    assert.equal(button.title, "Choose one-time code");
     assert.match(host.attachedShadow.querySelectorAll("style")[0].textContent, /focus-visible/);
     dom.flushFrames();
     assert.equal(host.style.display, "block");
@@ -221,7 +221,7 @@ test("picker failures show a temporary warning, and credential selections fill w
     assert.equal(filled.length, 2, "a removed form is never filled");
 });
 
-test("the fill shortcut opens the focused field's picker, else the first visible login field", t => {
+test("the fill shortcut opens the focused field's picker, else the first visible login field", async t => {
     const dom = installDom(t);
     const form = dom.document.createElement("form");
     const username = dom.input("email");
@@ -242,9 +242,12 @@ test("the fill shortcut opens the focused field's picker, else the first visible
     });
     t.after(() => controls.dispose());
     assert.equal(controls.activateShortcut(null), false, "no controls on the page");
+    const claim = () => Promise.resolve({ username: "u", password: "p" });
+    assert.equal(await controls.fillFromPopup(null, claim), false, "the popup needs a login form");
     controls.createSecureTotpButton(code);
     dom.flushFrames();
     assert.equal(controls.activateShortcut(null), false, "only login pickers are a fallback");
+    assert.equal(await controls.fillFromPopup(code, claim), false, "a focused code field is not a login form");
     assert.equal(controls.activateShortcut(code), true, "a focused field uses its own picker");
     controls.createSecureCredentialButton(username);
     dom.flushFrames();

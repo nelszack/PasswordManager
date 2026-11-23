@@ -83,11 +83,23 @@
         const username = typeof request.username === "string" ? request.username.trim() : pending.username;
         const name = typeof request.name === "string" ? request.name.trim() : "";
         if (!name) throw new Error("Enter a name for these credentials");
+        // The person may correct the captured password after revealing it.
+        let password = pending.password;
+        if (request.password !== undefined) {
+            if (
+                typeof request.password !== "string" ||
+                !request.password ||
+                request.password.length > 64 * 1024 ||
+                /[\0\r\n]/.test(request.password)
+            )
+                throw new Error("Enter the password to save");
+            password = request.password;
+        }
         const fields = {
             domain: pending.domain,
             expectedSession: pending.sessionId,
             username,
-            password: pending.password,
+            password,
             name,
         };
         if (action === "update") {

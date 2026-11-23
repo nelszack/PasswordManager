@@ -7,6 +7,52 @@
     "use strict";
     const protocolVersion = 6;
     const operations = Object.freeze({
+  "copyGenerated": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "password"
+    ],
+    "optionalFields": [],
+    "resultShape": "message"
+  },
+  "copyItem": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "entryId",
+      "field",
+      "expectedRevision",
+      "expectedSession"
+    ],
+    "optionalFields": [],
+    "resultShape": "message"
+  },
+  "copyLoginValue": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "domain",
+      "entryId",
+      "field",
+      "expectedRevision",
+      "expectedSession"
+    ],
+    "optionalFields": [],
+    "resultShape": "message"
+  },
   "createPasskey": {
     "mutates": true,
     "lane": "work",
@@ -195,7 +241,9 @@
       "background"
     ],
     "requiredFields": [],
-    "optionalFields": [],
+    "optionalFields": [
+      "entryId"
+    ],
     "resultShape": "message"
   },
   "operationStatus": {
@@ -230,6 +278,19 @@
       "username"
     ],
     "resultShape": "message"
+  },
+  "searchItems": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "query"
+    ],
+    "optionalFields": [],
+    "resultShape": "itemPage"
   },
   "status": {
     "mutates": false,
@@ -276,6 +337,49 @@
     "resultShape": "message"
   }
 });
+    // Per-type labels shared with the desktop app, CLI and Android (item_profile.rs).
+    const itemProfiles = Object.freeze({
+  "api-secret": {
+    "owner": "Account or service",
+    "secret": "API key or token",
+    "title": "API secret"
+  },
+  "identity": {
+    "owner": "Full name",
+    "secret": "Identity number",
+    "title": "Identity"
+  },
+  "login": {
+    "owner": "Username or email",
+    "secret": "Password",
+    "title": "Login"
+  },
+  "payment-card": {
+    "owner": "Cardholder",
+    "secret": "Card number",
+    "title": "Payment card"
+  },
+  "secure-note": {
+    "owner": "Owner",
+    "secret": "Private content",
+    "title": "Secure note"
+  },
+  "software-license": {
+    "owner": "Licensed to",
+    "secret": "License key",
+    "title": "Software license"
+  },
+  "ssh-key": {
+    "owner": "User or host",
+    "secret": "Private key",
+    "title": "SSH key"
+  },
+  "wifi": {
+    "owner": "Network name",
+    "secret": "Wi-Fi password",
+    "title": "Wi-Fi"
+  }
+});
     const kinds = new Set(["login", "secure-note", "payment-card", "identity", "wifi", "software-license", "ssh-key", "api-secret"]);
     const outcomeStates = new Set(["pending", "committed", "committed_durability_unknown", "failed", "unknown"]);
     const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -316,6 +420,8 @@
                 case "verificationCode": valid = text(value) && /^\d{0,6}$/.test(value); break;
                 case "verificationToken": valid = text(value) && /^[a-f0-9]{64}$/.test(value); break;
                 case "passkeyRequest": valid = bounded(value, 65536) && value.startsWith("{"); break;
+                case "field": valid = ["username", "password", "totp"].includes(value); break;
+                case "query": valid = bounded(value, 256, true) && value.trim().length > 0; break;
                 default: valid = false;
             }
             if (!valid) fail("Invalid native request field");
@@ -361,10 +467,11 @@
             case "duoArray": valid = Array.isArray(data) && data.every(duoRequest); break;
             case "receipt": valid = receipt(data); break;
             case "passkeyArray": valid = Array.isArray(data) && data.every(choice => object(choice) && positive(choice.id) && integer(choice.revision) && text(choice.rp_id) && typeof choice.user_name === "string" && typeof choice.display_name === "string"); break;
+            case "itemPage": valid = object(data) && Array.isArray(data.items) && data.items.every(summary) && integer(data.total); break;
             case "passkeyCredential": valid = object(data) && text(data.id) && data.rawId === data.id && data.type === "public-key" && object(data.response) && text(data.response.clientDataJSON) && object(data.clientExtensionResults); break;
         }
         if (!valid) fail("Invalid native operation result");
         return data;
     }
-    return { protocolVersion, operations, validateRequest, validateResult };
+    return { protocolVersion, operations, itemProfiles, validateRequest, validateResult };
 });

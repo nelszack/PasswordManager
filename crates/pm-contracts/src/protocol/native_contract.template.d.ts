@@ -5,6 +5,7 @@ export type ItemKind = "login" | "secure-note" | "payment-card" | "identity" | "
 export type OperationState = "pending" | "committed" | "committed_durability_unknown" | "failed" | "unknown";
 export interface OperationReceipt { operationId: string; state: OperationState; revision: number | null; }
 export interface ItemSummary { id: number; revision: number; name: string; username: string | null; kind: ItemKind; urls: string[]; has_totp: boolean; has_duo: boolean; }
+export interface ItemPage { items: ItemSummary[]; total: number; }
 export interface CustomField { name: string; value: string; secret: boolean; }
 export interface BrowserLogin { id: number; revision: number; name: string; username: string | null; password: string; has_totp: boolean; }
 export interface AutofillItem { id: number; revision: number; name: string; kind: ItemKind; username: string | null; primary_secret: string; custom_fields: CustomField[]; }
@@ -21,6 +22,8 @@ export type NativeAction = keyof NativeRequests;
 export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo" | "approval"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }
 export const protocolVersion: __PROTOCOL_VERSION__;
 export const operations: Readonly<Record<NativeAction, NativePolicy>>;
+export interface ItemProfile { title: string; owner: string; secret: string; }
+export const itemProfiles: Readonly<Record<ItemKind, ItemProfile>>;
 export function validateRequest<K extends NativeAction>(action: K, fields: NativeRequests[K]): NativeRequests[K];
 export function validateResult<K extends NativeAction>(action: K, data: unknown): NativeResults[K];
 export type NativeResponse<K extends NativeAction> = { id: number; protocolVersion: number; nativeVersion: string; sessionId?: string; success: true; data: NativeResults[K]; operation?: OperationReceipt; operationId?: string } | { id: number; protocolVersion: number; nativeVersion: string; sessionId?: string; success: false; error: string; uncertain?: boolean; operationId?: string; operation?: OperationReceipt; code?: number };

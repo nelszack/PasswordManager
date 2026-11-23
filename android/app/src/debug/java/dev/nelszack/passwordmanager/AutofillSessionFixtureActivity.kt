@@ -12,4 +12,6 @@ class AutofillSessionFixtureActivity : SecureActivity() {
     }
 
     override fun retainVaultOnStop() = completedHandoff
+
+    override fun delayLockOnLeave() = false
 }

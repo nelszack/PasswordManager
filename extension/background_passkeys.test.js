@@ -218,11 +218,14 @@ test("declining, other providers, closing, cancelling, and invalidation each set
 });
 
 test("locked vaults, changed pages, failed operations, and missing windows are reported", async () => {
-    const locked = environment({ responses: { status: { success: true, data: { locked: true }, sessionId: null } } });
+    const lockedResponses = { status: { success: true, data: { locked: true }, sessionId: null } };
+    const locked = environment({ responses: lockedResponses });
     const pending = locked.service.request({ kind: "create", requestId: "r", options: registration() }, locked.sender);
     await tick();
     assert.equal(locked.service.data({ token: "token-1" }, locked.prompt).locked, true);
     await assert.rejects(locked.service.complete({ token: "token-1", selection: { action: "confirm" } }, locked.prompt), /Unlock/);
+    // Still locked: a refresh keeps the locked state.
+    assert.equal((await locked.service.data({ token: "token-1", refresh: true }, locked.prompt)).locked, true);
     locked.service.invalidate();
     await pending;
 
@@ -231,7 +234,34 @@ test("locked vaults, changed pages, failed operations, and missing windows are r
     await tick();
     assert.equal(lockedGet.service.data({ token: "token-1" }, lockedGet.prompt).locked, true);
     lockedGet.service.invalidate();
+
+    // Unlocking in the desktop app lets the open window continue.
+    const unlockingResponses = { getPasskeys: { success: false, error: "Vault locked." } };
+    const unlocking = environment({ responses: unlockingResponses });
+    const waiting = unlocking.service.request({ kind: "get", requestId: "r", options: signIn() }, unlocking.sender);
+    await tick();
+    unlockingResponses.getPasskeys = {
+        success: true,
+        sessionId: "a".repeat(64),
+        data: [{ id: 3, revision: 1, rp_id: "example.com", user_name: "alice", display_name: "Alice" }],
+    };
+    unlockingResponses.status = unlocked();
+    const refreshed = await unlocking.service.data({ token: "token-1", refresh: true }, unlocking.prompt);
+    assert.equal(refreshed.locked, false);
+    assert.equal(refreshed.choices.length, 1);
+    unlocking.service.invalidate();
+    await waiting;
     await lockedSignIn;
+
+    // Unlocked but no passkey for this site: the browser's own options take over.
+    const emptyResponses = { getPasskeys: { success: false, error: "Vault locked." } };
+    const empty = environment({ responses: emptyResponses });
+    const none = empty.service.request({ kind: "get", requestId: "r", options: signIn() }, empty.sender);
+    await tick();
+    emptyResponses.getPasskeys = { success: true, sessionId: "a".repeat(64), data: [] };
+    emptyResponses.status = unlocked();
+    await empty.service.data({ token: "token-1", refresh: true }, empty.prompt);
+    assert.equal(JSON.stringify(await none), JSON.stringify({ fallback: true }));
 
     const moved = environment({
         tabUrl: "https://other.example/",

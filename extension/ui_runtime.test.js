@@ -86,10 +86,15 @@ async function popupEnvironment(responses) {
         "statusDot", "statusText", "lockBtn", "openDesktopBtn", "output", "nativeHint", "recovery", "operation",
         "reviewOperation", "unknownReview", "inspected", "acknowledgeOperation", "genValue", "genNew", "genCopy",
         "genLength", "genLengthValue", "genSymbols", "genPassphrase", "neverSave", "neverCount",
-        "neverList"
+        "neverList", "setupCard", "setupCommand", "copySetupCommand", "extensionId", "copyExtensionId",
+        "retryBtn", "siteSection", "siteTitle", "siteSearch", "siteList", "siteEmpty", "addLoginBtn",
+        "addForm", "addName", "addUsername", "addPassword", "addRegenerate", "addSave", "addCancel",
+        "genUppercase", "genDigits", "genAmbiguous", "genSeparator", "shortcuts",
+        "vaultSearch", "vaultQuery", "vaultResults", "vaultEmpty", "reconnectBtn"
     ], responses);
     env.context.PasswordManagerPopupState = require("./popup_state.js");
     env.context.PasswordManagerGenerator = require("./password_generator.js");
+    env.context.PasswordManagerCommandContract = require("./command_contract.js");
     execute("popup.js", env.context);
     env.documentListeners.get("DOMContentLoaded")();
     await settle();
@@ -102,19 +107,24 @@ test("popup runtime renders cached/live status and performs an explicit lock", a
         getStatus: { native: true, running: true, locked: false },
         lockVault: { success: true, data: "Vault locked." }
     });
-    assert.equal(env.elements.statusText.innerText, "Vault unlocked");
+    assert.equal(env.elements.statusText.innerText, "Unlocked");
+    assert.equal(env.elements.statusDot.className, "dot success");
     assert.equal(env.elements.lockBtn.disabled, false);
     await env.elements.lockBtn.dispatch("click");
     assert.equal(env.elements.output.innerText, "Vault locked.");
     env.runtimeListener()({ action: "statusChanged", status: { native: true } });
-    assert.equal(env.elements.statusText.innerText, "Desktop app not running");
+    assert.equal(env.elements.statusText.innerText, "Service stopped");
     assert.match(env.elements.nativeHint.textContent, /desktop app/);
+    assert.equal(env.elements.siteSection.hidden, true);
     env.runtimeListener()({ action: "statusChanged", status: { native: false } });
-    assert.match(env.elements.nativeHint.textContent, /browser integration/);
+    assert.match(env.elements.nativeHint.textContent, /Connect this browser/);
+    assert.equal(env.elements.setupCard.hidden, false);
     env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: true } });
     assert.match(env.elements.nativeHint.textContent, /Unlock/);
+    assert.equal(env.elements.setupCard.hidden, true);
     env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: false } });
-    assert.match(env.elements.nativeHint.textContent, /key button/);
+    assert.equal(env.elements.nativeHint.hidden, true);
+    assert.equal(env.elements.siteSection.hidden, false);
 });
 
 // Picker data defaults to a same-origin login; tests override only what differs.
@@ -183,8 +193,10 @@ async function credentialPromptEnvironment(responses = {}) {
         ...responses
     });
     const env = environment([
-        "credentials", "site", "status", "name", "username", "usernameLabel", "updateNote", "reviewOutcome", "add", "update", "cancel", "never"
+        "credentials", "site", "status", "name", "username", "usernameLabel", "updateNote", "reviewOutcome", "add", "update", "cancel", "never",
+        "passwordMask", "password", "revealPassword"
     ], responses, "?token=prompt-token");
+    env.elements.password.hidden = true; // as in credential_prompt.html
     execute("credential_prompt.js", env.context);
     await settle();
     return env;
@@ -199,6 +211,45 @@ test("credential prompt runtime renders metadata and submits only trusted action
     await settle();
     assert.equal(env.context.closed, true);
     assert.equal(env.messages.at(-1).selection.action, "update");
+});
+
+test("credential prompt reveals and corrects the captured password, and Escape means not now", async () => {
+    const env = await credentialPromptEnvironment({
+        revealCredentialPassword: { success: true, password: "captured-secret" },
+    });
+    env.messages.length = 0;
+    await env.elements.revealPassword.dispatch("click", { isTrusted: false });
+    assert.equal(env.messages.length, 0, "untrusted clicks reveal nothing");
+    await env.elements.revealPassword.dispatch("click", { isTrusted: true });
+    assert.equal(env.elements.password.value, "captured-secret");
+    assert.equal(env.elements.password.hidden, false);
+    assert.equal(env.elements.revealPassword.textContent, "Hide");
+    await env.elements.revealPassword.dispatch("click", { isTrusted: true });
+    assert.equal(env.elements.password.hidden, true);
+    env.elements.update.dispatch("click", { isTrusted: true });
+    await settle();
+    assert.equal(env.messages.at(-1).selection.password, undefined, "an unedited password is not resent");
+
+    const edited = await credentialPromptEnvironment({
+        revealCredentialPassword: { success: true, password: "captured-secret" },
+    });
+    await edited.elements.revealPassword.dispatch("click", { isTrusted: true });
+    edited.elements.password.value = "corrected-secret";
+    edited.elements.password.dispatch("input");
+    assert.match(edited.elements.passwordMask.textContent, /16 characters/);
+    edited.elements.add.dispatch("click", { isTrusted: true });
+    edited.elements.credentials.dispatch("submit", { isTrusted: true });
+    await settle();
+    assert.equal(edited.messages.at(-1).selection.password, "corrected-secret");
+
+    const escaping = await credentialPromptEnvironment();
+    escaping.documentListeners.get("keydown")({ key: "Escape", isTrusted: true, repeat: false });
+    await settle();
+    assert.equal(escaping.messages.at(-1).selection.action, "cancel");
+
+    const expired = await credentialPromptEnvironment({ revealCredentialPassword: { success: false } });
+    await expired.elements.revealPassword.dispatch("click", { isTrusted: true });
+    assert.match(expired.elements.status.textContent, /unavailable/);
 });
 
 test("credential prompt explains that updating another account keeps its username", async () => {
@@ -294,7 +345,11 @@ test("the popup has no master-password field and unlocks only through the deskto
     assert.match(env.elements.nativeHint.textContent, /desktop app/);
     assert.equal(env.messages.some(message => ["unlockVault", "listVaults"].includes(message.action)), false);
     const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "popup.html"), "utf8");
-    assert.doesNotMatch(html, /type="password"/);
+    // The only password input is for a login being added, never the master password.
+    const inputs = [...html.matchAll(/<input[^>]*type="password"[^>]*>/g)].map(match => match[0]);
+    assert.equal(inputs.length, 1);
+    assert.match(inputs[0], /id="addOwnPassword"/);
+    assert.doesNotMatch(html, /master password/i);
 });
 
 test("popup opens the desktop while disconnected and reports launch errors", async () => {
@@ -397,15 +452,226 @@ test("popup generator persists settings and copies the visible password", async 
     const before = env.elements.genValue.textContent;
     env.elements.genNew.dispatch("click");
     assert.notEqual(env.elements.genValue.textContent, before);
+    // Connected: the desktop service copies; a refusal is shown, never bypassed.
     await env.elements.genCopy.dispatch("click");
-    assert.equal(env.context.copied, env.elements.genValue.textContent);
-    assert.match(env.elements.output.innerText, /copied/);
+    assert.equal(env.context.copied, undefined);
+    assert.match(env.elements.output.innerText, /Could not/);
+    assert.equal(env.messages.at(-1).action, "popupCopyGenerated");
     assert.equal(env.elements.neverSave.hidden, false);
     assert.equal(env.elements.neverCount.textContent, "2");
     const allow = env.elements.neverList.children[0].children[1];
     allow.dispatch("click");
     assert.deepEqual(env.stored.pmNeverSave, ["https://b.test"]);
     assert.equal(env.elements.neverCount.textContent, "1");
+});
+
+test("popup lists this site's logins and fills, copies, and adds through the worker", async () => {
+    const items = [
+        { id: 4, name: "Work", username: "w@corp", hasTotp: true },
+        { id: 5, name: "Spare", username: "", hasTotp: false },
+    ];
+    const responses = {
+        getStatus: { native: true, running: true, locked: false },
+        popupLogins: { success: true, site: "https://example.com", items },
+        popupCopy: { success: true, data: "Password copied. The clipboard clears in 30 seconds." },
+        popupFill: { success: false, error: "No sign-in form was found on this page." },
+        popupSave: { success: true, data: "Saved" },
+        popupCopyGenerated: { success: true, data: "Password copied. The clipboard clears in 30 seconds." },
+    };
+    const env = await popupEnvironment(responses);
+    await settle();
+    assert.equal(env.elements.siteTitle.textContent, "Logins for example.com");
+    assert.equal(env.elements.siteList.children.length, 2);
+    assert.equal(env.elements.siteSearch.hidden, true, "search appears only for longer lists");
+    const [work, spare] = env.elements.siteList.children;
+    const workButtons = work.children[1].children;
+    assert.deepEqual(workButtons.map(button => button.textContent), ["Fill", "Copy username", "Copy password", "Copy code"]);
+    assert.deepEqual(spare.children[1].children.map(button => button.textContent), ["Fill", "Copy password"]);
+    await workButtons[2].dispatch("click");
+    assert.equal(JSON.stringify(env.messages.at(-1)), JSON.stringify({ action: "popupCopy", id: 4, field: "password" }));
+    assert.match(env.elements.output.innerText, /clears in 30 seconds/);
+    await workButtons[3].dispatch("click");
+    assert.equal(env.messages.at(-1).field, "totp");
+    await workButtons[0].dispatch("click");
+    assert.equal(env.messages.at(-1).action, "popupFill");
+    assert.equal(env.elements.output.className, "error");
+    responses.popupFill = { success: true };
+    await workButtons[0].dispatch("click");
+    assert.equal(env.context.closed, true, "a successful fill closes the popup");
+
+    // Adding a login uses a generated password and never a typed one.
+    env.elements.addForm.hidden = true; // as in popup.html
+    await env.elements.addLoginBtn.dispatch("click");
+    assert.equal(env.elements.addForm.hidden, false);
+    assert.equal(env.elements.addName.value, "example.com");
+    assert.ok(env.elements.addPassword.textContent.length >= 8);
+    env.elements.addName.value = "";
+    await env.elements.addForm.dispatch("submit");
+    assert.match(env.elements.output.innerText, /Enter a name/);
+    env.elements.addName.value = "New account";
+    env.elements.addUsername.value = "me";
+    const generated = env.elements.addPassword.textContent;
+    await env.elements.addForm.dispatch("submit");
+    const save = env.messages.find(message => message.action === "popupSave");
+    assert.equal(save.name, "New account");
+    assert.equal(save.password, generated);
+    assert.equal(env.elements.addForm.hidden, true);
+    assert.equal(env.elements.addPassword.textContent, "", "a closed form keeps no generated password");
+
+    // Generated passwords are copied by the desktop service when it is connected.
+    await env.elements.genCopy.dispatch("click");
+    assert.equal(env.context.copied, undefined);
+    assert.match(env.elements.output.innerText, /clears in 30 seconds/);
+
+    responses.popupLogins = { success: true, site: "https://example.com", items: [...items, ...items] };
+    env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: true } });
+    env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: false } });
+    await settle();
+    assert.equal(env.elements.siteSearch.hidden, false);
+    env.elements.siteSearch.value = "zzz";
+    env.elements.siteSearch.dispatch("input");
+    assert.match(env.elements.siteEmpty.textContent, /No logins match/);
+});
+
+test("popup searches the whole vault and copies results through the desktop service", async () => {
+    const responses = {
+        getStatus: { native: true, running: true, locked: false },
+        popupLogins: { success: true, site: "https://example.com", items: [] },
+        popupSearch: { success: true, total: 3, items: [
+            { id: 9, name: "Bank", username: "me", kind: "login", site: "https://bank.example" },
+            { id: 10, name: "Wi-Fi", username: "", kind: "wifi", site: "" },
+        ] },
+        popupCopyItem: { success: true, data: "Password copied. The clipboard clears in 15 seconds." },
+    };
+    const env = await popupEnvironment(responses);
+    await settle();
+    assert.equal(env.elements.vaultSearch.hidden, false);
+    env.elements.vaultQuery.value = "b";
+    await env.context.searchVault();
+    assert.equal(env.messages.some(message => message.action === "popupSearch"), false, "one letter does not search");
+    env.elements.vaultQuery.value = "ba";
+    await env.context.searchVault();
+    assert.equal(env.elements.vaultResults.children.length, 2);
+    assert.match(env.elements.vaultEmpty.textContent, /Showing 2 of 3/);
+    const bankButtons = env.elements.vaultResults.children[0].children[1].children;
+    assert.deepEqual(bankButtons.map(button => button.textContent), ["Copy username", "Copy password", "Open"]);
+    // "Open" hands the item to the desktop app for viewing and editing.
+    await bankButtons[2].dispatch("click");
+    assert.equal(env.messages.at(-1).action, "openDesktop");
+    assert.equal(env.messages.at(-1).id, 9);
+    await bankButtons[1].dispatch("click");
+    assert.equal(env.messages.at(-1).action, "popupCopyItem");
+    assert.equal(env.messages.at(-1).id, 9);
+    assert.match(env.elements.output.innerText, /clears in 15/);
+    await bankButtons[0].dispatch("click");
+    assert.equal(env.context.copied, undefined, "usernames are copied by the desktop app too");
+    assert.equal(env.messages.at(-1).field, "username");
+    // Typed items use their own labels from the shared item profiles.
+    assert.equal(env.elements.vaultResults.children[1].children[1].children[0].textContent, "Copy Wi-Fi password");
+    responses.popupSearch = { success: true, total: 0, items: [] };
+    await env.context.searchVault();
+    assert.match(env.elements.vaultEmpty.textContent, /No items match/);
+    responses.popupSearch = { success: false, error: "Search failed hard" };
+    await env.context.searchVault();
+    assert.match(env.elements.vaultEmpty.textContent, /Search failed hard/);
+});
+
+test("popup handles lost connections, uncertain saves, and offline copying explicitly", async () => {
+    const responses = {
+        getStatus: { native: true, running: true, locked: false },
+        popupLogins: { success: true, site: "https://example.com", items: [] },
+        popupSave: { success: false, uncertain: true, error: "timed out" },
+    };
+    const env = await popupEnvironment(responses);
+    await settle();
+    env.elements.addForm.hidden = true;
+    await env.elements.addLoginBtn.dispatch("click");
+    env.elements.addName.value = "New";
+    await env.elements.addForm.dispatch("submit");
+    assert.match(env.elements.output.innerText, /may have completed/);
+    assert.equal(env.elements.addForm.hidden, true, "the form closes so the save is not repeated");
+
+    // A failed status check turns actions off instead of trusting the cached state.
+    responses.getStatus = { success: false, error: "worker gone" };
+    await env.context.refreshStatus();
+    assert.equal(env.elements.statusText.innerText, "Reconnecting…");
+    assert.equal(env.elements.siteSection.hidden, true);
+    assert.equal(env.elements.vaultSearch.hidden, true);
+
+    // With no desktop service, copying a generated password needs a second click.
+    await env.elements.genCopy.dispatch("click");
+    assert.equal(env.context.copied, undefined);
+    assert.match(env.elements.output.innerText, /again to copy anyway/);
+    await env.elements.genCopy.dispatch("click");
+    assert.equal(env.context.copied, env.elements.genValue.textContent);
+});
+
+test("popup clears an unsaved login on lock, marks stale searches, and reconnects", async () => {
+    const responses = {
+        getStatus: { native: true, running: true, locked: false },
+        popupLogins: { success: true, site: "https://example.com", items: [] },
+        popupSearch: { success: true, total: 1, items: [{ id: 1, name: "Bank", username: "me", kind: "login", site: "" }] },
+    };
+    const env = await popupEnvironment(responses);
+    await settle();
+    // Closing the form returns focus to the button that opened it.
+    await env.elements.addLoginBtn.dispatch("click");
+    await env.elements.addCancel.dispatch("click");
+    assert.equal(env.elements.addLoginBtn.focused, true);
+    // A draft left open is erased, with a notice, when the vault locks.
+    await env.elements.addLoginBtn.dispatch("click");
+    env.elements.addUsername.value = "me";
+    env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: true } });
+    assert.equal(env.elements.addForm.hidden, true);
+    assert.equal(env.elements.addUsername.value, "");
+    assert.match(env.elements.output.innerText, /cleared because the vault locked/);
+    // Unlocking again: typing marks earlier results stale until the new search answers.
+    env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: false } });
+    env.elements.vaultQuery.value = "ba";
+    await env.context.searchVault();
+    assert.equal(env.elements.vaultResults.children.length, 1);
+    env.elements.vaultQuery.value = "ban";
+    await env.elements.vaultQuery.dispatch("input");
+    assert.equal(env.elements.vaultResults.children.length, 0);
+    assert.match(env.elements.vaultEmpty.textContent, /Searching/);
+    env.elements.vaultQuery.value = "b";
+    await env.elements.vaultQuery.dispatch("input");
+    assert.equal(env.elements.vaultEmpty.hidden, true);
+
+    // A lost worker connection offers Reconnect, which recovers once status answers.
+    const broken = await popupEnvironment({ getStatus: { success: false, error: "worker gone" } });
+    assert.equal(broken.elements.reconnectBtn.hidden, false);
+    broken.context.document.visibilityState = "visible";
+    Object.assign(broken.context.chrome.runtime, {
+        sendMessage(message, callback) {
+            broken.messages.push(message);
+            callback({ native: true, running: true, locked: true });
+        },
+    });
+    await broken.elements.reconnectBtn.dispatch("click");
+    await settle();
+    assert.equal(broken.elements.reconnectBtn.hidden, true);
+    assert.match(broken.elements.output.innerText, /Reconnected/);
+});
+
+test("popup explains insecure pages and guides setup when disconnected", async () => {
+    const env = await popupEnvironment({
+        getStatus: { native: true, running: true, locked: false },
+        popupLogins: { success: true, site: null, reason: "insecure", host: "http://router.local", items: [] },
+    });
+    await settle();
+    assert.match(env.elements.siteEmpty.textContent, /not encrypted/);
+    assert.equal(env.elements.addLoginBtn.hidden, true);
+
+    const setup = await popupEnvironment({ getStatus: { native: false } });
+    assert.match(setup.elements.setupCommand.textContent, /pm native-host install --browser/);
+    await setup.elements.copySetupCommand.dispatch("click");
+    assert.equal(setup.context.copied, setup.elements.setupCommand.textContent);
+    await setup.elements.retryBtn.dispatch("click");
+    assert.match(setup.elements.output.innerText, /Still not connected/);
+
+    const broken = await popupEnvironment({ getStatus: { success: false, error: "worker gone" } });
+    assert.match(broken.elements.nativeHint.textContent, /reconnecting automatically/);
 });
 
 test("popup generator falls back to defaults and reports clipboard failures", async () => {
@@ -415,6 +681,8 @@ test("popup generator falls back to defaults and reports clipboard failures", as
         storage: { pmGenerator: { symbolSet: "", uppercase: false, lowercase: false, digits: false } }
     });
     assert.equal(env.elements.genValue.textContent.length, 20);
+    await env.elements.genCopy.dispatch("click");
+    assert.match(env.elements.output.innerText, /copy anyway/);
     await env.elements.genCopy.dispatch("click");
     assert.match(env.elements.output.innerText, /Could not copy/);
     assert.equal(env.elements.neverSave.hidden, true);
@@ -426,7 +694,7 @@ test("popup generator falls back to defaults and reports clipboard failures", as
 });
 
 test("passkey prompt shows the browser-reported site and sends only explicit choices", async () => {
-    const ids = ["title", "destination", "status", "choices", "confirm", "fallback", "cancel", "verify", "verifyHint", "confirmInDesktop"];
+    const ids = ["title", "destination", "status", "choices", "confirm", "fallback", "cancel", "verify", "verifyHint", "confirmInDesktop", "openDesktop"];
     const prompt = async (data, completion = { success: true }, query = "?token=t1") => {
         const env = environment(ids, { getPasskeyPromptData: data, completePasskeyPrompt: completion }, query);
         env.elements.verify.hidden = true;

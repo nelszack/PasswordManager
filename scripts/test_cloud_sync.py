@@ -55,6 +55,10 @@ class Device:
         result = self.run("--json", "view")
         return json.loads(result.stdout)["data"]
 
+    def data(self, *args):
+        """A command's JSON `data`; human-readable output is for people, not scripts."""
+        return json.loads(self.run("--json", *args).stdout)["data"]
+
     def set_automatic(self, enabled):
         path = self.root / "config" / "config.toml"
         text = path.read_text()
@@ -124,11 +128,11 @@ def main():
                 assert local_token.read_bytes() == old_token
             print("PASS: manual connection failures preserve configuration and credentials")
             key = root / "external-test.key"
-            laptop.run("new", "--key", str(key))
+            laptop.run("new", "--key", str(key), "--locked")
             laptop.run("unlock", "--key", str(key))
             laptop.run("add", "--name", "Initial", "--generate-password", "--no-copy")
             laptop.run("sync", "enable")
-            remote_id = json.loads(laptop.run("sync", "vaults").stdout)[0]["id"]
+            remote_id = laptop.data("sync", "vaults")[0]["id"]
             desktop.run("sync", "pull")
             desktop.run("unlock", "--key", str(key))
             assert "Initial" in str(desktop.names())
@@ -156,7 +160,7 @@ def main():
             assert sorted(s["enabled"] for s in checkpoints) == [False, True]
             print("PASS: concurrent edits preserve both copies and allow a disabled comparison download")
 
-            review = json.loads(desktop.run("sync", "conflicts").stdout)
+            review = desktop.data("sync", "conflicts")
             def resolve(review, ok=True):
                 arguments = ["sync", "resolve", "--review", review["token"]]
                 for item in review["items"]:
@@ -168,13 +172,13 @@ def main():
             desktop.run("update", "--id", "1", "--username", "desktop-user")
             stale = resolve(review, ok=False)
             assert "changed since review" in stale.stderr.lower()
-            review = json.loads(desktop.run("sync", "conflicts").stdout)
+            review = desktop.data("sync", "conflicts")
             laptop.run("update", "--id", "1", "--username", "cloud-user")
             laptop.run("sync", "now")
             stale = resolve(review, ok=False)
             assert "changed since review" in stale.stderr.lower()
             original_files = set((desktop.root / "data").glob("*.enc"))
-            review = json.loads(desktop.run("sync", "conflicts").stdout)
+            review = desktop.data("sync", "conflicts")
             result = resolve(review)
             assert "recovery copies" in result.stdout.lower()
             recovery = set((desktop.root / "data").glob("*.enc")) - original_files
@@ -222,13 +226,13 @@ def main():
             print("PASS: re-enabling sync downloads changes made while it was disabled")
 
             # Server persistence must survive a restart without changing the version.
-            before = json.loads(laptop.run("sync", "vaults").stdout)
+            before = laptop.data("sync", "vaults")
             cloud.terminate()
             cloud.wait(timeout=10)
             cloud = subprocess.Popen([str(server_binary), "--data", str(storage), "--listen",
                                       f"127.0.0.1:{cloud_port}"], stdout=server_log, stderr=server_log)
             wait_for(reachable, "cloud restart")
-            assert json.loads(laptop.run("sync", "vaults").stdout) == before
+            assert laptop.data("sync", "vaults") == before
             print("PASS: durable cloud versions survive server restart")
         finally:
             for device in devices:

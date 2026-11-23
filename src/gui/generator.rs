@@ -105,18 +105,19 @@ impl Options {
                 .trim()
                 .parse::<u8>()
                 .ok()
-                .is_none_or(|value| value == 0)
+                .is_none_or(|value| !(3..=64).contains(&value))
             {
-                return Some("Choose between 1 and 255 words.");
+                // The same range on every surface (desktop, CLI, Android, extension).
+                return Some("Choose between 3 and 64 words.");
             }
         } else {
             if length
                 .trim()
                 .parse::<u8>()
                 .ok()
-                .is_none_or(|value| value == 0)
+                .is_none_or(|value| value < 8)
             {
-                return Some("Choose a length between 1 and 255.");
+                return Some("Choose a length between 8 and 255.");
             }
             if !self.uppercase && !self.lowercase && !self.digits && !self.symbols {
                 return Some("Select at least one character group.");
@@ -159,16 +160,16 @@ impl Options {
                 .trim()
                 .parse::<u8>()
                 .ok()
-                .filter(|words| *words > 0)
-                .ok_or("Choose between 1 and 255 words.")?;
+                .filter(|words| (3..=64).contains(words))
+                .ok_or("Choose between 3 and 64 words.")?;
             password_manager::password::generate_passphrase(words, &self.separator)
         } else {
             let length = length
                 .trim()
                 .parse::<u8>()
                 .ok()
-                .filter(|length| *length > 0)
-                .ok_or("Choose a length between 1 and 255.")?;
+                .filter(|length| *length >= 8)
+                .ok_or("Choose a length between 8 and 255.")?;
             password_manager::password::generate_password_with_options(
                 length,
                 &password_manager::password::PasswordOptions {

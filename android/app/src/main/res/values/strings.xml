@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_search_short">Search vault</string>
+    <string name="shortcut_search_long">Search your vault</string>
+    <string name="shortcut_generate_short">Generate</string>
+    <string name="shortcut_generate_long">Generate a password</string>
+</resources>

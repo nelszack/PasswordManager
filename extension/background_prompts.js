@@ -22,7 +22,7 @@ const PasswordManagerBackgroundPrompts = {
             chrome,
             page: "credential_prompt.html",
             width: 400,
-            height: 430,
+            height: 500,
             setTimeout,
             unavailable: "Could not open credential prompt",
         });
@@ -255,8 +255,21 @@ const PasswordManagerBackgroundPrompts = {
             return pending &&
                 !["invalidatedSaving", "closed"].includes(pending.state.phase) &&
                 pending.expiresAt > Date.now()
-                ? { success: true, data: pending.data, error: pending.state.error || null }
+                ? {
+                      success: true,
+                      data: { ...pending.data, passwordLength: pending.state.password?.length || 0 },
+                      error: pending.state.error || null,
+                  }
                 : { success: false, error: "Credential prompt expired" };
+        }
+        // The captured password, shown only when the person asks to review it.
+        function reveal(request, sender) {
+            if (!credentialPromptSenderAllowed(sender))
+                return { success: false, error: "Invalid credential prompt sender" };
+            const pending = pendingCredentialPrompts.get(request?.token);
+            if (!pending || pending.state.phase !== "ready" || pending.expiresAt <= Date.now())
+                return { success: false, error: "Credential prompt expired" };
+            return { success: true, password: pending.state.password };
         }
         function windowRemoved(windowId) {
             const token = credentialPromptWindows.release(windowId);
@@ -273,6 +286,7 @@ const PasswordManagerBackgroundPrompts = {
             complete: completeCredentialPrompt,
             invalidate: invalidateCredentialPrompts,
             data,
+            reveal,
             windowRemoved,
         };
     },

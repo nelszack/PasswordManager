@@ -1,6 +1,7 @@
-//! Device-local display names. Encrypted vault filenames remain unchanged.
-use password_manager::{
-    file::{AtomicWriteMode, atomic_write_private},
+//! Device-local display names shared by the desktop app and the CLI.
+//! Encrypted vault filenames remain unchanged.
+use crate::{
+    file::{AtomicWriteMode, atomic_write_private, config_dir},
     vault::validate_vault_filename,
 };
 use serde::{Deserialize, Serialize};
@@ -8,9 +9,43 @@ use std::{collections::BTreeMap, path::Path};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(super) struct Names(pub BTreeMap<String, String>);
+pub struct Names(pub BTreeMap<String, String>);
+
+/// The device-local names file in the configuration directory.
+pub fn path() -> std::path::PathBuf {
+    config_dir().join("vault-names.json")
+}
 
 impl Names {
+    /// Names from the default location; a missing or unreadable file means no names.
+    pub fn load() -> Self {
+        Self::read(&path()).unwrap_or_default()
+    }
+    /// Resolve a vault given by display name (case-insensitive) or `.enc` filename.
+    pub fn resolve(&self, wanted: &str, vaults: &[String]) -> Result<String, String> {
+        // Filenames pass through; the server reports missing or invalid ones.
+        if vaults.iter().any(|id| id == wanted) || wanted.ends_with(".enc") {
+            return Ok(wanted.to_owned());
+        }
+        let matches: Vec<_> = vaults
+            .iter()
+            .enumerate()
+            .filter(|(index, id)| {
+                self.label_at(id, *index, vaults.len())
+                    .eq_ignore_ascii_case(wanted.trim())
+            })
+            .map(|(_, id)| id.clone())
+            .collect();
+        match matches.as_slice() {
+            [id] => Ok(id.clone()),
+            [] => Err(format!(
+                "No vault is named {wanted:?}. Run `pm vaults` to see vault names."
+            )),
+            _ => Err(format!(
+                "Several vaults are named {wanted:?}; choose one by its .enc file from `pm vaults`."
+            )),
+        }
+    }
     pub fn read(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
             Ok(value) => serde_json::from_str(&value).map_err(|_| {
@@ -50,7 +85,7 @@ impl Names {
     }
 }
 
-pub(super) fn validate_name(label: &str) -> Result<(), &'static str> {
+pub fn validate_name(label: &str) -> Result<(), &'static str> {
     let label = label.trim();
     if label.is_empty() || label.chars().count() > 80 || label.chars().any(char::is_control) {
         Err("Choose a vault name with 1–80 characters and no line breaks.")
@@ -60,7 +95,7 @@ pub(super) fn validate_name(label: &str) -> Result<(), &'static str> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Choice {
+pub struct Choice {
     pub id: String,
     pub label: String,
 }
@@ -91,6 +126,23 @@ mod tests {
         assert_eq!(names.label_at("one.enc", 0, 2), "Named vault");
         assert_eq!(names.label_at("two.enc", 1, 2), "Vault 2");
         assert_eq!(Names::default().label_at("one.enc", 0, 1), "Personal vault");
+    }
+    #[test]
+    fn vaults_resolve_by_name_ignoring_case_or_by_filename() {
+        let vaults = vec!["a.enc".to_owned(), "b.enc".to_owned()];
+        let mut names = Names::default();
+        names.0.insert("a.enc".into(), "Work".into());
+        assert_eq!(names.resolve("work", &vaults).unwrap(), "a.enc");
+        assert_eq!(names.resolve("b.enc", &vaults).unwrap(), "b.enc");
+        assert_eq!(names.resolve("Vault 2", &vaults).unwrap(), "b.enc");
+        assert!(
+            names
+                .resolve("Home", &vaults)
+                .unwrap_err()
+                .contains("pm vaults")
+        );
+        names.0.insert("b.enc".into(), "work".into());
+        assert!(names.resolve("Work", &vaults).is_err());
     }
     #[test]
     fn labels_are_atomic_separate_from_vault_files_and_preserve_other_names() {

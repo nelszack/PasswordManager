@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press launcher shortcuts. Both open MainActivity, which still requires unlock for the vault. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="search"
+        android:enabled="true"
+        android:icon="@drawable/pm_shortcut_search"
+        android:shortcutShortLabel="@string/shortcut_search_short"
+        android:shortcutLongLabel="@string/shortcut_search_long">
+        <intent
+            android:action="dev.nelszack.passwordmanager.SHORTCUT_SEARCH"
+            android:targetPackage="dev.nelszack.passwordmanager"
+            android:targetClass="dev.nelszack.passwordmanager.MainActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="generate"
+        android:enabled="true"
+        android:icon="@drawable/pm_shortcut_generate"
+        android:shortcutShortLabel="@string/shortcut_generate_short"
+        android:shortcutLongLabel="@string/shortcut_generate_long">
+        <intent
+            android:action="dev.nelszack.passwordmanager.SHORTCUT_GENERATE"
+            android:targetPackage="dev.nelszack.passwordmanager"
+            android:targetClass="dev.nelszack.passwordmanager.MainActivity" />
+    </shortcut>
+</shortcuts>

@@ -105,6 +105,33 @@ module.exports.create = function create({
   }
   chrome.runtime.onMessage.addListener(shortcutListener);
 
+  // The toolbar popup asks the top frame to fill a login it listed for this site.
+  function popupFillListener(message, sender, sendResponse) {
+    if (message?.action !== "pmPopupFill" || sender?.id !== chrome.runtime.id) return;
+    if (!alive() || window !== window.top || typeof message.token !== "string") return;
+    const filled = withVisibilityCache(() =>
+      controls.fillFromPopup(deepActiveElement(), () =>
+        bridge.claimPopupFill(message.token),
+      ),
+    );
+    Promise.resolve(filled).then(
+      (done) =>
+        sendResponse(
+          done
+            ? { success: true }
+            : {
+                success: false,
+                error:
+                  "No sign-in form was found on this page. Use the key button in the login field instead.",
+              },
+        ),
+      (error) =>
+        sendResponse({ success: false, error: error?.message || "Could not fill" }),
+    );
+    return true;
+  }
+  chrome.runtime.onMessage.addListener(popupFillListener);
+
   // Dispose instead of acting once the extension context is gone.
   function alive() {
     if (disposed) return false;
@@ -348,6 +375,7 @@ module.exports.create = function create({
     duo?.dispose();
     credentials.dispose();
     chrome.runtime.onMessage.removeListener(shortcutListener);
+    chrome.runtime.onMessage.removeListener(popupFillListener);
   }
   return {
     start,

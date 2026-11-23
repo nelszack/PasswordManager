@@ -896,6 +896,7 @@ impl MobileState {
                 "unlocked": self.open().is_ok(),
                 "unlock_seconds": self.settings.unlock_seconds,
                 "clipboard_seconds": self.settings.clipboard_seconds,
+                "leave_lock_seconds": self.settings.leave_lock_seconds,
             })),
             Request::Vaults => Ok(json!(self.vault_names()?)),
             Request::Unlock {
@@ -962,9 +963,16 @@ impl MobileState {
                 Ok(json!(self.settings))
             }
             Request::Generate(options) => options.generate(&self.settings),
-            Request::Passcheck { password } => Ok(json!({
-                "assessment": crate::password::password_strength_output(&password),
-            })),
+            Request::Passcheck { password } => {
+                let (score, rating) = crate::password::strength_rating(&password);
+                Ok(json!({
+                    "assessment": crate::password::password_strength_output(&password),
+                    "score": score,
+                    "rating": rating,
+                    // The same rule vault creation applies, for live feedback.
+                    "master_problem": crate::encryption::validate_new_password(&password).err(),
+                }))
+            }
             Request::ItemProfiles => Ok(crate::item_profile::profiles_json()),
             _ => Err(MISROUTED.into()),
         }

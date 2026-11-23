@@ -9,19 +9,21 @@ pub mod docs;
 mod duo;
 pub mod encryption;
 pub mod file;
-pub mod item_profile;
+pub use pm_contracts::item_profile;
 pub mod mobile;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod native_messaging;
 mod operations;
 pub mod passkey;
 pub mod password;
+pub mod prompt;
 pub mod protocol;
 pub mod secret;
 pub mod server;
 mod terminal;
 pub mod types;
 pub mod vault;
+pub mod vault_names;
 
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_support {

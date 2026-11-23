@@ -65,7 +65,7 @@ const test = base.extend({
             const hostPath = path.join(browser.temporaryRoot, "pm-native-host");
             runPm(environment, "config", "--server-port", String(port));
             runPm(environment, "start"); started = true;
-            runPm(environment, "new", "--key", keyPath);
+            runPm(environment, "new", "--locked", "--key", keyPath);
             fs.symlinkSync(PM_BINARY, hostPath);
             installNativeManifest(browser.testHome, browser.profile, browser.extensionId, hostPath);
             const stop = () => { runPm(environment, "kill"); started = false; };
@@ -117,7 +117,7 @@ test("the extension saves through the real native host into a temporary vault", 
     await page.getByRole("button", { name: "Choose saved credentials" }).first().click();
     const picker = await pickerOpened;
     await expect(picker.locator("#destination")).toHaveText(`Fill on: ${origin}`);
-    await picker.getByRole("button", { name: /Real Native Entry/ }).click();
+    await picker.getByRole("option", { name: /Real Native Entry/ }).click();
     await expect(page.locator("#username")).toHaveValue("real@example.com");
     await expect(page.locator("#password")).toHaveValue("real-native-password");
 
@@ -146,7 +146,7 @@ test("the extension saves through the real native host into a temporary vault", 
     );
     await page.getByRole("button", { name: "Choose saved credentials" }).first().click();
     const secondPicker = await secondPickerOpened;
-    await expect(secondPicker.getByRole("button", { name: /Real Native Entry/ })).toBeVisible();
+    await expect(secondPicker.getByRole("option", { name: /Real Native Entry/ })).toBeVisible();
     runPm(environment, "lock");
     await expect.poll(() => secondPicker.isClosed()).toBe(true);
 

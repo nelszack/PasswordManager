@@ -16,7 +16,8 @@ if (typeof importScripts === "function") importScripts(
     "background_router.js",
     "duo_detection.js",
     "background_duo.js",
-    "background_passkeys.js"
+    "background_passkeys.js",
+    "background_popup.js"
 );
 
 // Wire dependencies once; each service owns its maps and lifecycle rules.
@@ -32,6 +33,7 @@ const native = PasswordManagerBackgroundNative.create({
         prompts.invalidate();
         duo.invalidate();
         passkeys.invalidate();
+        popup.invalidate();
     },
 });
 const pendingCredentials = PasswordManagerBackgroundPending.create({
@@ -80,6 +82,15 @@ const passkeys = PasswordManagerBackgroundPasskeys.create({
     crypto,
     setTimeout,
 });
+const popup = PasswordManagerBackgroundPopup.create({
+    chrome,
+    security: PasswordManagerSecurity,
+    protocol: PasswordManagerNativeProtocol,
+    nativeRequest: native.request,
+    crypto,
+    setTimeout,
+    rememberFilled: pickers.rememberFilled,
+});
 const manifest = chrome.runtime.getManifest();
 const status = PasswordManagerBackgroundStatus.create({
     chrome,
@@ -95,6 +106,7 @@ const status = PasswordManagerBackgroundStatus.create({
         prompts.invalidate();
         duo.invalidate();
         passkeys.invalidate();
+        popup.invalidate();
     },
     cleanupExpired: () => {
         pendingCredentials.cleanup().catch(() => {});
@@ -138,6 +150,7 @@ const router = PasswordManagerBackgroundRouter.create({
     pendingCredentials,
     duo,
     passkeys,
+    popup,
 });
 chrome.windows.onRemoved.addListener(windowId => {
     if (!duo.windowRemoved(windowId) && !prompts.windowRemoved(windowId) && !passkeys.windowRemoved(windowId))

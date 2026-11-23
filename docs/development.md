@@ -598,7 +598,7 @@ editing API are removed. Popup acknowledgement requires a server review reportin
 an unknown operation plus explicit inspection; it never replays the original write. Recovery identities for
 retired editor operations remain reviewable after an extension upgrade.
 
-CLI `view` and `search` and desktop search translate into one `List(SearchFilter)`
+CLI `list` and `search` and desktop search translate into one `List(SearchFilter)`
 RPC. The current local protocol version is **6**, defined by
 `crates/pm-contracts/src/protocol.rs`; older contracts are rejected. Stop the
 daemon with the previous build before replacing it, then update the native host (`pm native-host update`),

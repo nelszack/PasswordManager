@@ -65,6 +65,11 @@ test("completion builds only authorized add and update operations", () => {
     assert.equal(prompt.operation(pending, { action: "cancel" }).action, "cancel");
     assert.equal(prompt.operation(pending, { action: "update", name: "Personal" }).fields.entryId, 7);
     assert.throws(() => prompt.operation(pending, { action: "delete", name: "Personal" }));
+    // A reviewed, corrected password replaces the captured one; invalid ones are refused.
+    assert.equal(prompt.operation(pending, { action: "add", name: "A", password: "fixed" }).fields.password, "fixed");
+    for (const password of ["", 5, "a\nb", "x".repeat(64 * 1024 + 1)]) {
+        assert.throws(() => prompt.operation(pending, { action: "add", name: "A", password }), /password/);
+    }
     assert.throws(() => prompt.operation({ ...pending, data: {} }, {
         action: "update", name: "Personal"
     }));

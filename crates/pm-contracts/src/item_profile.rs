@@ -24,6 +24,14 @@ pub struct Profile {
     pub guidance: &'static str,
     pub suggested: &'static [(&'static str, bool)],
 }
+impl Profile {
+    /// The secret's name without editor guidance: "Identity number (optional)"
+    /// becomes "Identity number". Use it for buttons and messages.
+    pub fn secret_name(&self) -> &'static str {
+        self.secret.split(" (").next().unwrap_or(self.secret)
+    }
+}
+
 pub fn profile(kind: ItemKind) -> Profile {
     match kind {
         ItemKind::Login => Profile {

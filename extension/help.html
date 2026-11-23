@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Help · Password Manager</title>
+  <link rel="stylesheet" href="common.css"><link rel="stylesheet" href="help.css">
+</head>
+
+<body>
+  <main>
+    <header class="brand">
+      <img src="icons/icon32.png" alt="">
+      <h1>Password Manager help</h1>
+    </header>
+    <nav aria-label="On this page">
+      <a href="#setup">Set up</a> · <a href="#use">Fill and save</a> · <a href="#popup">Toolbar popup</a> ·
+      <a href="#clipboard">Clipboard</a> · <a href="#shortcuts">Shortcuts</a> · <a href="#trouble">Troubleshooting</a>
+    </nav>
+
+    <section id="setup" class="card">
+      <h2>Set up</h2>
+      <ol>
+        <li>Install the desktop app (the <code>pm</code> program): download the archive for your system from
+          <a href="https://github.com/nelszack/PasswordManager/releases" target="_blank" rel="noopener">the
+          releases page</a> and run <code>pm</code>, or build it with <code>cargo build --release --locked</code>.
+          Then create or open a vault.</li>
+        <li>In the desktop app, open <strong>Settings → Browser &amp; service → Set up browser
+          integration</strong>, choose your browser, and select <strong>Turn on browser integration</strong>.
+          From a terminal, run <code>pm native-host install --browser chrome</code> (or
+          <code>chromium</code>, <code>helium</code>, <code>firefox</code>).</li>
+        <li>Reload this extension. Its toolbar popup shows <strong>Unlocked</strong> while your vault is open.</li>
+      </ol>
+      <p class="hint">On Windows, fully close the browser before turning on integration. The extension ID is
+        fixed, so nothing needs copying; only a repackaged extension needs <code>--extension-id</code>.</p>
+    </section>
+
+    <section id="use" class="card">
+      <h2>Fill and save</h2>
+      <ul>
+        <li>Select the <strong>key</strong> button in a login field to choose a saved account. A separate window
+          shows exactly which site will be filled, so a page cannot trick you into filling it.</li>
+        <li>Card and identity fields have their own buttons; one-time code fields have a <strong>clock</strong>
+          button.</li>
+        <li>The <strong>✨</strong> button on sign-up forms suggests a strong password.</li>
+        <li>After you sign in with a new or changed password, a window offers to save or update it. You can review
+          and correct the captured password there, or choose <strong>Never for this site</strong>.</li>
+        <li>Autofill works only on encrypted (<code>https://</code>) pages.</li>
+      </ul>
+    </section>
+
+    <section id="popup" class="card">
+      <h2>Toolbar popup</h2>
+      <ul>
+        <li><strong>Logins for this site</strong>: fill one into the page, or copy its username, password, or
+          one-time code.</li>
+        <li><strong>Search all items</strong>: find any item by name, username, or website and copy its
+          username, password, or one-time code. <strong>Open</strong> shows the item in the desktop app, where
+          you can view, edit, or delete it. Search sees names and addresses, never passwords.</li>
+        <li><strong>Add</strong> saves a new login for the current site, with a generated password or one you
+          already have.</li>
+        <li>The popup never asks for your master password. Unlock in the desktop app; the popup updates by
+          itself.</li>
+      </ul>
+    </section>
+
+    <section id="clipboard" class="card">
+      <h2>Clipboard</h2>
+      <p>Passwords and codes are copied by the desktop app, which clears the clipboard after the time set in its
+        Settings → Security (and never if copying is turned off there). If the desktop app isn't connected, the
+        popup asks before copying a generated password, because nothing can clear it afterwards.</p>
+    </section>
+
+    <section id="shortcuts" class="card">
+      <h2>Keyboard shortcuts</h2>
+      <ul>
+        <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Y</kbd> (<kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>Y</kbd> on macOS)
+          opens the popup.</li>
+        <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> (<kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> on macOS)
+          chooses a login for the focused field.</li>
+        <li>In the account window, type to search, use <kbd>↑</kbd> <kbd>↓</kbd> and <kbd>Enter</kbd>, or
+          <kbd>Esc</kbd> to cancel.</li>
+      </ul>
+      <p class="hint">Change shortcuts at <code>chrome://extensions/shortcuts</code> (Chrome) or
+        <code>about:addons</code> → ⚙ → Manage Extension Shortcuts (Firefox).</p>
+    </section>
+
+    <section id="trouble" class="card">
+      <h2>Troubleshooting</h2>
+      <dl>
+        <dt>Not connected</dt>
+        <dd>Browser integration isn't turned on for this browser, or the desktop app moved. Turn it on again
+          (see <a href="#setup">Set up</a>), then reload the extension. After updating the desktop app, choose
+          <strong>Repair after an update</strong> or run <code>pm native-host update</code>.</dd>
+        <dt>Service stopped</dt>
+        <dd>The desktop app's background service isn't running. Open the desktop app to start it.</dd>
+        <dt>Locked</dt>
+        <dd>Choose <strong>Unlock in desktop app</strong>: the desktop window comes forward with its password
+          field ready. Open popups, account and passkey windows continue by themselves once it unlocks.</dd>
+        <dt>Update needed</dt>
+        <dd>The extension and the desktop app are different versions. Update the one that is older.</dd>
+        <dt>Reconnecting…</dt>
+        <dd>The extension restarted in the background. Close and reopen the popup.</dd>
+        <dt>No key button on a page</dt>
+        <dd>The page isn't encrypted (<code>http://</code>), or its form isn't recognized. Use the popup's
+          <strong>Copy username</strong> and <strong>Copy password</strong> instead.</dd>
+        <dt>“Fill” from the popup did nothing</dt>
+        <dd>The login form is inside an embedded frame. Use the key button in the field instead.</dd>
+      </dl>
+    </section>
+  </main>
+</body>
+
+</html>

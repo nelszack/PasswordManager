@@ -5,9 +5,136 @@ use super::{
 };
 use iced::widget::{button as button_style, container, text};
 
-/// Bordered secondary action with a 15-point label.
-pub(super) fn action<'a>(label: &'a str, message: Message, enabled: bool) -> Button<'a> {
+/// The bundled Material Icons subset (assets/material-icons.ttf, Apache 2.0).
+pub(super) const ICON_FONT: iced::Font = iced::Font::with_name("Material Icons");
+
+/// One icon glyph from [`super::icon_chars`], sized to sit beside 15-point text.
+pub(super) fn icon<'a>(glyph: char) -> iced::widget::Text<'a> {
+    text(glyph.to_string())
+        .font(ICON_FONT)
+        .size(17)
+        .line_height(1.0)
+}
+
+/// The icon for a common action, chosen from its label so every surface of the
+/// app uses the same symbol for the same task.
+fn action_icon(label: &str) -> Option<char> {
+    use super::icon_chars as i;
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| label.starts_with(p));
+    // More specific labels first: "Create a backup" is a backup, not a new item.
+    Some(if starts(&["Copy"]) {
+        i::CONTENT_COPY
+    } else if starts(&[
+        "Create a backup",
+        "Create complete",
+        "Back up",
+        "Encrypted backup",
+    ]) {
+        i::BACKUP
+    } else if starts(&["Check vault health", "Vault health", "Run health check"]) {
+        i::HEALTH_AND_SAFETY
+    } else if starts(&["Reveal", "Show "]) {
+        i::VISIBILITY
+    } else if starts(&["Hide"]) {
+        i::VISIBILITY_OFF
+    } else if starts(&["Edit"]) {
+        i::EDIT
+    } else if starts(&["Permanently delete", "Delete", "Empty trash", "Purge"]) {
+        i::DELETE_FOREVER
+    } else if starts(&["Move to trash", "Move ", "Remove"]) {
+        i::DELETE
+    } else if starts(&["Lock"]) {
+        i::LOCK
+    } else if starts(&["Add", "New ", "Create"]) {
+        i::ADD
+    } else if starts(&["Search", "Advanced search"]) {
+        i::SEARCH
+    } else if starts(&["Refresh", "Check again", "Find existing"]) {
+        i::REFRESH
+    } else if starts(&["Generate", "Suggest"]) {
+        i::AUTORENEW
+    } else if starts(&["Open website", "Open the"]) {
+        i::OPEN_IN_NEW
+    } else if starts(&["Restore", "Undo"]) {
+        i::RESTORE
+    } else if starts(&["Download", "Export"]) {
+        i::FILE_DOWNLOAD
+    } else if starts(&["Import", "Upload"]) {
+        i::FILE_UPLOAD
+    } else if starts(&["Sync", "Turn on sync", "Turn off sync"]) {
+        i::SYNC
+    } else if starts(&["Save"]) {
+        i::CHECK
+    } else if starts(&["Help"]) {
+        i::HELP_OUTLINE
+    } else if starts(&["Back"]) {
+        i::ARROW_BACK
+    } else if starts(&["Cancel", "Close", "Dismiss"]) {
+        i::CLOSE
+    } else if starts(&["Password history", "History"]) {
+        i::HISTORY
+    } else if starts(&["Settings", "Open settings"]) {
+        i::SETTINGS
+    } else {
+        return None;
+    })
+}
+
+/// A bordered action showing [`icon`] before its label; screen readers hear the label.
+pub(super) fn icon_button<'a>(
+    glyph: char,
+    label: impl Into<String>,
+    message: Message,
+    enabled: bool,
+) -> Button<'a> {
+    let label = label.into();
+    button(
+        iced::widget::row![icon(glyph), text(label.clone()).size(15)]
+            .spacing(7)
+            .align_y(iced::Alignment::Center),
+    )
+    .accessible_name(label)
+    .padding([11, 14])
+    .style(quiet_button)
+    .on_press_maybe(enabled.then_some(message))
+}
+
+/// The same bordered action with text only (disclosures, where an icon would mislead).
+pub(super) fn text_action<'a>(
+    label: impl text::IntoFragment<'a>,
+    message: Message,
+    enabled: bool,
+) -> Button<'a> {
     button(text(label).size(15))
+        .padding([11, 14])
+        .style(quiet_button)
+        .on_press_maybe(enabled.then_some(message))
+}
+
+/// Bordered secondary action with a 15-point label and, for common tasks, an icon.
+pub(super) fn action<'a>(
+    label: impl text::IntoFragment<'a>,
+    message: Message,
+    enabled: bool,
+) -> Button<'a> {
+    let label = label.into_fragment();
+    let content: Element<'a, Message> = match action_icon(&label) {
+        // The icon is decoration: screen readers hear only the label.
+        Some(glyph) => {
+            let name = label.to_string();
+            return button(
+                iced::widget::row![icon(glyph), text(label).size(15)]
+                    .spacing(7)
+                    .align_y(iced::Alignment::Center),
+            )
+            .accessible_name(name)
+            .padding([11, 14])
+            .style(quiet_button)
+            .on_press_maybe(enabled.then_some(message));
+        }
+        None => text(label).size(15).into(),
+    };
+    button(content)
         .padding([11, 14])
         .style(quiet_button)
         .on_press_maybe(enabled.then_some(message))
@@ -41,7 +168,11 @@ pub(super) fn quiet_danger(theme: &Theme, status: button_style::Status) -> butto
 }
 
 /// Filled primary action with the same shape and label size as [`action`].
-pub(super) fn primary<'a>(label: &'a str, message: Message, enabled: bool) -> Button<'a> {
+pub(super) fn primary<'a>(
+    label: impl text::IntoFragment<'a>,
+    message: Message,
+    enabled: bool,
+) -> Button<'a> {
     // `Button::style` rounds every variant to the shared 8 px radius.
     action(label, message, enabled).style(button_style::primary)
 }
@@ -76,7 +207,32 @@ pub(super) fn tab_style(
     }
 }
 
-pub(super) fn label(value: &str) -> iced::widget::Text<'_> {
+/// A hover hint, used to show an action's keyboard shortcut.
+pub(super) fn tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    hint: String,
+) -> Element<'a, Message> {
+    iced::widget::tooltip(
+        content,
+        container(text(hint).size(13))
+            .padding([4, 8])
+            .style(container::rounded_box),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
+/// "Ctrl" or "Cmd", for shortcut hints.
+pub(super) fn command_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    }
+}
+
+pub(super) fn label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(value).size(14)
 }
 

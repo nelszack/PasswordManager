@@ -479,9 +479,36 @@ pub(super) fn lookup_vault_in(
             match names.as_slice() {
                 [] => return Ok(None),
                 [name] => name.clone(),
+                many if keyfile_master.is_some() => {
+                    // A key file opens exactly one vault; find it instead of asking.
+                    // A wrong key is expected for the others, but any other problem
+                    // (unreadable file, identity mismatch, damage) is the real answer.
+                    let mut other_problem = None;
+                    for name in many {
+                        let mut candidate = key_pass.clone();
+                        match lookup_vault_in(directory, &mut candidate, Some(name)) {
+                            Ok(Some(found)) => {
+                                *key_pass = candidate;
+                                return Ok(Some(found));
+                            }
+                            Err(error)
+                                if other_problem.is_none()
+                                    && !error.to_string().contains("incorrect password/key") =>
+                            {
+                                other_problem = Some(error);
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Err(other_problem.unwrap_or_else(|| {
+                        VaultError::Validation(
+                            "this key file does not open any vault on this device".into(),
+                        )
+                    }));
+                }
                 _ => {
                     return Err(VaultError::InvalidInput(
-                        "multiple vaults exist; select a vault ID explicitly".into(),
+                        "several vaults exist; choose which one to open".into(),
                     ));
                 }
             }

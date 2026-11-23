@@ -3,6 +3,7 @@
 #[cfg(feature = "cli")]
 mod cli_values;
 pub mod cloud;
+pub mod item_profile;
 pub mod protocol;
 pub mod secret;
 pub mod types;

@@ -1,15 +1,29 @@
 <resources>
-    <color name="pm_background">#F4F7F7</color>
+    <color name="pm_background">#F6F8FC</color>
     <color name="pm_surface">#FFFFFF</color>
-    <color name="pm_text">#172E36</color>
-    <color name="pm_muted">#526871</color>
-    <color name="pm_accent">#146B5B</color>
+    <color name="pm_text">#192334</color>
+    <color name="pm_muted">#4D5869</color>
+    <color name="pm_accent">#2850BE</color>
     <color name="pm_on_accent">#FFFFFF</color>
-    <color name="pm_accent_soft">#DDEFE8</color>
-    <color name="pm_outline">#D5E1DF</color>
-    <color name="pm_danger">#AD263C</color>
-    <style name="PasswordManagerTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+    <color name="pm_accent_soft">#E6ECFB</color>
+    <color name="pm_outline">#D6DCE6</color>
+    <!-- Field and card outlines: at least 3:1 against the surface. -->
+    <color name="pm_edge">#68758B</color>
+    <color name="pm_danger">#B42318</color>
+    <style name="PasswordManagerTheme" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">@color/pm_accent</item>
+        <item name="colorOnPrimary">@color/pm_on_accent</item>
+        <item name="colorPrimaryContainer">@color/pm_accent_soft</item>
+        <item name="colorOnPrimaryContainer">@color/pm_text</item>
+        <item name="colorSecondaryContainer">@color/pm_accent_soft</item>
+        <item name="colorOnSecondaryContainer">@color/pm_text</item>
+        <item name="colorSurface">@color/pm_surface</item>
+        <item name="colorOnSurface">@color/pm_text</item>
+        <item name="colorOnSurfaceVariant">@color/pm_muted</item>
+        <item name="colorOutline">@color/pm_edge</item>
+        <item name="colorOutlineVariant">@color/pm_outline</item>
+        <item name="colorError">@color/pm_danger</item>
         <item name="android:colorAccent">@color/pm_accent</item>
         <item name="android:windowBackground">@color/pm_background</item>
         <item name="android:colorBackground">@color/pm_background</item>

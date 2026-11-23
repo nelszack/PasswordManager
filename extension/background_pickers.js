@@ -43,6 +43,20 @@ const PasswordManagerBackgroundPickers = {
             );
         }
 
+        // Remember a fingerprint of a login filled outside the picker (the popup).
+        async function rememberFilled(destination, username, password) {
+            const key = filledLoginKey(destination);
+            const record = {
+                username,
+                fingerprint: await loginFingerprint(username, password),
+                expiresAt: Date.now() + filledLoginLifetime,
+            };
+            filledLogins.set(key, record);
+            setTimeout(() => {
+                if (filledLogins.get(key) === record) filledLogins.delete(key);
+            }, filledLoginLifetime);
+        }
+
         function pickerSenderAllowed(sender) {
             return security.securePickerSender(sender, chrome.runtime.id, chrome.runtime.getURL("picker.html"));
         }
@@ -340,6 +354,7 @@ const PasswordManagerBackgroundPickers = {
             dataWhenLoaded,
             windowRemoved,
             matchesFilledLogin,
+            rememberFilled,
         };
     },
 };

@@ -12,9 +12,31 @@ use password_manager::{
     vault,
 };
 
-fn confirmed_password(console: &Output, require_minimum: bool) -> String {
-    try_prompt_for_confirmed_password(require_minimum, |message| console.print_warning(message))
+pub(super) fn confirmed_password(console: &Output, label: &str, require_minimum: bool) -> String {
+    try_prompt_for_confirmed_password(label, require_minimum, |message| {
+        console.print_warning(message)
+    })
+    .unwrap_or_else(|error| {
+        // A rejected value is invalid input (2); a prompt that could not run is a failure (1).
+        let invalid = error.contains("must contain") || error.contains("too predictable");
+        console.exit_error(&error, if invalid { 2 } else { 1 })
+    })
+}
+
+fn hidden(console: &Output, prompt: &str, what: &str) -> String {
+    password_manager::prompt::hidden(prompt, what)
         .unwrap_or_else(|error| console.exit_error(&error, 1))
+}
+
+/// The lower-case name of an item type's main secret, for prompts.
+fn secret_label(kind: types::ItemKind) -> String {
+    let label = password_manager::item_profile::profile(kind).secret;
+    let label = label.split(" (").next().unwrap_or(label);
+    if label.starts_with("API") || label.starts_with("SSH") || label.starts_with("Wi-Fi") {
+        label.to_owned()
+    } else {
+        label.to_lowercase()
+    }
 }
 
 pub(super) fn target_type(target: EntryArgs) -> Target {
@@ -52,8 +74,10 @@ fn custom_fields(
         if name.is_empty() {
             return Err("custom field names cannot be empty".to_string());
         }
-        let value = rpassword::prompt_password(format!("{name}: "))
-            .map_err(|error| format!("could not read custom field {name:?}: {error}"))?;
+        let value = password_manager::prompt::hidden(
+            &format!("{name}: "),
+            &format!("custom field {name:?}"),
+        )?;
         parsed.retain(|existing| !existing.name.eq_ignore_ascii_case(name));
         parsed.push(CustomField {
             name: name.to_string(),
@@ -117,25 +141,192 @@ pub(super) async fn run(
             }
         }
         command => {
-            let copies_password = matches!(
-                command,
-                CliCommands::Get {
-                    password_only: false,
-                    field: None,
-                    ..
-                }
-            ) && conf.clipboard.timeout > 0;
-            if let Err(code) = console.send_command(client, prepare_command(command, conf, console))
+            let copies = matches!(command, CliCommands::Get { copy: true, .. });
+            if copies && conf.clipboard.timeout == 0 {
+                console.exit_error(
+                    "Copying is turned off (clipboard timeout 0). Turn it on with `pm config \
+                     --clipboard-timeout 30`, or print the value with --password-only.",
+                    2,
+                );
+            }
+            let empty_hint = empty_list_hint(&command);
+            if let CliCommands::New {
+                name,
+                key_path,
+                locked,
+            } = command
             {
+                super::vaults::create(client, conf, name, key_path, locked, console);
+                return;
+            }
+            TRASH_CLIENT.with(|slot| *slot.borrow_mut() = Some(client.clone()));
+            let suggest_for = match &command {
+                CliCommands::Get { target, .. }
+                | CliCommands::History { target }
+                | CliCommands::RestorePassword { target, .. } => {
+                    target.entry_name.clone().or(target.item.clone())
+                }
+                CliCommands::Update { target, .. } => {
+                    target.entry_name.clone().or(target.item.clone())
+                }
+                _ => None,
+            };
+            // How to undo a move to trash, printed after it succeeds.
+            let undo = match &command {
+                CliCommands::Delete(args) if !args.vault => args
+                    .entry_name
+                    .clone()
+                    .or(args.item.clone())
+                    .map(|name| format!("Undo with `pm restore {name:?}`."))
+                    .or(args
+                        .id
+                        .map(|id| format!("Undo with `pm restore --id {id}`."))),
+                _ => None,
+            };
+            let command = prepare_command(command, conf, console);
+            if let Err(code) =
+                console.send_command_with_hint(client, command, empty_hint.as_deref())
+            {
+                // A misspelled name: suggest close matches before exiting.
+                if code == 3
+                    && let Some(name) = suggest_for
+                {
+                    suggest_names(client, &name, console);
+                }
                 std::process::exit(code);
             }
-            if copies_password {
-                console.print_note(&format!(
-                    "Password copied to the clipboard; it clears in {}s.",
-                    conf.clipboard.timeout
-                ));
+            // The server reports the copy's outcome as a notice (see Output).
+            let _ = copies;
+            if let Some(undo) = undo {
+                console.print_note(&undo);
             }
         }
+    }
+}
+
+/// Weak-password checks cover logins, like `pm audit`: a card number is not a password.
+fn weak_logins(mut options: types::ListOptions) -> types::ListOptions {
+    if options.weak && options.kind.is_none() {
+        options.kind = Some(types::ItemKind::Login);
+    }
+    options
+}
+
+/// "Did you mean" for a name that matched nothing.
+fn suggest_names(client: &client::AuthenticatedClient, name: &str, console: &Output) {
+    let needle = name.trim().to_lowercase();
+    let short: String = needle.chars().take(3).collect();
+    if short.is_empty() || console.is_json() {
+        return;
+    }
+    let Ok(response) = client.request_response(ServerCommand::List(SearchFilter {
+        query: Some(short),
+        ..Default::default()
+    })) else {
+        return;
+    };
+    let password_manager::protocol::ResponsePayload::ItemPage(page) = response.payload else {
+        return;
+    };
+    let mut names: Vec<_> = page.items.iter().map(|item| item.name.clone()).collect();
+    // Same-named items appear once here; `pm list` shows each with its ID.
+    names.sort_unstable();
+    names.dedup();
+    names.sort_by_key(|candidate| {
+        let lower = candidate.to_lowercase();
+        (
+            !lower.starts_with(&needle) && !needle.starts_with(&lower),
+            lower.len().abs_diff(needle.len()),
+        )
+    });
+    names.truncate(3);
+    if !names.is_empty() {
+        console.print_note(&format!(
+            "Did you mean: {}? Or search with `pm search {}`.",
+            names
+                .iter()
+                .map(|n| format!(
+                    "\"{}\"",
+                    password_manager::client::terminal_metadata(n).as_str()
+                ))
+                .collect::<Vec<_>>()
+                .join(", "),
+            password_manager::client::terminal_metadata(name).as_str()
+        ));
+    }
+}
+
+/// What an empty list means for a search or filtered view, with a way forward.
+fn empty_list_hint(command: &CliCommands) -> Option<String> {
+    let filtered = |list: &password_manager::cli::ListArgs| {
+        list.kind.is_some()
+            || list.totp
+            || list.no_totp
+            || list.weak
+            || list.stale_days.is_some()
+            || !list.tags.is_empty()
+            || list.favorites
+    };
+    match command {
+        CliCommands::Search(args) => Some(match &args.query {
+            Some(query) => format!(
+                "No items match {:?}. Try a shorter search, or list everything with `pm view`.",
+                password_manager::client::terminal_metadata(query).as_str()
+            ),
+            None => "No items match these filters. List everything with `pm view`.".into(),
+        }),
+        CliCommands::View(list) if filtered(list) => {
+            Some("No items match these filters. List everything with `pm view`.".into())
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn resolve_vault(
+    selected: Option<String>,
+    conf: &config::Config,
+    console: &Output,
+) -> Option<String> {
+    let vaults =
+        vault::list_vaults().unwrap_or_else(|error| console.exit_error(&error.to_string(), 1));
+    match selected {
+        Some(wanted) => Some(
+            password_manager::vault_names::Names::load()
+                .resolve(&wanted, &vaults)
+                .unwrap_or_else(|error| console.exit_error(&error, 2)),
+        ),
+        None => conf.unlock.vault_id.clone(),
+    }
+}
+
+/// Fail before asking for a password when the vault to open is ambiguous.
+fn require_single_vault(selected: &Option<String>, key_file: bool, console: &Output) {
+    if selected.is_some() || key_file {
+        return;
+    }
+    let vaults = vault::list_vaults().unwrap_or_default();
+    if vaults.is_empty() {
+        console.exit_error(
+            "No vaults exist yet. Create one with `pm new --name NAME`.",
+            1,
+        );
+    }
+    if vaults.len() > 1 {
+        let names = password_manager::vault_names::Names::load();
+        let listed = vaults
+            .iter()
+            .enumerate()
+            .map(|(index, id)| names.label_at(id, index, vaults.len()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        console.exit_error(
+            &format!(
+                "There are {} vaults ({listed}). Choose one with `pm unlock --vault NAME`, or set a \
+                 default with `pm config --default-vault FILE`.",
+                vaults.len()
+            ),
+            2,
+        );
     }
 }
 
@@ -149,23 +340,14 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             timeout,
             vault_file,
         } => {
-            if let Some(name) = &vault_file
-                && let Err(error) = vault::validate_vault_filename(name)
-            {
-                console.exit_error(&error.to_string(), 2);
-            }
+            let vault_file = resolve_vault(vault_file, conf, console);
+            require_single_vault(&vault_file, key.is_some(), console);
             ServerCommand::Unlock(UnlockInfo {
-                vault_file: vault_file.or(conf.unlock.vault_id.clone()),
+                vault_file,
                 key: if let Some(k) = key {
                     resolved_key(k, console)
                 } else {
-                    PasswordType::Password(
-                        rpassword::prompt_password("Enter master password: ").unwrap_or_else(
-                            |error| {
-                                console.exit_error(&format!("could not read password: {error}"), 1)
-                            },
-                        ),
-                    )
+                    PasswordType::Password(hidden(console, "Master password: ", "master password"))
                 },
                 timeout: timeout.timeout.unwrap_or(conf.unlock.timeout),
             })
@@ -183,11 +365,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
         },
         CliCommands::Passkey { command } => {
             use password_manager::cli::PasskeyCommands;
-            let read = |prompt: &str| {
-                rpassword::prompt_password(prompt).unwrap_or_else(|error| {
-                    console.exit_error(&format!("could not read input: {error}"), 1)
-                })
-            };
+            let read = |prompt: &str| hidden(console, prompt, "PIN or password");
             match command {
                 PasskeyCommands::Approve { id } => ServerCommand::PasskeyDecision {
                     id,
@@ -205,15 +383,10 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             }
         }
         CliCommands::Kill => ServerCommand::Kill,
-        CliCommands::New { key_path } => ServerCommand::New(if let Some(kp) = key_path {
-            resolved_new_key(kp, console)
-        } else {
-            PasswordType::Password(confirmed_password(console, true))
-        }),
         CliCommands::Rekey { key_path } => ServerCommand::Rekey(if let Some(kp) = key_path {
             resolved_new_key(kp, console)
         } else {
-            PasswordType::Password(confirmed_password(console, true))
+            PasswordType::Password(confirmed_password(console, "master password", true))
         }),
 
         CliCommands::Add {
@@ -244,7 +417,10 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             let password = if matches!(kind, types::ItemKind::Identity) {
                 String::new()
             } else if !generate_password {
-                confirmed_password(console, false)
+                let typed = confirmed_password(console, &secret_label(kind), false);
+                warn_if_weak(kind, &name, &typed, console);
+                warn_if_duplicate(&name, console);
+                typed
             } else {
                 make_password(conf.genpass.length)
             };
@@ -284,22 +460,21 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
         }) => match (id, entry_name.or(item), vault) {
             (Some(i), None, _) => ServerCommand::Delete(Target::Id(i)),
             (None, Some(n), _) => ServerCommand::Delete(Target::Name(n)),
-            (None, None, true) => {
-                confirm_permanent(yes, "Permanently delete this vault?", console);
-                ServerCommand::Delete(Target::Vault {
-                    key: if let Some(k) = key {
-                        resolved_key(k, console)
-                    } else {
-                        PasswordType::Password(confirmed_password(console, false))
-                    },
-                    keep_key,
-                    vault_file: vault_file.or(conf.unlock.vault_id.clone()),
-                })
-            }
+            (None, None, true) => delete_vault(vault_file, key, keep_key, yes, conf, console),
             _ => unreachable!("clap requires exactly one delete target"),
         },
+        CliCommands::Vaults {
+            command:
+                Some(password_manager::cli::VaultsCommand::Delete {
+                    vault,
+                    key,
+                    keep_key,
+                    yes,
+                }),
+            ..
+        } => delete_vault(vault, key, keep_key, yes, conf, console),
         CliCommands::View(options) => ServerCommand::List(SearchFilter {
-            list: options.into(),
+            list: weak_logins(options.into()),
             ..Default::default()
         }),
         CliCommands::Search(args) => ServerCommand::List(SearchFilter {
@@ -308,7 +483,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             username: args.username,
             url: args.url,
             notes: args.notes.map(Into::into),
-            list: args.list.into(),
+            list: weak_logins(args.list.into()),
         }),
         CliCommands::History { target } => ServerCommand::History(target_type(target)),
         CliCommands::Attachment { command } => ServerCommand::Attachment(match command {
@@ -338,7 +513,11 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             revision,
         },
         CliCommands::Trash => ServerCommand::Trash,
-        CliCommands::Restore { id } => ServerCommand::RestoreTrash(id),
+        CliCommands::Restore { id, item } => ServerCommand::RestoreTrash(match (id, item) {
+            (Some(id), _) => id,
+            (None, Some(name)) => trashed_id(&name, console),
+            (None, None) => unreachable!("clap requires a name or --id"),
+        }),
         CliCommands::Purge(args) => {
             let prompt = args.id.map_or_else(
                 || "Permanently erase all trashed items?".into(),
@@ -358,27 +537,25 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             require_totp,
         }),
         CliCommands::Totp { command } => match command {
-            TotpCommands::Set { target } => {
-                match rpassword::prompt_password("Base32 TOTP secret or TOTP/HOTP otpauth URI: ") {
-                    Ok(configuration) => ServerCommand::Totp(TotpCommand::Set {
-                        target: target_type(target),
-                        configuration: configuration.into(),
-                    }),
-                    Err(error) => console
-                        .exit_error(&format!("could not read TOTP configuration: {error}"), 1),
-                }
-            }
-            TotpCommands::Duo { target, mode } => {
-                match rpassword::prompt_password("Duo activation link (HTTPS or duo://): ") {
-                    Ok(activation) => ServerCommand::Totp(TotpCommand::Duo {
-                        target: target_type(target),
-                        activation: activation.into(),
-                        mode,
-                    }),
-                    Err(error) => console
-                        .exit_error(&format!("could not read Duo activation link: {error}"), 1),
-                }
-            }
+            TotpCommands::Set { target } => ServerCommand::Totp(TotpCommand::Set {
+                target: target_type(target),
+                configuration: hidden(
+                    console,
+                    "Setup key (Base32) or otpauth:// link from the site: ",
+                    "authenticator setup key",
+                )
+                .into(),
+            }),
+            TotpCommands::Duo { target, mode } => ServerCommand::Totp(TotpCommand::Duo {
+                target: target_type(target),
+                activation: hidden(
+                    console,
+                    "Duo activation link (HTTPS or duo://): ",
+                    "Duo activation link",
+                )
+                .into(),
+                mode,
+            }),
             TotpCommands::Show {
                 target,
                 copy,
@@ -400,7 +577,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             } => ServerCommand::Backup(BackupRequest {
                 path: resolved_file(path, console),
                 key_pass: key_path.map_or_else(
-                    || PasswordType::Password(confirmed_password(console, true)),
+                    || PasswordType::Password(confirmed_password(console, "backup password", true)),
                     |path| resolved_key(path, console),
                 ),
                 force,
@@ -408,16 +585,11 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             BackupCommands::Restore { path, key_path } => {
                 let key_pass = key_path.map_or_else(
                     || {
-                        PasswordType::Password(
-                            rpassword::prompt_password("Backup password: ").unwrap_or_else(
-                                |error| {
-                                    console.exit_error(
-                                        &format!("could not read backup password: {error}"),
-                                        1,
-                                    )
-                                },
-                            ),
-                        )
+                        PasswordType::Password(hidden(
+                            console,
+                            "Backup password: ",
+                            "backup password",
+                        ))
                     },
                     |path| resolved_key(path, console),
                 );
@@ -434,12 +606,13 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             target,
             metadata,
         } => {
-            let password = if add.password {
-                if !add.generate_password {
-                    Some(confirmed_password(console, false))
-                } else {
-                    Some(make_password(conf.genpass.length))
-                }
+            let password = if add.generate_password {
+                Some(make_password(conf.genpass.length))
+            } else if add.password {
+                let label = metadata
+                    .kind
+                    .map_or_else(|| "password".to_owned(), secret_label);
+                Some(confirmed_password(console, &label, false))
             } else {
                 None
             };
@@ -482,6 +655,7 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             field,
             copy,
         } => {
+            password_manager::client::presentation::reveal_notes(reveal_secrets);
             if let Some(name) = field {
                 if copy {
                     ServerCommand::GetField {
@@ -501,15 +675,58 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             } else {
                 ServerCommand::Get {
                     target: target_type(target),
-                    copy_timeout: conf.clipboard.timeout,
+                    // Zero asks the server for details without touching the clipboard.
+                    copy_timeout: if copy { conf.clipboard.timeout } else { 0 },
                     reveal_secrets,
                 }
             }
         }
-        CliCommands::Export { path, force } => ServerCommand::Export {
-            path: resolved_file(path, console),
+        CliCommands::Export {
+            path,
+            format,
             force,
-        },
+            yes,
+        } => {
+            // The extension decides the format, so a typo such as `.jsn` must not
+            // silently produce a lossy CSV file.
+            use password_manager::cli::ExportFormat;
+            let named = std::path::Path::new(&path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase);
+            let detected = match named.as_deref() {
+                Some("json") => Some(ExportFormat::Json),
+                Some("csv") => Some(ExportFormat::Csv),
+                _ => None,
+            };
+            match (format, detected) {
+                (_, None) => console.exit_error(
+                    "Choose a file name ending in .json (portable, keeps every detail) or .csv \
+                     (for other password managers).",
+                    2,
+                ),
+                (Some(wanted), Some(found)) if wanted != found => console.exit_error(
+                    &format!(
+                        "--format {} does not match the file name; use a .{} file name.",
+                        if wanted == ExportFormat::Json {
+                            "json"
+                        } else {
+                            "csv"
+                        },
+                        if wanted == ExportFormat::Json {
+                            "json"
+                        } else {
+                            "csv"
+                        },
+                    ),
+                    2,
+                ),
+                _ => {}
+            }
+            let path = resolved_file(path, console);
+            confirm_export(yes, &path, console);
+            ServerCommand::Export { path, force }
+        }
 
         CliCommands::Import {
             path,
@@ -526,7 +743,9 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             } else {
                 Some(match key_path {
                     Some(path) => resolved_new_key(path, console),
-                    None => PasswordType::Password(confirmed_password(console, true)),
+                    None => {
+                        PasswordType::Password(confirmed_password(console, "master password", true))
+                    }
                 })
             };
             ServerCommand::Import(ImportRequest {
@@ -542,12 +761,158 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
     }
 }
 
+/// The trash ID for a name, resolved the same way as item names elsewhere.
+fn trashed_id(name: &str, console: &Output) -> usize {
+    let client = TRASH_CLIENT.with(|client| client.borrow().clone());
+    let Some(client) = client else {
+        console.exit_error("could not read the trash", 1)
+    };
+    let response = client
+        .request_response(ServerCommand::Trash)
+        .unwrap_or_else(|error| console.exit_error(&error, 1));
+    let password_manager::protocol::ResponsePayload::Trash(page) = response.payload else {
+        console.exit_error(&response.error_message(), 1)
+    };
+    let exact: Vec<_> = page.trash.iter().filter(|item| item.name == name).collect();
+    let loose: Vec<_> = page
+        .trash
+        .iter()
+        .filter(|item| item.name.eq_ignore_ascii_case(name))
+        .collect();
+    match (exact.as_slice(), loose.as_slice()) {
+        ([one], _) | ([], [one]) => one.id,
+        ([], []) => console.exit_error(
+            &format!("No trashed item is named {name:?}. See `pm trash`."),
+            3,
+        ),
+        _ => console.exit_error(
+            &format!(
+                "Several trashed items are named {name:?} (IDs {}). Choose one with --id.",
+                loose
+                    .iter()
+                    .map(|item| item.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            2,
+        ),
+    }
+}
+
+thread_local! {
+    /// The client for lookups made while preparing a command.
+    static TRASH_CLIENT: std::cell::RefCell<Option<client::AuthenticatedClient>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Two items with one name make every later `pm get NAME` ambiguous; say so.
+fn warn_if_duplicate(name: &str, console: &Output) {
+    let client = TRASH_CLIENT.with(|client| client.borrow().clone());
+    let Some(client) = client else { return };
+    let Ok(response) = client.request_response(ServerCommand::List(SearchFilter {
+        name: Some(name.to_owned()),
+        ..Default::default()
+    })) else {
+        return;
+    };
+    if let password_manager::protocol::ResponsePayload::ItemPage(page) = response.payload
+        && let Some(existing) = page
+            .items
+            .iter()
+            .find(|item| item.name.eq_ignore_ascii_case(name.trim()))
+    {
+        console.print_warning(&format!(
+            "an item named {:?} already exists (#{}). Both are kept; refer to them by --id, or \
+             rename one with `pm update --id ID --name NEW`.",
+            existing.name, existing.id
+        ));
+    }
+}
+
+/// Warn about a weak new login password before it is saved.
+fn warn_if_weak(kind: types::ItemKind, name: &str, password: &str, console: &Output) {
+    if kind != types::ItemKind::Login || password.is_empty() {
+        return;
+    }
+    let (score, rating) = password_manager::password::strength_rating(password);
+    if score <= 1 {
+        console.print_warning(&format!(
+            "this password is weak ({rating}, {score}/4). Replace it with `pm update {:?} --generate`.",
+            name
+        ));
+    }
+}
+
+/// A plaintext export holds every secret; ask first, as the desktop app does.
+fn confirm_export(yes: bool, path: &str, console: &Output) {
+    use std::io::{self, Write};
+    if yes {
+        return;
+    }
+    if !console.can_prompt() || password_manager::prompt::from_stdin() {
+        console.exit_error(
+            "A plaintext export contains every password. Rerun with --yes to confirm.",
+            2,
+        );
+    }
+    eprint!(
+        "This writes every password in plain text to {}. Type export to continue: ",
+        password_manager::client::terminal_metadata(path).as_str()
+    );
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() || answer.trim() != "export" {
+        console.exit_error("Export canceled; nothing was written.", 2);
+    }
+}
+
+/// Permanent whole-vault deletion (`pm vaults delete`, formerly `pm delete --vault`).
+fn delete_vault(
+    vault_file: Option<String>,
+    key: Option<String>,
+    keep_key: bool,
+    yes: bool,
+    conf: &config::Config,
+    console: &Output,
+) -> ServerCommand {
+    let vault_file = resolve_vault(vault_file, conf, console);
+    require_single_vault(&vault_file, false, console);
+    let label = vault_file.as_deref().map_or_else(
+        || "this vault".to_owned(),
+        |id| {
+            let vaults = vault::list_vaults().unwrap_or_default();
+            format!(
+                "the vault \"{}\"",
+                password_manager::vault_names::Names::load().label(id, &vaults)
+            )
+        },
+    );
+    confirm_permanent(
+        yes,
+        &format!("Permanently delete {label} and every item in it?"),
+        console,
+    );
+    ServerCommand::Delete(Target::Vault {
+        key: if let Some(k) = key {
+            resolved_key(k, console)
+        } else {
+            PasswordType::Password(hidden(
+                console,
+                "Master password of the vault to delete: ",
+                "master password",
+            ))
+        },
+        keep_key,
+        vault_file,
+    })
+}
+
 fn confirm_permanent(yes: bool, prompt: &str, console: &Output) {
     use std::io::{self, Write};
     if yes {
         return;
     }
-    if !console.can_prompt() {
+    if !console.can_prompt() || password_manager::prompt::from_stdin() {
         console.exit_error(
             "Permanent deletion requires confirmation. Rerun with --yes to confirm.",
             2,

@@ -27,6 +27,8 @@ class MobileParityTest {
         val scenario = vault.launch(MobileManagementFixtureActivity::class.java)
         val screen = SyntheticScreen(scenario, vault)
         screen.click("Add item")
+        // The editor loads its type profiles before it shows the type picker.
+        screen.waitFor("Item type")
         scenario.onActivity { activity ->
             screen
                 .views(activity.window.decorView)
@@ -35,8 +37,8 @@ class MobileParityTest {
                 .setSelection(4)
         }
         screen.input("Name", "Synthetic Wi-Fi")
-        screen.input("Username / owner", "synthetic-owner")
-        screen.input("Password / primary secret", "synthetic-wifi-secret")
+        screen.input("Network name (SSID)", "synthetic-owner")
+        screen.input("Wi-Fi password", "synthetic-wifi-secret")
         screen.input("Websites (one per line)", "https://example.com\nhttps://alt.example.com")
         screen.input("Notes", "synthetic notes")
         screen.click("Add custom field")
@@ -87,9 +89,9 @@ class MobileParityTest {
         )
         scenario.onActivity { it.openTools() }
         screen.click("Password generator")
-        screen.waitFor("Generate")
-        screen.input("Password length", "37")
-        screen.click("Generate")
+        screen.waitFor("Generate again")
+        screen.input("Length (characters)", "37")
+        screen.click("Generate again")
         val deadline = android.os.SystemClock.elapsedRealtime() + 10000
         var generated = ""
         while (generated.length != 37 && android.os.SystemClock.elapsedRealtime() < deadline) {
@@ -99,7 +101,7 @@ class MobileParityTest {
                     screen
                         .views(activity.window.decorView)
                         .filterIsInstance<EditText>()
-                        .first { it.hint?.toString() == "Generated value" }
+                        .first { screen.label(it) == "Generated password" }
                         .text
                         .toString()
             }

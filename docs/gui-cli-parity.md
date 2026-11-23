@@ -19,7 +19,7 @@ acceptance; see the [mobile acceptance matrix](mobile-implementation.md#mobile-f
 | Add and edit all eight item types | `add`, `update` | Item editor with type-specific labels and suggested fields | Add item / Edit item with the same type labels and suggested fields |
 | Websites, notes, custom fields, secret fields | `add`/`update` `--url`, `--field`, `--secret-field`, `--remove-field` | Item editor | Item editor (one website per line; secret/remove per field) |
 | Tags and favorites | `--tag`, `--add-tag`, `--remove-tag`, `--favorite` | Editor; star in item details | Editor (comma-separated tags, Favorite) |
-| Browse and filter | `view` with `--type`, `--tag`, `--favorites`, health filters and sort | Vault list: text, type, tag, favorites | Vault list: text, type chips, ★ Favorites, tag picker |
+| Browse and filter | `list` (alias `view`) with `--type`, `--tag`, `--favorites`, health filters and sort | Vault list: text, type, tag, favorites | Vault list: text, type chips, ★ Favorites, tag picker |
 | Advanced search | `search`: text, name, username, URL, notes, type, authenticator, weak, stale, tags, favorites, sort | Tools → Advanced search (all of these) | Tools → Advanced search (all of these) |
 | Show and copy secrets | `get`, `--password-only`, `--field`, `--reveal-secrets` | Item details: reveal/copy primary secret and fields | Item details: show/copy password, username, each field |
 | Attachments | `attachment` add/save/remove | Item details → Attachments | Item details → Attachments (system file picker) |
@@ -32,8 +32,8 @@ acceptance; see the [mobile acceptance matrix](mobile-implementation.md#mobile-f
 | Encrypted backups | `backup` create/restore | Tools → Import, export & backups | Tools → Files & backups |
 | Import and export | `import` (preview, conflict policy, `--new`), `export` (JSON/CSV) | Tools → Import, export & backups | Tools → Files & backups (preview, conflict policy, JSON/CSV) |
 | Change credentials, delete vault | `rekey`, `delete --vault` | Tools → Vault security | Tools → Vault credentials |
-| Cloud sync | `sync` connect/vaults/pull [--copy]/enable/disable/status/check/conflicts/resolve/now | Settings → Connection → Cloud sync | Settings → Cloud sync settings / download vault and Review sync conflicts; Tools → Sync controls |
-| Automatic background sync | `config --sync-automatic` | Settings → Cloud sync checkbox | Syncs on open and after each change (no background service) |
+| Cloud sync | `sync` connect/vaults/pull [--copy]/enable/disable/status/check/conflicts/resolve/now | Settings → Sync | Settings → Cloud sync settings / download vault and Review sync conflicts; Tools → Sync controls |
+| Automatic background sync | `config --sync-automatic` | Settings → Sync checkbox | Syncs on open and after each change (no background service) |
 | Preferences | `config` | Settings | Settings → Mobile settings (separate device-local values) |
 | Lock | `lock` | Lock | Lock button; also locks on background, screen off and inactivity |
 
@@ -66,8 +66,9 @@ These exist only where they make sense:
   Duo when you tap Check again.
 - **Per-unlock timeout**: `unlock --timeout` and the desktop unlock form override
   the default for one session. Android always uses the auto-lock preference.
-- **Passphrase word default**: Android saves a default word count. The CLI and
-  desktop start at 6 each time (`genpass --words`).
+- **Generator ranges** are the same everywhere: 8–255 characters or 3–64 words.
+  Android and the browser extension remember your last choice on that device; the
+  CLI and desktop start passphrases at 6 words (`genpass --words`).
 - **Android only**: biometric unlock, password/card/identity autofill and the
   Android 14+ passkey provider, encrypted vault snapshot export, the
   old-password recovery copy kept during rekey, and an explicit "apply trash

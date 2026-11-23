@@ -146,6 +146,9 @@ pub fn decrypt_record_stream(
 }
 
 pub const PROTOCOL_VERSION: u16 = 6;
+/// Failure text for commands that need an unlocked vault. Clients may append
+/// their own next step (the CLI names `pm unlock`).
+pub const VAULT_LOCKED: &str = "The vault is locked. Unlock it, then try again.";
 pub const DEFAULT_PORT: u16 = 7878;
 pub fn server_addr(port: u16) -> std::net::SocketAddr {
     ([127, 0, 0, 1], port).into()
@@ -207,6 +210,8 @@ impl RequestEnvelope {
             crate::types::ServerCommand::BrowserLogin { .. }
                 | crate::types::ServerCommand::BrowserAutofillItem(_)
                 | crate::types::ServerCommand::BrowserAuthenticatorData { .. }
+                | crate::types::ServerCommand::BrowserCopy { .. }
+                | crate::types::ServerCommand::BrowserCopyItem { .. }
         ) && (self.expected_session.is_none() || self.expected_revision.is_none())
         {
             return Err(
