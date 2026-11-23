@@ -242,7 +242,7 @@ module.exports.create = function create({
   // complete: every filled new-password field (new and confirm) agrees.
   function savesNewPassword(control, snapshot) {
     const { passwordField: field, password } = snapshot;
-    if (!field || !password || !isNewPasswordInput(field)) return false;
+    if (!field || !password || !snapshot.newPassword) return false;
     if (!(control instanceof Element) || control instanceof HTMLInputElement)
       return control instanceof HTMLInputElement &&
         ["button", "submit"].includes(control.type) &&
@@ -259,7 +259,9 @@ module.exports.create = function create({
   // prompting for it would save a wrong password and block the retry's prompt.
   function newPasswordsAgree(snapshot) {
     const { passwordField: field, password, scope } = snapshot;
-    if (!field || !scope || !isNewPasswordInput(field)) return true;
+    if (!field || !scope || !snapshot.newPassword) return true;
+    // Fields found by a repeated value agree by construction; labelled ones
+    // must all hold the same value.
     return scopeInputs(scope)
       .filter(
         (input) =>
@@ -1030,8 +1032,18 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
         const filledPasswords = fields.filter(
             field => isUsableInput(field) && field.type === "password" && field.value
         );
-        const newPasswords = filledPasswords.filter(isNewPasswordInput);
-        const currentPasswords = filledPasswords.filter(field => !isNewPasswordInput(field));
+        // Sites label new-password fields inconsistently ("Verify", "password2").
+        // A value typed into two fields is the new password and its confirmation;
+        // the current password is typed once.
+        const labelled = filledPasswords.filter(isNewPasswordInput);
+        const repeated = labelled.length
+            ? []
+            : filledPasswords.filter(
+                  field => filledPasswords.filter(other => other.value === field.value).length > 1
+              );
+        const repeatedValues = new Set(repeated.map(field => field.value));
+        const newPasswords = repeatedValues.size === 1 ? repeated : labelled;
+        const currentPasswords = filledPasswords.filter(field => !newPasswords.includes(field));
         const selectedPassword = fields.includes(lastCredentialInput)
             ? credentialFields(lastCredentialInput, scope).passwordField
             : null;
@@ -1053,6 +1065,8 @@ module.exports.create = function create({ roots = () => [document] } = {}) {
             username: usernameField ? usernameField.value.trim() : "",
             password: passwordField.value,
             passwordField,
+            // A newly chosen password (registration or change), not a sign-in.
+            newPassword: newPasswords.includes(passwordField),
             scope,
         };
     }

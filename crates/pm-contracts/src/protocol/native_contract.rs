@@ -154,6 +154,8 @@ impl NativeAction {
                 &["username"],
                 "message",
             ),
+            // `addDomain` also saves the page's address on the item, for a
+            // login the person chose although it was not saved for this site.
             Self::UpdateCredentials => (
                 &[
                     "domain",
@@ -162,7 +164,7 @@ impl NativeAction {
                     "expectedRevision",
                     "expectedSession",
                 ],
-                &["username"],
+                &["username", "addDomain"],
                 "message",
             ),
             Self::OperationStatus => (&["operationId"], &[], "receipt"),
@@ -330,7 +332,7 @@ pub fn browser_declarations() -> String {
 fn typescript_field(field: &str) -> &'static str {
     match field {
         "entryId" | "expectedRevision" => "number",
-        "approve" => "boolean",
+        "approve" | "addDomain" => "boolean",
         _ => "string",
     }
 }

@@ -204,7 +204,7 @@ module.exports.create = function create({
   // complete: every filled new-password field (new and confirm) agrees.
   function savesNewPassword(control, snapshot) {
     const { passwordField: field, password } = snapshot;
-    if (!field || !password || !isNewPasswordInput(field)) return false;
+    if (!field || !password || !snapshot.newPassword) return false;
     if (!(control instanceof Element) || control instanceof HTMLInputElement)
       return control instanceof HTMLInputElement &&
         ["button", "submit"].includes(control.type) &&
@@ -221,7 +221,9 @@ module.exports.create = function create({
   // prompting for it would save a wrong password and block the retry's prompt.
   function newPasswordsAgree(snapshot) {
     const { passwordField: field, password, scope } = snapshot;
-    if (!field || !scope || !isNewPasswordInput(field)) return true;
+    if (!field || !scope || !snapshot.newPassword) return true;
+    // Fields found by a repeated value agree by construction; labelled ones
+    // must all hold the same value.
     return scopeInputs(scope)
       .filter(
         (input) =>

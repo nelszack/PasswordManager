@@ -7,7 +7,7 @@ const promptState = require("./credential_prompt_state.js");
 function environment(stored) {
     const calls = [], deliveries = [], destinations = [], removed = [], timers = [];
     let saveError, lookupError, windowError, remembered, held, resolveSave, matched = false, saved;
-    let holdLookup, resolveLookup, holdMatch, resolveMatch, holdWindow, createWindow;
+    let holdLookup, resolveLookup, holdMatch, resolveMatch, holdWindow, createWindow, searchResponse;
     const chrome = { runtime: { id: "abcdefghijklmnopabcdefghijklmnop", getURL: path => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${path}` },
         tabs: { sendMessage(tab, message, options, callback) { deliveries.push(message); destinations.push(options); callback(); } },
         windows: { create(options, callback) {
@@ -32,6 +32,7 @@ function environment(stored) {
                 if (holdLookup) await new Promise(resolve => { resolveLookup = resolve; });
                 return { success: true, sessionId: "a".repeat(64), data: [{"revision": 1, "id": 7, "name": "Example", "username": "alice"}] };
             }
+            if (action === "searchItems") return searchResponse;
             if (action === "checkSavedLogin") {
                 if (saved instanceof Error) throw saved;
                 return saved || { success: false, error: "Unsupported native action" };
@@ -49,6 +50,7 @@ function environment(stored) {
         failSave(error) { saveError = error; }, failLookup(error) { lookupError = error; },
         failWindow(error) { windowError = error; }, remember(record) { remembered = record; }, match() { matched = true; },
         saved(response) { saved = response; },
+        searchReturns(response) { searchResponse = response; },
         hold() { held = true; }, release(response) { resolveSave(response); },
         holdLookup() { holdLookup = true; }, releaseLookup() { resolveLookup(); },
         holdMatch() { holdMatch = true; }, releaseMatch() { resolveMatch(false); },
@@ -203,4 +205,41 @@ test("an unchanged sign-in the vault already holds never prompts", async () => {
         other.saved(response);
         assert.equal(typeof (await other.open()).token, "string", label);
     }
+});
+
+test("a prompt can search the vault and update a login saved for another site", async () => {
+    const env = environment();
+    const { token } = await env.open();
+    const search = query => env.service.search({ token, query }, env.popup);
+    const choose = entryId => env.service.choose({ token, entryId }, env.popup);
+    const item = { id: 9, revision: 2, name: "Example (old domain)", username: "alice", kind: "login", urls: ["https://old.example.org"] };
+    env.searchReturns({ success: true, sessionId: "a".repeat(64), data: { items: [
+        item, { id: 10, revision: 1, name: "Example card", kind: "payment-card", urls: [] }
+    ] } });
+
+    await assert.rejects(env.service.search({ token, query: "exam" }, env.sender), /Invalid credential prompt sender/);
+    assert.deepEqual(await search("e"), { success: true, items: [] }, "short queries do not reach the vault");
+    const found = await search("exam");
+    assert.deepEqual(found.items, [{ id: 9, name: "Example (old domain)", username: "alice", site: "https://old.example.org" }]);
+    assert.equal(env.calls.filter(call => call.action === "searchItems").length, 1);
+    assert.throws(() => choose(10), /Search for the login again/, "only logins from the search can be chosen");
+
+    const chosen = choose(9);
+    assert.equal(chosen.data.updateTarget.id, 9);
+    assert.equal(chosen.data.updateTarget.addSite, true);
+    await env.complete(token, "update");
+    const update = env.calls.at(-1);
+    assert.equal(update.action, "updateCredentials");
+    assert.deepEqual(
+        { entryId: update.fields.entryId, expectedRevision: update.fields.expectedRevision, addDomain: update.fields.addDomain,
+          domain: update.fields.domain, password: update.fields.password, expectedSession: update.fields.expectedSession },
+        { entryId: 9, expectedRevision: 2, addDomain: true, domain: "https://example.com", password: "synthetic",
+          expectedSession: "a".repeat(64) }
+    );
+
+    // Results from another unlock session cannot be chosen.
+    const other = environment();
+    const second = await other.open();
+    other.searchReturns({ success: true, sessionId: "b".repeat(64), data: { items: [item] } });
+    await assert.rejects(other.service.search({ token: second.token, query: "exam" }, other.popup), /locked or switched/);
 });

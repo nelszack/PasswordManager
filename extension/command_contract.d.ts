@@ -27,7 +27,7 @@ export interface NativeRequests {
     getAutofillItem: { entryId: number; expectedRevision: number; expectedSession: string; };
     getTotp: { operationId: string; domain: string; entryId: number; expectedRevision: number; expectedSession: string; };
     saveCredentials: { operationId: string; domain: string; password: string; name: string; expectedSession: string; username?: string; };
-    updateCredentials: { operationId: string; domain: string; entryId: number; password: string; expectedRevision: number; expectedSession: string; username?: string; };
+    updateCredentials: { operationId: string; domain: string; entryId: number; password: string; expectedRevision: number; expectedSession: string; username?: string; addDomain?: boolean; };
     operationStatus: { operationId: string; };
     getPasskeys: { domain: string; passkeyRequest: string; };
     createPasskey: { operationId: string; domain: string; passkeyRequest: string; expectedSession: string; verificationToken?: string; };

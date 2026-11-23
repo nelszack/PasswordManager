@@ -120,3 +120,41 @@ test("updating a different account keeps its stored username unless the user edi
     assert.equal(prompt.operation(passwordOnly, { action: "update", name: "Alice", username: "" }).fields.username, "alice");
     assert.equal(prompt.operation(passwordOnly, { action: "update", name: "Alice", username: "alice2" }).fields.username, "alice2");
 });
+
+test("a login chosen from a vault search becomes the update target and gains this site", () => {
+    const siteAccounts = [{ id: 3, revision: 1, name: "Site login", username: "bob" }];
+    const data = prompt.describe(siteAccounts, "alice", "https://login.example.com");
+    const chosen = prompt.chooseTarget(
+        data,
+        { id: 7, revision: 4, name: "Example", username: "alice", urls: ["https://www.example.com"] },
+        siteAccounts,
+        "alice"
+    );
+    assert.deepEqual(chosen.updateTarget, { id: 7, revision: 4, name: "Example", username: "alice", addSite: true });
+    assert.equal(chosen.hasAccounts, true);
+    assert.equal(chosen.preferUpdate, true);
+    assert.match(chosen.updateNote, /address will be added to “Example”/);
+    assert.doesNotMatch(chosen.updateNote, /keeps the username/, "same username: nothing else to explain");
+    const { action, fields } = prompt.operation(
+        { domain: "https://login.example.com", sessionId: "s", username: "alice", password: "new-secret", data: chosen },
+        { action: "update", name: "ignored", username: "alice" }
+    );
+    assert.equal(action, "update");
+    assert.deepEqual(
+        { entryId: fields.entryId, expectedRevision: fields.expectedRevision, addDomain: fields.addDomain, username: fields.username },
+        { entryId: 7, expectedRevision: 4, addDomain: true, username: "alice" }
+    );
+
+    // A login already saved for this site keeps its addresses.
+    const sameSite = prompt.chooseTarget(data, siteAccounts[0], siteAccounts, "alice");
+    assert.equal(sameSite.updateTarget.addSite, false);
+    assert.match(sameSite.updateNote, /keeps the username “bob”/);
+    assert.doesNotMatch(sameSite.updateNote, /address will be added/);
+    const update = prompt.operation(
+        { domain: "https://login.example.com", sessionId: "s", username: "alice", password: "p", data: sameSite },
+        { action: "update", name: "x", username: "alice" }
+    );
+    assert.equal(update.fields.addDomain, undefined);
+    assert.equal(update.fields.username, "bob", "the captured username never renames another login");
+    assert.throws(() => prompt.chooseTarget(data, { id: 0 }, siteAccounts, "alice"), /Choose a saved login/);
+});

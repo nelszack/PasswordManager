@@ -67,6 +67,8 @@ const PasswordManagerBackgroundRouter = {
             reviewCredentialPrompt: { handle: (request, sender) => prompts.review(request, sender) },
             getCredentialPromptData: { handle: (request, sender) => prompts.data(request, sender) },
             revealCredentialPassword: { handle: (request, sender) => prompts.reveal(request, sender) },
+            searchCredentialTargets: { handle: (request, sender) => prompts.search(request, sender) },
+            chooseCredentialTarget: { handle: (request, sender) => prompts.choose(request, sender) },
             completeCredentialPrompt: {
                 handle: (request, sender) => prompts.complete(request, sender),
                 failure: operationFailure,

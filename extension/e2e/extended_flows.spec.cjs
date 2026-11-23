@@ -184,7 +184,10 @@ test.describe("extended credential flows", () => {
             ])
         }, accounts: [
             { id: 7, name: "Alice", username: "alice@example.com", password: "saved-password", has_totp: true, domain: origin },
-            { id: 8, name: "Bob", username: "bob@example.com", password: "bob-password", has_totp: false, domain: origin }
+            { id: 8, name: "Bob", username: "bob@example.com", password: "bob-password", has_totp: false, domain: origin },
+            // Saved under an older address, so lookups for this site never return it.
+            { id: 11, name: "Dana", username: "dana@example.com", password: "dana-old-password", has_totp: false,
+              domain: "https://old.example.org" }
         ] });
         page = browser.context.pages()[0] || await browser.context.newPage();
         await observeAutomaticPrompts(browser.context);
@@ -404,6 +407,41 @@ test.describe("extended credential flows", () => {
             request.action === "updateCredentials" && request.password === "carol-password"
         );
         expect(update).toMatchObject({ entryId: 7, username: "alice@example.com" });
+    });
+
+    test("a new password can update a login saved for another site, which gains this site", async () => {
+        await page.goto(`${origin}/simple`);
+        await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+        await page.locator("#username").fill("dana@example.com");
+        await page.locator("#password").fill("dana-new-password");
+        const prompt = await openPrompt(browser.context, page.locator("#submit"));
+        await expect(prompt.locator("#credentials")).toBeVisible();
+
+        const choose = prompt.getByRole("button", { name: "Update a different saved login…" });
+        const search = prompt.getByLabel("Find the saved login");
+        await choose.click();
+        await search.fill("nothing-matches");
+        await expect(prompt.locator("#targetResults")).toContainText("No saved login matches.");
+        // Escape closes the search, not the prompt; Enter never saves a new login.
+        await search.press("Enter");
+        await search.press("Escape");
+        await expect(prompt.locator("#chooser")).toBeHidden();
+        expect(prompt.isClosed()).toBe(false);
+
+        await choose.click();
+        await search.fill("dana");
+        await prompt.getByRole("button", { name: /Dana/ }).click();
+        await expect(prompt.locator("#update")).toHaveText("Update “Dana”");
+        await expect(prompt.locator("#updateNote")).toContainText("address will be added to “Dana”");
+        // The prompt closes itself after saving; record its coverage first.
+        await browser.coverPage(prompt, true);
+        await prompt.locator("#update").click();
+        const update = await waitForNativeRequest(browser.nativeLog, request =>
+            request.action === "updateCredentials" && request.password === "dana-new-password"
+        );
+        expect(update).toMatchObject({ entryId: 11, addDomain: true, username: "dana@example.com", domain: origin });
+        expect(readNativeRequests(browser.nativeLog).some(request => request.action === "saveCredentials" && request.password === "dana-new-password"))
+            .toBe(false);
     });
 
     test("TOTP is fetched only after secure picker selection", async () => {

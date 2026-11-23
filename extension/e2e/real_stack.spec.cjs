@@ -161,3 +161,50 @@ test("the extension saves through the real native host into a temporary vault", 
     await expect(page.locator("body")).toHaveAttribute("data-submitted", "yes");
     expect(automaticPrompts).toHaveLength(0);
 });
+
+test("a new password can update a login saved for another address, adding this site", async ({ realVault }) => {
+    test.setTimeout(90_000);
+    const { browser, environment, origin, keyPath } = realVault;
+    runPm(environment, "unlock", "--key", keyPath, "--timeout", "0");
+    // Saved earlier for a different address than the one the site now uses.
+    childProcess.execFileSync(PM_BINARY, [
+        "--password-stdin", "add", "--no-copy", "--name", "Old Address Login",
+        "--username", "moved@example.com", "--url", "https://old.example.org/login"
+    ], { cwd: path.dirname(PM_BINARY), env: environment, input: "old-password\n", timeout: 15_000 });
+
+    const page = browser.context.pages()[0] || await browser.context.newPage();
+    await page.goto(origin);
+    await expect(page.getByRole("button", { name: "Choose saved credentials" }).first()).toBeVisible();
+    await page.locator("#username").fill("moved@example.com");
+    await page.locator("#password").fill("moved-new-password");
+    const opened = browser.context.waitForEvent("page", popup => popup.url().includes("credential_prompt.html"));
+    await page.getByRole("button", { name: "Sign in" }).click();
+    const prompt = await opened;
+    await expect(prompt.locator("#credentials")).toBeVisible();
+    // Nothing is saved for this address, so only "save new" is offered at first.
+    await expect(prompt.locator("#update")).toBeHidden();
+
+    await prompt.getByRole("button", { name: "Update a different saved login…" }).click();
+    await prompt.getByLabel("Find the saved login").fill("old address");
+    await prompt.getByRole("button", { name: /Old Address Login/ }).click();
+    await expect(prompt.locator("#update")).toHaveText("Update “Old Address Login”");
+    await expect(prompt.locator("#updateNote")).toContainText("address will be added");
+    await prompt.locator("#update").click();
+    await expect.poll(() => prompt.isClosed()).toBe(true);
+
+    const updated = JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Old Address Login"));
+    expect(updated.data.urls).toEqual(expect.arrayContaining(["https://old.example.org/login", origin]));
+    expect(updated.data.username).toBe("moved@example.com");
+    expect(JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Old Address Login", "--password-only")))
+        .toMatchObject({ ok: true, data: "moved-new-password" });
+    const list = JSON.parse(runPm(environment, "--json", "list"));
+    expect(list.data.length ?? list.data.items?.length).toBe(1);
+
+    // The site now offers the login it was added to.
+    await page.locator("#username").fill("");
+    await page.locator("#password").fill("");
+    const pickerOpened = browser.context.waitForEvent("page", popup => popup.url().includes("picker.html"));
+    await page.getByRole("button", { name: "Choose saved credentials" }).first().click();
+    const picker = await pickerOpened;
+    await expect(picker.getByRole("option", { name: /Old Address Login/ })).toBeVisible();
+});

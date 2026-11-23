@@ -161,6 +161,8 @@ const PasswordManagerBackgroundPrompts = {
                 domain,
                 username,
                 state: { phase: "ready", password },
+                accounts,
+                searchResults: new Map(),
                 data: promptState.describe(accounts, username, domain),
                 expiresAt: Date.now() + 2 * 60_000,
                 windowId: null,
@@ -279,6 +281,52 @@ const PasswordManagerBackgroundPrompts = {
                   }
                 : { success: false, error: "Credential prompt expired" };
         }
+        function readyPrompt(request, sender) {
+            if (!credentialPromptSenderAllowed(sender)) throw new Error("Invalid credential prompt sender");
+            const pending = pendingCredentialPrompts.get(request?.token);
+            if (!pending || pending.state.phase !== "ready" || pending.expiresAt <= Date.now())
+                throw new Error("Credential prompt expired");
+            return pending;
+        }
+
+        // Search every saved login, not only those for this site, so a new
+        // password can go to the right one when its saved address differs. The
+        // service returns names, usernames and addresses only, never a secret.
+        async function search(request, sender) {
+            const pending = readyPrompt(request, sender);
+            const query = typeof request.query === "string" ? request.query.trim() : "";
+            if (query.length < 2 || query.length > 256) return { success: true, items: [] };
+            const response = await nativeRequest("searchItems", { query });
+            if (!response?.success) throw new Error(response?.error || "Search failed");
+            // IDs and revisions are only meaningful in the session this prompt reviewed.
+            if (response.sessionId !== undefined && response.sessionId !== pending.sessionId)
+                throw new Error("The vault was locked or switched; sign in on the page again to save");
+            const items = (Array.isArray(response.data?.items) ? response.data.items : [])
+                .filter(item => Number.isSafeInteger(item?.id) && item.id > 0 && (item.kind ?? "login") === "login")
+                .slice(0, 20);
+            pending.searchResults = new Map(items.map(item => [item.id, item]));
+            return {
+                success: true,
+                items: items.map(item => ({
+                    id: item.id,
+                    name: String(item.name || ""),
+                    username: String(item.username || ""),
+                    site: String(item.urls?.[0] || ""),
+                })),
+            };
+        }
+
+        // Make a login from the latest search (or saved for this site) the one to update.
+        function choose(request, sender) {
+            const pending = readyPrompt(request, sender);
+            const id = request.entryId;
+            const item =
+                pending.searchResults.get(id) || pending.accounts.find(account => account?.id === id) || null;
+            if (!item) throw new Error("Search for the login again, then choose it");
+            pending.data = promptState.chooseTarget(pending.data, item, pending.accounts, pending.username);
+            return { success: true, data: { ...pending.data, passwordLength: pending.state.password?.length || 0 } };
+        }
+
         // The captured password, shown only when the person asks to review it.
         function reveal(request, sender) {
             if (!credentialPromptSenderAllowed(sender))
@@ -304,6 +352,8 @@ const PasswordManagerBackgroundPrompts = {
             invalidate: invalidateCredentialPrompts,
             data,
             reveal,
+            search,
+            choose,
             windowRemoved,
         };
     },
