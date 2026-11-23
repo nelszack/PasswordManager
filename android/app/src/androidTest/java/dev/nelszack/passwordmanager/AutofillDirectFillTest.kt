@@ -24,8 +24,11 @@ class AutofillDirectFillTest {
         val automation = instrumentation.uiAutomation
         val originalServiceInfo = automation.serviceInfo
         val client = instrumentation.context.packageName
-        fun waitFor(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-            val end = android.os.SystemClock.elapsedRealtime() + 15000
+        fun waitFor(
+            timeoutMs: Long = 15000,
+            predicate: (AccessibilityNodeInfo) -> Boolean,
+        ): AccessibilityNodeInfo? {
+            val end = android.os.SystemClock.elapsedRealtime() + timeoutMs
             fun find(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
                 if (predicate(node)) return node
                 for (i in 0 until node.childCount) node.getChild(i)?.let {
@@ -93,17 +96,25 @@ class AutofillDirectFillTest {
                     )
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
-            click(
-                requireNotNull(
-                    waitFor {
-                        it.text?.toString()?.equals("Request test suggestions", true) == true
-                    }
+            val isSuggestion = { node: AccessibilityNodeInfo ->
+                node.text?.toString() == username ||
+                    node.contentDescription?.toString()?.startsWith("$username,") == true ||
+                    node.text?.toString()?.startsWith("$username\n") == true
+            }
+            // Inline suggestions ride on the keyboard. On a cold emulator the
+            // keyboard can finish appearing after the one fill request, leaving
+            // nothing to show; ask again, as a person taps the field again.
+            var suggestion: AccessibilityNodeInfo? = null
+            for (attempt in 1..3) {
+                click(
+                    requireNotNull(
+                        waitFor {
+                            it.text?.toString()?.equals("Request test suggestions", true) == true
+                        }
+                    )
                 )
-            )
-            val suggestion = waitFor {
-                it.text?.toString() == username ||
-                    it.contentDescription?.toString()?.startsWith("$username,") == true ||
-                    it.text?.toString()?.startsWith("$username\n") == true
+                suggestion = waitFor(timeoutMs = 10_000, predicate = isSuggestion)
+                if (suggestion != null) break
             }
             assertNotNull("The synthetic account suggestion must appear", suggestion)
             click(requireNotNull(suggestion))

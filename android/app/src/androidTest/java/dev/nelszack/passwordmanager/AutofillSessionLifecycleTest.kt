@@ -1,6 +1,7 @@
 package dev.nelszack.passwordmanager
 
 import androidx.lifecycle.Lifecycle
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.*
 import org.junit.Test
@@ -11,6 +12,23 @@ import org.junit.runner.RunWith
 class AutofillSessionLifecycleTest {
     companion object {
         @org.junit.ClassRule @JvmField val vault = SyntheticVaultRule("autofill-session")
+    }
+
+    /**
+     * Stop the activity. ActivityScenario does so by starting an empty activity on
+     * top and gives up after 45 seconds; a busy CI emulator can take longer, so keep
+     * waiting for the stop it already requested before failing.
+     */
+    private fun stop(scenario: ActivityScenario<*>) {
+        try {
+            scenario.moveToState(Lifecycle.State.CREATED)
+        } catch (timeout: AssertionError) {
+            val end = android.os.SystemClock.elapsedRealtime() + 30_000
+            while (scenario.state != Lifecycle.State.CREATED) {
+                if (android.os.SystemClock.elapsedRealtime() > end) throw timeout
+                Thread.sleep(200)
+            }
+        }
     }
 
     @Test
@@ -36,7 +54,7 @@ class AutofillSessionLifecycleTest {
         assertTrue(Vault.autofillSession.allows(scope))
 
         val cancelled = vault.launch(AutofillSessionFixtureActivity::class.java)
-        cancelled.moveToState(Lifecycle.State.CREATED)
+        stop(cancelled)
         vault.drain()
         assertFalse(Vault.json("status").getBoolean("unlocked"))
         assertFalse(Vault.autofillSession.allows(scope))
