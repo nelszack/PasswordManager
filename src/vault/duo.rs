@@ -146,15 +146,20 @@ impl Vault {
         }
         match command {
             DuoCommand::Remove { target } => {
-                let id = self.require_target(target)?.entry.id;
+                let item = self.require_target(target)?;
+                // Reporting success here would claim a removal that never happened.
+                if item.duo.is_none() {
+                    return Err(VaultError::NotFound(
+                        "item has no Duo push credentials to remove".into(),
+                    ));
+                }
+                let id = item.entry.id;
                 self.transaction(TransactionScope::Entry(id), key, |v| {
                     let item = v.item_mut(id).unwrap();
-                    let changed = item.duo.take().is_some();
-                    if changed {
-                        item.entry.modified = Timestamp::now();
-                    }
+                    item.duo = None;
+                    item.entry.modified = Timestamp::now();
                     Ok((
-                        changed,
+                        true,
                         "Local push credentials removed. Remove the device separately in Duo; \
                          passcodes are retained."
                             .into(),

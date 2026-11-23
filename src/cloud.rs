@@ -218,8 +218,19 @@ fn transport_error(error: reqwest::Error) -> String {
     message.chars().take(2048).collect()
 }
 
+/// Whether `pm sync connect` has stored this device's sync credential.
+pub fn device_connected() -> bool {
+    config_dir().join("sync-token").is_file()
+}
+
+pub const NOT_CONNECTED: &str =
+    "This device is not connected to a sync server. Run pm sync connect first.";
+
 impl CloudClient {
     pub fn new(config: &SyncConfig) -> Result<Self, String> {
+        if !device_connected() {
+            return Err(NOT_CONNECTED.into());
+        }
         let token = read_token_file(&config_dir().join("sync-token"))
             .map_err(|e| format!("Read sync credential: {e}; run pm sync connect"))?;
         Self::with_token(&config.server_url, token)

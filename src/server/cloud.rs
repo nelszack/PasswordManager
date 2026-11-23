@@ -183,6 +183,7 @@ pub(super) async fn command(
                     s.version.as_deref().unwrap_or("not uploaded"),
                     status.local_changed,
                 ),
+                None if !crate::cloud::device_connected() => crate::cloud::NOT_CONNECTED.into(),
                 None => "This vault is not connected to sync. Run pm sync enable.".into(),
             }
         }
@@ -202,9 +203,11 @@ fn downloaded(filename: String) -> String {
 
 async fn check(host: &DesktopHost<'_>) -> Result<String, String> {
     let status = engine::status(host, true).await?;
-    let state = status
-        .binding
-        .ok_or("This vault is not connected to sync; run pm sync enable")?;
+    let state = status.binding.ok_or(if crate::cloud::device_connected() {
+        "This vault is not connected to sync; run pm sync enable"
+    } else {
+        crate::cloud::NOT_CONNECTED
+    })?;
     if !state.enabled {
         return Err("Sync is disabled for this vault".into());
     }
