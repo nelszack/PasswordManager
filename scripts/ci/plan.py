@@ -48,7 +48,7 @@ def select(paths):
             selected.update(("extension", "browser", "rust"))
         elif path == "scripts/validate.cjs":
             selected.update(("extension", "rust"))
-        elif path == "scripts/test_gui_accessibility.py":
+        elif path in ("scripts/test_gui_accessibility.py", "scripts/gui_screenshots.py"):
             selected.add("rust")
         elif path in ("docs/commands.html", "docs/commands.template.html"):
             selected.add("rust")
