@@ -40,7 +40,7 @@
                 case "expectedSession": valid = text(value) && /^[a-fA-F0-9]{64}$/.test(value); break;
                 case "entryId": valid = positive(value); break;
                 case "expectedRevision": valid = integer(value); break;
-                case "approve": valid = typeof value === "boolean"; break;
+                case "approve": case "addDomain": valid = typeof value === "boolean"; break;
                 case "domain": valid = bounded(value, 2048, true) && value.length > 0; break;
                 case "password": valid = bounded(value, 65536); break;
                 case "username": case "name": valid = bounded(value, 4096, true); break;

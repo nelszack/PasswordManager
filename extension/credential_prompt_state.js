@@ -53,13 +53,7 @@
               ? "No saved account has this username. Update an existing account or save a new one."
               : "Would you like to save these credentials?";
         const targetUsername = updateTarget ? accountUsername(updateTarget) : "";
-        // Updating a different account replaces only its password. Say so, because
-        // the captured username is hidden and would otherwise look like it applies.
-        const updateNote =
-            updateTarget && username && targetUsername !== username
-                ? `Updating “${String(updateTarget.name || targetUsername || "this login")}” changes only its password` +
-                  (targetUsername ? ` and keeps the username “${targetUsername}”.` : ".")
-                : "";
+        const updateNote = noteFor(updateTarget, username, false);
         return {
             message,
             site,
@@ -77,6 +71,46 @@
                       username: targetUsername,
                   }
                 : null,
+        };
+    }
+
+    // Updating a different account replaces only its password. Say so, because
+    // the captured username is hidden and would otherwise look like it applies.
+    // A login saved for another site also gains this site's address.
+    function noteFor(target, username, addSite) {
+        if (!target) return "";
+        const targetUsername = accountUsername(target);
+        const label = String(target.name || targetUsername || "this login");
+        const notes = [];
+        if (username && targetUsername !== username) {
+            notes.push(
+                `Updating “${label}” changes only its password` +
+                    (targetUsername ? ` and keeps the username “${targetUsername}”.` : ".")
+            );
+        }
+        if (addSite) notes.push(`This site's address will be added to “${label}”.`);
+        return notes.join(" ");
+    }
+
+    // The person picked a saved login from a vault search, possibly one saved
+    // for another site. `siteAccounts` are the logins already saved for this site.
+    function chooseTarget(data, item, siteAccounts, username) {
+        if (!Number.isSafeInteger(item?.id) || item.id <= 0) throw new Error("Choose a saved login");
+        const addSite = !(Array.isArray(siteAccounts) && siteAccounts.some(account => account?.id === item.id));
+        const target = {
+            id: item.id,
+            ...(item.revision === undefined ? {} : { revision: item.revision }),
+            name: String(item.name || ""),
+            username: accountUsername(item),
+            addSite,
+        };
+        return {
+            ...data,
+            hasAccounts: true,
+            preferUpdate: true,
+            updateTarget: target,
+            updateNote: noteFor(target, username, addSite),
+            message: `Update the saved password for “${String(target.name || target.username || "this login")}”.`,
         };
     }
 
@@ -122,9 +156,10 @@
             if (typeof targetUsername === "string" && username === captured) fields.username = targetUsername;
             fields.entryId = entryId;
             fields.expectedRevision = pending.data.updateTarget.revision;
+            if (pending.data.updateTarget.addSite === true) fields.addDomain = true;
         }
         return { action, fields };
     }
 
-    return { accountUsername, accountsFromLookup, describe, operation };
+    return { accountUsername, accountsFromLookup, chooseTarget, describe, operation };
 });

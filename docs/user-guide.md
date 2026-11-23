@@ -1560,6 +1560,16 @@ unlock. Website pickers, credential-save prompts, signup generation, and Duo
 decisions remain available; the extension has no full vault-management page or
 browser generator-settings editor.
 
+**Saving and updating passwords.** After you sign in or change a password on a
+site, the save prompt offers to update a login saved for that site, or to save a
+new one. If the right login was saved under a different address (an old domain,
+or a separate sign-in host), choose **Update a different saved login…**, search
+by name, username or website, and pick it. The new password replaces the old one,
+and the site's address is added to the login so the site offers it from then on.
+The search returns only names, usernames and addresses; no saved password reaches
+the browser. On change-password forms the new password is recognised even when
+the site labels its fields unusually: it is the value you typed twice.
+
 **Keyboard shortcuts.** `Ctrl+Shift+L` (`⌘⇧L` on macOS) opens the account
 picker for the focused login field, or for the first visible login field on the
 page; `Ctrl+Shift+Y` (`⌘⇧Y`) opens the popup. Change them at

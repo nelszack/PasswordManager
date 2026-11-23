@@ -196,7 +196,7 @@ test("saving a shared form captures the selected login pair rather than another 
     const credentials = require("./content_credentials.js").create();
     credentials.lastInput = secondPassword;
     assert.deepEqual(credentials.findLoginCredentials(form), {
-        username: "second", password: "second-secret", passwordField: secondPassword, scope: form
+        username: "second", password: "second-secret", passwordField: secondPassword, newPassword: false, scope: form
     });
 });
 

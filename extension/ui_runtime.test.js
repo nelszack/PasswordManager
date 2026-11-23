@@ -20,6 +20,14 @@ class FakeElement {
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     setAttribute() {}
+    querySelector(selector) {
+        for (const child of this.children) {
+            if (child.tagName === selector.toUpperCase()) return child;
+            const found = child.querySelector?.(selector);
+            if (found) return found;
+        }
+        return null;
+    }
     focus() { this.focused = true; }
     reportValidity() { return true; }
 }
@@ -32,7 +40,11 @@ function environment(ids, responses, search = "") {
     const clock = { now: 1_000_000 };
     const document = {
         getElementById(id) { return elements[id]; },
-        createElement() { return new FakeElement(); },
+        createElement(tag = "") {
+            const element = new FakeElement();
+            element.tagName = String(tag).toUpperCase();
+            return element;
+        },
         addEventListener(type, listener) { documentListeners.set(type, listener); }
     };
     let runtimeListener;
@@ -194,9 +206,10 @@ async function credentialPromptEnvironment(responses = {}) {
     });
     const env = environment([
         "credentials", "site", "status", "name", "username", "usernameLabel", "updateNote", "reviewOutcome", "add", "update", "cancel", "never",
-        "passwordMask", "password", "revealPassword"
+        "passwordMask", "password", "revealPassword", "chooseOther", "chooser", "targetSearch", "targetResults"
     ], responses, "?token=prompt-token");
     env.elements.password.hidden = true; // as in credential_prompt.html
+    env.elements.chooser.hidden = true;
     execute("credential_prompt.js", env.context);
     await settle();
     return env;
@@ -780,4 +793,58 @@ test("passkey prompt shows the browser-reported site and sends only explicit cho
     execute("passkey_prompt.js", expired.context);
     await settle();
     assert.equal(expired.elements.status.textContent, "Passkey request expired");
+});
+
+test("credential prompt can update a login saved for another site, adding this site", async () => {
+    const env = await credentialPromptEnvironment({
+        getCredentialPromptData: { success: true, data: {
+            site: "https://login.example.com", message: "Would you like to save these credentials?",
+            suggestedName: "login.example.com", username: "alice", askForUsername: false, hasAccounts: false,
+            updateTarget: null
+        } },
+        searchCredentialTargets: { success: true, items: [
+            { id: 7, name: "Example", username: "alice", site: "https://www.example.com" }
+        ] },
+        chooseCredentialTarget: { success: true, data: {
+            site: "https://login.example.com", message: "Update the saved password for “Example”.",
+            suggestedName: "login.example.com", username: "alice", askForUsername: false, hasAccounts: true,
+            preferUpdate: true, updateTarget: { id: 7, name: "Example", username: "alice", addSite: true },
+            updateNote: "This site's address will be added to “Example”."
+        } }
+    });
+    assert.equal(env.elements.update.hidden, true, "no saved login matches this site yet");
+    env.elements.chooseOther.dispatch("click", { isTrusted: true });
+    assert.equal(env.elements.chooser.hidden, false);
+
+    // Enter in the search box must never submit the save-as-new form.
+    let prevented = false;
+    env.elements.targetSearch.dispatch("keydown", { key: "Enter", preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(env.messages.some(message => message.action === "completeCredentialPrompt"), false);
+
+    env.elements.targetSearch.value = "exam";
+    env.elements.targetSearch.dispatch("input");
+    await new Promise(resolve => setTimeout(resolve, 250));
+    await settle();
+    const search = env.messages.find(message => message.action === "searchCredentialTargets");
+    assert.deepEqual({ token: search.token, query: search.query }, { token: "prompt-token", query: "exam" });
+    const result = env.elements.targetResults.children[0].children[0];
+    assert.match(result.children[1].textContent, /alice · https:\/\/www.example.com/);
+
+    result.dispatch("click", { isTrusted: false });
+    await settle();
+    assert.equal(env.messages.some(message => message.action === "chooseCredentialTarget"), false);
+    result.dispatch("click", { isTrusted: true });
+    await settle();
+    assert.equal(env.messages.at(-1).action, "chooseCredentialTarget");
+    assert.equal(env.messages.at(-1).entryId, 7);
+    assert.equal(env.elements.update.hidden, false);
+    assert.equal(env.elements.update.className, "primary");
+    assert.equal(env.elements.update.textContent, "Update “Example”");
+    assert.match(env.elements.updateNote.textContent, /address will be added/);
+    assert.equal(env.elements.chooser.hidden, true);
+
+    env.elements.update.dispatch("click", { isTrusted: true });
+    await settle();
+    assert.equal(env.messages.at(-1).selection.action, "update");
 });

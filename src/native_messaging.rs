@@ -69,6 +69,8 @@ struct NativeRequest {
     field: Option<crate::types::BrowserCopyField>,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default, rename = "addDomain")]
+    add_domain: Option<bool>,
 }
 
 impl NativeRequest {
@@ -91,6 +93,7 @@ impl NativeRequest {
             ("verificationToken", self.verification_token.is_some()),
             ("field", self.field.is_some()),
             ("query", self.query.is_some()),
+            ("addDomain", self.add_domain.is_some()),
         ];
         if self
             .expected_session
@@ -163,6 +166,7 @@ impl Zeroize for NativeRequest {
         self.passkey_request.zeroize();
         self.verification_token.zeroize();
         self.query.zeroize();
+        self.add_domain.zeroize();
         *self = Self::default();
     }
 }
@@ -909,30 +913,33 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
         }),
         "updateCredentials" => {
             // The page origin authorizes the browser selection; updating a
-            // password must not replace the item's saved primary URL.
-            required(request.domain.take(), "domain", 2048)?;
+            // password must not replace the item's saved primary URL. A login
+            // chosen for another site gains this site as an additional address.
+            let domain = required(request.domain.take(), "domain", 2048)?;
             let entry_id = request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?;
-            Ok(ServerCommand::Update(crate::types::TypedUpdate::from(
-                EntryUpdate {
-                    target: Target::Id(entry_id),
-                    update: EntryChanges {
-                        name: None,
-                        username: Some(optional_text(request.username.take(), "username", 4096)?),
-                        url: None,
-                        notes: None,
-                    },
-                    password: Some(
-                        required(
-                            request.password.take().map(SecretString::expose_owned),
-                            "password",
-                            64 * 1024,
-                        )?
-                        .into(),
-                    ),
+            let mut update = crate::types::TypedUpdate::from(EntryUpdate {
+                target: Target::Id(entry_id),
+                update: EntryChanges {
+                    name: None,
+                    username: Some(optional_text(request.username.take(), "username", 4096)?),
+                    url: None,
+                    notes: None,
                 },
-            )))
+                password: Some(
+                    required(
+                        request.password.take().map(SecretString::expose_owned),
+                        "password",
+                        64 * 1024,
+                    )?
+                    .into(),
+                ),
+            });
+            if request.add_domain == Some(true) {
+                update.add_url = vec![domain];
+            }
+            Ok(ServerCommand::Update(update))
         }
         "lock" => Ok(ServerCommand::Lock(true)),
         "getPasskeys" => Ok(ServerCommand::BrowserPasskeys {

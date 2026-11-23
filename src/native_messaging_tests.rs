@@ -620,7 +620,25 @@ fn browser_password_updates_preserve_saved_site_information() {
     };
     assert_eq!(update.entry.update.username.as_deref(), Some("alice"));
     assert_eq!(update.entry.update.url, None);
+    assert!(update.add_url.is_empty());
     assert_eq!(update.entry.password.unwrap().expose(), "new-password");
+
+    // A login chosen although it was saved for another site keeps its primary
+    // address and gains this one.
+    let mut request: NativeRequest = serde_json::from_value(json!({
+        "id": 1,
+        "action": "updateCredentials",
+        "domain": "https://alternate.example.com",
+        "entryId": 7,
+        "password": "new-password",
+        "addDomain": true,
+    }))
+    .unwrap();
+    let ServerCommand::Update(update) = command_for_request(&mut request).unwrap() else {
+        panic!("expected credential update");
+    };
+    assert_eq!(update.entry.update.url, None);
+    assert_eq!(update.add_url, ["https://alternate.example.com"]);
 }
 
 #[test]

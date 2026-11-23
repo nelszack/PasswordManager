@@ -48,6 +48,7 @@ test("captured credentials prefer new passwords, the selected login, then curren
         username: "alice@example.com",
         password: "new-secret",
         passwordField: fresh,
+        newPassword: true,
         scope: form,
     });
     fresh.value = "";
@@ -137,4 +138,30 @@ test("a failed restore keeps no username", async t => {
     const failing = credentialsEnvironment(t, { pending: { username: "x" }, failing: true });
     await failing.credentials.restoreUsernameFromPreviousStep();
     assert.equal(failing.credentials.resolveUsername(""), "");
+});
+
+test("an unlabelled change form's new password is the value typed twice", t => {
+    const env = credentialsEnvironment(t);
+    const form = env.dom.document.body.appendChild(env.dom.document.createElement("form"));
+    // Labels such as "Verify" or names such as password1/password2 are not
+    // recognised as new-password fields; the repeated value still is.
+    const current = env.field(form, "password", { name: "password0" }, "old-secret");
+    const fresh = env.field(form, "password", { name: "password1" }, "new-secret");
+    env.field(form, "password", { name: "password2", placeholder: "Verify" }, "new-secret");
+    const found = env.credentials.findLoginCredentials(form);
+    assert.equal(found.password, "new-secret");
+    assert.equal(found.passwordField, fresh);
+    assert.equal(found.newPassword, true);
+
+    // A mistyped confirmation has no repeated value: fall back to the current
+    // password, which the vault already holds, so nothing wrong is saved.
+    fresh.value = "new-secreX";
+    const mismatch = env.credentials.findLoginCredentials(form);
+    assert.equal(mismatch.passwordField, current);
+    assert.equal(mismatch.newPassword, false);
+
+    // A single sign-in password is not a new password.
+    const login = env.dom.document.body.appendChild(env.dom.document.createElement("form"));
+    env.field(login, "password", { name: "pw" }, "only-secret");
+    assert.equal(env.credentials.findLoginCredentials(login).newPassword, false);
 });
