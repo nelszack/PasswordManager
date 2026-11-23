@@ -1,0 +1,8 @@
+# Leaf subcommands without a transcript yet. Remove a line once a
+# transcript runs that command; new commands need a transcript.
+duo enroll
+gui
+native-host install
+native-host update
+sync connect
+totp duo

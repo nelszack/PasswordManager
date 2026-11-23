@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Create account</title>
+<style>body{font:16px system-ui;padding:60px} form{display:grid;gap:10px;width:340px} input{padding:10px}</style></head>
+<body>
+<form>
+  <h1>Create your account</h1>
+  <!-- A name next to the email gives identity context, so both offer identity fill. -->
+  <label for="fullName">Full name</label><input id="fullName" name="fullName" autocomplete="name" data-expect="identity">
+  <label for="newEmail">Email</label><input id="newEmail" type="email" name="email" autocomplete="email" data-expect="identity">
+  <label for="newPassword">Create password</label>
+  <input id="newPassword" type="password" name="password" autocomplete="new-password" data-expect="generate">
+  <label for="confirmPassword">Confirm password</label>
+  <input id="confirmPassword" type="password" name="confirmPassword" autocomplete="new-password" data-expect="generate">
+  <button>Create account</button>
+</form>
+</body></html>

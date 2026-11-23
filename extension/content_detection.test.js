@@ -60,6 +60,17 @@ test("credential detection distinguishes login, registration, search, and TOTP f
     assert.equal(detection.isTotpInput(totp), true);
 });
 
+test("card security codes are not one-time sign-in codes", () => {
+    assert.equal(detection.isTotpInput(new FakeInput("text", { name: "otp", "aria-label": "Security code" })), true);
+    assert.equal(detection.isTotpInput(new FakeInput("text", { autocomplete: "cc-csc", "aria-label": "Security code" })), false);
+    assert.equal(detection.isTotpInput(new FakeInput("tel", { name: "cvc", placeholder: "Security code" })), false);
+    assert.equal(detection.isTotpInput(new FakeInput("text", { "aria-label": "Card security code" })), false);
+    // Layout classes that merely mention "card" do not hide a sign-in code.
+    const styled = new FakeInput("text", { name: "otp" });
+    styled.className = "card-input";
+    assert.equal(detection.isTotpInput(styled), true);
+});
+
 test("unlabelled usernames are accepted only immediately before a login password", () => {
     const unrelated = new FakeInput("text");
     const username = new FakeInput("text");

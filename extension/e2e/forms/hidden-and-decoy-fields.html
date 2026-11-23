@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Hidden, disabled and decoy fields</title>
+<!-- Bot traps and inactive fields must not get buttons; the real pair must. -->
+<style>body{font:16px system-ui;padding:60px} input{padding:10px} .trap{display:none}
+.away{visibility:hidden} .faded{opacity:0} form{display:grid;gap:10px;width:320px}</style></head>
+<body>
+<form>
+  <div class="trap"><input name="username_confirm" autocomplete="username" data-expect=""></div>
+  <div class="away"><input name="login_backup" data-expect=""></div>
+  <div class="faded"><input name="email_alt" type="email" data-expect=""></div>
+  <input name="account" disabled aria-label="Account (disabled)" data-expect="">
+  <input name="user_readonly" readonly value="locked" aria-label="Username (read-only)" data-expect="">
+  <label for="u">Username</label><input id="u" name="user" data-expect="login">
+  <label for="p">Password</label><input id="p" name="pass" type="password" data-expect="login">
+  <button>Sign in</button>
+</form>
+</body></html>

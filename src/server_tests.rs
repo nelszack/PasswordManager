@@ -756,10 +756,11 @@ async fn expected_revisions_prevent_overlapping_editor_writes() {
     );
     let second = RequestEnvelope::new(update("Second"))
         .with_operation(Some("editor-two".into()), Some(revision));
-    assert_eq!(
-        worker.execute(state.clone(), second).await.responses[0].code,
-        ResponseCode::Conflict as i32
-    );
+    let conflict = worker.execute(state.clone(), second).await;
+    assert_eq!(conflict.responses[0].code, ResponseCode::Conflict as i32);
+    // The session did not change, so editors keep their unsaved edits for review.
+    assert!(worker.session_id().is_some());
+    assert_eq!(conflict.responses[0].session_id, worker.session_id());
     let rejected = worker
         .execute(
             state,

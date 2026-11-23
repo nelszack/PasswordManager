@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>MUI outlined fields with a visibility toggle</title>
+<!-- MUI draws the outline as an absolutely positioned fieldset over the input, and
+     the password field has an end-adornment "show password" icon button at its
+     right edge, where the extension's button would normally go. -->
+<style>body{font:16px system-ui;padding:60px}
+.MuiFormControl-root{position:relative;display:block;width:360px;margin-bottom:20px}
+.MuiOutlinedInput-root{position:relative;display:flex;align-items:center}
+.MuiOutlinedInput-input{flex:1;padding:16px 14px;border:0;font-size:16px;background:none}
+.MuiOutlinedInput-notchedOutline{position:absolute;inset:-5px 0 0;margin:0;padding:0 8px;border:1px solid #999;
+  border-radius:4px;pointer-events:none}
+.MuiInputAdornment-root{margin-right:8px}
+.MuiIconButton-root{width:32px;height:32px;border:0;border-radius:50%;background:#ddd}</style></head>
+<body>
+<form>
+  <div class="MuiFormControl-root"><div class="MuiOutlinedInput-root">
+    <input class="MuiOutlinedInput-input" id=":r1:" name="identifier" type="text" aria-label="Email or phone" data-expect="login">
+    <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span>Email or phone</span></legend></fieldset>
+  </div></div>
+  <div class="MuiFormControl-root"><div class="MuiOutlinedInput-root">
+    <input class="MuiOutlinedInput-input" id=":r2:" name="password" type="password" aria-label="Password" data-expect="login">
+    <div class="MuiInputAdornment-root"><button class="MuiIconButton-root" type="button" aria-label="toggle password visibility">&#128065;</button></div>
+    <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span>Password</span></legend></fieldset>
+  </div></div>
+  <button type="submit">Continue</button>
+</form>
+</body></html>

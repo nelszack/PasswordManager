@@ -154,6 +154,16 @@ suppresses late secret replies without discarding mutation receipts (including
 HOTP counter updates). Hidden field drafts preserve redacted values unless
 explicitly replaced.
 
+`src/gui/flow_tests.rs` drives the real desktop app through whole flows without
+a window: create a vault, add and find items, edit, lock and unlock, trash and
+undo, save settings, and an edit that races another client. Each flow re-runs
+the test binary as a child process with a temporary home, config and data
+directory, and starts the real server inside it. Buttons are clicked by their
+label through the rendered view, so a missing or disabled control fails the
+flow. Every task the app returns, including its server requests, runs to
+completion. To add a flow, use `Flow::start`, `click`, `send`, `expect_shows`,
+and wrap the test body in `sandboxed`.
+
 For desktop changes, run `cargo test --locked --bin pm` and the CLI integration
 tests in addition to shared validation. Manually check create/unlock, list/search,
 editing, timed reveal, copy cleanup, external locking, and GUI close/reopen while
@@ -280,11 +290,21 @@ Full spoken-output quality, editing, scrolling, menus, and IME checks remain par
 of the native acceptance review.
 
 The GUI tests also exercise the real Iced software renderer without opening a
-window or reading personal vaults. To export the synthetic fixtures as PPM images:
+window or reading personal vaults. `scripts/gui_screenshots.py` exports every
+rendered screen (several sizes, scales and themes) as PNGs and writes a gallery
+page. Given a baseline revision, it renders that revision the same way and shows
+the changed screens side by side with diff images, exiting 1 when any screen
+changed:
 
 ```bash
-PM_GUI_REVIEW_DIR=/absolute/path/to/renders cargo test --locked --bin pm gui::render_tests
+python3 scripts/gui_screenshots.py                    # target/gui-screenshots/index.html
+python3 scripts/gui_screenshots.py --baseline main    # what changed visually since main
 ```
+
+Baselines are rendered on the same machine rather than committed, because text is
+drawn with system fonts: pixels differ between machines but not between runs. For
+raw PPM files, set `PM_GUI_REVIEW_DIR=/absolute/path` when running
+`cargo test --locked --bin pm gui::render_tests`.
 
 These checks cover minimum windows, enlargement, themes, long content, recovery
 banners, and bounded large-vault lists. They verify widget layout and rendering;
@@ -365,6 +385,24 @@ The coverage command writes reports under `test-results/e2e-coverage`; use
 profiles and synthetic vaults. Most fixtures enable HTTP in a temporary extension
 copy; production injection remains HTTPS-only.
 
+`extension/e2e/forms/` is a set of real-world form patterns: framework fields,
+identifier-first sign-in, signup and password changes, shadow DOM, iframes,
+decoys, redrawn forms and checkout. Each field is marked with the in-page buttons
+it should get, and `form_corpus.spec.cjs` checks both the buttons and their
+placement with the real extension. To add a regression, save a minimal page there
+and run `npx playwright test form_corpus`. See
+[forms/README.md](../extension/e2e/forms/README.md).
+
+### CLI transcripts
+
+`tests/transcripts/*.txt` are scripts of `pm` commands with their expected exit
+code and output, run in isolated sandboxes by `cargo test --test cli_transcripts`.
+To record new or changed output, run
+`PM_BLESS=1 cargo test --test cli_transcripts`, then review the diff and replace
+volatile values with `[..]`. The same test target fails when a subcommand has no
+transcript, listing the remaining gaps in `tests/transcripts/UNCOVERED`. See
+[the format](../tests/transcripts/README.md).
+
 For Rust coverage, install the coverage runner first (the pinned toolchain
 already includes the LLVM tools). Either run it directly, or let the shared
 validation instrument its own test run and write an lcov report, as CI does on
@@ -435,8 +473,19 @@ The helper runs Android JVM tests and lint. Shared Rust changes still need the
 normal root validation and `pm-mobile` checks; Kotlin/resource changes need the
 Android build and the relevant isolated instrumentation tests. A host build of
 `pm-mobile` does not compile its Android-only JNI module. The Android CI workflow
-builds both supported ABIs, runs JVM tests/lint, and uploads a debug APK; it does
-not run emulator or phone instrumentation tests.
+builds both supported ABIs, runs JVM tests/lint, and uploads a debug APK. A second
+job installs the app and test APKs on an API 34 emulator and runs
+`scripts/android_instrumentation.sh`: every unattended instrumentation class in
+its own process, including the emulator-only `MobileIntegrationTest`, plus
+`MobileRedesignTest` in light and dark with screenshots. The screenshots and
+per-class logs are uploaded as the `android-instrumentation` artifact. The
+script refuses to run on anything but an emulator; locally, start one and run
+`ANDROID_SERIAL=emulator-5554 scripts/android_instrumentation.sh DIR`, where DIR
+holds both APKs from the same build.
+
+`AutofillFieldCorpusTest` (JVM) lists real-world field descriptions from apps
+and Chrome pages with the sign-in role each should get. Add a row whenever
+autofill misreads a field.
 
 Management widgets live in `MobileUi.kt` and `MobileScaffold.kt`, workflows in
 `ManagementActivity.kt` and its screen controllers (`DuoScreens.kt`,

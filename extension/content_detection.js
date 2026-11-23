@@ -9,6 +9,8 @@
     const SEARCH_HINT_RE = /search|query|lookup|find/i;
     const TOTP_HINT_RE =
         /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
+    // Only explicit card-code wording: descriptors include CSS classes such as "card-input".
+    const CARD_CODE_HINT_RE = /\b(cvv2?|cvc2?|csc)\b|card[-_ ]?(security|verification)/i;
     const USERNAME_INPUT_TYPES = new Set(["text", "email", "tel"]);
 
     function inputDescriptors(input) {
@@ -174,11 +176,13 @@
 
     function isTotpInput(input) {
         if (!isUsableInput(input)) return false;
-        if (autocompleteTokens(input).includes("one-time-code")) return true;
-        return (
-            ["text", "tel", "number"].includes(input.type) &&
-            inputDescriptors(input).some(value => TOTP_HINT_RE.test(value))
-        );
+        const tokens = autocompleteTokens(input);
+        if (tokens.includes("one-time-code")) return true;
+        // A card's "security code" (CVC) is not a sign-in code.
+        if (tokens.some(token => token.startsWith("cc-"))) return false;
+        const descriptors = inputDescriptors(input);
+        if (descriptors.some(value => CARD_CODE_HINT_RE.test(value))) return false;
+        return ["text", "tel", "number"].includes(input.type) && descriptors.some(value => TOTP_HINT_RE.test(value));
     }
 
     function isUsernameBeforePassword(input, formUsernames) {

@@ -36,6 +36,9 @@ class SelectionTests(unittest.TestCase):
             ".github/actions/plan-checks/action.yml": set(plan.SUITES),
             "scripts/package_extension.cjs": {"extension", "browser"},
             "scripts/firefox_manifest.cjs": {"extension", "browser"},
+            "scripts/gui_screenshots.py": {"rust"},
+            "scripts/android_instrumentation.sh": set(),
+            "tests/transcripts/items.txt": {"rust", "browser", "cloud", "fuzz"},
             "new-build-input.toml": set(plan.SUITES),
         }
         for path, expected in cases.items():

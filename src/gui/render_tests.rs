@@ -377,6 +377,58 @@ fn rendered_screens_fit_supported_windows() {
 }
 
 #[test]
+fn main_screens_render_in_dark_and_high_contrast_themes() {
+    use password_manager::config::Appearance;
+    for appearance in [Appearance::Dark, Appearance::HighContrast] {
+        let mut app = tests::app();
+        app.settings.appearance = appearance;
+        app.ui.width = 1060.0;
+        app.ui.height = 800.0;
+        app.connection.running = true;
+        app.request_state = RequestState::Idle;
+        app.notice.clear();
+        let prefix = format!("theme-{appearance:?}");
+        render(&app, &format!("{prefix}-onboarding"), 1060, 800, 1.0);
+        app.connection.session = Some("synthetic-session".into());
+        app.items = (1..=3)
+            .map(|id| ItemSummary {
+                tags: vec!["work".into()],
+                favorite: id == 1,
+                id,
+                revision: 1,
+                name: format!("Example account {id}"),
+                username: Some("alice@example.test".into()),
+                kind: ItemKind::Login,
+                urls: vec!["https://example.test".into()],
+                has_totp: id == 2,
+                has_duo: false,
+            })
+            .collect();
+        render(&app, &format!("{prefix}-items"), 1060, 800, 1.0);
+        app.editor = Editor::new(Draft {
+            name: "Example account".into(),
+            ..Default::default()
+        });
+        render(&app, &format!("{prefix}-editor"), 1060, 800, 1.0);
+        app.tab = Tab::Generator;
+        render(&app, &format!("{prefix}-generator"), 1060, 800, 1.0);
+        app.tab = Tab::Settings;
+        for section in presentation::SettingsSection::ALL {
+            app.ui.settings_section = section;
+            render(
+                &app,
+                &format!("{prefix}-settings-{section}"),
+                1060,
+                800,
+                1.0,
+            );
+        }
+        app.tab = Tab::Tools;
+        render(&app, &format!("{prefix}-tools"), 1060, 800, 1.0);
+    }
+}
+
+#[test]
 fn rendered_edge_cases_fit_minimum_windows_and_all_themes() {
     use password_manager::config::Appearance;
     for appearance in [

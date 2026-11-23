@@ -226,6 +226,12 @@ impl Owner {
                 ResponseCode::Conflict,
                 "Item changed since it was opened; reopen it before continuing",
             ));
+            // The session is unchanged: say so, so clients keep unsaved edits for
+            // review rather than treating the conflict as a relock.
+            rejected.session_id = self.session.session_id();
+            for response in &mut rejected.responses {
+                response.session_id = rejected.session_id.clone();
+            }
             if let Some(id) = operation_id.as_ref() {
                 self.complete(id, &mut rejected.responses, false);
             }

@@ -56,6 +56,9 @@ rfd = { version = "0.17.2", optional = true }
 pm-platform = { path = "crates/pm-platform", features = ["fixtures"] }
 # Property tests run in-process and do not use bit-set strategies.
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Runs the desktop app's tasks headlessly in the GUI flow tests (already a
+# dependency of iced; no new crates).
+iced_runtime = "0.14"
 
 # Line tables keep file/line backtraces and test-failure locations while skipping
 # full variable debug info, which dominated rebuild and link time for the
