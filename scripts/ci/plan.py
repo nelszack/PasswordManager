@@ -48,6 +48,9 @@ def select(paths):
             selected.update(("extension", "browser", "rust"))
         elif path == "scripts/validate.cjs":
             selected.update(("extension", "rust"))
+        elif path == "scripts/android_instrumentation.sh":
+            # Android-only; the separate Android workflow selects itself by path.
+            continue
         elif path in ("scripts/test_gui_accessibility.py", "scripts/gui_screenshots.py"):
             selected.add("rust")
         elif path in ("docs/commands.html", "docs/commands.template.html"):

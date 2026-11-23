@@ -43,8 +43,40 @@ data class TypedForm(
         get() = kind == "payment-card"
 }
 
+/** How a field takes part in signing in. */
+enum class LoginRole {
+    USERNAME,
+    PASSWORD,
+    CODE,
+}
+
 object Forms {
     class Rejected(val reason: String) : IllegalStateException(reason)
+
+    private val CARD_CODE = Regex("""\b(cvv2?|cvc2?|csc|cc-csc)\b|card[ _-]?(security|verification)""")
+
+    /**
+     * The sign-in role of a field from its lowercase descriptions (view ID, hint, HTML attributes
+     * and autofill hints, joined by spaces) and input type, or null when it plays none.
+     */
+    fun loginRole(hints: String, inputType: Int): LoginRole? {
+        if (VerificationFields.isCode(hints)) return LoginRole.CODE
+        // Checkout pages often mask a card's security code like a password.
+        if (CARD_CODE.containsMatchIn(hints)) return null
+        val variation = inputType and InputType.TYPE_MASK_VARIATION
+        val password =
+            variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
+                variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD &&
+                    inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_CLASS_NUMBER ||
+                hints.contains("password")
+        if (password) return LoginRole.PASSWORD
+        return if (
+            hints.contains("username") || hints.contains("email") || hints.contains("user_name")
+        )
+            LoginRole.USERNAME
+        else null
+    }
 
     /** One text field's identity, origin, and the text that describes its role. */
     private data class Described(
@@ -192,27 +224,13 @@ object Forms {
                     .plus(node.autofillHints?.toList().orEmpty())
                     .joinToString(" ")
                     .lowercase()
-            val code = VerificationFields.isCode(hints)
-            val variation = node.inputType and InputType.TYPE_MASK_VARIATION
-            val password =
-                variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-                    variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
-                    variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD &&
-                        node.inputType and InputType.TYPE_MASK_CLASS ==
-                            InputType.TYPE_CLASS_NUMBER ||
-                    hints.contains("password")
-            val username =
-                !password &&
-                    !code &&
-                    (hints.contains("username") ||
-                        hints.contains("email") ||
-                        hints.contains("user_name"))
-            if ((password || username || code) && node.autofillId != null)
+            val role = loginRole(hints, node.inputType)
+            if (role != null && node.autofillId != null)
                 fields.add(
                     Field(
                         requireNotNull(node.autofillId),
-                        username,
-                        code,
+                        role == LoginRole.USERNAME,
+                        role == LoginRole.CODE,
                         node.autofillValue?.takeIf { it.isText }?.textValue?.toString(),
                         nodeOrigin,
                     )

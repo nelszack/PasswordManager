@@ -463,8 +463,19 @@ The helper runs Android JVM tests and lint. Shared Rust changes still need the
 normal root validation and `pm-mobile` checks; Kotlin/resource changes need the
 Android build and the relevant isolated instrumentation tests. A host build of
 `pm-mobile` does not compile its Android-only JNI module. The Android CI workflow
-builds both supported ABIs, runs JVM tests/lint, and uploads a debug APK; it does
-not run emulator or phone instrumentation tests.
+builds both supported ABIs, runs JVM tests/lint, and uploads a debug APK. A second
+job installs the app and test APKs on an API 34 emulator and runs
+`scripts/android_instrumentation.sh`: every unattended instrumentation class in
+its own process, including the emulator-only `MobileIntegrationTest`, plus
+`MobileRedesignTest` in light and dark with screenshots. The screenshots and
+per-class logs are uploaded as the `android-instrumentation` artifact. The
+script refuses to run on anything but an emulator; locally, start one and run
+`ANDROID_SERIAL=emulator-5554 scripts/android_instrumentation.sh DIR`, where DIR
+holds both APKs from the same build.
+
+`AutofillFieldCorpusTest` (JVM) lists real-world field descriptions from apps
+and Chrome pages with the sign-in role each should get. Add a row whenever
+autofill misreads a field.
 
 Management widgets live in `MobileUi.kt` and `MobileScaffold.kt`, workflows in
 `ManagementActivity.kt` and its screen controllers (`DuoScreens.kt`,
