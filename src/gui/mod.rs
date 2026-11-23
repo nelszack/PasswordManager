@@ -228,8 +228,11 @@ enum Message {
     /// The operating system switched between light and dark.
     SystemTheme(iced::theme::Mode),
     /// Another launch asked this window to come forward.
+    /// Sent by the single-instance listener (Unix) and the tray (Linux).
+    #[cfg_attr(not(unix), allow(dead_code))]
     Raise(instance::Request),
-    /// Quit from the tray menu; asks first like closing the window.
+    /// Quit from the tray menu; asks first like closing the window. The tray is Linux-only.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Quit,
     /// Escape: close the topmost panel or confirmation, and hide secrets.
     Escape,

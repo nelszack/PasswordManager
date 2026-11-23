@@ -17,6 +17,8 @@ pub enum Request {
     Open(usize),
 }
 
+// The wire format is only spoken over the Unix socket (and checked by tests).
+#[cfg_attr(not(unix), allow(dead_code))]
 impl Request {
     fn wire(self) -> String {
         match self {
