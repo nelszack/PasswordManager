@@ -116,14 +116,28 @@ impl Sandbox {
 
     /// Replace values that differ between runs and machines with placeholders.
     fn normalize(&self, text: &str) -> String {
-        let root = self.root.path().to_string_lossy().into_owned();
         let mut text = text.replace("\r\n", "\n");
-        for variant in [
-            root.replace('\\', "\\\\"),
-            root.clone(),
-            root.replace('\\', "/"),
-        ] {
-            text = text.replace(&variant, "{root}");
+        // The temporary directory may sit behind a symlink (macOS: /var is
+        // /private/var), and pm prints resolved paths; replace the resolved form first.
+        let mut roots = Vec::new();
+        if let Ok(resolved) = std::fs::canonicalize(self.root.path()) {
+            let resolved = resolved.to_string_lossy().into_owned();
+            roots.push(
+                resolved
+                    .strip_prefix(r"\\?\")
+                    .unwrap_or(&resolved)
+                    .to_owned(),
+            );
+        }
+        roots.push(self.root.path().to_string_lossy().into_owned());
+        for root in roots {
+            for variant in [
+                root.replace('\\', "\\\\"),
+                root.clone(),
+                root.replace('\\', "/"),
+            ] {
+                text = text.replace(&variant, "{root}");
+            }
         }
         // Windows paths below the root keep their separators; make them uniform.
         while let Some(start) = text.find("{root}\\") {
