@@ -154,6 +154,16 @@ suppresses late secret replies without discarding mutation receipts (including
 HOTP counter updates). Hidden field drafts preserve redacted values unless
 explicitly replaced.
 
+`src/gui/flow_tests.rs` drives the real desktop app through whole flows without
+a window: create a vault, add and find items, edit, lock and unlock, trash and
+undo, save settings, and an edit that races another client. Each flow re-runs
+the test binary as a child process with a temporary home, config and data
+directory, and starts the real server inside it. Buttons are clicked by their
+label through the rendered view, so a missing or disabled control fails the
+flow. Every task the app returns, including its server requests, runs to
+completion. To add a flow, use `Flow::start`, `click`, `send`, `expect_shows`,
+and wrap the test body in `sandboxed`.
+
 For desktop changes, run `cargo test --locked --bin pm` and the CLI integration
 tests in addition to shared validation. Manually check create/unlock, list/search,
 editing, timed reveal, copy cleanup, external locking, and GUI close/reopen while
