@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Identifier-first sign-in</title>
+<!-- Many identity providers ask for the account first and the password on a second step. -->
+<style>body{font:16px system-ui;padding:60px} input{padding:10px;width:300px}</style></head>
+<body>
+<form>
+  <h1>Sign in</h1>
+  <label for="identifierId">Email or phone</label>
+  <input id="identifierId" type="email" name="identifier" autocomplete="username webauthn" data-expect="login">
+  <input type="password" name="hiddenPassword" tabindex="-1" aria-hidden="true" style="position:absolute;left:-9999px;opacity:0" data-expect="">
+  <button type="button">Next</button>
+</form>
+</body></html>

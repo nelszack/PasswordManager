@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Two-factor verification</title>
+<style>body{font:16px system-ui;padding:60px} input{padding:10px;width:200px;letter-spacing:4px}</style></head>
+<body>
+<form>
+  <h1>Enter the code from your authenticator app</h1>
+  <input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" aria-label="Verification code" data-expect="totp">
+  <label><input type="checkbox" name="trust"> Trust this device</label>
+  <button>Verify</button>
+</form>
+</body></html>

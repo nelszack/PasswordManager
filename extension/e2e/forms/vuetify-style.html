@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Vuetify-style fields</title>
+<!-- Vuetify keeps unfocused inputs transparent so a floating label shows through,
+     and each field has `contain: layout`, which makes it a containing block for
+     fixed-position descendants such as the extension's buttons. -->
+<style>body{font:16px system-ui;margin:0;padding:60px}
+.v-field{position:relative;contain:layout;display:block;width:340px;height:56px;margin:0 0 16px;
+  border:1px solid #888;border-radius:4px}
+.v-field input{position:absolute;inset:0;width:100%;padding:20px 12px 4px;border:0;background:none;
+  font-size:16px;opacity:0;box-sizing:border-box}
+.v-field input:focus{opacity:1}
+.v-label{position:absolute;left:12px;top:16px;pointer-events:none;color:#555}
+.v-btn{margin-top:8px}</style></head>
+<body>
+<form>
+  <div class="v-field"><label class="v-label" for="email">E-mail</label>
+    <input id="email" type="email" name="email" data-expect="login"></div>
+  <div class="v-field"><label class="v-label" for="password">Password</label>
+    <input id="password" type="password" name="password" data-expect="login"></div>
+  <button class="v-btn" type="submit">Log in</button>
+</form>
+</body></html>

@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Page without a login form</title>
+<style>body{font:16px system-ui;padding:60px} input{padding:10px;width:260px}</style></head>
+<body>
+<form role="search"><input name="query" aria-label="Find articles" data-expect=""></form>
+<article><h1>Article</h1><p>Body text.</p></article>
+<form>
+  <label for="news">Get the weekly newsletter</label>
+  <input id="news" type="email" name="newsletter_email" placeholder="you@example.com" data-expect=""
+    data-known-issue="a lone email field gets the key button; markup alone cannot tell it from identifier-first sign-in">
+  <button>Subscribe</button>
+</form>
+</body></html>

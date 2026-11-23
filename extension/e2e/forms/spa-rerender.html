@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Single-page app that redraws its form</title>
+<!-- Frameworks often render a placeholder, then replace the whole form after data
+     loads. Buttons must follow the new inputs and not linger on removed ones. -->
+<style>body{font:16px system-ui;padding:60px} form{display:grid;gap:10px;width:320px} input{padding:10px}</style></head>
+<body data-corpus-pending>
+<div id="app"><p>Loading…</p></div>
+<script>
+const app = document.getElementById("app");
+function render(step) {
+    app.innerHTML = `<form data-step="${step}">
+        <label for="u${step}">Username</label><input id="u${step}" name="username" autocomplete="username" data-expect="login">
+        <label for="p${step}">Password</label><input id="p${step}" name="password" type="password" data-expect="login">
+        <button type="button">Sign in</button></form>`;
+}
+setTimeout(() => render(1), 150);
+setTimeout(() => { render(2); document.body.removeAttribute("data-corpus-pending"); }, 600);
+</script>
+</body></html>

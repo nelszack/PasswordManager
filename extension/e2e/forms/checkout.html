@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Checkout</title>
+<style>body{font:16px system-ui;padding:40px} fieldset{display:grid;gap:8px;width:380px;margin-bottom:16px}
+input{padding:8px}</style></head>
+<body>
+<form>
+  <fieldset><legend>Shipping</legend>
+    <label for="name">Full name</label><input id="name" name="name" autocomplete="shipping name" data-expect="identity">
+    <label for="street">Street address</label><input id="street" name="address1" autocomplete="shipping address-line1" data-expect="identity">
+    <label for="city">City</label><input id="city" name="city" autocomplete="shipping address-level2" data-expect="identity">
+    <label for="zip">ZIP code</label><input id="zip" name="zip" autocomplete="shipping postal-code" data-expect="identity">
+  </fieldset>
+  <fieldset><legend>Payment</legend>
+    <label for="ccname">Name on card</label><input id="ccname" name="ccname" autocomplete="cc-name" data-expect="card">
+    <label for="ccnum">Card number</label><input id="ccnum" name="cardnumber" autocomplete="cc-number" inputmode="numeric" data-expect="card">
+    <label for="ccexp">Expiry (MM/YY)</label><input id="ccexp" name="exp-date" autocomplete="cc-exp" data-expect="card">
+    <label for="cvc">Security code</label><input id="cvc" name="cvc" autocomplete="cc-csc" data-expect="card">
+  </fieldset>
+  <button>Place order</button>
+</form>
+</body></html>

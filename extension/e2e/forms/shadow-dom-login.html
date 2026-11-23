@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Login inside a web component</title>
+<style>body{font:16px system-ui;padding:60px}</style></head>
+<body>
+<login-card></login-card>
+<script>
+customElements.define("login-card", class extends HTMLElement {
+    connectedCallback() {
+        const root = this.attachShadow({ mode: "open" });
+        root.innerHTML = `
+            <style>form{display:grid;gap:10px;width:320px} input{padding:10px;font-size:16px}</style>
+            <form>
+                <label for="u">Username</label><input id="u" name="username" autocomplete="username" data-expect="login">
+                <label for="p">Password</label><input id="p" name="password" type="password" data-expect="login">
+                <button>Sign in</button>
+            </form>`;
+    }
+});
+</script>
+</body></html>
