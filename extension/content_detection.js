@@ -9,7 +9,8 @@
     const SEARCH_HINT_RE = /search|query|lookup|find/i;
     const TOTP_HINT_RE =
         /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
-    const CARD_CODE_HINT_RE = /\b(cvv2?|cvc2?|csc)\b|card/i;
+    // Only explicit card-code wording: descriptors include CSS classes such as "card-input".
+    const CARD_CODE_HINT_RE = /\b(cvv2?|cvc2?|csc)\b|card[-_ ]?(security|verification)/i;
     const USERNAME_INPUT_TYPES = new Set(["text", "email", "tel"]);
 
     function inputDescriptors(input) {
