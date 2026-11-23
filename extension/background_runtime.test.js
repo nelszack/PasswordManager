@@ -332,7 +332,11 @@ test("automatic prompts use summaries and never compare unselected vault passwor
         assert.ok(result.token);
         assert.equal(result.matched, undefined);
         assert.equal(env.created.length, 1);
-        assert.equal(env.requests.filter(r => r.action !== "status").every(r => r.action === "getLoginItems"), true);
+        // Only summaries and the service-side "already saved?" check; never a secret.
+        assert.equal(
+            env.requests.filter(r => r.action !== "status").every(r => ["getLoginItems", "checkSavedLogin"].includes(r.action)),
+            true
+        );
         const sender = { id: env.pickerSender.id, url: env.pickerSender.url.replace("picker.html", "credential_prompt.html") };
         const data = await env.message({ action: "getCredentialPromptData", token: result.token }, sender);
         assert.equal(JSON.stringify(data).includes(password), false);

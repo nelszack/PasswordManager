@@ -7,6 +7,22 @@
     "use strict";
     const protocolVersion = 6;
     const operations = Object.freeze({
+  "checkSavedLogin": {
+    "mutates": false,
+    "lane": "work",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [
+      "domain",
+      "password"
+    ],
+    "optionalFields": [
+      "username"
+    ],
+    "resultShape": "summaryArray"
+  },
   "copyGenerated": {
     "mutates": false,
     "lane": "work",

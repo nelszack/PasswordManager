@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
 
-    const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth/i;
+    const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth|identif/i;
     const SEARCH_HINT_RE = /search|query|lookup|find/i;
     const TOTP_HINT_RE =
         /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
@@ -53,7 +53,11 @@
             }
             visited.push(node);
             const style = getComputedStyle(node);
-            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+            // Material-style fields (Vuetify, for one) keep the input itself
+            // transparent until focused so a floating label shows through; only
+            // a transparent container hides a field.
+            const transparent = style.opacity === "0" && !(node === element && node instanceof HTMLInputElement);
+            if (style.display === "none" || style.visibility === "hidden" || transparent) {
                 visible = false;
                 break;
             }

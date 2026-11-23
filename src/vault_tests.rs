@@ -856,6 +856,27 @@ fn browser_login_selection_and_typed_autofill_are_separate_and_secret_scoped() {
     );
 }
 #[test]
+fn saved_login_check_matches_site_username_and_password_without_releasing_secrets() {
+    let vault = memory();
+    let ids = |domain: &str, username: &str, password: &str| -> Vec<usize> {
+        vault
+            .browser_saved_logins(domain, username, password)
+            .iter()
+            .map(|summary| summary.id)
+            .collect()
+    };
+    assert_eq!(ids("https://example.com", "alice", "secret"), [1]);
+    // Sites treat emails and usernames case-insensitively and trim them.
+    assert_eq!(ids("https://example.com", " ALICE ", "other-secret"), [2]);
+    // A password-only step matches on the password alone.
+    assert_eq!(ids("https://example.com", "", "secret"), [1]);
+    assert!(ids("https://example.com", "alice", "changed").is_empty());
+    assert!(ids("https://example.com", "bob", "secret").is_empty());
+    assert!(ids("https://example.com", "alice", "Secret").is_empty());
+    assert!(ids("https://other.example", "alice", "secret").is_empty());
+    assert!(ids("not a url", "alice", "secret").is_empty());
+}
+#[test]
 fn validated_timestamp_and_nonzero_fixed_width_identity_reject_invalid_documents() {
     assert!(serde_json::from_str::<Timestamp>("\"yesterday\"").is_err());
     assert!(serde_json::from_str::<ItemId>("0").is_err());

@@ -115,6 +115,8 @@ module.exports.create = function create({ onInvalidated = () => {} } = {}) {
                 try {
                     chrome.runtime.sendMessage({ action: "claimPopupFill", token }, response => {
                         if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                        // Another frame of the page already filled this login.
+                        else if (response?.duplicate === true) resolve(null);
                         else if (!response?.success) reject(new Error(response?.error || "Could not fill"));
                         else resolve(response.payload);
                     });

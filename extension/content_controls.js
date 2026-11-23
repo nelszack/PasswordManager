@@ -64,7 +64,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
                     else writes.push(control.position);
                 }
             });
-            for (const write of writes) write();
+            // A host shown for the first time is measured again in the next frame
+            // to correct for a containing block other than the viewport.
+            let recheck = false;
+            for (const write of writes) recheck = write() === true || recheck;
+            if (recheck) reposition(false);
         });
     }
     const schedulePosition = () => reposition(true);
@@ -162,8 +166,9 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     // Fill a login chosen in the toolbar popup. `claim` fetches it from the
-    // extension; resolves to whether a login form was filled.
-    async function fillFromPopup(focused, claim) {
+    // extension. False at once when this frame has no login form; otherwise a
+    // promise of whether the form was filled.
+    function fillFromPopup(focused, claim) {
         const control = loginControl(focused, false);
         if (!control) return false;
         return control.activate(claim);
@@ -345,21 +350,42 @@ function overlayShift(input, left, top) {
     return CONTROL_SIZE + 4;
 }
 
+// A fixed host is placed relative to the viewport unless an ancestor of the
+// field makes a containing block (transform, filter, `contain: layout` as on
+// Vuetify fields). Its origin is where the shown host lands minus where it was
+// placed; null while the host is hidden and cannot be measured.
+function containingOrigin(host) {
+    if (host.style?.getPropertyValue?.("display") !== "block") return null;
+    const rect = host.getBoundingClientRect?.();
+    const left = parseFloat(host.style.getPropertyValue("left"));
+    const top = parseFloat(host.style.getPropertyValue("top"));
+    if (!rect || !Number.isFinite(left) || !Number.isFinite(top)) return null;
+    return { x: rect.left - left, y: rect.top - top };
+}
+
 // Return deferred writes so callers can finish all style/geometry reads first.
-// The overlay hit test is cached and repeated only for layout changes.
+// The overlay hit test is cached and repeated only for layout changes. A write
+// returns true when the host was just shown, so its origin is not yet known and
+// the caller should measure once more.
 function positionedButton(input, host, offset) {
     let shift = null;
+    let origin = { x: 0, y: 0 };
     const measure = (layout = true) => {
         const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
         let values = { display: "none" };
+        const measured = containingOrigin(host);
+        if (measured) origin = measured;
         if (rect?.width && rect?.height) {
             const top = rect.top + rect.height / 2 - CONTROL_SIZE / 2;
             const left = rect.right - offset;
             if (layout || shift === null) shift = overlayShift(input, left, top);
             const shifted = Math.max(rect.left ?? -Infinity, left - (shift ?? 0));
-            values = { display: "block", left: shifted + "px", top: top + "px" };
+            values = { display: "block", left: shifted - origin.x + "px", top: top - origin.y + "px" };
         }
-        return () => setImportantStyles(host, values);
+        return () => {
+            setImportantStyles(host, values);
+            return !measured && values.display === "block";
+        };
     };
     const position = () => measure()();
     position.measure = measure;

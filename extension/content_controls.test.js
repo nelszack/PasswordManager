@@ -35,6 +35,29 @@ test("position measurements defer writes and unchanged positions avoid style mut
     assert.equal(host.style.display, "none");
 });
 
+test("controls inside a containing block other than the viewport still sit on the field", t => {
+    // Vuetify 3 fields use `contain: layout`, which re-anchors fixed descendants.
+    const dom = installDom(t);
+    const input = dom.input("text", { left: 472, width: 336, height: 56, right: 808, top: 278 });
+    dom.document.body.appendChild(input);
+    const controls = create({ bridge: {}, credentials: {}, autofill: {} });
+    t.after(() => controls.dispose());
+    const { host } = controlButton("key", "Choose saved credentials");
+    host.containingOrigin = { x: 472, y: 278 };
+    controls.registerPositionedControl(input, host, positionedButton(input, host, 30));
+    dom.flushFrames();
+    dom.flushFrames();
+    assert.deepEqual(
+        [host.getBoundingClientRect().left, host.getBoundingClientRect().top],
+        [778, 292],
+        "the shown control is measured again and moved onto the field"
+    );
+    assert.equal(dom.frames.length, 0, "a placed control needs no further frames");
+    dom.fireWindow("scroll");
+    dom.flushFrames();
+    assert.equal(host.getBoundingClientRect().left, 778, "the measured origin is kept");
+});
+
 test("layout frames measure every control before applying any position", t => {
     const dom = installDom(t);
     const work = [];

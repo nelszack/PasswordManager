@@ -86,6 +86,17 @@ test("hidden, disconnected, disabled, and readonly fields fail closed", () => {
     assert.equal(detection.isElementVisible(input), false);
 });
 
+test("a transparent input is visible, but a transparent container hides it", () => {
+    // Vuetify keeps unfocused inputs at opacity 0 behind a floating label.
+    const input = new FakeInput("text", { placeholder: "Enter your email" });
+    input.style = { display: "flex", visibility: "visible", opacity: "0" };
+    assert.equal(detection.isUsableInput(input), true);
+    const container = new FakeInput();
+    container.style = { display: "block", visibility: "visible", opacity: "0" };
+    input.parentElement = container;
+    assert.equal(detection.isElementVisible(input), false);
+});
+
 test("scan-local form classification refreshes after fields change", () => {
     const unrelated = new FakeInput("text");
     const username = new FakeInput("text");

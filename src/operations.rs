@@ -239,6 +239,7 @@ fn dispatch_unlocked(
         | ServerCommand::BrowserDuoItems(..)
         | ServerCommand::BrowserLogins(..)
         | ServerCommand::BrowserLogin { .. }
+        | ServerCommand::BrowserLoginSaved { .. }
         | ServerCommand::BrowserAutofillItem(..)) => {
             browser_command(responses, msg, vault);
             Deferred::None
@@ -796,6 +797,14 @@ fn browser_command(responses: &mut Vec<RpcResponse>, msg: ServerCommand, vault: 
         ),
         ServerCommand::BrowserLogins(origin) => respond_ok(
             ResponsePayload::Summaries(vault.browser_logins(&origin)),
+            responses,
+        ),
+        ServerCommand::BrowserLoginSaved {
+            domain,
+            username,
+            password,
+        } => respond_ok(
+            ResponsePayload::Summaries(vault.browser_saved_logins(&domain, &username, &password)),
             responses,
         ),
         ServerCommand::BrowserLogin { domain, id } => respond_found(

@@ -6,7 +6,7 @@ const promptState = require("./credential_prompt_state.js");
 
 function environment(stored) {
     const calls = [], deliveries = [], destinations = [], removed = [], timers = [];
-    let saveError, lookupError, windowError, remembered, held, resolveSave, matched = false;
+    let saveError, lookupError, windowError, remembered, held, resolveSave, matched = false, saved;
     let holdLookup, resolveLookup, holdMatch, resolveMatch, holdWindow, createWindow;
     const chrome = { runtime: { id: "abcdefghijklmnopabcdefghijklmnop", getURL: path => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${path}` },
         tabs: { sendMessage(tab, message, options, callback) { deliveries.push(message); destinations.push(options); callback(); } },
@@ -32,6 +32,10 @@ function environment(stored) {
                 if (holdLookup) await new Promise(resolve => { resolveLookup = resolve; });
                 return { success: true, sessionId: "a".repeat(64), data: [{"revision": 1, "id": 7, "name": "Example", "username": "alice"}] };
             }
+            if (action === "checkSavedLogin") {
+                if (saved instanceof Error) throw saved;
+                return saved || { success: false, error: "Unsupported native action" };
+            }
             if (held) return new Promise(resolve => { resolveSave = resolve; });
             if (saveError) throw saveError;
             return { success: true, data: "Saved" };
@@ -44,6 +48,7 @@ function environment(stored) {
     return { service, sender, popup, calls, deliveries, destinations, removed, timers, open, complete,
         failSave(error) { saveError = error; }, failLookup(error) { lookupError = error; },
         failWindow(error) { windowError = error; }, remember(record) { remembered = record; }, match() { matched = true; },
+        saved(response) { saved = response; },
         hold() { held = true; }, release(response) { resolveSave(response); },
         holdLookup() { holdLookup = true; }, releaseLookup() { resolveLookup(); },
         holdMatch() { holdMatch = true; }, releaseMatch() { resolveMatch(false); },
@@ -179,4 +184,23 @@ test("never-save sites skip prompts, and choosing Never records the site once", 
     stored.pmNeverSave = ["https://example.com"];
     assert.equal((await env.complete(again.token, "never")).success, true);
     assert.deepEqual(stored.pmNeverSave, ["https://example.com"]);
+});
+
+test("an unchanged sign-in the vault already holds never prompts", async () => {
+    const env = environment();
+    env.saved({ success: true, sessionId: "a".repeat(64), data: [{ id: 7, revision: 1, name: "Example", username: "alice" }] });
+    assert.deepEqual({ ...(await env.open()) }, { success: true, skipped: true });
+    const check = env.calls.find(call => call.action === "checkSavedLogin");
+    assert.deepEqual(check.fields, { domain: "https://example.com", username: "alice", password: "synthetic" });
+    assert.equal(env.calls.some(call => call.action === "getLoginItem"), false, "no saved secret is fetched");
+
+    for (const [label, response] of [
+        ["changed password", { success: true, data: [] }],
+        ["host without the command", { success: false, error: "Unsupported native action" }],
+        ["transport failure", new Error("Native host disconnected")],
+    ]) {
+        const other = environment();
+        other.saved(response);
+        assert.equal(typeof (await other.open()).token, "string", label);
+    }
 });

@@ -37,6 +37,7 @@ export interface NativeRequests {
     copyGenerated: { password: string; };
     searchItems: { query: string; };
     copyItem: { entryId: number; field: string; expectedRevision: number; expectedSession: string; };
+    checkSavedLogin: { domain: string; password: string; username?: string; };
 }
 export interface NativeResults {
     status: ServerStatus;
@@ -61,6 +62,7 @@ export interface NativeResults {
     copyGenerated: string;
     searchItems: ItemPage;
     copyItem: string;
+    checkSavedLogin: ItemSummary[];
 }
 export type NativeAction = keyof NativeRequests;
 export interface NativePolicy { readonly mutates: boolean; readonly lane: "control" | "work" | "duo" | "approval"; readonly timeoutMs: number; readonly allowedSenders: readonly SenderRole[]; readonly requiredFields: readonly string[]; readonly optionalFields: readonly string[]; readonly resultShape: string; }

@@ -202,6 +202,14 @@ class FakeElement extends FakeNode {
         return root;
     }
     getBoundingClientRect() {
+        // A placed fixed-position control lands at its left/top, offset by the
+        // origin of its containing block (the viewport unless a test sets one).
+        const left = parseFloat(this.style?.getPropertyValue?.("left"));
+        const top = parseFloat(this.style?.getPropertyValue?.("top"));
+        if (this.style?.getPropertyValue?.("display") === "block" && Number.isFinite(left) && Number.isFinite(top)) {
+            const { x = 0, y = 0 } = this.containingOrigin || {};
+            return { left: left + x, top: top + y, right: left + x + 28, bottom: top + y + 28, width: 28, height: 28 };
+        }
         return this.rect;
     }
     focus() {

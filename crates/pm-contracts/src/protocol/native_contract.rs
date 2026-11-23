@@ -26,6 +26,7 @@ pub enum NativeAction {
     CopyGenerated,
     SearchItems,
     CopyItem,
+    CheckSavedLogin,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,7 +40,7 @@ pub struct NativePolicy {
     pub result_shape: &'static str,
 }
 impl NativeAction {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Status,
         Self::Lock,
         Self::OpenDesktop,
@@ -62,6 +63,7 @@ impl NativeAction {
         Self::CopyGenerated,
         Self::SearchItems,
         Self::CopyItem,
+        Self::CheckSavedLogin,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -87,6 +89,7 @@ impl NativeAction {
             Self::CopyGenerated => "copyGenerated",
             Self::SearchItems => "searchItems",
             Self::CopyItem => "copyItem",
+            Self::CheckSavedLogin => "checkSavedLogin",
         }
     }
     pub fn policy(self) -> NativePolicy {
@@ -205,6 +208,9 @@ impl NativeAction {
                 &[],
                 "message",
             ),
+            // Whether a captured sign-in is already saved; the service compares
+            // and returns matching summaries, never a secret.
+            Self::CheckSavedLogin => (&["domain", "password"], &["username"], "summaryArray"),
         };
         NativePolicy {
             mutates,

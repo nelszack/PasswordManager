@@ -179,6 +179,14 @@ pub enum ServerCommand {
         domain: String,
         id: usize,
     },
+    /// Logins for the site that already hold this username and password, so
+    /// the browser can skip a save prompt for an unchanged sign-in. Returns
+    /// metadata only; the comparison happens here and no secret leaves.
+    BrowserLoginSaved {
+        domain: String,
+        username: String,
+        password: SecretString,
+    },
     GetField {
         target: Target,
         name: String,
@@ -271,6 +279,7 @@ impl ServerCommand {
                 | Self::BrowserAutofillItem(_)
                 | Self::BrowserLogins(_)
                 | Self::BrowserLogin { .. }
+                | Self::BrowserLoginSaved { .. }
                 // Copies leave the vault unchanged and are safe to repeat.
                 | Self::BrowserCopy { .. }
                 | Self::BrowserCopyItem { .. }

@@ -479,3 +479,138 @@ test("the toolbar popup fills the top frame's login form only through a claimed 
   env.controller.dispose();
   assert.equal(await ask({ action: "pmPopupFill", token: "t" }), "ignored", "a disposed page stays inert");
 });
+
+// A settings page's change-password form: current, new and confirm fields and
+// a scripted "Save" button. The page saves in the background and stays put.
+function changePasswordForm(env, { current = true } = {}) {
+  const form = env.document.createElement("form");
+  const fields = [];
+  if (current) {
+    const old = env.dom.input("password");
+    old.autocomplete = "current-password";
+    fields.push(old);
+  }
+  const next = env.dom.input("password");
+  next.autocomplete = "new-password";
+  const confirm = env.dom.input("password");
+  confirm.autocomplete = "new-password";
+  confirm.name = "confirmPassword";
+  const save = env.document.createElement("button");
+  save.type = "button";
+  save.textContent = "Change password";
+  form.append(...fields, next, confirm, save);
+  env.form.remove();
+  env.document.body.appendChild(form);
+  return { old: fields[0], next, confirm, save };
+}
+
+test("a change-password save button prompts at once with the new password", async (t) => {
+  for (const current of [true, false]) {
+    await t.test(current ? "with current password" : "reset form", async (t) => {
+      const env = await contentEnvironment(t);
+      const form = changePasswordForm(env, { current });
+      if (current) env.type(form.old, "old-secret");
+      env.type(form.next, "new-secret");
+      env.type(form.confirm, "new-secret");
+      env.click(form.save);
+      await env.settle();
+      assert.deepEqual(
+        env.prompts().map(({ password }) => password),
+        ["new-secret"],
+      );
+    });
+  }
+});
+
+test("a change-password form with a mismatched confirmation never prompts", async (t) => {
+  const env = await contentEnvironment(t);
+  const form = changePasswordForm(env);
+  env.type(form.old, "old-secret");
+  env.type(form.next, "new-secret");
+  env.type(form.confirm, "new-secre");
+  env.click(form.save);
+  env.document.dispatch("keydown", {
+    key: "Enter",
+    target: form.confirm,
+    composedPath: () => [form.confirm],
+  });
+  await env.advance(5000);
+  assert.equal(env.prompts().length, 0);
+  // Fixing the typo and saving again still prompts.
+  env.type(form.confirm, "new-secret");
+  env.click(form.save);
+  await env.settle();
+  assert.equal(env.prompts().length, 1);
+});
+
+test("Enter in a new-password field prompts at once", async (t) => {
+  const env = await contentEnvironment(t);
+  const form = changePasswordForm(env, { current: false });
+  env.type(form.next, "new-secret");
+  env.type(form.confirm, "new-secret");
+  env.document.dispatch("keydown", {
+    key: "Enter",
+    target: form.confirm,
+    composedPath: () => [form.confirm],
+  });
+  await env.settle();
+  assert.deepEqual(env.prompts().map(({ password }) => password), ["new-secret"]);
+});
+
+test("a login step that leaves the password step within a few seconds still prompts", async (t) => {
+  const env = await contentEnvironment(t);
+  env.type(env.username, "alice@example.com");
+  env.type(env.password, "secret");
+  env.click(env.next);
+  await env.advance(1500);
+  env.password.remove();
+  await env.advance(1000);
+  assert.equal(env.prompts().length, 1);
+});
+
+test("the toolbar popup fills a same-origin embedded frame only when asked for embedded frames", async (t) => {
+  const env = await contentEnvironment(t);
+  env.dom.flushFrames();
+  env.dom.window.location.origin = "https://login.example";
+  env.dom.window.top = {};
+  const ask = (message) =>
+    new Promise((resolve) => {
+      let answered = false;
+      for (const listener of env.chrome.runtime._listeners) {
+        if (listener(message, { id: "extension-id" }, (value) => resolve(value)) === true) answered = true;
+      }
+      if (!answered) resolve("ignored");
+    });
+  assert.equal(await ask({ action: "pmPopupFill", token: "t" }), "ignored", "first ask goes to the top frame");
+  assert.equal(
+    await ask({ action: "pmPopupFill", token: "t", embedded: true, origin: "https://other.example" }),
+    "ignored",
+    "frames of other origins stay silent",
+  );
+  const filled = await ask({ action: "pmPopupFill", token: "t", embedded: true, origin: "https://login.example" });
+  assert.equal(filled.success, true, filled.error);
+  await env.settle();
+  assert.equal(env.password.value, "synthetic-secret");
+
+  // Another frame claimed it first: this frame neither fills nor answers.
+  env.password.value = "";
+  env.chrome.claimPopupFill = { success: false, duplicate: true, error: "Already filled" };
+  const silent = await Promise.race([
+    ask({ action: "pmPopupFill", token: "t", embedded: true, origin: "https://login.example" }),
+    env.settle().then(() => "silent"),
+  ]);
+  assert.equal(silent, "silent");
+  assert.equal(env.password.value, "");
+});
+
+test("a top frame without a login form says so for the embedded-frame fallback", async (t) => {
+  const env = await contentEnvironment(t);
+  env.form.remove();
+  env.dom.flushFrames();
+  const answer = await new Promise((resolve) => {
+    for (const listener of env.chrome.runtime._listeners)
+      listener({ action: "pmPopupFill", token: "t" }, { id: "extension-id" }, resolve);
+  });
+  assert.equal(answer.noForm, true);
+  assert.match(answer.error, /No sign-in form/);
+});

@@ -64,6 +64,17 @@ function handle(request) {
         } else {
             write({ id: request.id, success: true, data: request.action === "getLoginItem" ? matches[0] : matches });
         }
+    } else if (request.action === "checkSavedLogin") {
+        if (locked) {
+            write({ id: request.id, success: false, error: "Vault is locked" });
+            return;
+        }
+        const username = String(request.username || "").trim().toLowerCase();
+        const data = accounts
+            .filter(account => (!account.domain || account.domain === request.domain) && account.password === request.password)
+            .filter(account => !username || String(account.username || "").trim().toLowerCase() === username)
+            .map(({ password, ...summary }) => summary);
+        write({ id: request.id, success: true, data });
     } else if (request.action === "lock") {
         locked = true;
         write({ id: request.id, success: true, data: "Locked" });

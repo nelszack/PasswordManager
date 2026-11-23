@@ -76,8 +76,10 @@
             setTimeout: schedule = globalThis.setTimeout,
             clearTimeout: unschedule = globalThis.clearTimeout,
             now = Date.now,
-            confirmWithinMs = 500,
-            intervalMs = 50,
+            // Long enough for a sign-in request to return before the page
+            // swaps the step; buttons that leave the step stay put meanwhile.
+            confirmWithinMs = 3000,
+            intervalMs = 100,
         } = options;
         const deadline = now() + confirmWithinMs;
         let timer = null;

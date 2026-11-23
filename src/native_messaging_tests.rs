@@ -537,6 +537,33 @@ fn native_policy_rejects_cross_operation_fields_and_requires_reviewed_revisions(
 }
 
 #[test]
+fn saved_login_checks_need_a_site_and_password_and_keep_them_secret() {
+    let mut request: NativeRequest = serde_json::from_value(json!({
+        "id":1,"action":"checkSavedLogin","domain":"https://example.com",
+        "username":"alice","password":"captured-secret"
+    }))
+    .unwrap();
+    request.validate().unwrap();
+    let command = command_for_request(&mut request).unwrap();
+    assert!(matches!(
+        &command,
+        ServerCommand::BrowserLoginSaved { domain, username, password }
+            if domain == "https://example.com" && username == "alice" && password.expose() == "captured-secret"
+    ));
+    assert!(!command.is_mutation());
+    assert!(!format!("{command:?}").contains("captured-secret"));
+    for missing in ["domain", "password"] {
+        let mut value = json!({"id":1,"action":"checkSavedLogin","domain":"https://example.com","password":"p"});
+        value.as_object_mut().unwrap().remove(missing);
+        let mut request: NativeRequest = serde_json::from_value(value).unwrap();
+        assert!(
+            request.validate().is_err() || command_for_request(&mut request).is_err(),
+            "{missing}"
+        );
+    }
+}
+
+#[test]
 fn browser_native_reads_require_session_revision_and_site_for_otp() {
     for action in ["getLoginItem", "getAutofillItem", "getTotp"] {
         let mut valid = json!({"id":1,"action":action,"entryId":1,"expectedRevision":2,"expectedSession":"a".repeat(64)});

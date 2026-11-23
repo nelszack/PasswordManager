@@ -64,7 +64,10 @@ async function load() {
     usernameLabel.hidden = !data.askForUsername;
     updateButton.hidden = !data.hasAccounts;
     // One primary action: update when an account matches, otherwise save new.
-    const updateFirst = data.hasAccounts && !data.askForUsername && Boolean(data.updateTarget) && !data.updateNote;
+    const updateFirst =
+        data.hasAccounts &&
+        Boolean(data.updateTarget) &&
+        ((!data.askForUsername && !data.updateNote) || data.preferUpdate === true);
     updateButton.className = updateFirst ? "primary" : "";
     document.getElementById("add").className = updateFirst ? "" : "primary";
     if (data.updateTarget?.name) {
@@ -75,7 +78,7 @@ async function load() {
     updateNote.textContent = data.updateNote || "";
     updateNote.hidden = !data.hasAccounts || !data.updateNote;
     form.hidden = false;
-    (data.askForUsername ? usernameInput : nameInput).focus();
+    (data.preferUpdate === true ? updateButton : data.askForUsername ? usernameInput : nameInput).focus();
 }
 
 form.addEventListener("submit", event => {

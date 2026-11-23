@@ -49,6 +49,9 @@ const duoModule = require("content_duo.js");
 
 const ADVANCE_CONTROLS =
   "button, input[type='button'], input[type='submit'], input[type='image'], [role='button']";
+// Buttons that commit a new password on change-password and sign-up forms.
+const SAVE_PASSWORD_RE =
+  /\b(save|change|update|reset|set|submit|confirm|done|apply|create|sign[- ]?up|register)\b/i;
 
 // After an extension update or reload, scripts from the old version keep running
 // with a runtime that can no longer deliver messages.
@@ -70,6 +73,8 @@ module.exports.create = function create({
     credentialScope,
     isElementVisible,
     isExtensionUi,
+    isNewPasswordInput,
+    isUsableInput,
     isVisibilityToggle,
     scopeInputs,
     withVisibilityCache,
@@ -143,26 +148,30 @@ module.exports.create = function create({
   }
   chrome.runtime.onMessage.addListener(shortcutListener);
 
-  // The toolbar popup asks the top frame to fill a login it listed for this site.
+  // The toolbar popup asks the top frame to fill a login it listed for this
+  // site. When the top frame has no login form, it asks same-origin embedded
+  // frames, since many sites host their sign-in form in an iframe.
+  const NO_FORM =
+    "No sign-in form was found on this page. Use the key button in the login field instead.";
   function popupFillListener(message, sender, sendResponse) {
     if (message?.action !== "pmPopupFill" || sender?.id !== chrome.runtime.id) return;
-    if (!alive() || window !== window.top || typeof message.token !== "string") return;
+    if (!alive() || typeof message.token !== "string") return;
+    const embedded = window !== window.top;
+    if (embedded !== (message.embedded === true)) return;
+    if (embedded && message.origin !== window.location.origin) return;
     const filled = withVisibilityCache(() =>
       controls.fillFromPopup(deepActiveElement(), () =>
         bridge.claimPopupFill(message.token),
       ),
     );
+    // An embedded frame without a form, or one that lost the claim to another
+    // frame, stays silent so the frame that filled answers.
+    if (embedded && filled === false) return;
     Promise.resolve(filled).then(
-      (done) =>
-        sendResponse(
-          done
-            ? { success: true }
-            : {
-                success: false,
-                error:
-                  "No sign-in form was found on this page. Use the key button in the login field instead.",
-              },
-        ),
+      (done) => {
+        if (done) sendResponse({ success: true });
+        else if (!embedded) sendResponse({ success: false, noForm: true, error: NO_FORM });
+      },
       (error) =>
         sendResponse({ success: false, error: error?.message || "Could not fill" }),
     );
@@ -219,6 +228,49 @@ module.exports.create = function create({
     });
   }
 
+  // Login fields, plus the new-password fields of change-password and sign-up
+  // forms, whose values are captured but never autofilled.
+  function isCaptureInput(input) {
+    return (
+      isCredentialInput(input) ||
+      (input.type === "password" && isUsableInput(input))
+    );
+  }
+
+  // Change-password pages often save in the background and stay put, so a
+  // "Save"/"Change password" button prompts at once when the new password is
+  // complete: every filled new-password field (new and confirm) agrees.
+  function savesNewPassword(control, snapshot) {
+    const { passwordField: field, password } = snapshot;
+    if (!field || !password || !isNewPasswordInput(field)) return false;
+    if (!(control instanceof Element) || control instanceof HTMLInputElement)
+      return control instanceof HTMLInputElement &&
+        ["button", "submit"].includes(control.type) &&
+        SAVE_PASSWORD_RE.test(control.value);
+    const text = String(control.textContent || "").trim();
+    return [
+      text.length <= 40 ? text : "",
+      control.getAttribute("aria-label"),
+      control.getAttribute("title"),
+    ].some((value) => value && SAVE_PASSWORD_RE.test(String(value)));
+  }
+
+  // A new password whose confirmation differs will be rejected by the site;
+  // prompting for it would save a wrong password and block the retry's prompt.
+  function newPasswordsAgree(snapshot) {
+    const { passwordField: field, password, scope } = snapshot;
+    if (!field || !scope || !isNewPasswordInput(field)) return true;
+    return scopeInputs(scope)
+      .filter(
+        (input) =>
+          input.type === "password" &&
+          input.value &&
+          isNewPasswordInput(input) &&
+          isUsableInput(input),
+      )
+      .every((input) => input.value === password);
+  }
+
   // Only real submit controls prompt at once. Every other button, including
   // ones outside the password's form (cookie banners, menus, "Continue" on a
   // form-less login), must be confirmed by the page leaving the password step.
@@ -246,7 +298,7 @@ module.exports.create = function create({
       if (
         !e.isTrusted ||
         !(t instanceof HTMLInputElement) ||
-        !isCredentialInput(t)
+        !isCaptureInput(t)
       )
         return;
       credentialUserIntent = true;
@@ -261,7 +313,7 @@ module.exports.create = function create({
       const targetRoot = target.getRootNode?.();
       if (targetRoot?.host && !rootControllers.has(targetRoot))
         observer.scan(targetRoot);
-      if (target instanceof HTMLInputElement && isCredentialInput(target)) {
+      if (target instanceof HTMLInputElement && isCaptureInput(target)) {
         credentials.lastInput = target;
       }
     });
@@ -269,7 +321,10 @@ module.exports.create = function create({
     const submissionCoordinator =
       PasswordManagerFormSubmission.createSubmissionCoordinator({
         isForm: (form) => form instanceof HTMLFormElement,
-        credentialsFor: (form) => findLoginCredentials(form),
+        credentialsFor: (form) => {
+          const found = findLoginCredentials(form);
+          return newPasswordsAgree(found) ? found : { username: "", password: "" };
+        },
         shouldIgnore: () => disposed || !credentialAttempt.idle,
         userActivated: () => navigator.userActivation?.isActive === true,
         handle: ({ credentials }) => attemptCredentials(credentials),
@@ -296,7 +351,7 @@ module.exports.create = function create({
     // prompt only once the page leaves the password step.
     const handlePossibleAdvance = (source, immediate) => {
       const input =
-        source instanceof HTMLInputElement && isCredentialInput(source)
+        source instanceof HTMLInputElement && isCaptureInput(source)
           ? source
           : credentials.lastInput;
       const scope =
@@ -308,6 +363,8 @@ module.exports.create = function create({
       const username = usernameFromScope(scope);
       const snapshot = credentialsFromScope(scope);
       pendingAdvance?.cancel();
+      pendingAdvance = null;
+      if (!newPasswordsAgree(snapshot)) return;
       pendingAdvance = PasswordManagerFormSubmission.scheduleCredentialAdvance(
         {
           username: username || snapshot.username,
@@ -316,9 +373,10 @@ module.exports.create = function create({
         {
           remember: rememberUsernameAcrossNavigation,
           shouldIgnore: () => disposed || !credentialAttempt.idle,
-          advanced: immediate
-            ? null
-            : () => !disposed && leftPasswordStep(snapshot),
+          advanced:
+            immediate || savesNewPassword(source, snapshot)
+              ? null
+              : () => !disposed && leftPasswordStep(snapshot),
           prompt: (captured) => {
             attemptCredentials(captured).catch((error) =>
               console.log("Password Manager credential prompt error:", error),
@@ -346,7 +404,7 @@ module.exports.create = function create({
       if (!event.isTrusted || event.key !== "Enter" || event.isComposing)
         return;
       const target = event.composedPath?.()[0] || event.target;
-      if (!(target instanceof HTMLInputElement) || !isCredentialInput(target))
+      if (!(target instanceof HTMLInputElement) || !isCaptureInput(target))
         return;
       handlePossibleAdvance(target, true);
     });
@@ -432,7 +490,7 @@ module.exports.create = function create({
 })(typeof globalThis === "object" ? globalThis : this, function () {
     "use strict";
 
-    const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth/i;
+    const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth|identif/i;
     const SEARCH_HINT_RE = /search|query|lookup|find/i;
     const TOTP_HINT_RE =
         /\b(otp|totp|2fa|mfa)\b|one[-_ ]?time|verification[-_ ]?(code|token)|security[-_ ]?code|authenticator[-_ ]?code/i;
@@ -480,7 +538,11 @@ module.exports.create = function create({
             }
             visited.push(node);
             const style = getComputedStyle(node);
-            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+            // Material-style fields (Vuetify, for one) keep the input itself
+            // transparent until focused so a floating label shows through; only
+            // a transparent container hides a field.
+            const transparent = style.opacity === "0" && !(node === element && node instanceof HTMLInputElement);
+            if (style.display === "none" || style.visibility === "hidden" || transparent) {
                 visible = false;
                 break;
             }
@@ -753,8 +815,10 @@ module.exports.create = function create({
             setTimeout: schedule = globalThis.setTimeout,
             clearTimeout: unschedule = globalThis.clearTimeout,
             now = Date.now,
-            confirmWithinMs = 500,
-            intervalMs = 50,
+            // Long enough for a sign-in request to return before the page
+            // swaps the step; buttons that leave the step stay put meanwhile.
+            confirmWithinMs = 3000,
+            intervalMs = 100,
         } = options;
         const deadline = now() + confirmWithinMs;
         let timer = null;
@@ -904,6 +968,8 @@ module.exports.create = function create({ onInvalidated = () => {} } = {}) {
                 try {
                     chrome.runtime.sendMessage({ action: "claimPopupFill", token }, response => {
                         if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                        // Another frame of the page already filled this login.
+                        else if (response?.duplicate === true) resolve(null);
                         else if (!response?.success) reject(new Error(response?.error || "Could not fill"));
                         else resolve(response.payload);
                     });
@@ -1437,7 +1503,11 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
                     else writes.push(control.position);
                 }
             });
-            for (const write of writes) write();
+            // A host shown for the first time is measured again in the next frame
+            // to correct for a containing block other than the viewport.
+            let recheck = false;
+            for (const write of writes) recheck = write() === true || recheck;
+            if (recheck) reposition(false);
         });
     }
     const schedulePosition = () => reposition(true);
@@ -1535,8 +1605,9 @@ module.exports.create = function create({ bridge, credentials, autofill }) {
     }
 
     // Fill a login chosen in the toolbar popup. `claim` fetches it from the
-    // extension; resolves to whether a login form was filled.
-    async function fillFromPopup(focused, claim) {
+    // extension. False at once when this frame has no login form; otherwise a
+    // promise of whether the form was filled.
+    function fillFromPopup(focused, claim) {
         const control = loginControl(focused, false);
         if (!control) return false;
         return control.activate(claim);
@@ -1718,21 +1789,42 @@ function overlayShift(input, left, top) {
     return CONTROL_SIZE + 4;
 }
 
+// A fixed host is placed relative to the viewport unless an ancestor of the
+// field makes a containing block (transform, filter, `contain: layout` as on
+// Vuetify fields). Its origin is where the shown host lands minus where it was
+// placed; null while the host is hidden and cannot be measured.
+function containingOrigin(host) {
+    if (host.style?.getPropertyValue?.("display") !== "block") return null;
+    const rect = host.getBoundingClientRect?.();
+    const left = parseFloat(host.style.getPropertyValue("left"));
+    const top = parseFloat(host.style.getPropertyValue("top"));
+    if (!rect || !Number.isFinite(left) || !Number.isFinite(top)) return null;
+    return { x: rect.left - left, y: rect.top - top };
+}
+
 // Return deferred writes so callers can finish all style/geometry reads first.
-// The overlay hit test is cached and repeated only for layout changes.
+// The overlay hit test is cached and repeated only for layout changes. A write
+// returns true when the host was just shown, so its origin is not yet known and
+// the caller should measure once more.
 function positionedButton(input, host, offset) {
     let shift = null;
+    let origin = { x: 0, y: 0 };
     const measure = (layout = true) => {
         const rect = isElementVisible(input) ? input.getBoundingClientRect() : null;
         let values = { display: "none" };
+        const measured = containingOrigin(host);
+        if (measured) origin = measured;
         if (rect?.width && rect?.height) {
             const top = rect.top + rect.height / 2 - CONTROL_SIZE / 2;
             const left = rect.right - offset;
             if (layout || shift === null) shift = overlayShift(input, left, top);
             const shifted = Math.max(rect.left ?? -Infinity, left - (shift ?? 0));
-            values = { display: "block", left: shifted + "px", top: top + "px" };
+            values = { display: "block", left: shifted - origin.x + "px", top: top - origin.y + "px" };
         }
-        return () => setImportantStyles(host, values);
+        return () => {
+            setImportantStyles(host, values);
+            return !measured && values.display === "block";
+        };
     };
     const position = () => measure()();
     position.measure = measure;

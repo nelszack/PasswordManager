@@ -26,7 +26,7 @@ function environment({ url = "https://example.com/login", answer = { success: tr
             async sendMessage(id, message, options) {
                 requests.push({ action: "tabs.sendMessage", id, message, options });
                 if (fillAnswer instanceof Error) throw fillAnswer;
-                return fillAnswer;
+                return typeof fillAnswer === "function" ? fillAnswer(message, options) : fillAnswer;
             },
         },
     };
@@ -158,7 +158,7 @@ test("generated passwords and new logins are validated before reaching the host"
     await assert.rejects(env.service.save({ name: "A", password: "p" }, env.popup), /page changed/);
 });
 
-test("a popup fill is claimed once by the same tab's top frame and origin", async () => {
+test("a popup fill is claimed once by a frame of the same tab and origin", async () => {
     const env = environment();
     await env.service.logins({}, env.popup);
     await env.service.fill({ id: 4 }, env.popup);
@@ -166,7 +166,7 @@ test("a popup fill is claimed once by the same tab's top frame and origin", asyn
     assert.deepEqual(delivered.message, { action: "pmPopupFill", token: "token-1" });
     assert.deepEqual(delivered.options, { frameId: 0 });
     for (const sender of [
-        { ...env.page, frameId: 2 },
+        { ...env.page, frameId: undefined },
         { ...env.page, tab: { id: 8 } },
         { ...env.page, origin: "https://evil.example" },
     ]) {
@@ -177,7 +177,14 @@ test("a popup fill is claimed once by the same tab's top frame and origin", asyn
     const claimed = await env.service.claim({ token: "token-1" }, env.page);
     assert.equal(claimed.payload.password, "synthetic");
     assert.deepEqual(env.remembered[0], [{ tabId: 7, frameId: 0, domain: "https://example.com" }, "w@corp", "synthetic"]);
-    await assert.rejects(env.service.claim({ token: "token-1" }, env.page), /expired/, "a token is single-use");
+    const again = await env.service.claim({ token: "token-1" }, { ...env.page, frameId: 3 });
+    assert.deepEqual({ ...again }, { success: false, duplicate: true, error: "Already filled" }, "a token is single-use");
+    assert.equal(env.requests.filter(request => request.action === "getLoginItem").length, 1);
+
+    // A same-origin embedded frame may claim; it is remembered as that frame.
+    await env.service.fill({ id: 4 }, env.popup);
+    await env.service.claim({ token: "token-1" }, { ...env.page, frameId: 2 });
+    assert.deepEqual(env.remembered[1][0], { tabId: 7, frameId: 2, domain: "https://example.com" });
 
     // Locking invalidates fills that were handed to the page.
     await env.service.fill({ id: 4 }, env.popup);
@@ -188,6 +195,29 @@ test("a popup fill is claimed once by the same tab's top frame and origin", asyn
     await env.service.fill({ id: 4 }, env.popup);
     env.timers.at(-1)();
     await assert.rejects(env.service.claim({ token: "token-1" }, env.page), /expired/);
+});
+
+test("a top frame without a form hands the fill to same-origin embedded frames", async () => {
+    const noForm = { success: false, noForm: true, error: "No sign-in form was found on this page." };
+    const env = environment({ answer: (message, options) => (options ? noForm : { success: true }) });
+    await env.service.logins({}, env.popup);
+    assert.deepEqual(JSON.parse(JSON.stringify(await env.service.fill({ id: 4 }, env.popup))), { success: true });
+    const sent = env.requests.filter(request => request.action === "tabs.sendMessage");
+    assert.deepEqual(sent.map(request => request.options), [{ frameId: 0 }, undefined]);
+    assert.deepEqual(sent[1].message, {
+        action: "pmPopupFill",
+        token: "token-1",
+        embedded: true,
+        origin: "https://example.com",
+    });
+
+    // No embedded frame answers: the top frame's reason is reported.
+    env.setAnswer((message, options) => {
+        if (options) return noForm;
+        throw new Error("Could not establish connection. Receiving end does not exist.");
+    });
+    await assert.rejects(env.service.fill({ id: 4 }, env.popup), /No sign-in form/);
+    await assert.rejects(env.service.claim({ token: "token-1" }, env.page), /expired/, "a failed fill drops its token");
 });
 
 test("fills report pages without a form or content script", async () => {

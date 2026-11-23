@@ -1,5 +1,5 @@
-/* Wide enough for site lists and passphrases, never wider than a zoomed popup. */
-body { width: min(380px, 100vw); max-width: 100%; padding: 16px; display: grid; gap: 12px; }
+/* Fixed width: popups size to content, and 100vw resolves against the tiny initial popup viewport. */
+body { width: 420px; max-width: 100%; padding: 16px; display: grid; gap: 12px; }
 h1 { margin: 0; font-size: 17px; flex: 1; min-width: 0; }
 h2 { margin: 0; font-size: 15px; }
 .status { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }

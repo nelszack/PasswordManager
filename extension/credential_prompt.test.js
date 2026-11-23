@@ -109,6 +109,13 @@ test("updating a different account keeps its stored username unless the user edi
     // Password-only steps without a username keep the target's username too.
     const unknown = prompt.describe(accounts, "", "https://login.example.com");
     assert.equal(unknown.updateNote, "");
+    // A change-password form shows no username: the site's only login is the likely target.
+    assert.equal(unknown.preferUpdate, true);
+    assert.match(unknown.message, /^Update the saved password for “Alice”/);
+    const twoAccounts = prompt.describe([...accounts, { id: 9, name: "Other", username: "o" }], "", "https://login.example.com");
+    assert.equal(twoAccounts.preferUpdate, false);
+    assert.match(twoAccounts.message, /No saved account has this username/);
+    assert.equal(prompt.describe(accounts, "bob", "https://login.example.com").preferUpdate, false);
     const passwordOnly = { ...pending, username: "", data: unknown };
     assert.equal(prompt.operation(passwordOnly, { action: "update", name: "Alice", username: "" }).fields.username, "alice");
     assert.equal(prompt.operation(passwordOnly, { action: "update", name: "Alice", username: "alice2" }).fields.username, "alice2");

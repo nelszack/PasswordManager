@@ -175,6 +175,19 @@ const PasswordManagerBackgroundPopup = {
             let answer;
             try {
                 answer = await chrome.tabs.sendMessage(choice.tabId, { action: "pmPopupFill", token }, { frameId: 0 });
+                // Sign-in forms are often in an iframe. Same-origin frames with a
+                // login form answer; the claim still checks each frame's origin.
+                if (answer?.noForm) {
+                    answer =
+                        (await chrome.tabs
+                            .sendMessage(choice.tabId, {
+                                action: "pmPopupFill",
+                                token,
+                                embedded: true,
+                                origin: choice.origin,
+                            })
+                            .catch(() => null)) || answer;
+                }
             } catch (_) {
                 answer = null;
             }
@@ -188,20 +201,22 @@ const PasswordManagerBackgroundPopup = {
             return { success: true };
         }
 
-        // The page's top frame claims the fill it was asked to perform.
+        // The page frame that holds the login form claims the fill it was asked
+        // to perform. Only one frame may claim it.
         async function claim(request, sender) {
             const pending = pendingFills.get(request?.token);
-            pendingFills.delete(request?.token);
             if (
                 !pending ||
                 pending.expiresAt <= Date.now() ||
                 pending.generation !== generation ||
                 sender?.tab?.id !== pending.tabId ||
-                sender?.frameId !== 0 ||
+                !Number.isInteger(sender?.frameId) ||
                 security.senderOrigin(sender) !== pending.origin
             ) {
                 throw new Error("Fill request expired");
             }
+            if (pending.claimed) return { success: false, duplicate: true, error: "Already filled" };
+            pending.claimed = true;
             const response = await nativeRequest("getLoginItem", {
                 domain: pending.origin,
                 entryId: pending.item.id,
@@ -212,7 +227,7 @@ const PasswordManagerBackgroundPopup = {
             if (pending.generation !== generation) throw new Error("Fill request expired");
             const payload = response.data;
             await rememberFilled(
-                { tabId: pending.tabId, frameId: 0, domain: pending.origin },
+                { tabId: pending.tabId, frameId: sender.frameId, domain: pending.origin },
                 payload.username ? String(payload.username).trim() : "",
                 payload.password
             );

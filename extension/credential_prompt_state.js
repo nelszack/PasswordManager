@@ -42,9 +42,14 @@
                 suggestedName = "";
             }
         }
+        // Change-password forms rarely show the username. With one saved login
+        // for the site, the new password almost certainly belongs to it.
+        const preferUpdate = !username && validAccounts.length === 1;
         const message = existing
             ? "An account with this username already exists. Update it or save a new account."
-            : validAccounts.length
+            : preferUpdate
+              ? `Update the saved password for “${String(updateTarget.name || accountUsername(updateTarget) || "this login")}”, or save a new account.`
+              : validAccounts.length
               ? "No saved account has this username. Update an existing account or save a new one."
               : "Would you like to save these credentials?";
         const targetUsername = updateTarget ? accountUsername(updateTarget) : "";
@@ -62,6 +67,7 @@
             suggestedName,
             username: String(username || ""),
             askForUsername: !username,
+            preferUpdate,
             updateNote,
             updateTarget: updateTarget
                 ? {

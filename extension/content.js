@@ -11,6 +11,9 @@ const duoModule = require("./content_duo.js");
 
 const ADVANCE_CONTROLS =
   "button, input[type='button'], input[type='submit'], input[type='image'], [role='button']";
+// Buttons that commit a new password on change-password and sign-up forms.
+const SAVE_PASSWORD_RE =
+  /\b(save|change|update|reset|set|submit|confirm|done|apply|create|sign[- ]?up|register)\b/i;
 
 // After an extension update or reload, scripts from the old version keep running
 // with a runtime that can no longer deliver messages.
@@ -32,6 +35,8 @@ module.exports.create = function create({
     credentialScope,
     isElementVisible,
     isExtensionUi,
+    isNewPasswordInput,
+    isUsableInput,
     isVisibilityToggle,
     scopeInputs,
     withVisibilityCache,
@@ -105,26 +110,30 @@ module.exports.create = function create({
   }
   chrome.runtime.onMessage.addListener(shortcutListener);
 
-  // The toolbar popup asks the top frame to fill a login it listed for this site.
+  // The toolbar popup asks the top frame to fill a login it listed for this
+  // site. When the top frame has no login form, it asks same-origin embedded
+  // frames, since many sites host their sign-in form in an iframe.
+  const NO_FORM =
+    "No sign-in form was found on this page. Use the key button in the login field instead.";
   function popupFillListener(message, sender, sendResponse) {
     if (message?.action !== "pmPopupFill" || sender?.id !== chrome.runtime.id) return;
-    if (!alive() || window !== window.top || typeof message.token !== "string") return;
+    if (!alive() || typeof message.token !== "string") return;
+    const embedded = window !== window.top;
+    if (embedded !== (message.embedded === true)) return;
+    if (embedded && message.origin !== window.location.origin) return;
     const filled = withVisibilityCache(() =>
       controls.fillFromPopup(deepActiveElement(), () =>
         bridge.claimPopupFill(message.token),
       ),
     );
+    // An embedded frame without a form, or one that lost the claim to another
+    // frame, stays silent so the frame that filled answers.
+    if (embedded && filled === false) return;
     Promise.resolve(filled).then(
-      (done) =>
-        sendResponse(
-          done
-            ? { success: true }
-            : {
-                success: false,
-                error:
-                  "No sign-in form was found on this page. Use the key button in the login field instead.",
-              },
-        ),
+      (done) => {
+        if (done) sendResponse({ success: true });
+        else if (!embedded) sendResponse({ success: false, noForm: true, error: NO_FORM });
+      },
       (error) =>
         sendResponse({ success: false, error: error?.message || "Could not fill" }),
     );
@@ -181,6 +190,49 @@ module.exports.create = function create({
     });
   }
 
+  // Login fields, plus the new-password fields of change-password and sign-up
+  // forms, whose values are captured but never autofilled.
+  function isCaptureInput(input) {
+    return (
+      isCredentialInput(input) ||
+      (input.type === "password" && isUsableInput(input))
+    );
+  }
+
+  // Change-password pages often save in the background and stay put, so a
+  // "Save"/"Change password" button prompts at once when the new password is
+  // complete: every filled new-password field (new and confirm) agrees.
+  function savesNewPassword(control, snapshot) {
+    const { passwordField: field, password } = snapshot;
+    if (!field || !password || !isNewPasswordInput(field)) return false;
+    if (!(control instanceof Element) || control instanceof HTMLInputElement)
+      return control instanceof HTMLInputElement &&
+        ["button", "submit"].includes(control.type) &&
+        SAVE_PASSWORD_RE.test(control.value);
+    const text = String(control.textContent || "").trim();
+    return [
+      text.length <= 40 ? text : "",
+      control.getAttribute("aria-label"),
+      control.getAttribute("title"),
+    ].some((value) => value && SAVE_PASSWORD_RE.test(String(value)));
+  }
+
+  // A new password whose confirmation differs will be rejected by the site;
+  // prompting for it would save a wrong password and block the retry's prompt.
+  function newPasswordsAgree(snapshot) {
+    const { passwordField: field, password, scope } = snapshot;
+    if (!field || !scope || !isNewPasswordInput(field)) return true;
+    return scopeInputs(scope)
+      .filter(
+        (input) =>
+          input.type === "password" &&
+          input.value &&
+          isNewPasswordInput(input) &&
+          isUsableInput(input),
+      )
+      .every((input) => input.value === password);
+  }
+
   // Only real submit controls prompt at once. Every other button, including
   // ones outside the password's form (cookie banners, menus, "Continue" on a
   // form-less login), must be confirmed by the page leaving the password step.
@@ -208,7 +260,7 @@ module.exports.create = function create({
       if (
         !e.isTrusted ||
         !(t instanceof HTMLInputElement) ||
-        !isCredentialInput(t)
+        !isCaptureInput(t)
       )
         return;
       credentialUserIntent = true;
@@ -223,7 +275,7 @@ module.exports.create = function create({
       const targetRoot = target.getRootNode?.();
       if (targetRoot?.host && !rootControllers.has(targetRoot))
         observer.scan(targetRoot);
-      if (target instanceof HTMLInputElement && isCredentialInput(target)) {
+      if (target instanceof HTMLInputElement && isCaptureInput(target)) {
         credentials.lastInput = target;
       }
     });
@@ -231,7 +283,10 @@ module.exports.create = function create({
     const submissionCoordinator =
       PasswordManagerFormSubmission.createSubmissionCoordinator({
         isForm: (form) => form instanceof HTMLFormElement,
-        credentialsFor: (form) => findLoginCredentials(form),
+        credentialsFor: (form) => {
+          const found = findLoginCredentials(form);
+          return newPasswordsAgree(found) ? found : { username: "", password: "" };
+        },
         shouldIgnore: () => disposed || !credentialAttempt.idle,
         userActivated: () => navigator.userActivation?.isActive === true,
         handle: ({ credentials }) => attemptCredentials(credentials),
@@ -258,7 +313,7 @@ module.exports.create = function create({
     // prompt only once the page leaves the password step.
     const handlePossibleAdvance = (source, immediate) => {
       const input =
-        source instanceof HTMLInputElement && isCredentialInput(source)
+        source instanceof HTMLInputElement && isCaptureInput(source)
           ? source
           : credentials.lastInput;
       const scope =
@@ -270,6 +325,8 @@ module.exports.create = function create({
       const username = usernameFromScope(scope);
       const snapshot = credentialsFromScope(scope);
       pendingAdvance?.cancel();
+      pendingAdvance = null;
+      if (!newPasswordsAgree(snapshot)) return;
       pendingAdvance = PasswordManagerFormSubmission.scheduleCredentialAdvance(
         {
           username: username || snapshot.username,
@@ -278,9 +335,10 @@ module.exports.create = function create({
         {
           remember: rememberUsernameAcrossNavigation,
           shouldIgnore: () => disposed || !credentialAttempt.idle,
-          advanced: immediate
-            ? null
-            : () => !disposed && leftPasswordStep(snapshot),
+          advanced:
+            immediate || savesNewPassword(source, snapshot)
+              ? null
+              : () => !disposed && leftPasswordStep(snapshot),
           prompt: (captured) => {
             attemptCredentials(captured).catch((error) =>
               console.log("Password Manager credential prompt error:", error),
@@ -308,7 +366,7 @@ module.exports.create = function create({
       if (!event.isTrusted || event.key !== "Enter" || event.isComposing)
         return;
       const target = event.composedPath?.()[0] || event.target;
-      if (!(target instanceof HTMLInputElement) || !isCredentialInput(target))
+      if (!(target instanceof HTMLInputElement) || !isCaptureInput(target))
         return;
       handlePossibleAdvance(target, true);
     });

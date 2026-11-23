@@ -150,8 +150,9 @@ function advanceClock() {
 test("non-submit advances prompt only after the page leaves the password step", () => {
     for (const [label, leavesAt, expected] of [
         ["removed after 120 ms", 120, 1],
-        ["still on the password step after 500 ms", Infinity, 0],
-        ["left too late", 600, 0],
+        ["removed after a slow sign-in request", 2400, 1],
+        ["still on the password step after 3 s", Infinity, 0],
+        ["left too late", 3200, 0],
     ]) {
         const clock = advanceClock();
         const prompts = [];
@@ -169,7 +170,7 @@ test("non-submit advances prompt only after the page leaves the password step", 
         assert.deepEqual(remembered, ["alice"], label);
         assert.equal(prompts.length, 0, `${label}: nothing opens before confirmation`);
         assert.equal(watch.pending, true);
-        clock.run(1000);
+        clock.run(5000);
         assert.equal(prompts.length, expected, label);
         assert.equal(watch.pending, false);
         assert.equal(clock.timers.length, 0, `${label}: polling stops`);

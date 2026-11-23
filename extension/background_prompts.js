@@ -68,6 +68,19 @@ const PasswordManagerBackgroundPrompts = {
             });
         }
 
+        // Whether the vault already holds this sign-in for the site. The desktop
+        // service compares and answers with summaries only, so no saved secret
+        // reaches the browser. Hosts without the command answer with an error,
+        // which keeps the prompt.
+        async function alreadySaved(domain, username, password) {
+            try {
+                const response = await nativeRequest("checkSavedLogin", { domain, username, password });
+                return response?.success === true && Array.isArray(response.data) && response.data.length > 0;
+            } catch (_) {
+                return false;
+            }
+        }
+
         function invalidateCredentialPrompts() {
             generation++;
             for (const [token, pending] of pendingCredentialPrompts) {
@@ -135,6 +148,10 @@ const PasswordManagerBackgroundPrompts = {
             if (matched) {
                 return { success: true, skipped: true };
             }
+            // Typed, reloaded or filled by the browser: still unchanged if saved.
+            if (accounts.length && (await alreadySaved(domain, username, password)))
+                return { success: true, skipped: true };
+            if (epoch !== generation) return { success: true, skipped: true };
             const token = crypto.randomUUID();
             const pending = {
                 tabId,

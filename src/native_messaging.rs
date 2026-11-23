@@ -856,6 +856,16 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             "domain",
             2048,
         )?)),
+        "checkSavedLogin" => Ok(ServerCommand::BrowserLoginSaved {
+            domain: required(request.domain.take(), "domain", 2048)?,
+            username: optional_text(request.username.take(), "username", 4096)?,
+            password: required(
+                request.password.take().map(SecretString::expose_owned),
+                "password",
+                64 * 1024,
+            )?
+            .into(),
+        }),
         "getLoginItem" => Ok(ServerCommand::BrowserLogin {
             domain: required(request.domain.take(), "domain", 2048)?,
             id: request

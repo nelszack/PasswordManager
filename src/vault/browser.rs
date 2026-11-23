@@ -114,6 +114,36 @@ impl Vault {
             has_totp: item.authenticator.is_some(),
         })
     }
+    /// Logins for the origin that already hold this password and, when one
+    /// was captured, this username (ignoring case and surrounding space, as
+    /// sites do for emails). Lets the browser skip prompting for an unchanged
+    /// sign-in without any secret leaving the vault.
+    pub fn browser_saved_logins(
+        &self,
+        domain: &str,
+        username: &str,
+        password: &str,
+    ) -> Vec<ItemSummary> {
+        let Some(requested) = parse_site(domain, false) else {
+            return vec![];
+        };
+        let username = username.trim();
+        self.active_items()
+            .filter(|item| {
+                item.metadata.kind == ItemKind::Login
+                    && item_matches_site(item, &requested)
+                    && (username.is_empty()
+                        || item.entry.username.as_deref().is_some_and(|saved| {
+                            saved.trim().to_lowercase() == username.to_lowercase()
+                        }))
+                    && bool::from(subtle::ConstantTimeEq::ct_eq(
+                        item.entry.password.expose().as_bytes(),
+                        password.as_bytes(),
+                    ))
+            })
+            .map(|item| self.summary(item))
+            .collect()
+    }
     pub fn browser_autofill(&self) -> Vec<ItemSummary> {
         self.active_items()
             .filter(|i| matches!(i.metadata.kind, ItemKind::PaymentCard | ItemKind::Identity))
