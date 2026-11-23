@@ -1,0 +1,52 @@
+# Several vaults side by side, listed without unlocking. Listings are sorted by
+# the random vault file name, so multi-vault listings only check one row.
+$ pm vaults
+? 0
+No vaults yet. Create one with `pm new --name NAME`.
+$ pm new --locked --name Personal --key {root}/personal.key
+? 0
+Vault "Personal" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm new --locked --name Work --key {root}/work.key
+? 0
+Vault "Work" ([..].enc) created and left locked.
+Open it with `pm unlock --vault "Work"`.
+$ pm vaults
+? 0
+...
+Work      [..].enc
+...
+Open one with `pm unlock --vault NAME`; rename with `pm vaults --rename FILE --name NAME`.
+$ pm vaults --rename Work --name Office
+? 0
+...
+Office    [..].enc
+...
+Open one with `pm unlock --vault NAME`; rename with `pm vaults --rename FILE --name NAME`.
+$ pm vaults
+? 0
+...
+Office    [..].enc
+...
+Open one with `pm unlock --vault NAME`; rename with `pm vaults --rename FILE --name NAME`.
+$ pm unlock --vault Office --key {root}/work.key
+? 0
+Vault unlocked.
+$ pm status
+? 0
+Status: Unlocked
+Version: 0.1.0
+$ pm lock
+? 0
+Vault locked.
+$ pm vaults delete Office --key {root}/work.key
+? 2
+! Error: Permanent deletion requires confirmation. Rerun with --yes to confirm.
+$ pm vaults delete Office --key {root}/work.key --yes
+? 0
+Vault deleted.
+$ pm vaults
+? 0
+Personal  [..].enc
+
+Open one with `pm unlock --vault NAME`; rename with `pm vaults --rename FILE --name NAME`.

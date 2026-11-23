@@ -1,0 +1,95 @@
+# Integrations with nothing configured fail clearly instead of hanging.
+$ pm new --locked --key {root}/vault.key
+? 0
+Vault "Personal vault" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm unlock --key {root}/vault.key
+? 0
+Vault unlocked.
+$ pm sync status
+? 0
+This vault is not connected to sync. Run pm sync enable.
+$ pm sync check
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm sync conflicts
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm sync disable
+? 1
+! Error: This vault is not connected to sync
+$ pm ssh-agent approve 12345
+? 1
+! Error: That SSH request is no longer waiting.
+$ pm ssh-agent deny 12345
+? 1
+! Error: That SSH request is no longer waiting.
+$ pm --password-stdin passkey approve 12345
+< synthetic-pin
+? 1
+! Error: That passkey request is no longer waiting.
+$ pm passkey deny 12345
+? 1
+! Error: That passkey request is no longer waiting.
+$ pm --password-stdin add --no-copy --name Example --username alice
+< synthetic-password-1
+? 0
+Added "Example".
+$ pm duo requests Example
+? 1
+! Error: Item has no push credentials; enroll a fresh link using pm duo enroll
+$ pm duo approve Example
+? 1
+! Error: Duo decisions require an interactive terminal to review and confirm the request
+$ pm duo deny Example --request 12345
+? 1
+! Error: Duo decisions require an interactive terminal to review and confirm the request
+$ pm duo watch Example
+? 1
+Watching Duo requests. Use pm duo approve/deny in another terminal (--request ID if multiple requests are pending). Polling does not extend auto-lock. Ctrl+C to stop.
+! Error: Item has no push credentials; enroll a fresh link using pm duo enroll
+$ pm duo remove Example
+? 0
+Local push credentials removed. Remove the device separately in Duo; passcodes are retained.
+$ pm sync enable
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm sync now
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm sync vaults
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm sync pull
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm sync resolve --review not-a-token
+? 1
+! Error: Read sync credential: [..](os error 2); run pm sync connect
+$ pm --password-stdin passkey set-pin
+< 2468
+< 1357
+? 2
+! Error: The passkey PINs do not match.
+$ pm --password-stdin passkey set-pin
+< 2468
+< 2468
+? 1
+! Error: Use a passkey PIN of at least 6 characters.
+$ pm --password-stdin passkey set-pin
+< 246810
+< 246810
+? 0
+Passkey PIN set.
+$ pm passkey remove-pin
+? 0
+Passkey PIN removed.
+$ pm completions bash --output completions.bash
+? 0
+Completions written to completions.bash
+$ pm completions nonsense
+? 2
+! error: invalid value 'nonsense' for '<SHELL>'
+!   [possible values: bash, elvish, fish, powershell, zsh]
+!
+! For more information, try '--help'.

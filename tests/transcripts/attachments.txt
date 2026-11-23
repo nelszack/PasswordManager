@@ -1,0 +1,44 @@
+# Small files stored encrypted with an item.
+% file notes/recovery.txt
+synthetic recovery codes: 1111 2222 3333
+% end
+$ pm new --locked --key {root}/vault.key
+? 0
+Vault "Personal vault" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm unlock --key {root}/vault.key
+? 0
+Vault unlocked.
+$ pm --password-stdin add --no-copy --name Example --username alice
+< synthetic-password-1
+? 0
+Added "Example".
+$ pm attachment add Example --path notes/recovery.txt
+? 0
+Attachment added.
+! Warning: With tags, favorites, or attachments, older versions of the app can't open this vault; update other devices before they sync it.
+$ pm get Example
+? 0
+Name:               Example
+ID:                 1
+Type:               Login
+Username or email:  alice
+Password:           ******** (hidden; add --password-only to print it)
+Attachment:         recovery.txt (41 B)
+Modified:           [..]
+Created:            [..]
+$ pm attachment save Example --name recovery.txt --path restored.txt
+? 0
+Attachment saved.
+$ pm attachment save Example --name recovery.txt --path restored.txt
+? 4
+! Error: Saving the attachment failed: destination file "{root}/restored.txt" already exists; use --force to replace it
+$ pm attachment save Example --name RECOVERY.TXT --path restored.txt --force
+? 0
+Attachment saved.
+$ pm attachment remove Example --name recovery.txt
+? 0
+Attachment removed.
+$ pm attachment remove Example --name recovery.txt
+? 3
+! Error: Removing the attachment failed: no attachment is named "recovery.txt"

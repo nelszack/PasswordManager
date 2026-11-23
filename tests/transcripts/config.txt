@@ -1,0 +1,167 @@
+# Persistent defaults and how commands pick them up.
+$ pm config
+? 0
+[genpass]
+length = 20
+stats = false
+copy = true
+
+[clipboard]
+timeout = 15
+
+[unlock]
+timeout = 900
+
+[copy]
+passwords = true
+
+[recovery]
+password_history_limit = 10
+trash_retention_days = 0
+
+[server]
+port = 7878
+ssh_agent = false
+
+[desktop]
+appearance = "system"
+scale = 100
+close_action = "ask"
+
+[sync]
+server_url = ""
+automatic = true
+$ pm config --length 12
+? 0
+[genpass]
+length = 12
+stats = false
+copy = true
+
+[clipboard]
+timeout = 15
+
+[unlock]
+timeout = 900
+
+[copy]
+passwords = true
+
+[recovery]
+password_history_limit = 10
+trash_retention_days = 0
+
+[server]
+port = 7878
+ssh_agent = false
+
+[desktop]
+appearance = "system"
+scale = 100
+close_action = "ask"
+
+[sync]
+server_url = ""
+automatic = true
+! Saved: genpass.length = 12.
+$ pm --json genpass --no-copy --no-stats --no-symbols
+? 0
+{"data":{"copied":false,"copy_error":null,"password":"[..]","rating":"Strong","score":4},"ok":true}
+$ pm config --length 3
+? 0
+[genpass]
+length = 3
+stats = false
+copy = true
+
+[clipboard]
+timeout = 15
+
+[unlock]
+timeout = 900
+
+[copy]
+passwords = true
+
+[recovery]
+password_history_limit = 10
+trash_retention_days = 0
+
+[server]
+port = 7878
+ssh_agent = false
+
+[desktop]
+appearance = "system"
+scale = 100
+close_action = "ask"
+
+[sync]
+server_url = ""
+automatic = true
+! Saved: genpass.length = 3.
+$ pm config --reset
+? 0
+[genpass]
+length = 20
+stats = false
+copy = true
+
+[clipboard]
+timeout = 15
+
+[unlock]
+timeout = 900
+
+[copy]
+passwords = true
+
+[recovery]
+password_history_limit = 10
+trash_retention_days = 0
+
+[server]
+port = 7878
+ssh_agent = false
+
+[desktop]
+appearance = "system"
+scale = 100
+close_action = "ask"
+
+[sync]
+server_url = ""
+automatic = true
+! Saved: genpass.length = 20.
+$ pm config
+? 0
+[genpass]
+length = 20
+stats = false
+copy = true
+
+[clipboard]
+timeout = 15
+
+[unlock]
+timeout = 900
+
+[copy]
+passwords = true
+
+[recovery]
+password_history_limit = 10
+trash_retention_days = 0
+
+[server]
+port = 7878
+ssh_agent = false
+
+[desktop]
+appearance = "system"
+scale = 100
+close_action = "ask"
+
+[sync]
+server_url = ""
+automatic = true

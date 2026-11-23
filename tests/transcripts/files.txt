@@ -1,0 +1,58 @@
+# Import, export and encrypted backups use paths relative to the caller.
+% file logins.csv
+name,url,username,password,notes
+Mail,https://mail.example.test,alice,synthetic-mail-1,
+Bank,https://bank.example.test,alice-b,synthetic-bank-1,checking
+% end
+$ pm new --locked --key {root}/vault.key
+? 0
+Vault "Personal vault" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm unlock --key {root}/vault.key
+? 0
+Vault unlocked.
+$ pm import --path logins.csv --preview
+? 0
+Import preview: 2 parsed, 2 added, 0 replaced, 0 kept with a new name, 0 skipped.
+$ pm import --path logins.csv
+? 0
+Import finished: 2 parsed, 2 added, 0 replaced, 0 kept with a new name, 0 skipped.
+$ pm list
+? 0
+#2  Bank  Login - alice-b - https://bank.example.test
+#1  Mail  Login - alice - https://mail.example.test
+
+2 items. Show one with `pm get NAME` or `pm get --id ID`.
+$ pm import --path logins.csv --conflicts skip
+? 0
+Import finished: 2 parsed, 0 added, 0 replaced, 0 kept with a new name, 2 skipped.
+$ pm export --path out.csv --format csv
+? 2
+! Error: A plaintext export contains every password. Rerun with --yes to confirm.
+$ pm export --path out.csv --format csv --yes
+? 0
+Export finished. WARNING: the export contains plaintext secrets.
+$ pm export --path out.csv --format csv --yes
+? 4
+! Error: Export failed: destination file "{root}/out.csv" already exists; use --force to replace it
+$ pm export --path out.json --yes
+? 0
+Export finished. WARNING: the export contains plaintext secrets.
+$ pm backup create --path vault.pmbackup --key {root}/vault.key
+? 0
+Encrypted backup created.
+$ pm backup restore --path vault.pmbackup --key {root}/vault.key
+? 1
+! Error: Lock the current vault before restoring a backup.
+$ pm lock
+? 0
+Vault locked.
+$ pm backup restore --path vault.pmbackup --key {root}/vault.key
+? 0
+Encrypted backup restored as [..].enc. Unlock it with the backup password/key.
+$ pm vaults
+? 0
+Vault 1  [..].enc
+Vault 2  [..].enc
+
+Open one with `pm unlock --vault NAME`; rename with `pm vaults --rename FILE --name NAME`.

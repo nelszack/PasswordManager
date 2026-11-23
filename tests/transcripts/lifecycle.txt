@@ -1,0 +1,45 @@
+# The background server: explicit start, status, re-encryption and shutdown.
+$ pm status
+? 1
+! Error: No vault yet. Create one with `pm new --name NAME` (it starts the background server for you).
+$ pm start
+? 0
+Server started (PID [..])
+$ pm start
+? 0
+Server is already running.
+$ pm new --locked --key {root}/vault.key
+? 0
+Vault "Personal vault" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm unlock --key {root}/vault.key --timeout 600
+? 0
+Vault unlocked.
+$ pm --password-stdin add --no-copy --name Example --username alice
+< synthetic-password-1
+? 0
+Added "Example".
+$ pm rekey --key {root}/new.key
+? 0
+Vault re-encrypted with the new key.
+$ pm lock
+? 0
+Vault locked.
+$ pm unlock --key {root}/vault.key
+? 2
+! Error: Unlock failed: incorrect password/key or modified encrypted contents
+$ pm unlock --key {root}/new.key
+? 0
+Vault unlocked.
+$ pm get Example --password-only
+? 0
+synthetic-password-1
+$ pm kill
+? 0
+Server stopped.
+$ pm status
+? 1
+! Error: Server is not running, so no vault is open. Run `pm unlock` to start it and open your vault.
+$ pm kill
+? 1
+! Error: Server is not running, so no vault is open. Run `pm unlock` to start it and open your vault.

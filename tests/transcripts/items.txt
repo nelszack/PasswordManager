@@ -1,0 +1,105 @@
+# The life of a login item: add, find, change, revisions, trash and restore.
+$ pm new --locked --key {root}/vault.key
+? 0
+Vault "Personal vault" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm status
+? 0
+Status: Locked (run `pm unlock` to open your vault)
+Version: 0.1.0
+$ pm unlock --key {root}/vault.key
+? 0
+Vault unlocked.
+$ pm --password-stdin add --no-copy --name Example --username alice --url https://example.com/login --tag work
+< synthetic-password-1
+? 0
+Added "Example".
+! Warning: With tags, favorites, or attachments, older versions of the app can't open this vault; update other devices before they sync it.
+$ pm --password-stdin add --type secure-note --name "Wifi notes" --notes "router in hall closet"
+< synthetic note body
+? 0
+Added "Wifi notes".
+$ pm list
+? 0
+#1  Example     Login - alice - https://example.com/login - #work
+#2  Wifi notes  Secure note
+
+2 items. Show one with `pm get NAME` or `pm get --id ID`.
+$ pm search exam
+? 0
+#1  Example  Login - alice - https://example.com/login - #work
+
+1 item. Show one with `pm get NAME` or `pm get --id ID`.
+$ pm search --tag work
+? 0
+#1  Example  Login - alice - https://example.com/login - #work
+
+1 item. Show one with `pm get NAME` or `pm get --id ID`.
+$ pm get Example
+? 0
+Name:               Example
+ID:                 1
+Type:               Login
+Username or email:  alice
+Website:            https://example.com/login
+Password:           ******** (hidden; add --password-only to print it)
+Tags:               work
+Modified:           [..]
+Created:            [..]
+$ pm get Example --password-only
+? 0
+synthetic-password-1
+$ pm --password-stdin update Example --password
+< synthetic-password-2
+? 0
+Item updated.
+$ pm history Example
+? 0
+Revision 1  changed [..]
+
+Restore one with `pm restore-password NAME --revision N`.
+$ pm restore-password Example --revision 1
+? 0
+Password restored.
+$ pm get Example --password-only
+? 0
+synthetic-password-1
+$ pm update Example --favorite --add-tag personal
+? 0
+Item updated.
+$ pm list --favorites
+? 0
+#1  * Example  Login - alice - https://example.com/login - #work - #personal
+
+1 item. Show one with `pm get NAME` or `pm get --id ID`.
+$ pm delete "Wifi notes"
+? 0
+Item moved to trash.
+! Undo with `pm restore "Wifi notes"`.
+$ pm trash
+? 0
+#2    Wifi notes  (Secure note, deleted [..])
+
+Restore one with `pm restore --id ID`; erase one with `pm purge --id ID`.
+$ pm restore "Wifi notes"
+? 0
+Item restored.
+$ pm delete "Wifi notes"
+? 0
+Item moved to trash.
+! Undo with `pm restore "Wifi notes"`.
+$ pm purge --all
+? 2
+! Error: Permanent deletion requires confirmation. Rerun with --yes to confirm.
+$ pm purge --all --yes
+? 0
+Trash purged.
+$ pm trash
+? 0
+Trash is empty.
+$ pm lock
+? 0
+Vault locked.
+$ pm get Example
+? 1
+! Error: The vault is locked. Run `pm unlock`, then try again.

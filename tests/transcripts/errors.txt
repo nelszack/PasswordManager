@@ -1,0 +1,39 @@
+# Failures have stable exit codes and actionable messages.
+$ pm get Example
+? 1
+! Error: No vault yet. Create one with `pm new --name NAME` (it starts the background server for you).
+$ pm --json get Example
+? 1
+{"code":1,"error":"No vault yet. Create one with `pm new --name NAME` (it starts the background server for you).","ok":false}
+$ pm new --locked --key {root}/vault.key
+? 0
+Vault "Personal vault" ([..].enc) created and left locked.
+Open it with `pm unlock`.
+$ pm get Example
+? 1
+! Error: The vault is locked. Run `pm unlock`, then try again.
+$ pm unlock --key {root}/vault.key
+? 0
+Vault unlocked.
+$ pm get Missing
+? 3
+! Error: No item is named "Missing"
+$ pm --json get Missing
+? 3
+{"code":3,"data":"no item is named \"Missing\"","error":"no item is named \"Missing\"","ok":false,"operation":null}
+$ pm delete --id 999999
+? 3
+! Error: Item not found.
+$ pm operation --id not-an-operation
+? 0
+Operation not-an-operation: Unknown. The server has no retained outcome. Inspect the vault; do not assume the change failed.
+$ pm audit
+? 0
+No login items to assess. Add or import a login before checking vault health.
+$ pm frobnicate
+? 2
+! error: unrecognized subcommand 'frobnicate'
+!
+! Usage: pm [OPTIONS] [COMMAND]
+!
+! For more information, try '--help'.

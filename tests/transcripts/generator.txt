@@ -1,0 +1,29 @@
+# Password generation and strength checks need no vault or server.
+$ pm --json genpass --no-copy --no-stats --length 0
+? 2
+{"argument":null,"code":2,"command":null,"error":"Invalid command arguments. Run `pm --help` for usage.","kind":"ValueValidation","ok":false}
+$ pm --json genpass --no-copy --no-stats --length 300
+? 2
+{"argument":null,"code":2,"command":null,"error":"Invalid command arguments. Run `pm --help` for usage.","kind":"ValueValidation","ok":false}
+$ pm --json genpass --no-copy --no-stats --length 24 --no-symbols
+? 0
+{"data":{"copied":false,"copy_error":null,"password":"[..]","rating":"Strong","score":4},"ok":true}
+$ pm --json genpass --no-copy --no-stats --passphrase --words 2
+? 2
+{"argument":null,"code":2,"command":null,"error":"Invalid command arguments. Run `pm --help` for usage.","kind":"ValueValidation","ok":false}
+$ pm genpass --no-copy --no-uppercase --no-lowercase --no-digits --no-symbols
+? 2
+! Error: At least one non-empty character class is required
+$ pm --password-stdin passcheck
+< password
+? 0
+Password stats:
+    Score (0-4): 0
+    Entropy: 1.58 bits
+    Strength: Very Weak
+    Warning: This is a top-10 common password.
+    Suggestions: Add another word or two. Uncommon words are better.
+$ pm --json --password-stdin passcheck
+< correct-horse-battery-staple-synthetic-9
+? 0
+{"data":{"rating":"Strong","score":4},"ok":true}
