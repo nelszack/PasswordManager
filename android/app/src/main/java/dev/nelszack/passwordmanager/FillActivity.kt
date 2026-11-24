@@ -405,8 +405,7 @@ class FillActivity : VaultActivity() {
             }
             page("Save login")
             label(
-                "Website or app: $origin
-Username: ${username.ifBlank { "(not captured)" }}"
+                "Website or app: $origin\nUsername: ${username.ifBlank { "(not captured)" }}"
             )
             val address =
                 if (hostnameOnly) {
@@ -471,8 +470,7 @@ Username: ${username.ifBlank { "(not captured)" }}"
                 val title =
                     "Update ${entry.getString("name")}" +
                         (account?.let { " ($it)" } ?: "") +
-                        "
-$previousOrigin"
+                        "\n$previousOrigin"
                 MobileUi.button(this, title, primary = primary) {
                         guarded {
                             com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
