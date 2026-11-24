@@ -9,27 +9,27 @@ internal class FileScreens(private val host: ManagementActivity) {
         host.contentResolver.openInputStream(uri)?.use { it.readBounded(MAX_TRANSFER) }
             ?: error("Could not open selected file")
 
-    /** Reads [uri], passes it base64url-encoded to [use], and wipes the raw bytes. */
-    private fun <T> withEncodedFile(uri: Uri, use: (String) -> T): T {
+    /** Sends the file at [uri] as the raw content of [op], wiping the bytes afterwards. */
+    private fun sendFile(uri: Uri, op: String, vararg args: Pair<String, Any?>): Any {
         val bytes = readFile(uri)
         try {
-            return use(DeviceKeys.encode(bytes))
+            val reply = Vault.transfer(op, bytes, *args)
+            reply.wipe()
+            return reply.data
         } finally {
             bytes.fill(0)
         }
     }
 
-    /** Runs a native operation that returns file `data` and writes it to [uri]. */
-    private fun writeResult(uri: Uri, op: String, vararg args: Pair<String, Any?>) =
-        writeFile(uri, DeviceKeys.decode(Vault.json(op, *args).getString("data")))
-
-    private fun writeFile(uri: Uri, bytes: ByteArray) {
-        check(bytes.size <= MAX_TRANSFER) { "File exceeds the 16 MiB mobile transfer limit" }
+    /** Runs a native operation that returns file content and writes it to [uri]. */
+    private fun writeResult(uri: Uri, op: String, vararg args: Pair<String, Any?>) {
+        val reply = Vault.transfer(op, null, *args)
         try {
-            host.contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+            check(reply.size <= MAX_TRANSFER) { "File exceeds the 16 MiB mobile transfer limit" }
+            host.contentResolver.openOutputStream(uri, "wt")?.use { reply.writeTo(it) }
                 ?: error("Could not write selected file")
         } finally {
-            bytes.fill(0)
+            reply.wipe()
         }
     }
 
@@ -124,14 +124,12 @@ internal class FileScreens(private val host: ManagementActivity) {
                     val encoded = key?.let(DeviceKeys::encode)
                     key?.fill(0)
                     task({
-                        withEncodedFile(uri) { data ->
-                            Vault.json(
-                                "restore_backup",
-                                "data" to data,
-                                "password" to supplied,
-                                "key_file" to encoded,
-                            )
-                        }
+                        sendFile(
+                            uri,
+                            "restore_backup",
+                            "password" to supplied,
+                            "key_file" to encoded,
+                        ) as org.json.JSONObject
                     }) {
                         selectedVault = it.getString("vault")
                         showHome()
@@ -160,14 +158,8 @@ internal class FileScreens(private val host: ManagementActivity) {
             button("Preview import") {
                 val selected = policy()
                 task({
-                    withEncodedFile(uri) { data ->
-                        Vault.json(
-                            "import_items",
-                            "data" to data,
-                            "preview" to true,
-                            "conflicts" to selected,
-                        )
-                    }
+                    sendFile(uri, "import_items", "preview" to true, "conflicts" to selected)
+                        as org.json.JSONObject
                 }) { preview ->
                     page("Import preview")
                     pageBack = { importForm(uri) }
@@ -186,15 +178,13 @@ internal class FileScreens(private val host: ManagementActivity) {
                     for (i in 0 until losses.length()) label(losses.getString(i))
                     button("Apply reviewed import") {
                         task({
-                            withEncodedFile(uri) { data ->
-                                Vault.request(
-                                    "import_items",
-                                    "data" to data,
-                                    "preview" to false,
-                                    "conflicts" to selected,
-                                    "review_token" to preview.getString("review_token"),
-                                )
-                            }
+                            sendFile(
+                                uri,
+                                "import_items",
+                                "preview" to false,
+                                "conflicts" to selected,
+                                "review_token" to preview.getString("review_token"),
+                            )
                             afterToolChange()
                         }) {
                             showItems(it)

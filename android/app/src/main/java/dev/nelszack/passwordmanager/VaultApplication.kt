@@ -19,6 +19,31 @@ object NativeBridge {
     @JvmStatic external fun invalidate()
 
     @JvmStatic external fun call(context: Context, directory: String, request: String): String
+
+    /**
+     * [call] with file content as raw bytes: [data] is the request's content, and the reply holds
+     * a 4-byte big-endian JSON length, the JSON reply, then any returned content.
+     */
+    @JvmStatic
+    external fun callBytes(
+        context: Context,
+        directory: String,
+        request: String,
+        data: ByteArray?,
+    ): ByteArray
+}
+
+/**
+ * A reply with file content, kept in the native reply buffer so it is never copied into a string.
+ * Call [wipe] once the content has been written.
+ */
+class FileReply(val data: Any, private val frame: ByteArray, private val offset: Int) {
+    val size
+        get() = frame.size - offset
+
+    fun writeTo(out: java.io.OutputStream) = out.write(frame, offset, size)
+
+    fun wipe() = frame.fill(0)
 }
 
 object Vault {
@@ -73,21 +98,40 @@ object Vault {
     private val settings
         get() = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
-    fun request(op: String, vararg args: Pair<String, Any?>): Any {
+    private fun body(op: String, args: Array<out Pair<String, Any?>>): String {
         if (op in sessionChanges) {
             primaryUnlock = false
             autofillSession.clear()
         }
         val body = JSONObject().put("op", op)
         args.forEach { (key, value) -> if (value != null) body.put(key, value) }
-        val reply =
-            JSONObject(
-                NativeBridge.call(
-                    context,
-                    context.filesDir.resolve("vaults").absolutePath,
-                    body.toString(),
-                )
-            )
+        return body.toString()
+    }
+
+    private val directory
+        get() = context.filesDir.resolve("vaults").absolutePath
+
+    fun request(op: String, vararg args: Pair<String, Any?>): Any =
+        handle(op, JSONObject(NativeBridge.call(context, directory, body(op, args))))
+
+    /**
+     * Runs [op] with [content] (imports, restores, attachments) passed as raw bytes rather than
+     * base64 text, and returns any file content (exports, backups, snapshots, attachments) the
+     * same way, avoiding large string copies of whole files.
+     */
+    fun transfer(op: String, content: ByteArray?, vararg args: Pair<String, Any?>): FileReply {
+        val frame = NativeBridge.callBytes(context, directory, body(op, args), content)
+        try {
+            val length = java.nio.ByteBuffer.wrap(frame, 0, 4).int
+            val reply = JSONObject(String(frame, 4, length, Charsets.UTF_8))
+            return FileReply(handle(op, reply), frame, 4 + length)
+        } catch (error: Throwable) {
+            frame.fill(0)
+            throw error
+        }
+    }
+
+    private fun handle(op: String, reply: JSONObject): Any {
         check(reply.getBoolean("ok")) { reply.optString("error", "Vault operation failed") }
         if (op in primaryUnlocks) primaryUnlock = true
         if (op == "biometric_unlock" || op == "lock") primaryUnlock = false

@@ -76,13 +76,17 @@ class MobileParityNativeTest {
         val backup = Vault.json("backup_create", "key_file" to key).getString("data")
         Vault.request("lock")
         Vault.request("unlock", "vault" to vault, "key_file" to key)
-        val exported =
-            Vault.json("export_items", "format" to "json", "confirmed" to true).getString("data")
+        // Exports and imports use raw bytes; backups above and below use base64 JSON.
+        val reply = Vault.transfer("export_items", null, "format" to "json", "confirmed" to true)
+        val exported = java.io.ByteArrayOutputStream().also(reply::writeTo).toByteArray()
+        reply.wipe()
+        assertTrue(exported.isNotEmpty())
         val preview =
-            Vault.json("import_items", "data" to exported, "conflicts" to "skip", "preview" to true)
-        Vault.request(
+            Vault.transfer("import_items", exported, "conflicts" to "skip", "preview" to true)
+                .data as JSONObject
+        Vault.transfer(
             "import_items",
-            "data" to exported,
+            exported,
             "conflicts" to "skip",
             "preview" to false,
             "review_token" to preview.getString("review_token"),

@@ -43,6 +43,26 @@ const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const KEY_BYTES: usize = 32;
 const HEADER_PREFIX_BYTES: usize = 38;
 
+/// File content sent with a request: raw bytes from [`MobileVault::call_binary`],
+/// or the base64url `data` field of a JSON request, decoded before routing.
+type Payload = Zeroizing<Vec<u8>>;
+
+thread_local! {
+    /// File content a handler returns, collected by the call on this thread.
+    /// Handlers producing it run synchronously on the calling thread.
+    static OUTGOING: std::cell::RefCell<Option<Payload>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Return file content beside the reply instead of base64 inside it.
+fn binary_reply(bytes: Payload) -> Value {
+    OUTGOING.with(|slot| *slot.borrow_mut() = Some(bytes));
+    json!({})
+}
+
+fn take_outgoing() -> Option<Payload> {
+    OUTGOING.with(|slot| slot.borrow_mut().take())
+}
+
 /// One request from the app. The JSON envelope is process-local; never log it.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -68,10 +88,12 @@ enum Request {
     },
     NewKeyFile,
     ImportVault {
-        data: String,
+        #[serde(skip)]
+        data: Payload,
     },
     RestoreBackup {
-        data: SecretString,
+        #[serde(skip)]
+        data: Payload,
         password: Option<SecretString>,
         key_file: Option<SecretString>,
     },
@@ -207,7 +229,8 @@ enum Request {
     AttachmentAdd {
         id: usize,
         name: String,
-        data: SecretString,
+        #[serde(skip)]
+        data: Payload,
         expected_revision: Option<u64>,
     },
     /// An attachment's content as base64url, for saving with the system picker.
@@ -216,7 +239,8 @@ enum Request {
         name: String,
     },
     ImportItems {
-        data: SecretString,
+        #[serde(skip)]
+        data: Payload,
         conflicts: Option<ConflictPolicy>,
         preview: Option<bool>,
         review_token: Option<String>,
@@ -415,6 +439,19 @@ fn guard(state: &Mutex<MobileState>) -> MutexGuard<'_, MobileState> {
     })
 }
 
+impl Request {
+    /// Where this request keeps its file content, for those that take one.
+    fn payload_mut(&mut self) -> Option<&mut Payload> {
+        match self {
+            Self::ImportVault { data }
+            | Self::RestoreBackup { data, .. }
+            | Self::AttachmentAdd { data, .. }
+            | Self::ImportItems { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+}
+
 impl MobileVault {
     pub fn new(directory: PathBuf) -> Result<Self, String> {
         if !directory.is_absolute() {
@@ -484,7 +521,41 @@ impl MobileVault {
     /// JSON is only a process-local FFI envelope. Never log requests or results.
     /// Safe to call from several threads: local work is serialized by the vault
     /// mutex, and network work runs between its snapshot and apply steps.
+    /// File content travels base64url-encoded in the JSON `data` field, both
+    /// ways. [`Self::call_binary`] passes it as raw bytes instead.
     pub fn call(&self, input: &str) -> Result<Value, String> {
+        let (mut value, outgoing) = self.call_inner(input, None)?;
+        if let (Some(bytes), Value::Object(reply)) = (outgoing, &mut value) {
+            reply.insert("data".into(), Value::String(passkey::encode(&*bytes)));
+        }
+        Ok(value)
+    }
+
+    /// Like [`Self::call`], with imports, backups and attachments as raw bytes
+    /// beside a JSON request without `data`, and file content in replies
+    /// returned the same way. Avoids base64 and the large text copies it
+    /// causes on both sides of the FFI boundary.
+    pub fn call_binary(
+        &self,
+        input: &str,
+        data: Option<Payload>,
+    ) -> Result<(Value, Option<Payload>), String> {
+        if data
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > MAX_REQUEST_BYTES)
+        {
+            return Err("Mobile request exceeds limit".into());
+        }
+        self.call_inner(input, Some(data))
+    }
+
+    /// `binary` is the raw content of a [`Self::call_binary`] request, or
+    /// `None` when content arrives as a JSON field.
+    fn call_inner(
+        &self,
+        input: &str,
+        binary: Option<Option<Payload>>,
+    ) -> Result<(Value, Option<Payload>), String> {
         if input.len() > MAX_REQUEST_BYTES {
             return Err("Mobile request exceeds limit".into());
         }
@@ -495,18 +566,41 @@ impl MobileVault {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        let invalid = || format!("Invalid or unsupported mobile request: {op}");
+        // File content is taken out of the envelope before typed parsing,
+        // so the request owns the decoded bytes and nothing is copied twice.
+        let field = envelope.as_object_mut().and_then(|o| o.remove("data"));
+        let payload = match (binary, field) {
+            (Some(bytes), None) => bytes,
+            (None, None) => None,
+            (None, Some(Value::String(text))) => {
+                let text = Zeroizing::new(text);
+                Some(Zeroizing::new(
+                    passkey::decode(&text).map_err(|_| invalid())?,
+                ))
+            }
+            (_, Some(mut other)) => {
+                wipe_json(&mut other);
+                wipe_json(&mut envelope);
+                return Err(invalid());
+            }
+        };
         // Deserialization errors can echo rejected values; report only the operation.
-        let request = Request::deserialize(&envelope)
-            .map_err(|_| format!("Invalid or unsupported mobile request: {op}"));
+        let request = Request::deserialize(&envelope).map_err(|_| invalid());
         wipe_json(&mut envelope);
-        let request = request?;
+        let mut request = request?;
+        match (request.payload_mut(), payload) {
+            (Some(slot), Some(bytes)) => *slot = bytes,
+            (None, None) => {}
+            _ => return Err(invalid()),
+        }
         let ticket = Ticket::new(self.cancellation);
         if matches!(request, Request::Lock) {
             if let Some(flag) = self.cancellation {
                 flag.clear();
             }
             self.lock();
-            return Ok(json!({}));
+            return Ok((json!({}), None));
         }
         if ticket.cancelled() {
             self.lock();
@@ -526,13 +620,17 @@ impl MobileVault {
         };
         let opens_session = request.opens_session();
         let adoptions = self.state().adoptions;
+        drop(take_outgoing());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.dispatch(request, &ticket)
         }));
+        // Taken whatever happened, so content never outlives its call.
+        let outgoing = take_outgoing();
         if ticket.cancelled() {
             if let Ok(Ok(mut value)) = result {
                 wipe_json(&mut value);
             }
+            drop(outgoing);
             // A session another request opened after the app's `lock` is not ours to end.
             let mut state = self.state();
             if opens_session || state.adoptions == adoptions {
@@ -540,10 +638,14 @@ impl MobileVault {
             }
             return Err(INTERRUPTED.into());
         }
-        result.unwrap_or_else(|_| {
-            self.lock();
-            Err("Mobile operation failed; vault locked".into())
-        })
+        match result {
+            Ok(Ok(value)) => Ok((value, outgoing)),
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                self.lock();
+                Err("Mobile operation failed; vault locked".into())
+            }
+        }
     }
 
     /// Routes network requests to handlers that release the vault between
@@ -687,9 +789,24 @@ impl MobileVault {
         match deferred {
             Deferred::None => {}
             Deferred::Audit(pending, check_breaches) => {
+                let revision = pending.revision;
                 match pending.finish(|| ticket.cancelled()) {
                     Ok(snapshot) => {
                         let audit = block_on(ticket, snapshot.audit(check_breaches))?;
+                        // A sync or edit while scoring or checking breaches
+                        // would leave this report describing old passwords.
+                        let current = {
+                            let state = self.state();
+                            state.session == session
+                                && state.vault.as_ref().map(Vault::vault_revision) == Some(revision)
+                        };
+                        if !current {
+                            operations::respond_conflict(
+                                "Vault changed while the audit ran; run it again",
+                                &mut responses,
+                            );
+                            return response_value(responses, existing_update);
+                        }
                         let code = if audit.incomplete {
                             ResponseCode::Failure
                         } else {
@@ -946,7 +1063,6 @@ impl MobileState {
             }
             Request::NewKeyFile => Ok(tools::new_key_file()),
             Request::ImportVault { data } => {
-                let data = passkey::decode(&data)?;
                 crate::encryption::validate_vault_header(&data)?;
                 if data.len() as u64 > MAX_VAULT_BYTES {
                     return Err("Vault exceeds size limit".into());
@@ -1115,7 +1231,7 @@ impl MobileState {
                 let bytes = crate::file::read_bounded_file(&path, MAX_SNAPSHOT_BYTES).map_err(
                     |_| "Encrypted vault exceeds mobile transfer limit or could not be read",
                 )?;
-                Ok(json!({ "data": passkey::encode(bytes) }))
+                Ok(binary_reply(bytes))
             }
             Request::ExportItems { format, confirmed } => {
                 self.export_items(format.as_deref() != Some("csv"), confirmed)
@@ -1126,16 +1242,6 @@ impl MobileState {
                 data,
                 expected_revision,
             } => {
-                // Base64 holds 3 bytes per 4 characters; reject oversized
-                // input before decoding it.
-                let limit = attachments::MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
-                if data.len() > limit {
-                    return Err(format!(
-                        "Attachments are limited to {} MiB each",
-                        attachments::MAX_ATTACHMENT_BYTES / (1024 * 1024)
-                    ));
-                }
-                let bytes = Zeroizing::new(passkey::decode(data.expose())?);
                 let (vault, credentials) = self.unlocked()?;
                 let target = Target::Id(id);
                 if let Some(expected) = expected_revision
@@ -1146,7 +1252,7 @@ impl MobileState {
                     );
                 }
                 vault
-                    .add_attachment(&target, &name, bytes, credentials)
+                    .add_attachment(&target, &name, data, credentials)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "message": "Attachment added." }))
             }
@@ -1155,7 +1261,7 @@ impl MobileState {
                     .vault()?
                     .attachment_data(&Target::Id(id), &name)
                     .map_err(|e| e.to_string())?;
-                Ok(json!({ "data": passkey::encode(&*data) }))
+                Ok(binary_reply(data))
             }
             Request::ImportItems {
                 data,
@@ -1850,6 +1956,74 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "Tagged");
         assert_eq!(items[0]["favorite"], true);
+    }
+
+    #[test]
+    fn binary_calls_carry_file_content_beside_the_json_both_ways() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        save(
+            &mut api,
+            "Holder",
+            "user",
+            "synthetic",
+            "https://example.com",
+        )
+        .unwrap();
+        let revision = item(&mut api, 1).unwrap()["revision"].as_u64().unwrap();
+        let content = vec![0u8, 1, 2, 250, 255];
+        let add = json!({ "op": "attachment_add", "id": 1, "name": "scan.png",
+            "expected_revision": revision })
+        .to_string();
+        // Content must come from one place: bytes, or a JSON field, never neither or both.
+        let invalid = |result: Result<(Value, Option<Payload>), String>| {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("Invalid or unsupported mobile request")
+            );
+        };
+        invalid(api.call_binary(&add, None));
+        invalid(
+            api.call_binary(
+                &json!({ "op": "attachment_add", "id": 1, "name": "scan.png",
+                "data": passkey::encode(&content) })
+                .to_string(),
+                Some(Zeroizing::new(content.clone())),
+            ),
+        );
+        invalid(api.call_binary(r#"{"op":"status"}"#, Some(Zeroizing::new(vec![1]))));
+        let (reply, outgoing) = api
+            .call_binary(&add, Some(Zeroizing::new(content.clone())))
+            .unwrap();
+        assert!(outgoing.is_none());
+        assert_eq!(reply["message"], "Attachment added.");
+        // Content comes back as bytes, and the JSON call still encodes it.
+        let (reply, outgoing) = api
+            .call_binary(r#"{"op":"attachment_data","id":1,"name":"scan.png"}"#, None)
+            .unwrap();
+        assert_eq!(reply, json!({}));
+        assert_eq!(*outgoing.unwrap(), content);
+        let encoded = api
+            .call(r#"{"op":"attachment_data","id":1,"name":"scan.png"}"#)
+            .unwrap();
+        assert_eq!(encoded["data"], passkey::encode(&content));
+        // A round trip of the encrypted snapshot, imported as a separate vault file.
+        let (_, snapshot) = api.call_binary(r#"{"op":"snapshot"}"#, None).unwrap();
+        let (imported, _) = api
+            .call_binary(r#"{"op":"import_vault"}"#, snapshot)
+            .unwrap();
+        assert!(imported["vault"].as_str().unwrap().ends_with(".enc"));
+        // A failed request returns no content.
+        api.lock();
+        assert!(
+            api.call_binary(r#"{"op":"attachment_data","id":1,"name":"scan.png"}"#, None)
+                .is_err()
+        );
+        assert!(take_outgoing().is_none());
     }
 
     #[test]
