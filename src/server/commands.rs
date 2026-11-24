@@ -367,7 +367,7 @@ fn handle_command(
                 .into();
                 Ok(())
             }) {
-                respond_domain_error(&error, reply);
+                crate::operations::report_beside_result(&error, reply);
             }
         }
     }

@@ -976,14 +976,15 @@ async fn finish_duo_enrollment(
             vault.finish_duo_enrollment(&prepared, material, key)
         })
         .await;
+    // Duo has consumed the activation by now, so a failure to save must say
+    // so, including when the vault locked or the server began stopping.
+    let saving_failed = |error: &dyn std::fmt::Display| {
+        format!("Duo enrolled but saving failed: {error}. Check enrollment before retrying.")
+    };
     match result {
         Ok(Ok(output)) => respond_domain_result(Ok(output), reply),
-        Ok(Err(error)) => respond_domain_error_with_context(
-            &error,
-            &format!("Duo enrolled but saving failed: {error}. Check enrollment before retrying."),
-            reply,
-        ),
-        Err(error) => respond_failure(&error, reply),
+        Ok(Err(error)) => respond_domain_error_with_context(&error, &saving_failed(&error), reply),
+        Err(error) => respond_failure(&saving_failed(&error), reply),
     }
 }
 
@@ -1020,6 +1021,35 @@ pub(crate) async fn finish_duo(
         Ok(Err(error)) => respond_domain_error(&error, reply),
         Err(error) => respond_failure(&error, reply),
     }
+}
+
+/// Reports `error` after a command already ran. When the command left the
+/// credentials unusable, the session locked after it produced its result; that
+/// result may record a committed change, so it is kept (with the more severe
+/// code, as Durability outranks every failure) instead of being replaced.
+pub(crate) fn report_beside_result(
+    error: &crate::vault::VaultError,
+    reply: &mut Option<RpcResponse>,
+) {
+    let Some(mut ran) = reply.take() else {
+        respond_domain_error(error, reply);
+        return;
+    };
+    let mut lock = None;
+    respond_domain_error(error, &mut lock);
+    let Some(lock) = lock else {
+        *reply = Some(ran);
+        return;
+    };
+    ran.code = ran.code.max(lock.code);
+    match (&mut ran.payload, lock.payload) {
+        (ResponsePayload::Message(message), ResponsePayload::Message(locked)) => {
+            message.push('\n');
+            message.push_str(&locked);
+        }
+        (payload, locked) => *payload = locked,
+    }
+    *reply = Some(ran);
 }
 
 /// Completes deferred network or CPU work for the unlock `session` that
@@ -1093,6 +1123,26 @@ pub(crate) async fn finish_deferred(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_after_a_committed_change_keeps_the_commit() {
+        let mut reply = Some(RpcResponse::message(
+            ResponseCode::Durability,
+            "Item updated; the save may not be durable.",
+        ));
+        report_beside_result(&crate::vault::VaultError::Locked, &mut reply);
+        let response = reply.unwrap();
+        assert_eq!(response.code, ResponseCode::Durability as i32);
+        let ResponsePayload::Message(message) = &response.payload else {
+            panic!("message payload expected");
+        };
+        assert!(message.starts_with("Item updated"));
+        assert!(message.ends_with("vault is locked"));
+
+        let mut reply = None;
+        report_beside_result(&crate::vault::VaultError::Locked, &mut reply);
+        assert_eq!(reply.unwrap().code, ResponseCode::Failure as i32);
+    }
 
     #[test]
     fn acknowledgements_remain_messages_even_when_they_look_like_json() {

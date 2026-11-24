@@ -1258,7 +1258,9 @@ impl MobileState {
         }
         let history_limit = self.settings.history_limit;
         let session = self.session_id();
-        self.with_unlocked(|vault, credentials| {
+        let mut reply = None;
+        let mut existing_update = false;
+        let ran = self.session.with_unlocked(|vault, credentials| {
             if let Some(required) = confirmation(vault, &command)
                 && !confirmed
             {
@@ -1266,22 +1268,37 @@ impl MobileState {
                 return Err(VaultError::Validation(required.into()));
             }
             // Saving an item without changes succeeds, as the app has always shown.
-            let existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).ok().flatten().is_some());
+            existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).ok().flatten().is_some());
             if let Some(expected) = expected_revision
                 && !operations::expected_revision_matches(Some(vault), &command, expected)
             {
                 command.zeroize();
                 return Err(VaultError::Conflict(ITEM_CHANGED.into()));
             }
-            let mut reply = None;
-            let deferred =
-                operations::execute_unlocked(&mut reply, command, vault, credentials, history_limit);
-            Ok(PreparedCommand {
-                reply,
-                deferred,
-                existing_update,
-                session,
-            })
+            Ok(operations::execute_unlocked(
+                &mut reply,
+                command,
+                vault,
+                credentials,
+                history_limit,
+            ))
+        });
+        let deferred = match ran {
+            Ok(deferred) => deferred,
+            // The command ran, then left the credentials unusable and the
+            // session locked: keep its result, which may record a change.
+            Err(error) if reply.is_some() => {
+                operations::report_beside_result(&error, &mut reply);
+                Deferred::None
+            }
+            Err(VaultError::Locked) => return Err(LOCKED.into()),
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(PreparedCommand {
+            reply,
+            deferred,
+            existing_update,
+            session,
         })
     }
 
