@@ -796,7 +796,6 @@ impl MobileVault {
     /// Lends the vault state to the shared sync engine or deferred work.
     fn host(&self, ticket: &Ticket, client: Option<CloudClient>) -> MobileHost<'_> {
         MobileHost {
-            directory: self.state().directory.clone(),
             ticket: *ticket,
             client,
             owner: &self.state,
@@ -1543,7 +1542,6 @@ struct MobileHost<'a> {
     /// The request's view of the app's lock signal.
     ticket: Ticket,
     client: Option<CloudClient>,
-    directory: PathBuf,
 }
 
 impl VaultHost for MobileHost<'_> {
@@ -1602,7 +1600,7 @@ impl SyncHost for MobileHost<'_> {
         async move { snapshot }
     }
     fn directory(&self) -> PathBuf {
-        self.directory.clone()
+        guard(self.owner).directory.clone()
     }
 }
 
