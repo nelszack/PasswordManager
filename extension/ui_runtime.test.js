@@ -103,7 +103,8 @@ async function popupEnvironment(responses) {
         "retryBtn", "siteSection", "siteTitle", "siteSearch", "siteList", "siteEmpty", "addLoginBtn",
         "addForm", "addName", "addUsername", "addPassword", "addRegenerate", "addSave", "addCancel",
         "genUppercase", "genDigits", "genAmbiguous", "genSeparator", "shortcuts",
-        "vaultSearch", "vaultQuery", "vaultResults", "vaultEmpty", "reconnectBtn"
+        "vaultSearch", "vaultQuery", "vaultResults", "vaultEmpty", "reconnectBtn",
+        "addOwn", "addOwnPassword", "addOwnRow", "addGeneratedRow"
     ], responses);
     env.page = execute("popup.js", env.context);
     env.documentListeners.get("DOMContentLoaded")();
@@ -541,6 +542,80 @@ test("popup lists this site's logins and fills, copies, and adds through the wor
     env.elements.siteSearch.value = "zzz";
     env.elements.siteSearch.dispatch("input");
     assert.match(env.elements.siteEmpty.textContent, /No logins match/);
+});
+
+test("popup saves a typed password, regenerates, and reports refused settings and failures", async () => {
+    const responses = {
+        getStatus: { native: true, running: true, locked: false },
+        popupLogins: { success: true, site: "https://example.com", items: [{ id: 4, name: "Work", username: "w@corp" }] },
+        popupCopy: { success: true, data: "Username copied." },
+        popupSave: { success: true, data: "Saved" },
+        popupSearch: { success: true, total: 1, items: [{ id: 7, name: "Odd", username: "", kind: "future-kind", site: "" }] },
+        lockVault: { success: false },
+        clipboardFails: true,
+    };
+    const env = await popupEnvironment(responses);
+    await settle();
+
+    // Copy username is offered only for logins that have one.
+    await env.elements.siteList.children[0].children[1].children[1].dispatch("click");
+    assert.equal(JSON.stringify(env.messages.at(-1)), JSON.stringify({ action: "popupCopy", id: 4, field: "username" }));
+
+    // Opening the form resets the own-password option to a generated password.
+    env.elements.addForm.hidden = true;
+    env.elements.addOwn.checked = true;
+    env.elements.addOwnPassword.value = "left over";
+    await env.elements.addLoginBtn.dispatch("click");
+    assert.equal(env.elements.addOwn.checked, false);
+    assert.equal(env.elements.addOwnPassword.value, "");
+    assert.equal(env.elements.addOwnRow.hidden, true);
+    assert.equal(env.elements.addGeneratedRow.hidden, false);
+    const first = env.elements.addPassword.textContent;
+    let regenerated = first;
+    for (let attempt = 0; attempt < 5 && regenerated === first; attempt++) {
+        env.elements.addRegenerate.dispatch("click");
+        regenerated = env.elements.addPassword.textContent;
+    }
+    assert.notEqual(regenerated, first, "Regenerate replaces the generated password");
+
+    // Choosing an own password swaps the rows; an empty one is refused.
+    env.elements.addOwn.checked = true;
+    env.elements.addOwn.dispatch("change", { target: env.elements.addOwn });
+    assert.equal(env.elements.addOwnRow.hidden, false);
+    assert.equal(env.elements.addGeneratedRow.hidden, true);
+    assert.equal(env.elements.addOwnPassword.focused, true);
+    await env.elements.addForm.dispatch("submit");
+    assert.match(env.elements.output.innerText, /Enter the password/);
+    assert.equal(env.messages.some(message => message.action === "popupSave"), false);
+    env.elements.addOwnPassword.value = "typed secret";
+    await env.elements.addForm.dispatch("submit");
+    assert.equal(env.messages.find(message => message.action === "popupSave").password, "typed secret");
+    env.elements.addOwn.checked = false;
+    env.elements.addOwn.dispatch("change", { target: env.elements.addOwn });
+    assert.equal(env.elements.addOwnRow.hidden, true);
+
+    // Generator settings outside the allowed range are refused and not stored.
+    env.elements.genLength.dispatch("input", { target: { value: "0" } });
+    assert.equal(env.elements.output.className, "error");
+    assert.equal(env.stored.pmGenerator, undefined);
+    env.elements.genAmbiguous.dispatch("change", { target: { checked: true } });
+    assert.equal(env.stored.pmGenerator.excludeAmbiguous, true);
+
+    // Clipboard and lock failures are reported, never silent.
+    await env.elements.copyExtensionId.dispatch("click");
+    assert.match(env.elements.output.innerText, /Could not copy/);
+    await env.elements.lockBtn.dispatch("click");
+    assert.match(env.elements.output.innerText, /Could not reach the desktop app/);
+
+    // An item type this popup does not know still gets generic labels.
+    env.elements.vaultQuery.value = "odd";
+    await env.page.searchVault();
+    assert.equal(env.elements.vaultResults.children.length, 1);
+
+    // Configured keyboard shortcuts are listed in the footer.
+    env.context.chrome.commands = { getAll(callback) { callback([{ name: "fill-login", shortcut: "Ctrl+Shift+L" }]); } };
+    env.documentListeners.get("DOMContentLoaded")();
+    assert.equal(env.elements.shortcuts.textContent, "Shortcuts — Fill login: Ctrl+Shift+L");
 });
 
 test("popup searches the whole vault and copies results through the desktop service", async () => {
