@@ -127,19 +127,9 @@ impl Vault {
         let Some(requested) = parse_site(domain, false) else {
             return vec![];
         };
-        let username = username.trim();
         self.active_items()
             .filter(|item| {
-                item.metadata.kind == ItemKind::Login
-                    && item_matches_site(item, &requested)
-                    && (username.is_empty()
-                        || item.entry.username.as_deref().is_some_and(|saved| {
-                            saved.trim().to_lowercase() == username.to_lowercase()
-                        }))
-                    && bool::from(subtle::ConstantTimeEq::ct_eq(
-                        item.entry.password.expose().as_bytes(),
-                        password.as_bytes(),
-                    ))
+                item_matches_site(item, &requested) && login_holds(item, username, password)
             })
             .map(|item| self.summary(item))
             .collect()
@@ -172,6 +162,23 @@ impl PartialEq for CachedSites {
     fn eq(&self, _: &Self) -> bool {
         true
     }
+}
+/// Whether a login already holds this password and, when one was captured,
+/// this username (ignoring case and surrounding space, as sites do for
+/// emails). The password comparison is constant time.
+pub(super) fn login_holds(item: &Item, username: &str, password: &str) -> bool {
+    let username = username.trim().to_lowercase();
+    item.metadata.kind == ItemKind::Login
+        && (username.is_empty()
+            || item
+                .entry
+                .username
+                .as_deref()
+                .is_some_and(|saved| saved.trim().to_lowercase() == username))
+        && bool::from(subtle::ConstantTimeEq::ct_eq(
+            item.entry.password.expose().as_bytes(),
+            password.as_bytes(),
+        ))
 }
 fn item_matches_site(item: &Item, requested: &Site) -> bool {
     item.metadata.kind == ItemKind::Login

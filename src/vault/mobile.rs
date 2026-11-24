@@ -110,6 +110,17 @@ enum Request {
     HostnameLogins {
         origin: String,
     },
+    /// Logins for the site that already hold this password and, when one was
+    /// captured, this username, so saving an unchanged sign-in adds no
+    /// duplicate. The comparison happens here; only summaries are returned.
+    SavedLogins {
+        origin: String,
+        #[serde(default)]
+        hostname_only: bool,
+        #[serde(default)]
+        username: String,
+        password: SecretString,
+    },
     OtpLogins {
         origin: String,
         #[serde(default)]
@@ -876,6 +887,7 @@ impl MobileState {
             | Request::ItemProfiles) => self.settings_request(request),
             request @ (Request::Logins { .. }
             | Request::HostnameLogins { .. }
+            | Request::SavedLogins { .. }
             | Request::OtpLogins { .. }
             | Request::Login { .. }
             | Request::SiteOtp { .. }
@@ -992,6 +1004,30 @@ impl MobileState {
                 Ok(json!(logins))
             }
             Request::HostnameLogins { origin } => self.browser_choices(&origin, true, false),
+            Request::SavedLogins {
+                origin,
+                hostname_only,
+                username,
+                password,
+            } => {
+                let vault = self.vault()?;
+                let ids: std::collections::BTreeSet<usize> = if hostname_only {
+                    vault
+                        .mobile_browser_choices(&origin, true, false)
+                        .into_iter()
+                        .map(|(summary, _)| summary.id)
+                        .collect()
+                } else {
+                    self.login_ids(&origin).into_iter().collect()
+                };
+                let saved: Vec<_> = ids
+                    .into_iter()
+                    .filter_map(|id| vault.item(id))
+                    .filter(|item| super::browser::login_holds(item, &username, &password))
+                    .map(|item| vault.summary(item))
+                    .collect();
+                Ok(json!(saved))
+            }
             Request::OtpLogins {
                 origin,
                 hostname_only,
@@ -2037,6 +2073,87 @@ mod tests {
         );
         api.lock();
         assert!(api.call(request).is_err());
+    }
+
+    #[test]
+    fn saved_logins_match_unchanged_sign_ins_without_returning_secrets() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let mut api = MobileVault::new(temp.path().into()).unwrap();
+        let ids = |api: &MobileVault, request: &str| -> Vec<u64> {
+            api.call(request)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    assert!(!entry.to_string().contains("synthetic-secret"));
+                    entry["id"].as_u64().unwrap()
+                })
+                .collect()
+        };
+        let exact = r#"{"op":"saved_logins","origin":"https://example.com","username":" Alex@Example.com ","password":"synthetic-secret"}"#;
+        assert!(api.call(exact).is_err(), "requires an unlocked vault");
+        api.call(r#"{"op":"create","password":"Cedar-Lantern-Quartz-9274!"}"#)
+            .unwrap();
+        save(
+            &mut api,
+            "Site",
+            "alex@example.com",
+            "synthetic-secret",
+            "https://example.com",
+        )
+        .unwrap();
+        save(
+            &mut api,
+            "Other",
+            "sam@example.com",
+            "synthetic-secret",
+            "https://example.com",
+        )
+        .unwrap();
+        save(
+            &mut api,
+            "Port",
+            "alex@example.com",
+            "synthetic-secret",
+            "https://example.com:8443",
+        )
+        .unwrap();
+        save(
+            &mut api,
+            "Elsewhere",
+            "alex@example.com",
+            "synthetic-secret",
+            "https://other.test",
+        )
+        .unwrap();
+        // Username case and surrounding space are ignored; port and host still apply.
+        assert_eq!(ids(&api, exact), vec![1]);
+        // A changed password is not "already saved".
+        assert!(
+            ids(
+                &api,
+                &exact.replace("synthetic-secret", "synthetic-secret2")
+            )
+            .is_empty()
+        );
+        // Without a captured username, any login holding the password matches.
+        assert_eq!(
+            ids(
+                &api,
+                r#"{"op":"saved_logins","origin":"https://example.com","password":"synthetic-secret"}"#
+            ),
+            vec![1, 2]
+        );
+        // Chrome's hostname-only forms consider every port on the host.
+        assert_eq!(
+            ids(
+                &api,
+                r#"{"op":"saved_logins","origin":"https://example.com","hostname_only":true,"username":"alex@example.com","password":"synthetic-secret"}"#
+            ),
+            vec![1, 3]
+        );
     }
 
     use super::*;

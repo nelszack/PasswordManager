@@ -453,6 +453,14 @@ screen-off, or restarting the process revokes that grant. Website-matched TOTP
 entries can fill recognized verification-code fields or offer **Copy verification
 code and return**. The vault must already contain that site's authenticator.
 
+When Android offers to save a login, the sheet first checks the vault: a login
+that already holds the same username (ignoring case) and password is left
+unchanged instead of saved twice. Otherwise choose **Save new login** or update a
+saved account with the same username. Change-password forms often hide the
+username; then every saved account for the site may be updated, and when the
+site has only one, updating it is the suggested action. The saved username is
+kept.
+
 On Android's legacy Chrome autofill API, the page port may be unavailable. The
 exact-hostname picker then requires explicit login/address selection and shows
 saved nonstandard ports; it cannot verify the current page port. See the
@@ -1757,8 +1765,10 @@ corrected before browser filling can use them.
 
 Save/update prompts use account summaries and never compare stored passwords
 in a content script. They run after user interaction without delaying or
-replaying the site's submission. A prompt may also appear for an already saved
-account; cancel it when no update is needed. Script-driven submissions without
+replaying the site's submission. The prompt is skipped when the vault already
+holds the captured login (the desktop service compares it and returns only
+summaries); with an older desktop service it may still appear, so cancel it when
+no update is needed. Script-driven submissions without
 user activation do not request account information.
 
 Terminal displays escape control characters in entry metadata. Explicit raw

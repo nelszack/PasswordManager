@@ -376,11 +376,38 @@ class FillActivity : VaultActivity() {
         intent.removeExtra("password")
         val hostnameOnly = intent.getBooleanExtra("hostname_only", false)
         task({
-            Vault.request(if (hostnameOnly) "hostname_logins" else "logins", "origin" to origin)
-                as JSONArray
-        }) { entries ->
+            val entries =
+                Vault.request(if (hostnameOnly) "hostname_logins" else "logins", "origin" to origin)
+                    as JSONArray
+            // Typed or filled by another app: unchanged if the vault already holds it. Rust compares
+            // and returns summaries only.
+            val saved =
+                Vault.request(
+                    "saved_logins",
+                    "origin" to origin,
+                    "hostname_only" to hostnameOnly,
+                    "username" to username,
+                    "password" to password,
+                ) as JSONArray
+            entries to saved
+        }) { (entries, saved) ->
+            if (saved.length() > 0) {
+                page("Login already saved")
+                label(
+                    "“${saved.getJSONObject(0).getString("name")}” already has this username and password. Nothing was changed."
+                )
+                MobileUi.button(this, "Done", primary = true) {
+                        setResult(RESULT_OK)
+                        finish()
+                    }
+                    .also(layout::addView)
+                return@task
+            }
             page("Save login")
-            label("Website or app: $origin\nUsername: $username")
+            label(
+                "Website or app: $origin
+Username: ${username.ifBlank { "(not captured)" }}"
+            )
             val address =
                 if (hostnameOnly) {
                     label(
@@ -410,7 +437,14 @@ class FillActivity : VaultActivity() {
                         if (id == null)
                             VaultCommands.add(title, username, password, listOf(savedOrigin))
                         else
-                            VaultCommands.update(id, title, username, password, listOf(savedOrigin))
+                            // No captured username keeps the saved one.
+                            VaultCommands.update(
+                                id,
+                                title,
+                                username.ifBlank { null },
+                                password,
+                                listOf(savedOrigin),
+                            )
                     )
                     // The browser gets its result without waiting for sync.
                     Vault.queueSync()
@@ -419,28 +453,56 @@ class FillActivity : VaultActivity() {
                     finish()
                 }
             }
-            button("Save new login") { save() }
-            for (i in 0 until entries.length()) {
-                val entry = entries.getJSONObject(i)
+            // Usernames match ignoring case and surrounding space, as sites do for emails. Without a
+            // captured username (change-password forms rarely show one) every account may be updated.
+            val captured = username.trim()
+            val updatable =
+                (0 until entries.length()).map(entries::getJSONObject).filter {
+                    captured.isEmpty() ||
+                        it.optString("username").trim().equals(captured, ignoreCase = true)
+                }
+            // With one saved login for the site and no username, the new password almost
+            // certainly belongs to it.
+            val preferUpdate = captured.isEmpty() && entries.length() == 1
+            fun updateButton(entry: org.json.JSONObject, primary: Boolean) {
                 val previousOrigin = if (hostnameOnly) entry.getString("origin") else origin
-                if (entry.optString("username") == username)
-                    button("Update ${entry.getString("name")}\n$previousOrigin") {
-                        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                            .setMessage(
-                                "Replace the password for ${entry.getString("name")} at $previousOrigin?"
-                            )
-                            .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Update") { _, _ ->
-                                guarded {
-                                    save(
-                                        entry.getLong("id"),
-                                        entry.getString("name"),
-                                        previousOrigin,
-                                    )
+                val account =
+                    entry.optString("username").takeIf { captured.isEmpty() && it.isNotBlank() }
+                val title =
+                    "Update ${entry.getString("name")}" +
+                        (account?.let { " ($it)" } ?: "") +
+                        "
+$previousOrigin"
+                MobileUi.button(this, title, primary = primary) {
+                        guarded {
+                            com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                                .setMessage(
+                                    "Replace the password for ${entry.getString("name")} at $previousOrigin?"
+                                )
+                                .setNegativeButton("Cancel", null)
+                                .setPositiveButton("Update") { _, _ ->
+                                    guarded {
+                                        save(
+                                            entry.getLong("id"),
+                                            entry.getString("name"),
+                                            previousOrigin,
+                                        )
+                                    }
                                 }
-                            }
-                            .show()
+                                .show()
+                        }
                     }
+                    .also(layout::addView)
+            }
+            if (preferUpdate) {
+                label(
+                    "Update the saved password for “${updatable[0].getString("name")}”, or save a new login."
+                )
+                updateButton(updatable[0], primary = true)
+                button("Save new login") { save() }
+            } else {
+                button("Save new login") { save() }
+                updatable.forEach { updateButton(it, primary = false) }
             }
             button("Cancel") { finish() }
         }
