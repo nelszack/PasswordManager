@@ -95,6 +95,7 @@ const manifest = chrome.runtime.getManifest();
 const status = PasswordManagerBackgroundStatus.create({
     chrome,
     nativeRequest: native.request,
+    subscribeStatus: native.subscribeStatus,
     state: PasswordManagerBackgroundState,
     version: manifest.version_name || manifest.version,
     protocolVersion: PasswordManagerCommandContract.protocolVersion,

@@ -220,7 +220,8 @@ const PasswordManagerBackgroundNative = {
         }
         function enqueue(action, fields) {
             const policy = contract.operations[action];
-            if (!policy) return Promise.reject(new Error("Unsupported native operation"));
+            if (!policy || !channels.has(policy.lane || "work"))
+                return Promise.reject(new Error("Unsupported native operation"));
             if (policy.mutates && restoreError) return Promise.reject(restoreError);
             const channel = channels.get(policy.lane || "work");
             if (channel.queue.length >= 32) return Promise.reject(new Error("Too many pending native requests"));
@@ -291,6 +292,55 @@ const PasswordManagerBackgroundNative = {
             }
             return response;
         }
+        // Pushed status on a port of its own. The host sends a record whenever
+        // status changes and at least every 20 seconds, and exits once this port
+        // closes. onEnd reports why an unrequested end happened and how many
+        // records arrived, so callers can tell an unsupported host from a stop.
+        function subscribeStatus({ onStatus, onEnd }) {
+            const id = nextRequestId++;
+            let port = null;
+            let ended = false;
+            let received = 0;
+            function stop() {
+                ended = true;
+                try {
+                    port?.disconnect();
+                } catch (_) {
+                    /* Already closed. */
+                }
+            }
+            function finish(error) {
+                if (ended) return;
+                stop();
+                onEnd({ error, received });
+            }
+            try {
+                port = chrome.runtime.connectNative(NATIVE_HOST);
+                port.onMessage.addListener(response => {
+                    if (ended) return;
+                    try {
+                        // An older host cannot parse this action and answers with ID 0.
+                        if (response?.id !== id) throw new Error("Native host does not support status events");
+                        protocol.validateResponse(response, contract.protocolVersion);
+                        if (!response.success) throw new Error(response.error);
+                        contract.validateResult("statusEvents", response.data);
+                    } catch (error) {
+                        finish(error.message || "Invalid native host response");
+                        return;
+                    }
+                    received++;
+                    onStatus(response);
+                });
+                port.onDisconnect.addListener(() =>
+                    finish(chrome.runtime.lastError?.message || "Status subscription ended")
+                );
+                port.postMessage({ id, action: "statusEvents" });
+            } catch (error) {
+                // Report asynchronously, like every other end of the stream.
+                setTimeout(() => finish(error.message), 0);
+            }
+            return { close: stop };
+        }
         function acknowledgeUnknown(operationId) {
             if (!unresolved.has(operationId) || !observedUnknown.has(operationId))
                 throw new Error("Only an explicitly reviewed unknown operation can be acknowledged");
@@ -300,6 +350,7 @@ const PasswordManagerBackgroundNative = {
         return {
             request,
             reconcile,
+            subscribeStatus,
             acknowledgeUnknown,
             unresolved: () => [...unresolved.values()],
             closeIdle: () => {

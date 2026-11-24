@@ -531,7 +531,7 @@ pub fn run(client: &AuthenticatedClient) -> Result<(), String> {
     run_with_io(client, &mut stdin.lock(), &mut stdout.lock())
 }
 
-fn run_with_io(
+pub(crate) fn run_with_io(
     client: &AuthenticatedClient,
     reader: &mut impl Read,
     writer: &mut impl Write,
@@ -542,6 +542,12 @@ fn run_with_io(
         };
         let request = serde_json::from_slice::<NativeRequest>(&payload);
         payload.zeroize();
+        if let Ok(request) = &request
+            && request.action == NativeAction::StatusEvents
+        {
+            // The port now carries only pushed status, so the host ends with it.
+            return stream_status(client, request, writer);
+        }
         let response = Zeroizing::new(match request {
             Ok(request) => handle_request(client, request),
             // Deserialization errors can contain rejected string values. Keep
@@ -556,6 +562,37 @@ fn run_with_io(
             ),
         });
         write_message(writer, &response)?;
+    }
+}
+
+/// Forward the server's pushed status records as `status` responses with the
+/// subscription's request ID. Records arrive at least every 20 seconds, so
+/// once the browser closes the port a write fails and the host exits; it
+/// needs no second thread watching stdin. Older servers, or one at its
+/// subscriber limit, end the stream with an error the extension answers by
+/// polling instead.
+fn stream_status(
+    client: &AuthenticatedClient,
+    request: &NativeRequest,
+    writer: &mut impl Write,
+) -> Result<(), String> {
+    let id = request.id;
+    let ended = (|| -> Result<(), String> {
+        request.validate()?;
+        let mut events = client.status_events()?;
+        loop {
+            let response = events.recv()?;
+            let mut message = NativeResponse::success(id, response.payload.into_json());
+            message.session_id = response.session_id;
+            // A write failure means the browser closed the port: end quietly.
+            if write_message(writer, &message).is_err() {
+                return Ok(());
+            }
+        }
+    })();
+    match ended {
+        Ok(()) => Ok(()),
+        Err(error) => write_message(writer, &NativeResponse::error(id, error)),
     }
 }
 

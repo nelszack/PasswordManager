@@ -175,7 +175,7 @@ fn import_portable(
                     Ok(Attachment {
                         name: std::mem::take(&mut attachment.name),
                         added: attachment.added.clone(),
-                        data: data?,
+                        data: data?.into(),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;

@@ -27,6 +27,9 @@ pub enum NativeAction {
     SearchItems,
     CopyItem,
     CheckSavedLogin,
+    /// A stream, not a request: one status message per pushed server record,
+    /// on a port of its own, until either side closes it.
+    StatusEvents,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,7 +43,7 @@ pub struct NativePolicy {
     pub result_shape: &'static str,
 }
 impl NativeAction {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Status,
         Self::Lock,
         Self::OpenDesktop,
@@ -64,6 +67,7 @@ impl NativeAction {
         Self::SearchItems,
         Self::CopyItem,
         Self::CheckSavedLogin,
+        Self::StatusEvents,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -90,6 +94,7 @@ impl NativeAction {
             Self::SearchItems => "searchItems",
             Self::CopyItem => "copyItem",
             Self::CheckSavedLogin => "checkSavedLogin",
+            Self::StatusEvents => "statusEvents",
         }
     }
     pub fn policy(self) -> NativePolicy {
@@ -107,6 +112,8 @@ impl NativeAction {
             Self::DuoRequests | Self::DuoRespond | Self::GetDuoItems => "duo",
             // Waits for the person in the desktop app; never blocks other lanes.
             Self::VerifyPasskeyUser => "approval",
+            // Long-lived subscription port, separate from request lanes.
+            Self::StatusEvents => "events",
             _ => "work",
         };
         let allowed_senders: &[&str] = match self {
@@ -116,7 +123,7 @@ impl NativeAction {
         };
         let (required_fields, optional_fields, result_shape): (&[&str], &[&str], &str) = match self
         {
-            Self::Status => (&[], &[], "status"),
+            Self::Status | Self::StatusEvents => (&[], &[], "status"),
             Self::Lock => (&[], &[], "message"),
             // With an item ID, the desktop app opens showing that item.
             Self::OpenDesktop => (&[], &["entryId"], "message"),

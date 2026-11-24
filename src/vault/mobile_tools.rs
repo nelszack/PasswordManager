@@ -181,26 +181,25 @@ fn existing_credentials(
     Ok(PasswordType::Password(password.expose_owned()).into())
 }
 
-fn transfer(bytes: &[u8], what: &str) -> Result<Value, String> {
+fn transfer(bytes: Zeroizing<Vec<u8>>, what: &str) -> Result<Value, String> {
     if bytes.len() > MAX_TRANSFER_BYTES {
         return Err(format!("{what} exceeds the 16 MiB mobile transfer limit"));
     }
-    Ok(json!({ "data": passkey::encode(bytes) }))
+    Ok(binary_reply(bytes))
 }
 
 impl MobileState {
     pub(super) fn restore_backup(
         &mut self,
-        data: &str,
+        bytes: &[u8],
         password: Option<SecretString>,
         key_file: Option<SecretString>,
     ) -> Result<Value, String> {
-        let bytes = Zeroizing::new(passkey::decode(data)?);
         if bytes.len() < BACKUP_HEADER_BYTES {
             return Err("Invalid backup".into());
         }
         let mut key = existing_credentials(password, key_file, &bytes[BACKUP_HEADER_BYTES..])?;
-        let vault = backup::decode_backup(&bytes, &mut key, self.directory.clone())
+        let vault = backup::decode_backup(bytes, &mut key, self.directory.clone())
             .map_err(|e| e.to_string())?;
         let name = vault.metadata.filename.clone();
         write_vault_with_key(&vault, &mut key).map_err(|e| e.to_string())?;
@@ -216,23 +215,22 @@ impl MobileState {
             .vault()?
             .export_bytes(json)
             .map_err(|e| e.to_string())?;
-        transfer(&bytes, "File")
+        transfer(bytes, "File")
     }
 
     /// Previews an import, or applies one only if it matches the last preview.
     pub(super) fn import_items(
         &mut self,
-        data: &str,
+        bytes: &[u8],
         conflicts: ConflictPolicy,
         preview: bool,
         review_token: Option<String>,
     ) -> Result<Value, String> {
-        let bytes = Zeroizing::new(passkey::decode(data)?);
         if bytes.len() > MAX_TRANSFER_BYTES {
             return Err("Import exceeds the 16 MiB mobile transfer limit".into());
         }
-        let contents = std::str::from_utf8(&bytes).map_err(|_| "Import must be UTF-8")?;
-        let digest = crate::cloud::digest(&bytes);
+        let contents = std::str::from_utf8(bytes).map_err(|_| "Import must be UTF-8")?;
+        let digest = crate::cloud::digest(bytes);
         let history_limit = self.settings.history_limit;
         let review = if preview {
             None
@@ -273,7 +271,7 @@ impl MobileState {
             .vault()?
             .backup_bytes(&mut key, MAX_BACKUP_BYTES)
             .map_err(|e| e.to_string())?;
-        transfer(&bytes, "File")
+        transfer(Zeroizing::new(bytes), "File")
     }
 
     /// Re-encrypts with new credentials after saving a recovery copy, then locks.

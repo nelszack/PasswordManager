@@ -230,6 +230,93 @@ func atomicWrite(path string, data []byte) error {
 	}
 	return syncDirectory(filepath.Dir(path))
 }
+
+// history lists a vault's snapshots other than current, oldest first.
+// Commits are serialized per vault, so modification order is commit order.
+func history(dir, current string) []os.FileInfo {
+	files, _ := os.ReadDir(dir)
+	var previous []os.FileInfo
+	for _, e := range files {
+		if strings.HasSuffix(e.Name(), ".vault") && e.Name() != current+".vault" {
+			if i, err := e.Info(); err == nil {
+				previous = append(previous, i)
+			}
+		}
+	}
+	sort.Slice(previous, func(i, j int) bool { return previous[i].ModTime().Before(previous[j].ModTime()) })
+	return previous
+}
+
+// reclaimHistory removes this vault's previous snapshots, oldest first, until
+// an upload of need bytes fits the budget. Pruning normally runs only after a
+// commit, so without this a vault whose retained copies fill the budget could
+// never upload again. The current snapshot is never removed. The caller holds
+// the vault lock and not s.mu.
+func (s *server) reclaimHistory(id string, current snapshot, exists bool, need int64) {
+	dir := filepath.Join(s.root, "vaults", id)
+	keepName := ""
+	if exists {
+		keepName = current.Version
+	}
+	removed := false
+	for _, old := range history(dir, keepName) {
+		s.mu.Lock()
+		fits := s.budget-s.used-s.reserved-maxHeadBytes >= need
+		s.mu.Unlock()
+		if fits {
+			break
+		}
+		if os.Remove(filepath.Join(dir, old.Name())) != nil {
+			break
+		}
+		removed = true
+		s.mu.Lock()
+		s.used -= old.Size()
+		s.mu.Unlock()
+	}
+	if removed {
+		_ = syncDirectory(dir)
+	}
+}
+
+// removeAbandoned deletes what interrupted commits leave inside vault
+// directories: snapshots of a vault whose first head was never written (the
+// client was told the outcome is uncertain and sees no vault, so it uploads
+// again) and staging files from atomicWrite. Run before serving.
+func removeAbandoned(root string) error {
+	vaults := filepath.Join(root, "vaults")
+	entries, err := os.ReadDir(vaults)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !validID(e.Name(), 16) {
+			continue
+		}
+		dir := filepath.Join(vaults, e.Name())
+		_, err := os.Stat(filepath.Join(dir, "head.json"))
+		headless := errors.Is(err, os.ErrNotExist)
+		if err != nil && !headless {
+			return err
+		}
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, f := range files {
+			name := f.Name()
+			if strings.HasPrefix(name, ".pending-") || (headless && strings.HasSuffix(name, ".vault")) {
+				if err := os.Remove(filepath.Join(dir, name)); err != nil {
+					return err
+				}
+			}
+		}
+		if headless {
+			_ = os.Remove(dir) // Only succeeds when nothing else remains.
+		}
+	}
+	return syncDirectory(vaults)
+}
 func (s *server) authorized(r *http.Request) bool {
 	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		return false
@@ -381,12 +468,18 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage unavailable", 500)
 			return
 		}
-		limit := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
 		if r.ContentLength > maxVault {
 			s.mu.Unlock()
 			http.Error(w, "upload exceeds the vault size limit", 413)
 			return
 		}
+		if r.ContentLength > 0 && s.budget-s.used-s.reserved-maxHeadBytes < r.ContentLength {
+			// Retained history must not lock a growing vault out of the quota.
+			s.mu.Unlock()
+			s.reclaimHistory(id, h, exists, r.ContentLength)
+			s.mu.Lock()
+		}
+		limit := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
 		if limit <= 0 || r.ContentLength > limit {
 			s.mu.Unlock()
 			http.Error(w, "storage quota reached", 507)
@@ -507,17 +600,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Keep current plus a small number of previous versions. Never delete current.
-		files, _ := os.ReadDir(dir)
-		var previous []os.FileInfo
-		for _, e := range files {
-			if strings.HasSuffix(e.Name(), ".vault") && e.Name() != version+".vault" {
-				if i, e := e.Info(); e == nil {
-					previous = append(previous, i)
-				}
-			}
-		}
-		sort.Slice(previous, func(i, j int) bool { return previous[i].ModTime().After(previous[j].ModTime()) })
-		for i := max(s.keep-1, 0); i < len(previous); i++ {
+		previous := history(dir, version)
+		for i := 0; i < len(previous)-max(s.keep-1, 0); i++ {
 			_ = os.Remove(filepath.Join(dir, previous[i].Name()))
 		}
 		s.mu.Lock()
@@ -625,6 +709,9 @@ func main() {
 	pending, _ := filepath.Glob(filepath.Join(*root, ".upload-*"))
 	for _, p := range pending {
 		_ = os.Remove(p)
+	}
+	if err := removeAbandoned(*root); err != nil {
+		log.Fatal(err)
 	}
 	if err := s.initializeUsage(); err != nil {
 		log.Fatal(err)

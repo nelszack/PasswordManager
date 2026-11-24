@@ -84,6 +84,9 @@ The Rust workspace separates reusable contracts and client infrastructure:
 - `pm-mobile` builds the JNI shared library with the root application's desktop
   feature disabled. Android owns a separate in-process `MobileVault`; it does
   not use `AuthenticatedClient` or run the desktop daemon on the phone.
+  Requests are JSON. File content (imports, restores, attachments, exports,
+  backups, snapshots) crosses as raw bytes through `NativeBridge.callBytes`;
+  the plain `call` entry point still accepts and returns it as base64url `data`.
 
 Exercise the extracted components with:
 

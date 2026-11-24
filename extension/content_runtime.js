@@ -1226,6 +1226,12 @@ module.exports.create = function create({ bridge }) {
         return input.form || input.closest("[role='form'], dialog, form") || input.parentElement || document;
     }
 
+    // Whether formControls(scope) would list control, without listing them all.
+    function inFormScope(scope, control) {
+        if (!control.isConnected) return false;
+        return scope instanceof HTMLFormElement ? control.form === scope : scope.contains(control) && control !== scope;
+    }
+
     function formControls(scope) {
         const controls =
             scope instanceof HTMLFormElement
@@ -1375,20 +1381,19 @@ module.exports.create = function create({ bridge }) {
             if (!field) continue;
             // Prefer the original control or a unique stable identifier when a
             // page replaces/reorders fields; use position only for unnamed fields.
-            const current = formControls(scope);
-            const matches = current.filter(
-                control =>
-                    (id ? control.id === id : name && control.name === name) &&
-                    fieldGroup(control) === group &&
-                    autofillField(control, kind) === field
-            );
-            const control = current.includes(target.control)
-                ? target.control
-                : matches.length === 1
-                  ? matches[0]
-                  : !id && !name
-                    ? current[index]
-                    : null;
+            // Rescan the form only once the original has gone, so large forms
+            // stay linear when nothing was replaced.
+            let control = target.control;
+            if (!inFormScope(scope, control)) {
+                const current = formControls(scope);
+                const matches = current.filter(
+                    candidate =>
+                        (id ? candidate.id === id : name && candidate.name === name) &&
+                        fieldGroup(candidate) === group &&
+                        autofillField(candidate, kind) === field
+                );
+                control = matches.length === 1 ? matches[0] : !id && !name ? current[index] : null;
+            }
             if (!control || fieldGroup(control) !== group || autofillField(control, kind) !== field) continue;
             const value = autofillValue(item, field);
             if (value) fillFormControl(control, value);

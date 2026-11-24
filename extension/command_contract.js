@@ -319,6 +319,17 @@
     "optionalFields": [],
     "resultShape": "status"
   },
+  "statusEvents": {
+    "mutates": false,
+    "lane": "events",
+    "timeoutMs": 15000,
+    "allowedSenders": [
+      "background"
+    ],
+    "requiredFields": [],
+    "optionalFields": [],
+    "resultShape": "status"
+  },
   "updateCredentials": {
     "mutates": true,
     "lane": "work",

@@ -529,6 +529,15 @@ async fn finish_external_effect(
                 }
             };
             let audit = snapshot.audit(check_breaches).await;
+            // Breach lookups take network time; an edit or sync meanwhile would
+            // make this report describe passwords that are no longer stored.
+            if worker.vault_revision() != expected_revision {
+                outcome::respond_conflict(
+                    "Vault changed while the audit ran; run it again",
+                    &mut result.responses,
+                );
+                return worker.finish_external(result, operation_id).await;
+            }
             let code = if audit.incomplete {
                 ResponseCode::Failure
             } else {

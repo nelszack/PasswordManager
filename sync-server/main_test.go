@@ -674,3 +674,76 @@ func TestTransfersExtendDeadlinesOnlyWhileMakingProgress(t *testing.T) {
 		t.Fatalf("leaked reservation: %d", s.reserved)
 	}
 }
+
+func TestRetainedHistoryYieldsToANewUploadButCurrentNeverDoes(t *testing.T) {
+	s, h, token := fixture(t)
+	path := "/v1/vaults/" + strings.Repeat("f", 32)
+	body := strings.Repeat("x", 100)
+	version := "*"
+	for i := 0; i < 3; i++ {
+		res := request(t, h, token, "PUT", path, version, body)
+		if res.StatusCode != 200 {
+			t.Fatal(res.Status)
+		}
+		version = res.Header.Get("ETag")
+	}
+	// Three retained copies fill the budget; the fourth upload must still fit.
+	s.mu.Lock()
+	s.budget = s.used + maxHeadBytes + 50
+	s.keep = 1 // Afterwards only the current snapshot remains.
+	s.mu.Unlock()
+	res := request(t, h, token, "PUT", path, version, body)
+	if res.StatusCode != 200 {
+		t.Fatalf("history blocked upload: %s", res.Status)
+	}
+	version = res.Header.Get("ETag")
+	actual, err := directoryUsage(filepath.Join(s.root, "vaults"))
+	s.mu.Lock()
+	used, reserved, budget := s.used, s.reserved, s.budget
+	s.mu.Unlock()
+	if err != nil || used != actual || reserved != 0 || used > budget {
+		t.Fatalf("accounting: used %d actual %d reserved %d budget %d (%v)", used, actual, reserved, budget, err)
+	}
+	// Only the current snapshot remains, and it is never reclaimed.
+	s.mu.Lock()
+	s.budget = s.used + maxHeadBytes + 10
+	s.mu.Unlock()
+	if res := request(t, h, token, "PUT", path, version, body); res.StatusCode != 507 {
+		t.Fatalf("current snapshot reclaimed: %s", res.Status)
+	}
+	current := request(t, h, token, "GET", path, "", "")
+	if data, _ := io.ReadAll(current.Body); current.StatusCode != 200 || string(data) != body {
+		t.Fatal("current snapshot damaged")
+	}
+}
+
+func TestStartupRemovesAbandonedFirstCommitsAndStagingFiles(t *testing.T) {
+	s, h, token := fixture(t)
+	committed := strings.Repeat("a", 32)
+	res := request(t, h, token, "PUT", "/v1/vaults/"+committed, "*", "kept")
+	if res.StatusCode != 200 {
+		t.Fatal(res.Status)
+	}
+	headless := filepath.Join(s.root, "vaults", strings.Repeat("b", 32))
+	if err := os.MkdirAll(headless, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(s.root, "vaults", committed, ".pending-123")
+	for _, file := range []string{filepath.Join(headless, "orphan.vault"), stale} {
+		if err := os.WriteFile(file, []byte("abandoned"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeAbandoned(s.root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(headless); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("headless vault kept: %v", err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging file kept: %v", err)
+	}
+	if got := request(t, h, token, "GET", "/v1/vaults/"+committed, "", ""); got.StatusCode != 200 {
+		t.Fatal("committed vault removed")
+	}
+}

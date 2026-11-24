@@ -232,7 +232,7 @@ open class MainActivity : ManagementActivity() {
             pickFile(16 * 1024 * 1024) { bytes ->
                 task({
                     try {
-                        Vault.json("import_vault", "data" to DeviceKeys.encode(bytes))
+                        Vault.transfer("import_vault", bytes).data as org.json.JSONObject
                     } finally {
                         bytes.fill(0)
                     }
@@ -1134,16 +1134,13 @@ open class MainActivity : ManagementActivity() {
                 destination(name) { uri ->
                     unlock({
                         task({
-                            val bytes =
-                                DeviceKeys.decode(
-                                    Vault.json("attachment_data", "id" to id, "name" to name)
-                                        .getString("data")
-                                )
+                            val reply =
+                                Vault.transfer("attachment_data", null, "id" to id, "name" to name)
                             try {
-                                contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                                contentResolver.openOutputStream(uri, "wt")?.use { reply.writeTo(it) }
                                     ?: error("Could not write selected file")
                             } finally {
-                                bytes.fill(0)
+                                reply.wipe()
                             }
                         }) { detail(id) }
                     })
@@ -1181,13 +1178,14 @@ open class MainActivity : ManagementActivity() {
                                     it.readBounded(MAX_ATTACHMENT_BYTES)
                                 } ?: error("Could not open selected file")
                             try {
-                                Vault.json(
-                                    "attachment_add",
-                                    "id" to id,
-                                    "name" to name,
-                                    "data" to DeviceKeys.encode(bytes),
-                                    "expected_revision" to entry.getLong("revision"),
-                                )
+                                Vault.transfer(
+                                        "attachment_add",
+                                        bytes,
+                                        "id" to id,
+                                        "name" to name,
+                                        "expected_revision" to entry.getLong("revision"),
+                                    )
+                                    .wipe()
                             } finally {
                                 bytes.fill(0)
                             }

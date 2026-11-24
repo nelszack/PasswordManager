@@ -100,6 +100,8 @@ struct ChoiceCache {
 pub(super) struct State {
     choices: std::cell::RefCell<ChoiceCache>,
     matching: std::cell::RefCell<Option<MatchingItems>>,
+    /// Distinct tags of the loaded items, sorted; rebuilt when the items change.
+    tags: std::cell::RefCell<Option<Vec<String>>>,
     search_text: std::cell::RefCell<std::collections::HashMap<usize, SearchText>>,
     pub progress: String,
     pub progress_started: Option<Instant>,
@@ -186,6 +188,7 @@ impl Default for State {
         Self {
             choices: std::cell::RefCell::default(),
             matching: std::cell::RefCell::default(),
+            tags: std::cell::RefCell::default(),
             search_text: std::cell::RefCell::default(),
             progress: String::new(),
             progress_started: None,
@@ -399,6 +402,7 @@ impl App {
             self.items.insert(index, item.clone());
         }
         self.ui.matching.get_mut().take();
+        self.ui.tags.get_mut().take();
         for id in replaced {
             self.ui.search_text.get_mut().remove(&id);
         }
@@ -409,8 +413,28 @@ impl App {
 
     pub(super) fn replace_items(&mut self, items: Vec<ItemSummary>) {
         self.ui.matching.get_mut().take();
+        self.ui.tags.get_mut().take();
         self.ui.search_text.get_mut().clear();
         self.items = items;
+    }
+
+    /// Distinct tags across the loaded items (the first spelling of each,
+    /// ignoring ASCII case), sorted case-insensitively. Views ask for this on
+    /// every redraw, so it is computed once per change to the items.
+    pub(super) fn available_tags(&self) -> std::cell::Ref<'_, Vec<String>> {
+        if self.ui.tags.borrow().is_none() {
+            let mut seen = std::collections::HashSet::new();
+            let mut tags: Vec<String> = self
+                .items
+                .iter()
+                .flat_map(|item| &item.tags)
+                .filter(|tag| seen.insert(tag.to_ascii_lowercase()))
+                .cloned()
+                .collect();
+            tags.sort_by_cached_key(|tag| tag.to_lowercase());
+            *self.ui.tags.borrow_mut() = Some(tags);
+        }
+        std::cell::Ref::map(self.ui.tags.borrow(), |tags| tags.as_ref().unwrap())
     }
 
     pub(super) fn matching_items(&self) -> std::cell::Ref<'_, Vec<usize>> {
@@ -626,6 +650,40 @@ mod tests {
         assert!(app.matching_items().is_empty());
         app.clear_vault();
         assert!(app.matching_items().is_empty());
+    }
+    #[test]
+    fn tag_choices_are_deduplicated_sorted_and_follow_item_changes() {
+        let mut app = crate::gui::tests::app();
+        let item = |id, revision, tags: &[&str]| ItemSummary {
+            tags: tags.iter().map(|tag| (*tag).into()).collect(),
+            favorite: false,
+            id,
+            revision,
+            name: format!("item {id}"),
+            username: None,
+            kind: ItemKind::Login,
+            urls: vec![],
+            has_totp: false,
+            has_duo: false,
+        };
+        app.replace_items(vec![
+            item(1, 1, &["work", "Bank"]),
+            item(2, 1, &["WORK", "école"]),
+        ]);
+        app.items_revision = Some(1);
+        // First spelling wins; the order ignores case.
+        assert_eq!(*app.available_tags(), ["Bank", "work", "école"]);
+        assert!(
+            app.apply_item_changes(&password_manager::vault::ItemChanges {
+                base_revision: 1,
+                revision: 2,
+                items: vec![item(1, 2, &["Archive"])],
+                removed: vec![],
+            })
+        );
+        assert_eq!(*app.available_tags(), ["Archive", "WORK", "école"]);
+        app.clear_vault();
+        assert!(app.available_tags().is_empty());
     }
     fn luminance(color: Color) -> f32 {
         let channel = |value: f32| {

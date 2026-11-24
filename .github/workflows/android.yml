@@ -70,11 +70,33 @@ jobs:
           echo '20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78  '"$RUNNER_TEMP/gradle.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
           echo "GRADLE=$RUNNER_TEMP/gradle-8.13/bin/gradle" >> "$GITHUB_ENV"
+      - name: Restore Gradle dependency cache
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Downloaded dependencies and transformed jars only; build outputs
+          # and the configuration cache stay per run.
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/transforms-4
+            ~/.gradle/caches/jars-9
+          key: gradle-v1-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle.properties') }}
+          restore-keys: gradle-v1-
       - name: Build APK, unit tests, and lint
         run: python3 scripts/build_android.py
       - name: Build instrumentation test APK
         # Same job and debug key as the app APK, so both install together.
         run: '"$GRADLE" -p android --console=plain :app:assembleDebugAndroidTest'
+      - name: Save Gradle dependency cache
+        # Main refreshes the shared cache; pull requests only restore it.
+        if: github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/transforms-4
+            ~/.gradle/caches/jars-9
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Collect APKs for the emulator job
         run: |
           mkdir -p apks

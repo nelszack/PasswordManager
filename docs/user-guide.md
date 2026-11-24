@@ -1776,6 +1776,8 @@ secret output to a pipe and plaintext exports preserve the stored values.
 
 The badge and any open popup track native-host, server, and vault lock state
 continuously, including changes made through the CLI and automatic locking.
+While a popup or manager window is open, the service pushes each change as it
+happens; older native hosts and services are polled every two seconds instead.
 They also show a warning when the extension release, installed native host,
 and running password-manager server are not the same version. Restart the
 server and reinstall/reload the extension after an upgrade to clear it.
