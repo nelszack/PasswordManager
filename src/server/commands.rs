@@ -49,7 +49,7 @@ pub(super) fn install_unlocked(
 }
 
 /// Refuses an attempt while the shared throttle is waiting.
-fn throttled(state: &ConnectionState, responses: &mut Vec<RpcResponse>) -> bool {
+fn throttled(state: &ConnectionState, reply: &mut Option<RpcResponse>) -> bool {
     let wait = state
         .unlock_throttle
         .lock()
@@ -58,7 +58,7 @@ fn throttled(state: &ConnectionState, responses: &mut Vec<RpcResponse>) -> bool 
     if let Some(seconds) = wait {
         respond_failure(
             &format!("Too many incorrect attempts. Try again in {seconds} seconds."),
-            responses,
+            reply,
         );
     }
     wait.is_some()
@@ -78,7 +78,7 @@ fn record_attempt(state: &ConnectionState, succeeded: bool) {
 }
 
 fn handle_command(
-    responses: &mut Vec<RpcResponse>,
+    reply: &mut Option<RpcResponse>,
     state: ConnectionState,
     msg: ServerCommand,
     session: &mut VaultSession,
@@ -87,7 +87,7 @@ fn handle_command(
     if state.stopping.load(Ordering::Acquire) {
         let mut msg = msg;
         msg.zeroize();
-        respond_failure("Server is stopping.", responses);
+        respond_failure("Server is stopping.", reply);
         return;
     }
     match msg {
@@ -95,11 +95,11 @@ fn handle_command(
             if !session.is_locked()
                 && let Err(error) = lock_session(session)
             {
-                respond_failed("Could not stop server safely", &error, responses);
+                respond_failed("Could not stop server safely", &error, reply);
                 return;
             }
             state.stopping.store(true, Ordering::Release);
-            respond("Server stopped.", responses);
+            respond("Server stopped.", reply);
             *effect = CommandEffect::StopServer;
         }
         ServerCommand::Lock(send) => {
@@ -114,7 +114,7 @@ fn handle_command(
                             } else {
                                 "Vault locked."
                             },
-                            responses,
+                            reply,
                         );
                     }
                 }
@@ -122,7 +122,7 @@ fn handle_command(
                     let message = format!("Vault locked with a cleanup warning: {error}");
                     *state.background_error.blocking_lock() = Some(message.clone());
                     if send {
-                        respond_domain_error_with_context(&error, &message, responses);
+                        respond_domain_error_with_context(&error, &message, reply);
                     }
                 }
             }
@@ -132,11 +132,11 @@ fn handle_command(
                 info.zeroize();
                 respond_failure(
                     "A vault is already unlocked. Lock it before unlocking another one.",
-                    responses,
+                    reply,
                 );
                 return;
             }
-            if throttled(&state, responses) {
+            if throttled(&state, reply) {
                 info.zeroize();
                 return;
             }
@@ -149,9 +149,9 @@ fn handle_command(
                     state
                         .inactivity_timeout
                         .store(info.timeout, Ordering::Release);
-                    respond("Vault unlocked.", responses);
+                    respond("Vault unlocked.", reply);
                 }
-                Err(error) => respond_failed("Unlock failed", &error, responses),
+                Err(error) => respond_failed("Unlock failed", &error, reply),
             }
         }
         ServerCommand::SshDecision { id, allow } => {
@@ -162,46 +162,43 @@ fn handle_command(
                     } else {
                         "SSH signature refused."
                     },
-                    responses,
+                    reply,
                 );
             } else {
-                respond_failure("That SSH request is no longer waiting.", responses);
+                respond_failure("That SSH request is no longer waiting.", reply);
             }
         }
         ServerCommand::PasskeyVerification { .. } => respond_failure(
             "Passkey confirmations are handled outside the vault worker",
-            responses,
+            reply,
         ),
         ServerCommand::PasskeyDecision { id, secret } => {
             if session.is_locked() {
-                respond_failure(crate::protocol::VAULT_LOCKED, responses);
+                respond_failure(crate::protocol::VAULT_LOCKED, reply);
                 return;
             }
             // Only a request from this unlock session can be answered here.
             if state.passkey_approvals.session_of(&id) != session.session_id() {
-                respond_failure("That passkey request is no longer waiting.", responses);
+                respond_failure("That passkey request is no longer waiting.", reply);
                 return;
             }
             let Some(secret) = secret else {
                 state.passkey_approvals.decide(&id, false);
-                respond("Passkey request refused.", responses);
+                respond("Passkey request refused.", reply);
                 return;
             };
             // Same slowdown as wrong master passwords.
-            if throttled(&state, responses) {
+            if throttled(&state, reply) {
                 return;
             }
             let confirmed = session.confirms_person(&crate::file::data_dir(), secret.expose());
             record_attempt(&state, confirmed);
             if !confirmed {
-                respond_failure(
-                    "That master password or passkey PIN is incorrect.",
-                    responses,
-                );
+                respond_failure("That master password or passkey PIN is incorrect.", reply);
             } else if state.passkey_approvals.decide(&id, true) {
-                respond("Passkey request confirmed.", responses);
+                respond("Passkey request confirmed.", reply);
             } else {
-                respond_failure("That passkey request is no longer waiting.", responses);
+                respond_failure("That passkey request is no longer waiting.", reply);
             }
         }
         ServerCommand::SetPasskeyPin(pin) => {
@@ -209,9 +206,9 @@ fn handle_command(
                 &crate::file::data_dir(),
                 pin.as_ref().map(crate::secret::SecretString::expose),
             ) {
-                Ok(()) if pin.is_some() => respond("Passkey PIN set.", responses),
-                Ok(()) => respond("Passkey PIN removed.", responses),
-                Err(error) => respond_failure(&error, responses),
+                Ok(()) if pin.is_some() => respond("Passkey PIN set.", reply),
+                Ok(()) => respond("Passkey PIN removed.", reply),
+                Err(error) => respond_failure(&error, reply),
             }
         }
         ServerCommand::Status => {
@@ -224,27 +221,25 @@ fn handle_command(
             status.passkey_requests = state
                 .passkey_approvals
                 .list_for(session.session_id().as_deref());
-            respond_ok(ResponsePayload::Status(status), responses);
+            respond_ok(ResponsePayload::Status(status), reply);
         }
-        ServerCommand::Cloud(_) => respond_failure(
-            "Sync commands are handled outside the vault worker",
-            responses,
-        ),
-        ServerCommand::OperationStatus(_) => respond_failure(
-            "Operation status is resolved by the vault worker.",
-            responses,
-        ),
+        ServerCommand::Cloud(_) => {
+            respond_failure("Sync commands are handled outside the vault worker", reply)
+        }
+        ServerCommand::OperationStatus(_) => {
+            respond_failure("Operation status is resolved by the vault worker.", reply)
+        }
         ServerCommand::New(key) => {
             if !session.is_locked()
                 && let Err(error) = lock_session(session)
             {
-                respond_domain_error(&error, responses);
+                respond_domain_error(&error, reply);
                 return;
             }
             let mut credentials = VaultCredentials::from(key);
             match create_vault(&mut None, &mut credentials, true) {
-                Ok(()) => respond("Vault created.", responses),
-                Err(error) => respond_domain_error(&error, responses),
+                Ok(()) => respond("Vault created.", reply),
+                Err(error) => respond_domain_error(&error, reply),
             }
         }
         ServerCommand::Delete(Target::Vault {
@@ -252,40 +247,37 @@ fn handle_command(
             keep_key,
             vault_file,
         }) => {
-            if throttled(&state, responses) {
+            if throttled(&state, reply) {
                 key.zeroize();
                 return;
             }
             if let Err(error) = lock_session(session) {
-                respond_domain_error(&error, responses);
+                respond_domain_error(&error, reply);
                 return;
             }
             match delete_vault(key, keep_key, vault_file.as_deref()) {
                 Ok(()) => {
                     record_attempt(&state, true);
-                    respond("Vault deleted.", responses)
+                    respond("Vault deleted.", reply)
                 }
                 Err(error) => {
                     record_attempt(&state, false);
-                    respond_domain_error(&error, responses)
+                    respond_domain_error(&error, reply)
                 }
             }
         }
         ServerCommand::RestoreBackup(mut request) => {
             if !session.is_locked() {
-                respond_failure(
-                    "Lock the current vault before restoring a backup.",
-                    responses,
-                );
+                respond_failure("Lock the current vault before restoring a backup.", reply);
             } else {
                 match restore_encrypted_backup(&request.path, &mut request.key_pass) {
                     Ok(filename) => respond_ok(
                         ResponsePayload::Vault(crate::protocol::VaultReference {
                             vault_file: filename,
                         }),
-                        responses,
+                        reply,
                     ),
-                    Err(error) => respond_failed("Backup restore failed", &error, responses),
+                    Err(error) => respond_failed("Backup restore failed", &error, reply),
                 }
             }
             request.zeroize();
@@ -303,13 +295,13 @@ fn handle_command(
                 if !session.is_locked()
                     && let Err(error) = lock_session(session)
                 {
-                    respond_domain_error(&error, responses);
+                    respond_domain_error(&error, reply);
                     return;
                 }
                 let Some(key) = args.key_pass else {
                     respond_failure(
                         "A password or key is required for a new imported vault.",
-                        responses,
+                        reply,
                     );
                     return;
                 };
@@ -329,14 +321,14 @@ fn handle_command(
                 })
             };
             match result {
-                Ok(report) => respond_ok(ResponsePayload::ImportReport(report), responses),
-                Err(error) => respond_failed("Import failed", &error, responses),
+                Ok(report) => respond_ok(ResponsePayload::ImportReport(report), reply),
+                Err(error) => respond_failed("Import failed", &error, reply),
             }
         }
         mut msg => {
             if session.is_locked() {
                 msg.zeroize();
-                respond_failure(crate::protocol::VAULT_LOCKED, responses);
+                respond_failure(crate::protocol::VAULT_LOCKED, reply);
                 return;
             }
             // A passkey response reports user verification only after the
@@ -360,13 +352,13 @@ fn handle_command(
                         .passkey_approvals
                         .redeem(&token, origin, session.session_id().as_deref());
                 if !*verified {
-                    respond_failure("The passkey confirmation expired; try again.", responses);
+                    respond_failure("The passkey confirmation expired; try again.", reply);
                     return;
                 }
             }
             if let Err(error) = session.with_unlocked(|vault, key| {
                 *effect = crate::operations::execute_unlocked(
-                    responses,
+                    reply,
                     msg,
                     vault,
                     key,
@@ -375,7 +367,7 @@ fn handle_command(
                 .into();
                 Ok(())
             }) {
-                respond_domain_error(&error, responses);
+                respond_domain_error(&error, reply);
             }
         }
     }
@@ -387,12 +379,6 @@ pub(super) fn execute_command(
     session: &mut crate::vault::VaultSession,
 ) -> outcome::CommandOutcome {
     let mut outcome = outcome::CommandOutcome::default();
-    handle_command(
-        &mut outcome.responses,
-        state,
-        msg,
-        session,
-        &mut outcome.effect,
-    );
+    handle_command(&mut outcome.reply, state, msg, session, &mut outcome.effect);
     outcome
 }

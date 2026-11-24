@@ -365,7 +365,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
                 );
                 response.request_id = Some(request.request_id.clone());
                 response.session_id = worker.session_id();
-                let _ = deliver_responses(vec![response], &mut stream, &response_key).await;
+                let _ = deliver_responses(Some(response), &mut stream, &response_key).await;
                 return;
             }
         }
@@ -380,7 +380,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             // Status is nonsecret published state; it remains responsive while
             // the owner finishes a filesystem commit or derives a key.
             outcome::CommandOutcome {
-                responses: vec![current_status(&state, &worker).await],
+                reply: Some(current_status(&state, &worker).await),
                 effect: CommandEffect::None,
                 ..Default::default()
             }
@@ -417,7 +417,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             };
             response.session_id = session;
             outcome::CommandOutcome {
-                responses: vec![response],
+                reply: Some(response),
                 ..Default::default()
             }
         } else if let ServerCommand::Cloud(action) = &request.command {
@@ -449,7 +449,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             };
             response.session_id = worker.session_id();
             outcome::CommandOutcome {
-                responses: vec![response],
+                reply: Some(response),
                 ..Default::default()
             }
         } else {
@@ -462,10 +462,10 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
     ) {
         result = finish_external_effect(result, worker, operation_id).await;
     }
-    for response in &mut result.responses {
+    if let Some(response) = result.reply.as_mut() {
         response.request_id = Some(request_id.clone());
     }
-    if let Err(error) = deliver_responses(result.responses, &mut stream, &response_key).await {
+    if let Err(error) = deliver_responses(result.reply, &mut stream, &response_key).await {
         eprintln!("Could not deliver authenticated response: {error}");
     }
     let _ = stream.flush().await;
@@ -494,11 +494,10 @@ async fn finish_external_effect(
     static SCORING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
     match work {
         Deferred::Duo(prepared) => {
-            crate::operations::finish_duo(*prepared, &started, &mut result.responses).await
+            crate::operations::finish_duo(*prepared, &started, &mut result.reply).await
         }
         Deferred::DuoEnrollment(prepared) => {
-            crate::operations::finish_duo_enrollment(*prepared, &started, &mut result.responses)
-                .await
+            crate::operations::finish_duo_enrollment(*prepared, &started, &mut result.reply).await
         }
         Deferred::Audit(snapshot, check_breaches) => {
             // Check the captured session/revision between scores so locking and
@@ -523,7 +522,7 @@ async fn finish_external_effect(
                 _ => {
                     outcome::respond_conflict(
                         "Vault changed or audit evaluation failed; run it again",
-                        &mut result.responses,
+                        &mut result.reply,
                     );
                     return worker.finish_external(result, operation_id).await;
                 }
@@ -534,7 +533,7 @@ async fn finish_external_effect(
             if worker.vault_revision() != expected_revision {
                 outcome::respond_conflict(
                     "Vault changed while the audit ran; run it again",
-                    &mut result.responses,
+                    &mut result.reply,
                 );
                 return worker.finish_external(result, operation_id).await;
             }
@@ -546,7 +545,7 @@ async fn finish_external_effect(
             outcome::respond_payload(
                 code,
                 ResponsePayload::Audit(audit.report),
-                &mut result.responses,
+                &mut result.reply,
             );
         }
         Deferred::WeakList(pending, filter) => {
@@ -564,11 +563,11 @@ async fn finish_external_effect(
             .await;
             drop(permit);
             if matches!(scored, Ok(Ok(()))) {
-                crate::operations::finish_weak_list(*filter, &started, &mut result.responses).await;
+                crate::operations::finish_weak_list(*filter, &started, &mut result.reply).await;
             } else {
                 outcome::respond_conflict(
                     "Vault was locked or changed while checking password strength; run it again",
-                    &mut result.responses,
+                    &mut result.reply,
                 );
             }
         }

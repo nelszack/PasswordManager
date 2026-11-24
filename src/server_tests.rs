@@ -216,12 +216,12 @@ async fn displayed_trash_ids_select_the_same_items_for_restore_and_purge() {
                 RequestEnvelope::new(ServerCommand::Delete(Target::Id(id))),
             )
             .await;
-        assert_eq!(result.responses[0].code, 0);
+        assert_eq!(result.response().code, 0);
     }
     let result = worker
         .execute(state.clone(), RequestEnvelope::new(ServerCommand::Trash))
         .await;
-    let listing = crate::client::render_response(&result.responses[0].payload);
+    let listing = crate::client::render_response(&result.response().payload);
     let ids: Vec<usize> = listing
         .lines()
         .filter_map(|line| line.strip_prefix('#'))
@@ -237,7 +237,7 @@ async fn displayed_trash_ids_select_the_same_items_for_restore_and_purge() {
         let result = worker
             .execute(state.clone(), RequestEnvelope::new(command))
             .await;
-        assert_eq!(result.responses[0].code, 0);
+        assert_eq!(result.response().code, 0);
     }
     worker
         .with_session(|session| {
@@ -365,7 +365,7 @@ fn mutation_responses_preserve_precommit_and_committed_durability_states() {
         let outcome = crate::vault::with_write_fault(fault, || {
             execute_command(state.clone(), command, &mut session)
         });
-        assert_eq!(outcome.responses[0].code, code as i32);
+        assert_eq!(outcome.response().code, code as i32);
         assert_eq!(
             session
                 .vault()
@@ -390,7 +390,7 @@ fn mutation_responses_preserve_precommit_and_committed_durability_states() {
         })),
         &mut session,
     );
-    assert_eq!(result.responses[0].code, 0);
+    assert_eq!(result.response().code, 0);
     fs::remove_file(path).unwrap();
 }
 
@@ -412,7 +412,7 @@ fn typed_authenticators_preserve_hotp_consumption_and_totp_read_semantics() {
         }),
         &mut live,
     );
-    assert_ne!(rejected.responses[0].code, 0);
+    assert_ne!(rejected.response().code, 0);
     assert_eq!(live.vault().unwrap().vault_revision(), before);
     for (counter, code) in [(0, "755224"), (1, "287082")] {
         let result = execute_command(
@@ -420,7 +420,7 @@ fn typed_authenticators_preserve_hotp_consumption_and_totp_read_semantics() {
             ServerCommand::AuthenticatorData(Target::Id(1)),
             &mut live,
         );
-        let ResponsePayload::Authenticator(data) = &result.responses[0].payload else {
+        let ResponsePayload::Authenticator(data) = &result.response().payload else {
             panic!("expected structured code")
         };
         assert!(data.valid());
@@ -436,7 +436,7 @@ fn typed_authenticators_preserve_hotp_consumption_and_totp_read_semantics() {
         }),
         &mut live,
     );
-    assert_eq!(configured.responses[0].code, 0);
+    assert_eq!(configured.response().code, 0);
     let before = live.vault().unwrap().vault_revision();
     let result = execute_command(
         state,
@@ -446,7 +446,7 @@ fn typed_authenticators_preserve_hotp_consumption_and_totp_read_semantics() {
         }),
         &mut live,
     );
-    let ResponsePayload::Authenticator(data) = &result.responses[0].payload else {
+    let ResponsePayload::Authenticator(data) = &result.response().payload else {
         panic!("expected structured code")
     };
     assert!(data.valid());
@@ -614,10 +614,10 @@ async fn status_and_error_classification_are_typed_and_correlated() {
     let (mut client, mut server) = tcp_pair().await;
     let response_key = [42; 32];
     deliver_responses(
-        vec![RpcResponse::message(
+        Some(RpcResponse::message(
             ResponseCode::NotFound,
             "wording without classification keywords",
-        )],
+        )),
         &mut server,
         &response_key,
     )
@@ -649,12 +649,12 @@ async fn mutation_ids_deduplicate_and_conflicting_arguments_fail() {
     };
     let first = worker.execute(state.clone(), request()).await;
     assert_eq!(
-        first.responses[0].operation.as_ref().unwrap().state,
+        first.response().operation.as_ref().unwrap().state,
         OperationState::Committed
     );
     let repeated = worker.execute(state.clone(), request()).await;
-    assert_eq!(repeated.responses[0].code, 0);
-    for response in [&first.responses[0], &repeated.responses[0]] {
+    assert_eq!(repeated.response().code, 0);
+    for response in [&first.response(), &repeated.response()] {
         let ResponsePayload::Authenticator(code) = &response.payload else {
             panic!("expected exact authenticator response")
         };
@@ -667,7 +667,7 @@ async fn mutation_ids_deduplicate_and_conflicting_arguments_fail() {
             RequestEnvelope::new(ServerCommand::AuthenticatorData(Target::Id(1))),
         )
         .await;
-    let ResponsePayload::Authenticator(code) = &next.responses[0].payload else {
+    let ResponsePayload::Authenticator(code) = &next.response().payload else {
         panic!("expected next code")
     };
     assert_eq!(
@@ -678,7 +678,11 @@ async fn mutation_ids_deduplicate_and_conflicting_arguments_fail() {
     let conflicting = RequestEnvelope::new(ServerCommand::AuthenticatorData(Target::Id(2)))
         .with_operation(Some("same-operation".into()), None);
     assert_eq!(
-        worker.execute(state.clone(), conflicting).await.responses[0].code,
+        worker
+            .execute(state.clone(), conflicting)
+            .await
+            .response()
+            .code,
         ResponseCode::Conflict as i32
     );
     let result = worker
@@ -687,7 +691,7 @@ async fn mutation_ids_deduplicate_and_conflicting_arguments_fail() {
             RequestEnvelope::new(ServerCommand::OperationStatus("same-operation".into())),
         )
         .await;
-    let ResponsePayload::Operation(receipt) = &result.responses[0].payload else {
+    let ResponsePayload::Operation(receipt) = &result.response().payload else {
         panic!("expected receipt")
     };
     assert_eq!(receipt.state, OperationState::Committed);
@@ -712,23 +716,23 @@ async fn expected_revisions_prevent_overlapping_editor_writes() {
     let first = RequestEnvelope::new(update("First"))
         .with_operation(Some("editor-one".into()), Some(revision));
     assert_eq!(
-        worker.execute(state.clone(), first).await.responses[0].code,
+        worker.execute(state.clone(), first).await.response().code,
         0
     );
     let second = RequestEnvelope::new(update("Second"))
         .with_operation(Some("editor-two".into()), Some(revision));
     let conflict = worker.execute(state.clone(), second).await;
-    assert_eq!(conflict.responses[0].code, ResponseCode::Conflict as i32);
+    assert_eq!(conflict.response().code, ResponseCode::Conflict as i32);
     // The session did not change, so editors keep their unsaved edits for review.
     assert!(worker.session_id().is_some());
-    assert_eq!(conflict.responses[0].session_id, worker.session_id());
+    assert_eq!(conflict.response().session_id, worker.session_id());
     let rejected = worker
         .execute(
             state,
             RequestEnvelope::new(ServerCommand::OperationStatus("editor-two".into())),
         )
         .await;
-    let ResponsePayload::Operation(receipt) = &rejected.responses[0].payload else {
+    let ResponsePayload::Operation(receipt) = &rejected.response().payload else {
         panic!("expected rejected operation receipt")
     };
     assert_eq!(receipt.state, OperationState::Failed);
@@ -753,7 +757,7 @@ async fn operation_outcomes_are_explicitly_unknown_after_worker_restart() {
             )),
         )
         .await;
-    let ResponsePayload::Operation(receipt) = &result.responses[0].payload else {
+    let ResponsePayload::Operation(receipt) = &result.response().payload else {
         panic!("expected receipt")
     };
     assert_eq!(receipt.state, OperationState::Unknown);
@@ -1049,7 +1053,7 @@ async fn duo_poll_preserves_session_through_async_completion_and_encrypted_deliv
     else {
         panic!("Duo polling must defer its network response");
     };
-    assert!(result.responses.is_empty());
+    assert!(result.reply.is_none());
     // Replace only the remote transport. Session capture, parsing, completion,
     // response encryption, and decoding use the production path.
     prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
@@ -1058,7 +1062,7 @@ async fn duo_poll_preserves_session_through_async_completion_and_encrypted_deliv
     let (mut client, mut server) = tcp_pair().await;
     let response_key = [17; 32];
     let delivery = tokio::spawn(async move {
-        deliver_responses(result.responses, &mut server, &response_key)
+        deliver_responses(result.reply, &mut server, &response_key)
             .await
             .unwrap();
     });
@@ -1105,13 +1109,13 @@ async fn asynchronous_results_cannot_survive_a_lock_or_be_relabelled_with_a_new_
             .unwrap();
         assert_ne!(worker.session_id(), original_session);
         let result = finish_external_effect(result, worker, None).await;
-        assert_eq!(result.responses.len(), 1);
-        assert_eq!(result.responses[0].code, ResponseCode::Conflict as i32);
+        assert!(result.reply.is_some());
+        assert_eq!(result.response().code, ResponseCode::Conflict as i32);
         assert!(matches!(
-            result.responses[0].payload,
+            result.response().payload,
             ResponsePayload::Message(_)
         ));
-        assert_eq!(result.responses[0].session_id, original_session);
+        assert_eq!(result.response().session_id, original_session);
     }
 }
 
@@ -1149,7 +1153,7 @@ async fn weak_lists_score_outside_the_vault_queue_and_reuse_cached_scores() {
             ..Default::default()
         })
     };
-    let ids = |result: &outcome::CommandOutcome| match &result.responses[0].payload {
+    let ids = |result: &outcome::CommandOutcome| match &result.response().payload {
         ResponsePayload::ItemPage(page) => {
             page.items.iter().map(|item| item.id).collect::<Vec<_>>()
         }
@@ -1165,7 +1169,7 @@ async fn weak_lists_score_outside_the_vault_queue_and_reuse_cached_scores() {
         CommandEffect::Deferred(crate::operations::Deferred::WeakList(..))
     ));
     let result = finish_external_effect(result, worker.clone(), None).await;
-    assert_eq!(result.responses[0].code, ResponseCode::Success as i32);
+    assert_eq!(result.response().code, ResponseCode::Success as i32);
     assert_eq!(ids(&result), vec![1, 3]);
 
     // Scores are cached for the session, so the next list answers on the queue.
@@ -1180,8 +1184,8 @@ async fn weak_lists_score_outside_the_vault_queue_and_reuse_cached_scores() {
     let result = fresh.execute(state, RequestEnvelope::new(weak())).await;
     fresh.with_session(|live| live.lock()).await.unwrap();
     let result = finish_external_effect(result, fresh, None).await;
-    assert_eq!(result.responses.len(), 1);
-    assert_eq!(result.responses[0].code, ResponseCode::Conflict as i32);
+    assert!(result.reply.is_some());
+    assert_eq!(result.response().code, ResponseCode::Conflict as i32);
 }
 
 #[tokio::test]
@@ -1242,13 +1246,13 @@ async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
     let handle = worker.clone();
     let pending = tokio::spawn(async move {
-        let mut responses = vec![];
+        let mut reply = None;
         let started = StartedSession {
             session: handle.session_id(),
             worker: &handle,
         };
-        crate::operations::finish_duo(prepared, &started, &mut responses).await;
-        responses
+        crate::operations::finish_duo(prepared, &started, &mut reply).await;
+        reply
     });
     tokio::time::timeout(Duration::from_secs(2), ready)
         .await
@@ -1259,12 +1263,12 @@ async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
         .expect("network I/O must not prevent vault locking");
     assert!(worker.is_locked());
     release.send(()).unwrap();
-    let responses = tokio::time::timeout(Duration::from_secs(2), pending)
+    let reply = tokio::time::timeout(Duration::from_secs(2), pending)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(responses[0].code, ResponseCode::Failure as i32);
-    assert!(responses[0].error_message().contains("locked"));
+    assert_eq!(reply.as_ref().unwrap().code, ResponseCode::Failure as i32);
+    assert!(reply.as_ref().unwrap().error_message().contains("locked"));
     http.await.unwrap();
 }
 
@@ -1314,8 +1318,8 @@ async fn browser_selections_reject_stale_sessions_revisions_and_unmatched_otp_or
             RequestEnvelope::new(ServerCommand::BrowserLogins("https://example.com".into())),
         )
         .await;
-    let session_id = lookup.responses[0].session_id.clone().unwrap();
-    let ResponsePayload::Summaries(items) = &lookup.responses[0].payload else {
+    let session_id = lookup.response().session_id.clone().unwrap();
+    let ResponsePayload::Summaries(items) = &lookup.response().payload else {
         panic!("expected summaries")
     };
     let revision = items[0].revision;
@@ -1341,24 +1345,24 @@ async fn browser_selections_reject_stale_sessions_revisions_and_unmatched_otp_or
         let invalid = worker
             .execute(state.clone(), RequestEnvelope::new(command))
             .await;
-        assert_eq!(invalid.responses[0].code, ResponseCode::InvalidInput as i32);
+        assert_eq!(invalid.response().code, ResponseCode::InvalidInput as i32);
     }
     assert_eq!(
         worker
             .execute(state.clone(), scoped(login()))
             .await
-            .responses[0]
+            .response()
             .code,
         0
     );
     let denied = worker
         .execute(state.clone(), scoped(otp("https://attacker.example")))
         .await;
-    assert_eq!(denied.responses[0].code, ResponseCode::NotFound as i32);
+    assert_eq!(denied.response().code, ResponseCode::NotFound as i32);
     let allowed = worker
         .execute(state.clone(), scoped(otp("https://example.com")))
         .await;
-    let ResponsePayload::Authenticator(code) = &allowed.responses[0].payload else {
+    let ResponsePayload::Authenticator(code) = &allowed.response().payload else {
         panic!("expected OTP")
     };
     assert_eq!(
@@ -1371,7 +1375,7 @@ async fn browser_selections_reject_stale_sessions_revisions_and_unmatched_otp_or
         worker
             .execute(state.clone(), scoped(login()))
             .await
-            .responses[0]
+            .response()
             .code,
         ResponseCode::Conflict as i32
     );
@@ -1391,7 +1395,7 @@ async fn browser_selections_reject_stale_sessions_revisions_and_unmatched_otp_or
                 worker
                     .execute(state.clone(), scoped(command))
                     .await
-                    .responses[0]
+                    .response()
                     .code,
                 ResponseCode::Conflict as i32
             );
@@ -1399,7 +1403,7 @@ async fn browser_selections_reject_stale_sessions_revisions_and_unmatched_otp_or
         let mut write = RequestEnvelope::new(ServerCommand::Delete(Target::Id(1)));
         write.expected_session = Some(session_id.clone());
         assert_eq!(
-            worker.execute(state.clone(), write).await.responses[0].code,
+            worker.execute(state.clone(), write).await.response().code,
             ResponseCode::Conflict as i32
         );
         assert!(
@@ -1449,11 +1453,7 @@ async fn worker_returns_bounded_revision_deltas_and_does_not_replay_them() {
     request.expected_session = worker.session_id();
     let request_bytes = rmp_serde::to_vec_named(&request).unwrap();
     let before = worker.vault_revision().unwrap();
-    let response = worker
-        .execute(state.clone(), request)
-        .await
-        .responses
-        .remove(0);
+    let response = worker.execute(state.clone(), request).await.reply.unwrap();
     assert_eq!(response.code, 0);
     let changes = response.changes.unwrap();
     assert_eq!(changes.base_revision, before);
@@ -1466,8 +1466,8 @@ async fn worker_returns_bounded_revision_deltas_and_does_not_replay_them() {
             rmp_serde::from_slice(&request_bytes).unwrap(),
         )
         .await
-        .responses
-        .remove(0);
+        .reply
+        .unwrap();
     assert!(retried.changes.is_none());
     assert_eq!(worker.vault_revision(), Some(before + 1));
 }

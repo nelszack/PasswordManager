@@ -23,11 +23,11 @@ struct Operation {
     vault_id: Option<[u8; 16]>,
     fingerprint: [u8; 32],
     receipt: OperationReceipt,
-    responses: Vec<RpcResponse>,
+    reply: Option<RpcResponse>,
 }
 impl Drop for Operation {
     fn drop(&mut self) {
-        for response in &mut self.responses {
+        if let Some(response) = self.reply.as_mut() {
             response.zeroize();
         }
     }
@@ -50,10 +50,10 @@ impl Owner {
         // Keep nonsecret receipts for reconciliation, but never retain unlocked
         // response material after a lock or a change of unlock session.
         for operation in &mut self.operations {
-            for response in &mut operation.responses {
+            if let Some(response) = operation.reply.as_mut() {
                 response.zeroize();
             }
-            operation.responses.clear();
+            operation.reply = None;
         }
     }
     fn receipt(&self, id: &str) -> OperationReceipt {
@@ -82,10 +82,10 @@ impl Owner {
         self.operations.push_back(operation);
         Ok(())
     }
-    fn complete(&mut self, id: &str, responses: &mut [RpcResponse], external: bool) {
+    fn complete(&mut self, id: &str, reply: &mut Option<RpcResponse>, external: bool) {
         let revision = self.session.vault().map(Vault::vault_revision);
         if let Some(operation) = self.operations.iter_mut().find(|op| op.id == id) {
-            let code = responses.iter().map(|r| r.code).max().unwrap_or(0);
+            let code = reply.as_ref().map_or(0, |r| r.code);
             operation.receipt.state = if code == ResponseCode::Durability as i32 {
                 OperationState::CommittedDurabilityUnknown
             } else if code == ResponseCode::Success as i32 {
@@ -96,13 +96,11 @@ impl Owner {
                 OperationState::Failed
             };
             operation.receipt.revision = revision;
-            for response in responses.iter_mut() {
-                response.operation = Some(operation.receipt.clone());
-            }
             // Retain small mutation results, particularly consumed HOTP codes.
             // Details/reports can be large and are recoverable through reads;
             // retain their receipt rather than multiplying secret snapshots.
-            let bytes = responses.iter().try_fold(0usize, |total, response| {
+            operation.reply = reply.as_mut().and_then(|response| {
+                response.operation = Some(operation.receipt.clone());
                 let size = match &response.payload {
                     ResponsePayload::Message(message) => message.len(),
                     ResponsePayload::Authenticator(code) => code.code.len() + code.mode.len(),
@@ -110,23 +108,13 @@ impl Owner {
                     ResponsePayload::Operation(receipt) => receipt.operation_id.len(),
                     _ => return None,
                 };
-                total
-                    .checked_add(size + 512)
-                    .filter(|size| *size <= RESULT_BYTES)
+                (size + 512 <= RESULT_BYTES).then(|| {
+                    let mut retained = response.clone();
+                    // Deltas are disposable metadata, not part of retry receipts.
+                    retained.changes = None;
+                    retained
+                })
             });
-            operation.responses = if bytes.is_some() {
-                responses
-                    .iter()
-                    .cloned()
-                    .map(|mut response| {
-                        // Deltas are disposable metadata, not part of retry receipts.
-                        response.changes = None;
-                        response
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
         }
     }
     fn execute(
@@ -189,13 +177,13 @@ impl Owner {
                         "Operation ID was already used for different arguments",
                     ));
                 }
-                if previous.responses.is_empty() {
+                if previous.reply.is_none() {
                     return one(RpcResponse::success(ResponsePayload::Operation(
                         previous.receipt.clone(),
                     )));
                 }
                 return outcome::CommandOutcome {
-                    responses: previous.responses.clone(),
+                    reply: previous.reply.clone(),
                     effect: CommandEffect::None,
                     ..Default::default()
                 };
@@ -210,7 +198,7 @@ impl Owner {
                 vault_id: self.session.vault().map(Vault::vault_id),
                 fingerprint,
                 receipt,
-                responses: vec![],
+                reply: None,
             }) {
                 return one(RpcResponse::message(ResponseCode::Conflict, error));
             }
@@ -229,11 +217,11 @@ impl Owner {
             // The session is unchanged: say so, so clients keep unsaved edits for
             // review rather than treating the conflict as a relock.
             rejected.session_id = self.session.session_id();
-            for response in &mut rejected.responses {
+            if let Some(response) = rejected.reply.as_mut() {
                 response.session_id = rejected.session_id.clone();
             }
             if let Some(id) = operation_id.as_ref() {
-                self.complete(id, &mut rejected.responses, false);
+                self.complete(id, &mut rejected.reply, false);
             }
             return rejected;
         }
@@ -247,7 +235,7 @@ impl Owner {
             self.clear_results();
         }
         result.session_id = self.session.session_id();
-        for response in &mut result.responses {
+        if let Some(response) = result.reply.as_mut() {
             response.session_id = result.session_id.clone();
             response.vault_revision = self.session.vault().map(Vault::vault_revision);
             response.changes = self.session.vault().and_then(Vault::mutation_changes);
@@ -257,10 +245,10 @@ impl Owner {
                 result.effect,
                 CommandEffect::None | CommandEffect::StopServer
             ) {
-                self.complete(&id, &mut result.responses, false);
+                self.complete(&id, &mut result.reply, false);
             } else {
                 let receipt = self.receipt(&id);
-                for response in &mut result.responses {
+                if let Some(response) = result.reply.as_mut() {
                     response.operation = Some(receipt.clone());
                 }
             }
@@ -270,7 +258,7 @@ impl Owner {
 }
 fn one(response: RpcResponse) -> outcome::CommandOutcome {
     outcome::CommandOutcome {
-        responses: vec![response],
+        reply: Some(response),
         effect: CommandEffect::None,
         ..Default::default()
     }
@@ -510,8 +498,8 @@ impl VaultWorker {
             .await;
         receive.await.map_err(|_| {
             outcome
-                .responses
-                .first()
+                .reply
+                .as_ref()
                 .map(RpcResponse::error_message)
                 .unwrap_or_else(|| "Vault worker stopped before completing the operation".into())
         })
@@ -528,17 +516,17 @@ impl VaultWorker {
                 // Revalidate on the owner queue. A lock or another unlock while
                 // network work was in flight must discard its old payload.
                 if owner.session.session_id() != result.session_id {
-                    result.responses.clear();
+                    result.reply = None;
                     outcome::respond_conflict(
                         "Unlock session changed; reopen the selection before continuing",
-                        &mut result.responses,
+                        &mut result.reply,
                     );
                 }
-                for response in &mut result.responses {
+                if let Some(response) = result.reply.as_mut() {
                     response.session_id = result.session_id.clone();
                 }
                 if let Some(id) = operation_id {
-                    owner.complete(&id, &mut result.responses, true);
+                    owner.complete(&id, &mut result.reply, true);
                 }
                 result
             }),
@@ -758,14 +746,14 @@ mod tests {
                     state: OperationState::Committed,
                     revision: Some(1),
                 },
-                responses: vec![RpcResponse::success(ResponsePayload::Secret(
+                reply: Some(RpcResponse::success(ResponsePayload::Secret(
                     "synthetic-code".into(),
-                ))],
+                ))),
             })
             .unwrap();
         owner.session.lock();
         owner.clear_results();
-        assert!(owner.operations[0].responses.is_empty());
+        assert!(owner.operations[0].reply.is_none());
         assert_eq!(owner.receipt("retained").state, OperationState::Committed);
     }
     #[test]
@@ -783,7 +771,7 @@ mod tests {
                         state: OperationState::Pending,
                         revision: None,
                     },
-                    responses: vec![],
+                    reply: None,
                 })
                 .unwrap();
         }
@@ -798,28 +786,28 @@ mod tests {
                         state: OperationState::Pending,
                         revision: None
                     },
-                    responses: vec![]
+                    reply: None
                 })
                 .is_err()
         );
-        let mut responses = vec![RpcResponse::message(
+        let mut reply = Some(RpcResponse::message(
             ResponseCode::Failure,
             "Duo response lost",
-        )];
-        owner.complete("pending-0", &mut responses, true);
+        ));
+        owner.complete("pending-0", &mut reply, true);
         assert_eq!(owner.receipt("pending-0").state, OperationState::Unknown);
-        let mut large = vec![RpcResponse::message(
+        let mut large = Some(RpcResponse::message(
             ResponseCode::Success,
             "x".repeat(RESULT_BYTES + 1),
-        )];
+        ));
         owner.complete("pending-1", &mut large, false);
         assert_eq!(owner.receipt("pending-1").state, OperationState::Committed);
         assert!(
-            owner.operations[1].responses.is_empty(),
+            owner.operations[1].reply.is_none(),
             "large results retain only a receipt"
         );
         assert!(
-            matches!(&large[0].payload,ResponsePayload::Message(message) if message.len()==RESULT_BYTES+1),
+            matches!(&large.as_ref().unwrap().payload,ResponsePayload::Message(message) if message.len()==RESULT_BYTES+1),
             "the original reply is still delivered intact"
         );
     }

@@ -416,7 +416,7 @@ struct ImportReview {
 
 /// A shared vault command after its vault step, waiting for deferred work.
 struct PreparedCommand {
-    responses: Vec<RpcResponse>,
+    reply: Option<RpcResponse>,
     deferred: Deferred,
     existing_update: bool,
     session: Option<String>,
@@ -779,7 +779,7 @@ impl MobileVault {
         confirmed: bool,
     ) -> Result<Value, String> {
         let PreparedCommand {
-            mut responses,
+            mut reply,
             deferred,
             existing_update,
             session,
@@ -803,21 +803,20 @@ impl MobileVault {
                         if !current {
                             operations::respond_conflict(
                                 "Vault changed while the audit ran; run it again",
-                                &mut responses,
+                                &mut reply,
                             );
-                            return response_value(responses, existing_update);
+                            return response_value(reply, existing_update);
                         }
                         let code = if audit.incomplete {
                             ResponseCode::Failure
                         } else {
                             ResponseCode::Success
                         };
-                        responses
-                            .push(RpcResponse::new(code, ResponsePayload::Audit(audit.report)));
+                        reply = Some(RpcResponse::new(code, ResponsePayload::Audit(audit.report)));
                     }
                     Err(_) => operations::respond_conflict(
                         "Vault changed or audit evaluation failed; run it again",
-                        &mut responses,
+                        &mut reply,
                     ),
                 }
             }
@@ -828,25 +827,22 @@ impl MobileVault {
                 let host = self.host(session, None);
                 block_on(
                     ticket,
-                    operations::finish_weak_list(*filter, &host, &mut responses),
+                    operations::finish_weak_list(*filter, &host, &mut reply),
                 )?;
             }
             Deferred::Duo(prepared) => {
                 let host = self.host(session, None);
-                block_on(
-                    ticket,
-                    operations::finish_duo(*prepared, &host, &mut responses),
-                )?;
+                block_on(ticket, operations::finish_duo(*prepared, &host, &mut reply))?;
             }
             Deferred::DuoEnrollment(prepared) => {
                 let host = self.host(session, None);
                 block_on(
                     ticket,
-                    operations::finish_duo_enrollment(*prepared, &host, &mut responses),
+                    operations::finish_duo_enrollment(*prepared, &host, &mut reply),
                 )?;
             }
         }
-        response_value(responses, existing_update)
+        response_value(reply, existing_update)
     }
 
     /// Lends the vault state to the shared sync engine or Duo completion for
@@ -1325,16 +1321,11 @@ impl MobileState {
             command.zeroize();
             return Err("Item changed since it was opened; reopen it before continuing".into());
         }
-        let mut responses = Vec::new();
-        let deferred = operations::execute_unlocked(
-            &mut responses,
-            command,
-            vault,
-            credentials,
-            history_limit,
-        );
+        let mut reply = None;
+        let deferred =
+            operations::execute_unlocked(&mut reply, command, vault, credentials, history_limit);
         Ok(PreparedCommand {
-            responses,
+            reply,
             deferred,
             existing_update,
             session,
@@ -1565,14 +1556,11 @@ fn confirmation(vault: &Vault, command: &ServerCommand) -> Option<&'static str> 
     }
 }
 
-/// Converts the shared command responses into the app's reply. Failures are
+/// Converts the shared command reply into the app's reply. Failures are
 /// plain messages; an incomplete audit still returns its partial report. With
 /// `existing_update`, "not found or unchanged" means the item was unchanged.
-fn response_value(responses: Vec<RpcResponse>, existing_update: bool) -> Result<Value, String> {
-    let response = responses
-        .into_iter()
-        .next()
-        .ok_or("Vault command produced no response")?;
+fn response_value(reply: Option<RpcResponse>, existing_update: bool) -> Result<Value, String> {
+    let response = reply.ok_or("Vault command produced no response")?;
     if existing_update && response.code == ResponseCode::NotFound as i32 {
         return Ok(json!({ "changed": false }));
     }

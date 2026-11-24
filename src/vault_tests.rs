@@ -1753,12 +1753,12 @@ fn the_first_save_that_needs_the_new_schema_is_reported_once() {
         !vault.metadata.schema_upgraded,
         "already upgraded; not reported again"
     );
-    let mut responses = Vec::new();
+    let mut reply = None;
     let mut another = typed("Another", None);
     another.tags = vec!["x".into()];
     let mut fresh = memory();
     crate::operations::execute_unlocked(
-        &mut responses,
+        &mut reply,
         crate::types::ServerCommand::Add {
             entry: another,
             copy_timeout: 0,
@@ -1768,7 +1768,8 @@ fn the_first_save_that_needs_the_new_schema_is_reported_once() {
         10,
     );
     assert!(
-        responses[0]
+        reply
+            .unwrap()
             .notice
             .as_deref()
             .is_some_and(|n| n.contains("older versions"))
