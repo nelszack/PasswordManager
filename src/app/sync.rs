@@ -42,7 +42,7 @@ pub(super) async fn run(
         }
         command => {
             if !running {
-                start(client.port).unwrap_or_else(|e| console.exit_error(&e, 1));
+                start(client.port).unwrap_or_else(|e| console.exit_error(&e.to_string(), 1));
             }
             let action = match command {
                 SyncCommands::Vaults => Action::List,

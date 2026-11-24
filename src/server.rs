@@ -87,30 +87,63 @@ impl From<crate::operations::Deferred> for CommandEffect {
     }
 }
 
-/// The desktop session that started deferred work. Completion is refused if
-/// that session was locked or replaced while the work ran.
-struct StartedSession<'a> {
+/// The vault worker as seen by deferred work and cloud sync running outside
+/// its queue. Nothing is applied once the server starts stopping.
+struct DesktopHost<'a> {
     worker: &'a VaultWorker,
-    session: Option<String>,
+    stopping: Arc<AtomicBool>,
 }
 
-impl crate::operations::SessionAccess for StartedSession<'_> {
-    fn with_unlocked<T: Send + 'static>(
+impl crate::operations::VaultHost for DesktopHost<'_> {
+    fn with_session<T: Send + 'static>(
         &self,
+        expected: Option<String>,
         apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, crate::vault::VaultError>
         + Send
         + 'static,
     ) -> impl std::future::Future<Output = Result<Result<T, crate::vault::VaultError>, String>> + Send
     {
-        let expected = self.session.clone();
-        self.worker.with_session(move |session| {
-            if expected.is_none() || session.session_id() != expected {
-                return Err(crate::vault::VaultError::Locked);
+        let stopping = self.stopping.clone();
+        let applied = self.worker.with_session(move |session| {
+            if stopping.load(Ordering::Acquire) {
+                return Err("Server is stopping; the vault was not changed".to_owned());
             }
-            session.with_unlocked(apply)
+            if expected.is_none() || session.session_id() != expected {
+                return Err(SESSION_CHANGED.to_owned());
+            }
+            Ok(session.with_unlocked(apply))
+        });
+        async move { applied.await? }
+    }
+
+    fn staleness(
+        &self,
+        session: Option<String>,
+        revision: Option<u64>,
+    ) -> crate::operations::Stale {
+        let worker = self.worker.clone();
+        Arc::new(move || {
+            session.is_none()
+                || worker.session_id() != session
+                || revision.is_some_and(|revision| worker.vault_revision() != Some(revision))
+        })
+    }
+
+    fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> crate::operations::Blocking<T> {
+        // One CPU-heavy strength scoring at a time, outside the vault queue.
+        static SCORING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        Box::pin(async move {
+            let _permit = SCORING.acquire().await.ok()?;
+            tokio::task::spawn_blocking(work).await.ok()
         })
     }
 }
+
+/// Reported when deferred work returns to a vault that was locked or replaced.
+pub(crate) const SESSION_CHANGED: &str = "Vault locked or switched; nothing was applied";
 
 struct AuthenticatedRequest {
     request: RequestEnvelope,
@@ -132,16 +165,42 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-pub fn start(port: u16) -> Result<String, String> {
+/// Why the background server could not start.
+#[derive(Debug)]
+pub enum StartError {
+    /// Another process already listens on the server's address.
+    PortInUse(std::net::SocketAddr),
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PortInUse(address) => write!(f, "{address} is already in use by another process"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<StartError> for String {
+    fn from(error: StartError) -> Self {
+        error.to_string()
+    }
+}
+
+pub fn start(port: u16) -> Result<String, StartError> {
     if is_running(port) {
         return Ok("Server is already running.".to_string());
     }
     if std::net::TcpStream::connect_timeout(&server_addr(port), Duration::from_millis(250)).is_ok()
     {
-        return Err(format!(
-            "{} is already in use by another process",
-            server_addr(port)
-        ));
+        return Err(StartError::PortInUse(server_addr(port)));
     }
     // Provide an actionable startup error. The child acquires and holds the
     // authoritative lock itself, closing the race between this check and spawn.
@@ -167,7 +226,7 @@ pub fn start(port: u16) -> Result<String, String> {
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return Err(format!("failed to start background process: {error}")),
+        Err(error) => return Err(format!("failed to start background process: {error}").into()),
     };
     let pid = child.id();
     for _ in 0..20 {
@@ -176,20 +235,22 @@ pub fn start(port: u16) -> Result<String, String> {
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                return Err(format!("server exited during startup with {status}"));
+                return Err(format!("server exited during startup with {status}").into());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("could not verify server startup: {error}"));
+                return Err(format!("could not verify server startup: {error}").into());
             }
         }
     }
     if !is_running(port) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("server did not become ready within two seconds".to_string());
+        return Err("server did not become ready within two seconds"
+            .to_string()
+            .into());
     }
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -365,7 +426,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
                 );
                 response.request_id = Some(request.request_id.clone());
                 response.session_id = worker.session_id();
-                let _ = deliver_responses(vec![response], &mut stream, &response_key).await;
+                let _ = deliver_responses(Some(response), &mut stream, &response_key).await;
                 return;
             }
         }
@@ -373,6 +434,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
         None
     };
     let operation_id = request.operation_id.clone();
+    let stopping = state.stopping.clone();
     let request_id = request.request_id.clone();
     let kill_tx = state.kill_tx.clone();
     let mut result =
@@ -380,7 +442,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             // Status is nonsecret published state; it remains responsive while
             // the owner finishes a filesystem commit or derives a key.
             outcome::CommandOutcome {
-                responses: vec![current_status(&state, &worker).await],
+                reply: Some(current_status(&state, &worker).await),
                 effect: CommandEffect::None,
                 ..Default::default()
             }
@@ -417,7 +479,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             };
             response.session_id = session;
             outcome::CommandOutcome {
-                responses: vec![response],
+                reply: Some(response),
                 ..Default::default()
             }
         } else if let ServerCommand::Cloud(action) = &request.command {
@@ -449,7 +511,7 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
             };
             response.session_id = worker.session_id();
             outcome::CommandOutcome {
-                responses: vec![response],
+                reply: Some(response),
                 ..Default::default()
             }
         } else {
@@ -460,12 +522,12 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
         result.effect,
         CommandEffect::None | CommandEffect::StopServer
     ) {
-        result = finish_external_effect(result, worker, operation_id).await;
+        result = finish_external_effect(result, worker, stopping, operation_id).await;
     }
-    for response in &mut result.responses {
+    if let Some(response) = result.reply.as_mut() {
         response.request_id = Some(request_id.clone());
     }
-    if let Err(error) = deliver_responses(result.responses, &mut stream, &response_key).await {
+    if let Err(error) = deliver_responses(result.reply, &mut stream, &response_key).await {
         eprintln!("Could not deliver authenticated response: {error}");
     }
     let _ = stream.flush().await;
@@ -480,99 +542,16 @@ async fn handle_connection(mut stream: TcpStream, mut state: ConnectionState, wo
 async fn finish_external_effect(
     mut result: outcome::CommandOutcome,
     worker: VaultWorker,
+    stopping: Arc<AtomicBool>,
     operation_id: Option<String>,
 ) -> outcome::CommandOutcome {
-    use crate::operations::Deferred;
-    let CommandEffect::Deferred(work) = std::mem::take(&mut result.effect) else {
-        return worker.finish_external(result, operation_id).await;
-    };
-    let started = StartedSession {
-        worker: &worker,
-        session: result.session_id.clone(),
-    };
-    // One CPU-heavy strength scoring at a time, outside the vault queue.
-    static SCORING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-    match work {
-        Deferred::Duo(prepared) => {
-            crate::operations::finish_duo(*prepared, &started, &mut result.responses).await
-        }
-        Deferred::DuoEnrollment(prepared) => {
-            crate::operations::finish_duo_enrollment(*prepared, &started, &mut result.responses)
-                .await
-        }
-        Deferred::Audit(snapshot, check_breaches) => {
-            // Check the captured session/revision between scores so locking and
-            // edits remain responsive.
-            let permit = SCORING
-                .acquire()
-                .await
-                .expect("scoring semaphore stays open");
-            let expected_session = result.session_id.clone();
-            let expected_revision = Some(snapshot.revision);
-            let audit_worker = worker.clone();
-            let prepared = tokio::task::spawn_blocking(move || {
-                snapshot.finish(|| {
-                    audit_worker.session_id() != expected_session
-                        || audit_worker.vault_revision() != expected_revision
-                })
-            })
-            .await;
-            drop(permit);
-            let snapshot = match prepared {
-                Ok(Ok(snapshot)) => snapshot,
-                _ => {
-                    outcome::respond_conflict(
-                        "Vault changed or audit evaluation failed; run it again",
-                        &mut result.responses,
-                    );
-                    return worker.finish_external(result, operation_id).await;
-                }
-            };
-            let audit = snapshot.audit(check_breaches).await;
-            // Breach lookups take network time; an edit or sync meanwhile would
-            // make this report describe passwords that are no longer stored.
-            if worker.vault_revision() != expected_revision {
-                outcome::respond_conflict(
-                    "Vault changed while the audit ran; run it again",
-                    &mut result.responses,
-                );
-                return worker.finish_external(result, operation_id).await;
-            }
-            let code = if audit.incomplete {
-                ResponseCode::Failure
-            } else {
-                ResponseCode::Success
-            };
-            outcome::respond_payload(
-                code,
-                ResponsePayload::Audit(audit.report),
-                &mut result.responses,
-            );
-        }
-        Deferred::WeakList(pending, filter) => {
-            // Edits during scoring only leave a few cold scores for the list
-            // to compute on the queue; a lock or switch discards the work.
-            let permit = SCORING
-                .acquire()
-                .await
-                .expect("scoring semaphore stays open");
-            let expected_session = result.session_id.clone();
-            let scoring_worker = worker.clone();
-            let scored = tokio::task::spawn_blocking(move || {
-                pending.finish(|| scoring_worker.session_id() != expected_session)
-            })
-            .await;
-            drop(permit);
-            if matches!(scored, Ok(Ok(()))) {
-                crate::operations::finish_weak_list(*filter, &started, &mut result.responses).await;
-            } else {
-                outcome::respond_conflict(
-                    "Vault was locked or changed while checking password strength; run it again",
-                    &mut result.responses,
-                );
-            }
-        }
-        Deferred::None => {}
+    if let CommandEffect::Deferred(work) = std::mem::take(&mut result.effect) {
+        let host = DesktopHost {
+            worker: &worker,
+            stopping,
+        };
+        let session = result.session_id.clone();
+        crate::operations::finish_deferred(work, &host, session, &mut result.reply).await;
     }
     worker.finish_external(result, operation_id).await
 }

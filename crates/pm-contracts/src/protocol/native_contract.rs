@@ -69,32 +69,11 @@ impl NativeAction {
         Self::CheckSavedLogin,
         Self::StatusEvents,
     ];
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Status => "status",
-            Self::Lock => "lock",
-            Self::OpenDesktop => "openDesktop",
-            Self::DuoRequests => "duoRequests",
-            Self::DuoRespond => "duoRespond",
-            Self::GetAutofillItems => "getAutofillItems",
-            Self::GetLoginItems => "getLoginItems",
-            Self::GetDuoItems => "getDuoItems",
-            Self::GetLoginItem => "getLoginItem",
-            Self::GetAutofillItem => "getAutofillItem",
-            Self::GetTotp => "getTotp",
-            Self::SaveCredentials => "saveCredentials",
-            Self::UpdateCredentials => "updateCredentials",
-            Self::OperationStatus => "operationStatus",
-            Self::GetPasskeys => "getPasskeys",
-            Self::CreatePasskey => "createPasskey",
-            Self::GetPasskeyAssertion => "getPasskeyAssertion",
-            Self::VerifyPasskeyUser => "verifyPasskeyUser",
-            Self::CopyLoginValue => "copyLoginValue",
-            Self::CopyGenerated => "copyGenerated",
-            Self::SearchItems => "searchItems",
-            Self::CopyItem => "copyItem",
-            Self::CheckSavedLogin => "checkSavedLogin",
-            Self::StatusEvents => "statusEvents",
+    /// The wire name, as serde writes it, so it cannot drift from parsing.
+    pub fn name(self) -> String {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(name)) => name,
+            _ => unreachable!("unit variants serialize as strings"),
         }
     }
     pub fn policy(self) -> NativePolicy {
@@ -242,16 +221,11 @@ impl zeroize::Zeroize for NativeAction {
         *self = Self::Status;
     }
 }
-impl PartialEq<&str> for NativeAction {
-    fn eq(&self, s: &&str) -> bool {
-        self.as_str() == *s
-    }
-}
 
 pub fn browser_contract() -> String {
     let operations: std::collections::BTreeMap<_, _> = NativeAction::ALL
         .into_iter()
-        .map(|a| (a.as_str(), a.policy()))
+        .map(|a| (a.name(), a.policy()))
         .collect();
     use crate::types::ItemKind;
     let profiles: std::collections::BTreeMap<String, serde_json::Value> = [
@@ -295,7 +269,7 @@ pub fn browser_declarations() -> String {
     let mut results = String::new();
     for action in NativeAction::ALL {
         let policy = action.policy();
-        requests.push_str(&format!("    {}: {{", action.as_str()));
+        requests.push_str(&format!("    {}: {{", action.name()));
         if policy.mutates {
             requests.push_str(" operationId: string;");
         }
@@ -322,7 +296,7 @@ pub fn browser_declarations() -> String {
         };
         results.push_str(&format!(
             "    {}: {}{};\n",
-            action.as_str(),
+            action.name(),
             result,
             if policy.mutates {
                 " | OperationReceipt"

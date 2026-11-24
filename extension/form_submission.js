@@ -1,8 +1,4 @@
-(function (root, factory) {
-    const api = factory();
-    if (typeof module === "object" && module.exports) module.exports = api;
-    else root.PasswordManagerFormSubmission = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     // All submission sources share one document-wide decision lifecycle.
@@ -108,4 +104,4 @@
     }
 
     return { createCredentialAttempt, createSubmissionCoordinator, scheduleCredentialAdvance };
-});
+})();

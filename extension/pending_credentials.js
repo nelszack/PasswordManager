@@ -1,8 +1,4 @@
-(function (root, factory) {
-    const api = factory();
-    root.PasswordManagerPendingCredentials = api;
-    if (typeof module === "object" && module.exports) module.exports = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     const MAX_AGE_MS = 60_000;
@@ -44,4 +40,4 @@
     }
 
     return { MAX_AGE_MS, create, usable };
-});
+})();

@@ -1,3 +1,10 @@
+"use strict";
+// Page entry; scripts/build_extension.cjs bundles it into popup_runtime.js.
+const PasswordManagerUiTransport = require("./ui_transport.js");
+require("./ui_session.js");
+const PasswordManagerPopupState = require("./popup_state.js");
+const PasswordManagerGenerator = require("./password_generator.js");
+const PasswordManagerCommandContract = require("./command_contract.js");
 let pendingOperations = [];
 let reviewedOperationId = null;
 let lastStatus = null;
@@ -316,7 +323,7 @@ function lowerFirst(text) {
 }
 
 function resultRow(item) {
-    const profile = globalThis.PasswordManagerCommandContract?.itemProfiles?.[item.kind] || {
+    const profile = PasswordManagerCommandContract.itemProfiles[item.kind] || {
         title: "Login",
         owner: "Username",
         secret: "Password",
@@ -613,3 +620,6 @@ element("openDesktopBtn").addEventListener("click", async () => {
     else say(response?.error || "Could not open the desktop app", true);
     button.disabled = false;
 });
+
+// Entry points the unit tests drive directly.
+module.exports = { refreshStatus, searchVault };

@@ -1,13 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadScript } = require("./test_harness.cjs");
+const { loadModule } = require("./test_harness.cjs");
 const vm = require("node:vm");
 const { summary, nativeFields, nativeData } = require("./test_fixtures.cjs");
 
 function loadWorker(context) {
-    const execute = name => loadScript(name, context);
-    context.importScripts = (...names) => names.forEach(execute);
-    execute("background.js");
+    loadModule("background.js", context);
 }
 
 function securityEnvironment({ orphanWindows = [] } = {}) {

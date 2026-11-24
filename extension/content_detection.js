@@ -1,8 +1,4 @@
-(function (root, factory) {
-    const api = factory();
-    if (typeof module === "object" && module.exports) module.exports = api;
-    else root.PasswordManagerContentDetection = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth|identif/i;
@@ -252,4 +248,4 @@
         usernameCandidates,
         withVisibilityCache,
     };
-});
+})();

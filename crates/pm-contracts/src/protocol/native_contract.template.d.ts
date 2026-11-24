@@ -1,5 +1,4 @@
 // Generated from Rust native-operation policy; do not edit by hand.
-export as namespace PasswordManagerCommandContract;
 export type SenderRole = "popup" | "prompt" | "picker" | "duoPrompt" | "background";
 export type ItemKind = "login" | "secure-note" | "payment-card" | "identity" | "wifi" | "software-license" | "ssh-key" | "api-secret";
 export type OperationState = "pending" | "committed" | "committed_durability_unknown" | "failed" | "unknown";

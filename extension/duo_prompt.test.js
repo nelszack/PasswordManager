@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadScript } = require("./test_harness.cjs");
+const { loadModule } = require("./test_harness.cjs");
 const { createDocument } = require("./test_dom.cjs");
 
 const future = () => Math.floor(Date.now() / 1000) + 300;
@@ -65,7 +65,8 @@ function duoPrompt({ search = "?token=duo-token", responses = {} } = {}) {
                 },
             },
         },
-        PasswordManagerUiTransport: {
+    };
+    const transport = {
             async request(message, fallback) {
                 messages.push(message);
                 const response =
@@ -75,9 +76,8 @@ function duoPrompt({ search = "?token=duo-token", responses = {} } = {}) {
                 if (!response?.success) throw new Error(response?.error || fallback);
                 return response;
             },
-        },
     };
-    loadScript("duo_prompt.js", context);
+    loadModule("duo_prompt.js", context, { "./ui_transport.js": transport, "./ui_session.js": {} });
     const settle = () => new Promise(resolve => setImmediate(resolve));
     return {
         elements,

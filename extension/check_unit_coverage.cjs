@@ -7,7 +7,8 @@ const result = spawnSync(
         "--test",
         "--test-coverage-include=*.js",
         "--test-coverage-include-all",
-        "--test-coverage-exclude=content_runtime.js",
+        // Generated bundles repeat the authored modules measured below.
+        "--test-coverage-exclude=*_runtime.js",
         "--test-coverage-lines=58",
         "--test-coverage-branches=78",
         "*.test.js",
@@ -62,7 +63,8 @@ const thresholds = {
 
 for (const [file, [minimumLines, minimumBranches]] of Object.entries(thresholds)) {
     const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const match = result.stdout.match(new RegExp(`${escaped}\\s+\\|\\s+([0-9.]+)\\s+\\|\\s+([0-9.]+)`));
+    // Anchor the name to its own row: "popup.js" must not match "background_popup.js".
+    const match = result.stdout.match(new RegExp(`^\\S+\\s+${escaped}\\s+\\|\\s+([0-9.]+)\\s+\\|\\s+([0-9.]+)`, "m"));
     if (!match) throw new Error(`Coverage report did not include ${file}`);
     const lines = Number(match[1]);
     const branches = Number(match[2]);

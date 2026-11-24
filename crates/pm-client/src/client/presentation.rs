@@ -2,44 +2,49 @@ use crate::{protocol::ResponsePayload, terminal::metadata};
 use pm_contracts::item_profile::profile;
 use pm_contracts::vault::{ItemDetail, ItemPage};
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-static ASCII: AtomicBool = AtomicBool::new(false);
-static WIDTH: AtomicUsize = AtomicUsize::new(100);
-
-/// Plain ASCII punctuation instead of typographic glyphs (pipes, TERM=dumb, PM_PLAIN,
-/// non-UTF-8 locales). Only text this module adds changes; item data never does.
-pub fn set_ascii(on: bool) {
-    ASCII.store(on, Ordering::Relaxed);
+/// How one output renders text. Only text this module adds changes; item data never does.
+#[derive(Clone, Copy, Debug)]
+pub struct Style {
+    /// Plain ASCII punctuation instead of typographic glyphs (pipes, TERM=dumb,
+    /// PM_PLAIN, non-UTF-8 locales).
+    pub ascii: bool,
+    /// The terminal width that list columns fit into (40 to 400).
+    width: usize,
+    /// Show item notes in details (the CLI's `get --reveal-secrets`); hidden by
+    /// default, as in the desktop and mobile apps.
+    pub reveal_notes: bool,
 }
 
-/// The terminal width that list columns fit into.
-pub fn set_width(columns: usize) {
-    WIDTH.store(columns.clamp(40, 400), Ordering::Relaxed);
-}
-
-/// Whether plain ASCII output is active.
-pub fn ascii() -> bool {
-    ASCII.load(Ordering::Relaxed)
-}
-
-fn glyph(unicode: &'static str, ascii: &'static str) -> &'static str {
-    if ASCII.load(Ordering::Relaxed) {
-        ascii
-    } else {
-        unicode
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            ascii: false,
+            width: 100,
+            reveal_notes: false,
+        }
     }
 }
 
-fn dot() -> &'static str {
-    glyph(" · ", " - ")
+impl Style {
+    pub fn with_width(mut self, columns: usize) -> Self {
+        self.width = columns.clamp(40, 400);
+        self
+    }
 }
 
-pub fn render(payload: &ResponsePayload) -> String {
+fn glyph(style: Style, unicode: &'static str, ascii: &'static str) -> &'static str {
+    if style.ascii { ascii } else { unicode }
+}
+
+fn dot(style: Style) -> &'static str {
+    glyph(style, " · ", " - ")
+}
+
+pub fn render(style: Style, payload: &ResponsePayload) -> String {
     match payload {
         ResponsePayload::Message(message) => message.clone(),
         ResponsePayload::CloudVaults(vaults) => cloud_vaults(vaults),
-        ResponsePayload::CloudConflicts(review) => cloud_conflicts(review),
+        ResponsePayload::CloudConflicts(review) => cloud_conflicts(style, review),
         ResponsePayload::Secret(secret) => secret.expose().to_owned(),
         ResponsePayload::Status(status) => format!(
             "Status: {}\nVersion: {}{}{}{}",
@@ -113,9 +118,9 @@ pub fn render(payload: &ResponsePayload) -> String {
                     "The server has no retained outcome. Inspect the vault; do not assume the change failed.",
             }
         ),
-        ResponsePayload::ItemPage(page) => item_page(page, None),
-        ResponsePayload::Item(item) => item_detail(item),
-        ResponsePayload::Audit(report) => audit(report),
+        ResponsePayload::ItemPage(page) => item_page(style, page, None),
+        ResponsePayload::Item(item) => item_detail(style, item),
+        ResponsePayload::Audit(report) => audit(style, report),
         ResponsePayload::ImportReport(report) => import_report(report),
         ResponsePayload::History(page) => {
             if page.history.is_empty() {
@@ -161,7 +166,7 @@ pub fn render(payload: &ResponsePayload) -> String {
     }
 }
 
-pub fn audit(findings: &crate::vault::AuditReport) -> String {
+pub fn audit(style: Style, findings: &crate::vault::AuditReport) -> String {
     use std::fmt::Write;
     if findings.total == 0 {
         return "No login items to assess. Add or import a login before checking vault health.\n"
@@ -193,7 +198,7 @@ pub fn audit(findings: &crate::vault::AuditReport) -> String {
         .unwrap_or(0)
         .min(40);
     let label = |entry: &crate::vault::AuditLabel| -> String {
-        let name = elide(metadata(&entry.name).as_str(), 40);
+        let name = elide(style, metadata(&entry.name).as_str(), 40);
         let pad = " ".repeat(name_width.saturating_sub(cells(&name)));
         let user = entry
             .username
@@ -220,7 +225,7 @@ pub fn audit(findings: &crate::vault::AuditReport) -> String {
     let mut report = format!(
         "Vault health: {}/100{}{} of {} have no issues\n",
         findings.score,
-        dot(),
+        dot(style),
         findings.healthy,
         plural(findings.total, "login", "logins"),
     );
@@ -352,9 +357,9 @@ fn tags(values: &[String]) -> String {
         .join(", ")
 }
 
-fn urls(values: &[String]) -> String {
+fn urls(style: Style, values: &[String]) -> String {
     if values.is_empty() {
-        glyph("—", "-").into()
+        glyph(style, "—", "-").into()
     } else {
         values
             .iter()
@@ -382,7 +387,7 @@ fn timestamp_in(value: &str, zone: &jiff::tz::TimeZone) -> String {
 
 /// Item list: one aligned line per item so long vaults stay scannable.
 /// `empty` replaces the empty-vault hint when a search or filter matched nothing.
-pub fn item_page(page: &ItemPage, empty: Option<&str>) -> String {
+pub fn item_page(style: Style, page: &ItemPage, empty: Option<&str>) -> String {
     if page.items.is_empty() {
         return empty
             .unwrap_or(
@@ -398,7 +403,7 @@ pub fn item_page(page: &ItemPage, empty: Option<&str>) -> String {
             format!(
                 "{}{}",
                 if item.favorite {
-                    glyph("★ ", "* ")
+                    glyph(style, "★ ", "* ")
                 } else {
                     ""
                 },
@@ -414,10 +419,10 @@ pub fn item_page(page: &ItemPage, empty: Option<&str>) -> String {
         .unwrap_or(1);
     // Columns fit the terminal; long values are shortened here, while `pm get`
     // and --json keep them whole.
-    let width = WIDTH.load(Ordering::Relaxed);
+    let width = style.width;
     let names: Vec<String> = names
         .into_iter()
-        .map(|name| elide(&name, (width / 3).clamp(16, 60)))
+        .map(|name| elide(style, &name, (width / 3).clamp(16, 60)))
         .collect();
     let name_width = names.iter().map(|name| cells(name)).max().unwrap_or(0);
     let details_width = width.saturating_sub(id_width + name_width + 5).max(20);
@@ -440,7 +445,7 @@ pub fn item_page(page: &ItemPage, empty: Option<&str>) -> String {
         listing += &format!(
             "#{:<id_width$}  {name}{pad}  {}\n",
             item.id,
-            elide(&details.join(dot()), details_width)
+            elide(style, &details.join(dot(style)), details_width)
         );
     }
     let shown = page.items.len();
@@ -452,15 +457,7 @@ pub fn item_page(page: &ItemPage, empty: Option<&str>) -> String {
     listing + &format!("\n{count}. Show one with `pm get NAME` or `pm get --id ID`.\n")
 }
 
-static REVEAL_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Show item notes in details (the CLI's `get --reveal-secrets`); hidden by default,
-/// as in the desktop and mobile apps.
-pub fn reveal_notes(reveal: bool) {
-    REVEAL_NOTES.store(reveal, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn item_detail(item: &ItemDetail) -> String {
+fn item_detail(style: Style, item: &ItemDetail) -> String {
     let profile = profile(item.kind);
     let mut rows: Vec<(String, String)> = vec![
         ("Name".into(), metadata(&item.name).to_string()),
@@ -476,7 +473,7 @@ fn item_detail(item: &ItemDetail) -> String {
         } else {
             "Websites"
         };
-        rows.push((label.into(), urls(&item.urls)));
+        rows.push((label.into(), urls(style, &item.urls)));
     }
     if item.has_secret || item.password.is_some() {
         rows.push((
@@ -487,7 +484,7 @@ fn item_detail(item: &ItemDetail) -> String {
                 .unwrap_or_else(|| {
                     format!(
                         "{} (hidden; add --password-only to print it)",
-                        glyph("••••••••", "********")
+                        glyph(style, "••••••••", "********")
                     )
                 }),
         ));
@@ -515,7 +512,7 @@ fn item_detail(item: &ItemDetail) -> String {
         rows.push(("Favorite".into(), "yes".into()));
     }
     if let Some(notes) = item.notes.as_ref().filter(|n| !n.expose().is_empty()) {
-        let shown = REVEAL_NOTES.load(std::sync::atomic::Ordering::Relaxed);
+        let shown = style.reveal_notes;
         rows.push((
             "Notes".into(),
             if shown {
@@ -535,7 +532,7 @@ fn item_detail(item: &ItemDetail) -> String {
                 .unwrap_or_else(|| {
                     format!(
                         "{} (hidden; add --reveal-secrets)",
-                        glyph("••••••••", "********")
+                        glyph(style, "••••••••", "********")
                     )
                 }),
         ));
@@ -585,11 +582,11 @@ fn cells(value: &str) -> usize {
 }
 
 /// At most `limit` cells, ending in "…" ("..." in ASCII output) when shortened.
-fn elide(value: &str, limit: usize) -> String {
+fn elide(style: Style, value: &str, limit: usize) -> String {
     if cells(value) <= limit {
         return value.to_owned();
     }
-    let marker = glyph("…", "...");
+    let marker = glyph(style, "…", "...");
     let reserved = cells(marker);
     let mut out = String::new();
     let mut used = 0;
@@ -626,7 +623,7 @@ fn cloud_vaults(vaults: &[pm_contracts::cloud::RemoteVault]) -> String {
     text + "\nDownload one with `pm sync pull ID`.\n"
 }
 
-fn cloud_conflicts(review: &pm_contracts::cloud::ConflictReview) -> String {
+fn cloud_conflicts(style: Style, review: &pm_contracts::cloud::ConflictReview) -> String {
     if review.items.is_empty() {
         return "No conflicts: this device and the cloud agree.".into();
     }
@@ -636,7 +633,7 @@ fn cloud_conflicts(review: &pm_contracts::cloud::ConflictReview) -> String {
             "Item {}: this device \"{}\"{}cloud \"{}\"\n",
             item.id,
             metadata(&item.local).as_str(),
-            dot(),
+            dot(style),
             metadata(&item.remote).as_str()
         );
         for field in &item.fields {
@@ -644,7 +641,7 @@ fn cloud_conflicts(review: &pm_contracts::cloud::ConflictReview) -> String {
                 "  {}: this device {}{}cloud {}\n",
                 metadata(&field.field).as_str(),
                 metadata(&field.local).as_str(),
-                dot(),
+                dot(style),
                 metadata(&field.remote).as_str()
             );
         }
@@ -684,9 +681,9 @@ mod tests {
             items: vec![],
             total: 0,
         };
-        assert!(super::item_page(&page, None).contains("no items yet"));
+        assert!(super::item_page(super::Style::default(), &page, None).contains("no items yet"));
         assert_eq!(
-            super::item_page(&page, Some("No items match.")),
+            super::item_page(super::Style::default(), &page, Some("No items match.")),
             "No items match."
         );
     }

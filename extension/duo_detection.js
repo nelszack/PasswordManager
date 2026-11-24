@@ -1,8 +1,4 @@
-(function (root, factory) {
-    const api = factory();
-    if (typeof module === "object" && module.exports) module.exports = api;
-    else root.PasswordManagerDuoDetection = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     function duoOrigin(value) {
         try {
             const url = new URL(value);
@@ -23,4 +19,4 @@
         return duoOrigin(url) && /push sent|check (?:your |the )?(?:phone|device)|open duo mobile/i.test(words);
     }
     return { duoOrigin, challenge };
-});
+})();

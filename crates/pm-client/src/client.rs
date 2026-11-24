@@ -3,9 +3,10 @@ pub mod presentation;
 #[cfg(target_os = "windows")]
 mod shutdown;
 mod transport;
+pub use presentation::Style;
 pub use transport::{AuthenticatedClient, RequestFailure, StatusEvents, StatusEventsShutdown};
-pub fn render_response(payload: &crate::protocol::ResponsePayload) -> String {
-    presentation::render(payload)
+pub fn render_response(style: Style, payload: &crate::protocol::ResponsePayload) -> String {
+    presentation::render(style, payload)
 }
 pub fn terminal_output(text: &str) -> String {
     crate::terminal::output(text).to_string()

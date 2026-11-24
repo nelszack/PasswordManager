@@ -44,4 +44,4 @@ const PasswordManagerSecurity = (() => {
     return { senderOrigin, urlOrigin, pendingStorageKey, securePickerSender };
 })();
 
-if (typeof module !== "undefined") module.exports = PasswordManagerSecurity;
+module.exports = PasswordManagerSecurity;

@@ -492,8 +492,7 @@ pub(super) fn lookup_vault_in(
                                 return Ok(Some(found));
                             }
                             Err(error)
-                                if other_problem.is_none()
-                                    && !error.to_string().contains("incorrect password/key") =>
+                                if other_problem.is_none() && error != VaultError::WrongKey =>
                             {
                                 other_problem = Some(error);
                             }
@@ -535,9 +534,7 @@ pub(super) fn lookup_vault_in(
         .as_ref()
         .and_then(|master| crate::encryption::keyfile_session(&contents, master))
         .unwrap_or_else(|| key_pass.clone());
-    let plaintext = decrypt_file(&mut candidate, &contents).ok_or_else(|| {
-        VaultError::Validation("incorrect password/key or modified encrypted contents".into())
-    })?;
+    let plaintext = decrypt_file(&mut candidate, &contents).ok_or(VaultError::WrongKey)?;
     let data = decode_document(&plaintext)?;
     crate::cloud::verify_identity(&path, data.vault_id).map_err(VaultError::Validation)?;
     *key_pass = candidate;

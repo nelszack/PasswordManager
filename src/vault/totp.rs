@@ -338,17 +338,6 @@ pub(super) fn parse_authenticator_configuration(
 }
 
 #[cfg(test)]
-pub(super) fn parse_totp_configuration(value: &str) -> Result<Totp, VaultError> {
-    if is_otpauth_uri(value) {
-        compatible_totp_from_url(value)
-    } else {
-        let secret = TotpSecret::try_from_base32(value)
-            .map_err(|error| format!("invalid Base32 TOTP secret: {error}"))?;
-        compatible_totp_from_secret(secret)
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

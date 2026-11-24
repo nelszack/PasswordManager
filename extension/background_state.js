@@ -65,4 +65,4 @@ var PasswordManagerBackgroundState = (() => {
     return { parseServerStatus, versionError, badge, equal };
 })();
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundState;
+module.exports = PasswordManagerBackgroundState;

@@ -1,6 +1,6 @@
 //! Shared production implementation used by the CLI and security fuzz targets.
 pub mod cli;
-pub mod client;
+pub use pm_client as client;
 pub mod clipboard;
 mod clock;
 pub mod cloud;
@@ -8,20 +8,20 @@ pub mod config;
 pub mod docs;
 mod duo;
 pub mod encryption;
-pub mod file;
 pub use pm_contracts::item_profile;
-pub mod mobile;
+pub use pm_platform::file;
+/// In-process mobile API used by the Android JNI adapter.
+pub mod mobile {
+    pub use crate::vault::mobile::{Cancellation, MobileVault, wipe_response};
+}
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod native_messaging;
 mod operations;
 pub mod passkey;
 pub mod password;
 pub mod prompt;
-pub mod protocol;
-pub mod secret;
+pub use pm_contracts::{protocol, secret, types};
 pub mod server;
-mod terminal;
-pub mod types;
 pub mod vault;
 pub mod vault_names;
 

@@ -5,18 +5,13 @@ const path = require("node:path");
 const { firefoxManifest } = require("./firefox_manifest.cjs");
 const root = path.resolve(__dirname, "../extension");
 const files = [
-    "manifest.json", "background.js", "command_contract.js",
-    "background_security.js", "background_state.js", "background_native.js",
-    "background_status.js", "background_pending.js", "background_windows.js", "background_pickers.js",
-    "background_prompts.js", "background_router.js", "background_duo.js", "background_passkeys.js", "background_popup.js",
-    "native_protocol.js", "pending_credentials.js", "credential_prompt_state.js", "duo_detection.js",
-    "content_runtime.js", "ui_transport.js", "ui_session.js", "common.css",
-    "popup.html", "popup.js", "popup_state.js", "popup.css", "password_generator.js",
+    "manifest.json", "background_runtime.js", "content_runtime.js", "common.css",
+    "popup.html", "popup_runtime.js", "popup.css",
     "help.html", "help.css",
-    "picker.html", "picker.js", "picker_state.js", "picker.css",
-    "credential_prompt.html", "credential_prompt.js", "credential_prompt.css",
-    "duo_prompt.html", "duo_prompt.js", "duo_prompt.css",
-    "passkey_prompt.html", "passkey_prompt.js", "passkey_prompt.css",
+    "picker.html", "picker_runtime.js", "picker.css",
+    "credential_prompt.html", "credential_prompt_runtime.js", "credential_prompt.css",
+    "duo_prompt.html", "duo_prompt_runtime.js", "duo_prompt.css",
+    "passkey_prompt.html", "passkey_prompt_runtime.js", "passkey_prompt.css",
     "webauthn_page.js", "webauthn_bridge.js",
     "icons/icon16.png", "icons/icon32.png", "icons/icon48.png", "icons/icon128.png"
 ];
@@ -36,11 +31,6 @@ for (const file of files) {
             requireAsset(match[1].split("#")[0]);
         }
     }
-    if (file.endsWith(".js")) {
-        for (const call of source.matchAll(/importScripts\(([^)]+)\)/g)) {
-            for (const match of call[1].matchAll(/["']([^"']+)["']/g)) requireAsset(match[1]);
-        }
-    }
 }
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 for (const file of [manifest.background.service_worker, manifest.action.default_popup,
@@ -56,7 +46,7 @@ const destination = args[0];
 if (args.length !== 1 || !destination || !["chrome", "firefox"].includes(browser)) {
     throw new Error("Usage: node scripts/package_extension.cjs [--browser chrome|firefox] DESTINATION|--check");
 }
-const firefox = firefoxManifest(manifest, fs.readFileSync(path.join(root, "background.js"), "utf8"));
+const firefox = firefoxManifest(manifest);
 for (const file of firefox.background.scripts) requireAsset(file);
 if (destination !== "--check") {
     const target = path.resolve(destination);

@@ -108,4 +108,4 @@ const PasswordManagerGenerator = (() => {
     }
     return { defaults, validate, generate, settingsForSite };
 })();
-if (typeof module !== "undefined") module.exports = PasswordManagerGenerator;
+module.exports = PasswordManagerGenerator;

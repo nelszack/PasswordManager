@@ -5,11 +5,7 @@
 // serve are returned to the browser's own WebAuthn.
 const PasswordManagerBackgroundPasskeys = {
     create({ chrome, security, nativeRequest, crypto, setTimeout, lifetimeMs = 180_000 }) {
-        const decisions = (
-            typeof PasswordManagerDecisionWindows === "undefined"
-                ? require("./background_windows.js")
-                : PasswordManagerDecisionWindows
-        ).create({
+        const decisions = require("./background_windows.js").create({
             chrome,
             page: "passkey_prompt.html",
             width: 400,
@@ -318,4 +314,4 @@ const PasswordManagerBackgroundPasskeys = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPasskeys;
+module.exports = PasswordManagerBackgroundPasskeys;

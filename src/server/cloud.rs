@@ -4,8 +4,7 @@ use super::*;
 use crate::cloud::engine::{self, Bind, Snapshot, SyncHost};
 use crate::cloud::{Binding, CloudClient, binding};
 use crate::config::try_read_config;
-use crate::file::{config_dir, data_dir, read_bounded_file};
-use crate::vault::VaultError;
+use crate::file::{config_dir, data_dir};
 use std::path::PathBuf;
 static SYNC: Mutex<()> = Mutex::const_new(());
 struct AbortTask(tokio::task::JoinHandle<()>);
@@ -15,11 +14,6 @@ impl Drop for AbortTask {
     }
 }
 
-struct DesktopHost<'a> {
-    worker: &'a VaultWorker,
-    stopping: Arc<AtomicBool>,
-}
-
 impl SyncHost for DesktopHost<'_> {
     fn client(&self) -> impl std::future::Future<Output = Result<CloudClient, String>> + Send {
         client()
@@ -27,40 +21,10 @@ impl SyncHost for DesktopHost<'_> {
     fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot, String>> + Send {
         let snapshot = self.worker.with_session(|session| {
             let vault = session.vault().ok_or("Unlock a vault first")?;
-            let path = vault.sync_path()?;
-            let state = binding(&path)?;
-            let mut bytes =
-                read_bounded_file(&path, crate::cloud::MAX_BYTES).map_err(|e| e.to_string())?;
-            Ok(Snapshot {
-                path,
-                id: hex::encode(vault.vault_id()),
-                session: session.session_id().ok_or(crate::protocol::VAULT_LOCKED)?,
-                bytes: std::mem::take(&mut *bytes),
-                state,
-            })
+            let id = session.session_id().ok_or(crate::protocol::VAULT_LOCKED)?;
+            Snapshot::of(vault, id)
         });
         async move { snapshot.await? }
-    }
-    fn with_unlocked<T: Send + 'static>(
-        &self,
-        expected: String,
-        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
-    ) -> impl std::future::Future<Output = Result<T, String>> + Send {
-        let stopping = self.stopping.clone();
-        let applied = self.worker.with_session(move |session| {
-            if stopping.load(Ordering::Acquire) {
-                return Err("Server is stopping; the vault was not changed".into());
-            }
-            if session.session_id().as_ref() != Some(&expected) {
-                return Err("Vault locked or switched during sync; nothing was applied".into());
-            }
-            session
-                .with_unlocked(|vault, credentials| {
-                    apply(vault, credentials).map_err(VaultError::Persistence)
-                })
-                .map_err(|e| e.to_string())
-        });
-        async move { applied.await? }
     }
     fn directory(&self) -> PathBuf {
         data_dir()

@@ -1,3 +1,7 @@
+"use strict";
+// Page entry; scripts/build_extension.cjs bundles it into passkey_prompt_runtime.js.
+const PasswordManagerUiTransport = require("./ui_transport.js");
+require("./ui_session.js");
 // The decision window for one browser passkey request. It shows the site from
 // the browser (never from the page) and needs an explicit choice.
 const token = new URLSearchParams(location.search).get("token");

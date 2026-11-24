@@ -50,7 +50,10 @@ pub async fn run(
                 CliCommands::New { .. } | CliCommands::Unlock { .. }
             ) {
                 if let Err(error) = password_manager::server::start(port) {
-                    let hint = if error.contains("in use") {
+                    let hint = if matches!(
+                        error,
+                        password_manager::server::StartError::PortInUse(_)
+                    ) {
                         format!(
                             " Another program uses port {port}. Choose a free one with `pm config \
                              --server-port PORT`, or use `--port PORT` for this command."
@@ -58,6 +61,7 @@ pub async fn run(
                     } else {
                         String::new()
                     };
+                    let error = error.to_string();
                     let error = error.trim_end_matches('.');
                     console.exit_error(&format!("Could not start the server: {error}.{hint}"), 1);
                 }

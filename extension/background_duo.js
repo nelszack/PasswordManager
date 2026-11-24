@@ -2,11 +2,7 @@ const PasswordManagerBackgroundDuo = {
     create({ chrome, security, protocol, detection, nativeRequest, refreshStatus, crypto, setTimeout }) {
         const sessions = new Map(),
             tokens = new Map(),
-            windows = (
-                typeof PasswordManagerDecisionWindows === "undefined"
-                    ? require("./background_windows.js")
-                    : PasswordManagerDecisionWindows
-            ).create({
+            windows = require("./background_windows.js").create({
                 chrome,
                 page: "duo_prompt.html",
                 width: 440,
@@ -337,4 +333,4 @@ const PasswordManagerBackgroundDuo = {
         return { observe, data, complete, rememberLogin, invalidate, windowRemoved };
     },
 };
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundDuo;
+module.exports = PasswordManagerBackgroundDuo;

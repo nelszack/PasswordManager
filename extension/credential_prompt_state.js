@@ -1,8 +1,4 @@
-(function (root, factory) {
-    const api = factory();
-    root.PasswordManagerCredentialPrompt = api;
-    if (typeof module === "object" && module.exports) module.exports = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     function accountUsername(account) {
@@ -162,4 +158,4 @@
     }
 
     return { accountUsername, accountsFromLookup, chooseTarget, describe, operation };
-});
+})();

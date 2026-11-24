@@ -222,7 +222,7 @@ pub(super) async fn run(
                     "Native messaging host updated at {}",
                     path.display()
                 )),
-                Err(error) => console.exit_error(&error, 1),
+                Err(error) => console.exit_error(&error.to_string(), 1),
             },
             NativeHostCommands::Install {
                 extension_id,
@@ -232,7 +232,7 @@ pub(super) async fn run(
                     "Native messaging host installed at {}",
                     path.display()
                 )),
-                Err(error) => console.exit_error(&error, 1),
+                Err(error) => console.exit_error(&error.to_string(), 1),
             },
             NativeHostCommands::Run => {
                 if let Err(error) = native_messaging::run(client) {
@@ -314,7 +314,7 @@ pub(super) async fn run(
         }
         CliCommands::Start => match start(port) {
             Ok(message) => console.print_success(&message),
-            Err(error) => console.exit_error(&error, 1),
+            Err(error) => console.exit_error(&error.to_string(), 1),
         },
         CliCommands::Run if !server_running() => {
             if let Err(error) = server(

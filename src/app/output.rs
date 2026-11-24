@@ -1,5 +1,5 @@
 use password_manager::{
-    client::{AuthenticatedClient, render_response, terminal_output},
+    client::{AuthenticatedClient, Style, render_response, terminal_output},
     protocol::{RequestEnvelope, ResponsePayload},
     types::ServerCommand,
 };
@@ -57,8 +57,8 @@ fn terminal_width() -> Option<usize> {
 }
 
 /// Typographic punctuation in messages (never in secrets or item values) as ASCII.
-fn plain_punctuation(text: &str) -> String {
-    if !password_manager::client::presentation::ascii() {
+fn plain_punctuation(style: Style, text: &str) -> String {
+    if !style.ascii {
         return text.to_owned();
     }
     text.replace(['\u{201c}', '\u{201d}'], "\"")
@@ -97,15 +97,21 @@ fn cli_error(message: &str) -> String {
 pub struct Output {
     json: bool,
     quiet: bool,
+    style: Style,
 }
 impl Output {
     pub fn new(json: bool, quiet: bool) -> Self {
-        use password_manager::client::presentation;
-        presentation::set_ascii(ascii_wanted());
+        let mut style = Style::default();
+        style.ascii = ascii_wanted();
         if let Some(width) = terminal_width() {
-            presentation::set_width(width);
+            style = style.with_width(width);
         }
-        Self { json, quiet }
+        Self { json, quiet, style }
+    }
+    /// The same output, showing item notes in details (`get --reveal-secrets`).
+    pub fn revealing_notes(mut self, reveal: bool) -> Self {
+        self.style.reveal_notes = reveal;
+        self
     }
     pub fn is_json(&self) -> bool {
         self.json
@@ -127,7 +133,7 @@ impl Output {
             eprintln!(
                 "{} {}",
                 label("Error:", "31"),
-                terminal_output(&plain_punctuation(&cli_error(error)))
+                terminal_output(&plain_punctuation(self.style, &cli_error(error)))
             );
         }
     }
@@ -227,7 +233,7 @@ impl Output {
     /// Informational stderr line that keeps stdout clean for pipes and JSON.
     pub fn print_note(&self, note: &str) {
         if !self.quiet && !self.json {
-            eprintln!("{}", terminal_output(&plain_punctuation(note)));
+            eprintln!("{}", terminal_output(&plain_punctuation(self.style, note)));
         }
     }
     pub fn print_warning(&self, warning: &str) {
@@ -235,7 +241,7 @@ impl Output {
             eprintln!(
                 "{} {}",
                 label("Warning:", "33"),
-                terminal_output(&plain_punctuation(warning))
+                terminal_output(&plain_punctuation(self.style, warning))
             );
         }
     }
@@ -316,7 +322,8 @@ impl Output {
         } else if !self.quiet || code != 0 {
             if code != 0 {
                 if !matches!(response.payload, ResponsePayload::Message(_)) {
-                    let rendered = zeroize::Zeroizing::new(render_response(&response.payload));
+                    let rendered =
+                        zeroize::Zeroizing::new(render_response(self.style, &response.payload));
                     if !self.quiet {
                         self.print_success(&rendered);
                     }
@@ -343,13 +350,14 @@ impl Output {
                 }
             } else if let ResponsePayload::ItemPage(page) = &response.payload {
                 self.print_success(&password_manager::client::presentation::item_page(
-                    page, empty_hint,
+                    self.style, page, empty_hint,
                 ));
             } else if let ResponsePayload::Message(message) = &response.payload {
                 // Status messages carry no secrets, so their punctuation can be plain.
-                self.print_success(&plain_punctuation(message));
+                self.print_success(&plain_punctuation(self.style, message));
             } else {
-                let rendered = zeroize::Zeroizing::new(render_response(&response.payload));
+                let rendered =
+                    zeroize::Zeroizing::new(render_response(self.style, &response.payload));
                 self.print_success(&rendered);
             }
         }

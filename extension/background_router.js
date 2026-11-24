@@ -213,4 +213,4 @@ const PasswordManagerBackgroundRouter = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundRouter;
+module.exports = PasswordManagerBackgroundRouter;

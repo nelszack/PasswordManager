@@ -53,4 +53,4 @@ const PasswordManagerDecisionWindows = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerDecisionWindows;
+module.exports = PasswordManagerDecisionWindows;

@@ -117,6 +117,8 @@ type server struct {
 	usageReady bool
 	vaultLocks map[string]*vaultLock
 	slots      chan struct{}
+	routesOnce sync.Once
+	mux        *http.ServeMux
 }
 
 type vaultLock struct {
@@ -345,280 +347,331 @@ func (s *server) head(id string) (snapshot, error) {
 	}
 	return h, err
 }
+
+// Every request gets its own deadlines (there are no fixed body timeouts) and
+// is never cached. Routing, authentication, and the transfer-slot limit are
+// layered on per route in routes.
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// The server has no fixed body timeouts; every request sets its own.
 	// Errors mean the writer does not support deadlines (as in tests).
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(requestTimeout))
 	_ = rc.SetWriteDeadline(time.Now().Add(requestTimeout))
 	w.Header().Set("Cache-Control", "no-store")
-	if r.Method == "GET" && r.URL.Path == "/v1/health" {
+	s.routesOnce.Do(s.routes)
+	s.mux.ServeHTTP(w, r)
+}
+
+func (s *server) routes() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, versionInfo())
-		return
-	}
-	if !s.authorized(r) {
-		http.Error(w, "unauthorized", 401)
-		return
-	}
-	if r.URL.Path == "/v1/events" && r.Method == "GET" {
-		s.mu.Lock()
-		generation, changed := s.generation, s.changed
-		s.mu.Unlock()
-		if r.URL.Query().Get("since") == generation {
-			timer := time.NewTimer(25 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-changed:
-			case <-timer.C:
-			case <-r.Context().Done():
-				return
-			}
-		}
-		s.mu.Lock()
-		generation = s.generation
-		s.mu.Unlock()
-		writeJSON(w, map[string]string{"generation": generation})
-		return
-	}
-	select {
-	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
-	default:
-		http.Error(w, "busy", 503)
-		return
-	}
-	if r.URL.Path == "/v1/vaults" && r.Method == "GET" {
-		entries, err := os.ReadDir(filepath.Join(s.root, "vaults"))
-		if err != nil {
-			http.Error(w, "storage unavailable", 500)
+	})
+	mux.Handle("GET /v1/events", s.auth(s.events))
+	mux.Handle("GET /v1/vaults", s.auth(s.limited(s.listVaults)))
+	// GET patterns also serve HEAD.
+	mux.Handle("GET /v1/vaults/{id}", s.auth(s.limited(s.vault(s.getVault))))
+	mux.Handle("PUT /v1/vaults/{id}", s.auth(s.limited(s.vault(s.putVault))))
+	// Unknown paths still require a device credential before answering 404.
+	mux.Handle("/", s.auth(http.NotFound))
+	s.mux = mux
+}
+
+// auth refuses requests without a registered device token.
+func (s *server) auth(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(r) {
+			http.Error(w, "unauthorized", 401)
 			return
 		}
-		vaults := []vaultInfo{}
-		for _, e := range entries {
-			if e.IsDir() && validID(e.Name(), 16) {
-				release := s.lockVault(e.Name())
-				h, err := s.head(e.Name())
-				release()
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				if err != nil {
-					http.Error(w, "invalid vault metadata", 500)
-					return
-				}
-				vaults = append(vaults, vaultInfo{e.Name(), h})
-			}
+		next(w, r)
+	})
+}
+
+// limited bounds concurrent storage work; extra requests are refused, not queued.
+func (s *server) limited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.slots <- struct{}{}:
+			defer func() { <-s.slots }()
+		default:
+			http.Error(w, "busy", 503)
+			return
 		}
-		writeJSON(w, vaults)
-		return
+		next(w, r)
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/v1/vaults/")
-	if !strings.HasPrefix(r.URL.Path, "/v1/vaults/") || !validID(id, 16) {
-		http.NotFound(w, r)
-		return
+}
+
+// vaultRequest is one request for a vault, holding its per-vault lock until
+// unlock (which is idempotent and also runs when the handler returns).
+type vaultRequest struct {
+	id      string
+	head    snapshot
+	exists  bool
+	release func()
+	locked  bool
+}
+
+func (v *vaultRequest) unlock() {
+	if v.locked {
+		v.release()
+		v.locked = false
 	}
-	release := s.lockVault(id)
-	locked := true
-	unlock := func() {
-		if locked {
-			release()
-			locked = false
-		}
-	}
-	defer unlock()
-	h, err := s.head(id)
-	exists := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		http.Error(w, "storage unavailable", 500)
-		return
-	}
-	switch r.Method {
-	case "GET", "HEAD":
-		if !exists {
+}
+
+// vault validates the vault ID, locks it, and reads its current head.
+func (s *server) vault(next func(http.ResponseWriter, *http.Request, *vaultRequest)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !validID(id, 16) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("ETag", `"`+h.Version+`"`)
-		w.Header().Set("Content-Type", "application/octet-stream")
-		f, err := os.Open(filepath.Join(s.root, "vaults", id, h.Version+".vault"))
-		if err != nil {
-			http.Error(w, "snapshot unavailable", 500)
-			return
-		}
-		defer f.Close()
-		info, err := f.Stat()
-		if err != nil || info.Size() != h.Size {
-			http.Error(w, "invalid snapshot", 500)
-			return
-		}
-		// Snapshots are immutable. An open descriptor remains valid if a later
-		// commit prunes its directory entry while this client is downloading.
-		unlock()
-		_ = rc.SetWriteDeadline(transferDeadline(h.Size))
-		http.ServeContent(w, r, "vault", time.Time{}, f)
-	case "PUT":
-		if !uploadMatches(r, h, exists) {
-			http.Error(w, "vault changed; reconcile both copies", 412)
-			return
-		}
-		// Reserve quota without holding any lock during the network transfer.
-		s.mu.Lock()
-		if err := s.initializeUsage(); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "storage unavailable", 500)
-			return
-		}
-		if r.ContentLength > maxVault {
-			s.mu.Unlock()
-			http.Error(w, "upload exceeds the vault size limit", 413)
-			return
-		}
-		if r.ContentLength > 0 && s.budget-s.used-s.reserved-maxHeadBytes < r.ContentLength {
-			// Retained history must not lock a growing vault out of the quota.
-			s.mu.Unlock()
-			s.reclaimHistory(id, h, exists, r.ContentLength)
-			s.mu.Lock()
-		}
-		limit := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
-		if limit <= 0 || r.ContentLength > limit {
-			s.mu.Unlock()
-			http.Error(w, "storage quota reached", 507)
-			return
-		}
-		available := limit
-		if r.ContentLength > 0 {
-			available = r.ContentLength
-		}
-		reservation := available + maxHeadBytes
-		s.reserved += reservation
-		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			s.reserved -= reservation
-			s.mu.Unlock()
-		}()
-		unlock()
-		dir := filepath.Join(s.root, "vaults", id)
-		// Stage outside vault directories so an interrupted first upload is never listed.
-		f, err := os.CreateTemp(s.root, ".upload-")
-		if err != nil {
-			http.Error(w, "storage unavailable", 500)
-			return
-		}
-		defer os.Remove(f.Name())
-		finish := transferDeadline(maxVault)
-		_ = rc.SetWriteDeadline(finish)
-		disk := &diskWriter{f: f}
-		n, err := io.Copy(disk, io.LimitReader(progressReader{r.Body, rc, finish}, available+1))
-		// The reply itself gets an ordinary deadline from here on.
-		_ = rc.SetReadDeadline(time.Time{})
-		_ = rc.SetWriteDeadline(time.Now().Add(requestTimeout))
-		if err != nil {
-			f.Close()
-			code, message := uploadFailure(disk.err, err)
-			http.Error(w, message, code)
-			return
-		}
-		if n == 0 {
-			f.Close()
-			http.Error(w, "empty upload", 400)
-			return
-		}
-		if n > available {
-			f.Close()
-			if limit >= maxVault {
-				http.Error(w, "upload exceeds the vault size limit", 413)
-			} else {
-				http.Error(w, "storage quota reached", 507)
-			}
-			return
-		}
-		if err = f.Sync(); err != nil {
-			f.Close()
-			http.Error(w, "could not save upload", 500)
-			return
-		}
-		if err = f.Close(); err != nil {
-			http.Error(w, "could not save upload", 500)
-			return
-		}
-		// Serialize the durable commit, not the network transfer. A competing
-		// writer may have advanced this vault while this body was arriving.
-		release = s.lockVault(id)
-		locked = true
-		current, err := s.head(id)
+		v := &vaultRequest{id: id, release: s.lockVault(id), locked: true}
+		defer v.unlock()
+		h, err := s.head(id)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "storage unavailable", 500)
 			return
 		}
-		if !uploadMatches(r, current, err == nil) {
-			http.Error(w, "vault changed; reconcile both copies", 412)
-			return
-		}
-		beforeBytes, err := directoryUsage(dir)
-		if err != nil {
-			http.Error(w, "storage unavailable", 500)
-			return
-		}
-		// Reconcile even partially committed/failed writes, including orphan snapshots.
-		// Only this vault is scanned; unrelated commits continue concurrently.
-		accounted := false
-		reconcile := func() {
-			if accounted {
-				return
-			}
-			accounted = true
-			afterBytes, scanErr := directoryUsage(dir)
-			s.mu.Lock()
-			if scanErr != nil {
-				s.used += reservation
-			} else {
-				s.used += afterBytes - beforeBytes
-			}
-			s.reserved -= reservation
-			reservation = 0
-			s.mu.Unlock()
-		}
-		defer reconcile()
-		if err = os.MkdirAll(dir, 0700); err != nil {
-			http.Error(w, "storage unavailable", 500)
-			return
-		}
-		if err = syncDirectory(filepath.Dir(dir)); err != nil {
-			http.Error(w, "could not save vault directory", 500)
-			return
-		}
-		version := randomID()
-		if err = os.Rename(f.Name(), filepath.Join(dir, version+".vault")); err != nil {
-			http.Error(w, "could not save snapshot", 500)
-			return
-		}
-		next := snapshot{version, n}
-		b, _ := json.Marshal(next)
-		if err = atomicWrite(filepath.Join(dir, "head.json"), b); err != nil {
-			http.Error(w, "commit outcome uncertain; check current version", 500)
-			return
-		}
-		// Keep current plus a small number of previous versions. Never delete current.
-		previous := history(dir, version)
-		for i := 0; i < len(previous)-max(s.keep-1, 0); i++ {
-			_ = os.Remove(filepath.Join(dir, previous[i].Name()))
-		}
-		s.mu.Lock()
-		close(s.changed)
-		s.changed = make(chan struct{})
-		s.generation = randomID()
-		w.Header().Set("ETag", `"`+version+`"`)
-		s.mu.Unlock()
-		// Release accounting and this vault before a slow client reads its reply.
-		reconcile()
-		unlock()
-		writeJSON(w, next)
-	default:
-		w.Header().Set("Allow", "GET, HEAD, PUT")
-		http.Error(w, "method not allowed", 405)
+		v.head, v.exists = h, err == nil
+		next(w, r, v)
 	}
 }
+
+// events long-polls until the change generation differs from `since`.
+func (s *server) events(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	generation, changed := s.generation, s.changed
+	s.mu.Unlock()
+	if r.URL.Query().Get("since") == generation {
+		timer := time.NewTimer(25 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-changed:
+		case <-timer.C:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	s.mu.Lock()
+	generation = s.generation
+	s.mu.Unlock()
+	writeJSON(w, map[string]string{"generation": generation})
+}
+
+func (s *server) listVaults(w http.ResponseWriter, r *http.Request) {
+	entries, err := os.ReadDir(filepath.Join(s.root, "vaults"))
+	if err != nil {
+		http.Error(w, "storage unavailable", 500)
+		return
+	}
+	vaults := []vaultInfo{}
+	for _, e := range entries {
+		if e.IsDir() && validID(e.Name(), 16) {
+			release := s.lockVault(e.Name())
+			h, err := s.head(e.Name())
+			release()
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				http.Error(w, "invalid vault metadata", 500)
+				return
+			}
+			vaults = append(vaults, vaultInfo{e.Name(), h})
+		}
+	}
+	writeJSON(w, vaults)
+}
+
+func (s *server) getVault(w http.ResponseWriter, r *http.Request, v *vaultRequest) {
+	rc := http.NewResponseController(w)
+	id, h := v.id, v.head
+	if !v.exists {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("ETag", `"`+h.Version+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	f, err := os.Open(filepath.Join(s.root, "vaults", id, h.Version+".vault"))
+	if err != nil {
+		http.Error(w, "snapshot unavailable", 500)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() != h.Size {
+		http.Error(w, "invalid snapshot", 500)
+		return
+	}
+	// Snapshots are immutable. An open descriptor remains valid if a later
+	// commit prunes its directory entry while this client is downloading.
+	v.unlock()
+	_ = rc.SetWriteDeadline(transferDeadline(h.Size))
+	http.ServeContent(w, r, "vault", time.Time{}, f)
+}
+
+func (s *server) putVault(w http.ResponseWriter, r *http.Request, v *vaultRequest) {
+	rc := http.NewResponseController(w)
+	id, h, exists := v.id, v.head, v.exists
+	if !uploadMatches(r, h, exists) {
+		http.Error(w, "vault changed; reconcile both copies", 412)
+		return
+	}
+	// Reserve quota without holding any lock during the network transfer.
+	s.mu.Lock()
+	if err := s.initializeUsage(); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "storage unavailable", 500)
+		return
+	}
+	if r.ContentLength > maxVault {
+		s.mu.Unlock()
+		http.Error(w, "upload exceeds the vault size limit", 413)
+		return
+	}
+	if r.ContentLength > 0 && s.budget-s.used-s.reserved-maxHeadBytes < r.ContentLength {
+		// Retained history must not lock a growing vault out of the quota.
+		s.mu.Unlock()
+		s.reclaimHistory(id, h, exists, r.ContentLength)
+		s.mu.Lock()
+	}
+	limit := min(int64(maxVault), s.budget-s.used-s.reserved-maxHeadBytes)
+	if limit <= 0 || r.ContentLength > limit {
+		s.mu.Unlock()
+		http.Error(w, "storage quota reached", 507)
+		return
+	}
+	available := limit
+	if r.ContentLength > 0 {
+		available = r.ContentLength
+	}
+	reservation := available + maxHeadBytes
+	s.reserved += reservation
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.reserved -= reservation
+		s.mu.Unlock()
+	}()
+	v.unlock()
+	dir := filepath.Join(s.root, "vaults", id)
+	// Stage outside vault directories so an interrupted first upload is never listed.
+	f, err := os.CreateTemp(s.root, ".upload-")
+	if err != nil {
+		http.Error(w, "storage unavailable", 500)
+		return
+	}
+	defer os.Remove(f.Name())
+	finish := transferDeadline(maxVault)
+	_ = rc.SetWriteDeadline(finish)
+	disk := &diskWriter{f: f}
+	n, err := io.Copy(disk, io.LimitReader(progressReader{r.Body, rc, finish}, available+1))
+	// The reply itself gets an ordinary deadline from here on.
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Now().Add(requestTimeout))
+	if err != nil {
+		f.Close()
+		code, message := uploadFailure(disk.err, err)
+		http.Error(w, message, code)
+		return
+	}
+	if n == 0 {
+		f.Close()
+		http.Error(w, "empty upload", 400)
+		return
+	}
+	if n > available {
+		f.Close()
+		if limit >= maxVault {
+			http.Error(w, "upload exceeds the vault size limit", 413)
+		} else {
+			http.Error(w, "storage quota reached", 507)
+		}
+		return
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		http.Error(w, "could not save upload", 500)
+		return
+	}
+	if err = f.Close(); err != nil {
+		http.Error(w, "could not save upload", 500)
+		return
+	}
+	// Serialize the durable commit, not the network transfer. A competing
+	// writer may have advanced this vault while this body was arriving.
+	v.release, v.locked = s.lockVault(id), true
+	current, err := s.head(id)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		http.Error(w, "storage unavailable", 500)
+		return
+	}
+	if !uploadMatches(r, current, err == nil) {
+		http.Error(w, "vault changed; reconcile both copies", 412)
+		return
+	}
+	beforeBytes, err := directoryUsage(dir)
+	if err != nil {
+		http.Error(w, "storage unavailable", 500)
+		return
+	}
+	// Reconcile even partially committed/failed writes, including orphan snapshots.
+	// Only this vault is scanned; unrelated commits continue concurrently.
+	accounted := false
+	reconcile := func() {
+		if accounted {
+			return
+		}
+		accounted = true
+		afterBytes, scanErr := directoryUsage(dir)
+		s.mu.Lock()
+		if scanErr != nil {
+			s.used += reservation
+		} else {
+			s.used += afterBytes - beforeBytes
+		}
+		s.reserved -= reservation
+		reservation = 0
+		s.mu.Unlock()
+	}
+	defer reconcile()
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		http.Error(w, "storage unavailable", 500)
+		return
+	}
+	if err = syncDirectory(filepath.Dir(dir)); err != nil {
+		http.Error(w, "could not save vault directory", 500)
+		return
+	}
+	version := randomID()
+	if err = os.Rename(f.Name(), filepath.Join(dir, version+".vault")); err != nil {
+		http.Error(w, "could not save snapshot", 500)
+		return
+	}
+	next := snapshot{version, n}
+	b, _ := json.Marshal(next)
+	if err = atomicWrite(filepath.Join(dir, "head.json"), b); err != nil {
+		http.Error(w, "commit outcome uncertain; check current version", 500)
+		return
+	}
+	// Keep current plus a small number of previous versions. Never delete current.
+	previous := history(dir, version)
+	for i := 0; i < len(previous)-max(s.keep-1, 0); i++ {
+		_ = os.Remove(filepath.Join(dir, previous[i].Name()))
+	}
+	s.mu.Lock()
+	close(s.changed)
+	s.changed = make(chan struct{})
+	s.generation = randomID()
+	w.Header().Set("ETag", `"`+version+`"`)
+	s.mu.Unlock()
+	// Release accounting and this vault before a slow client reads its reply.
+	reconcile()
+	v.unlock()
+	writeJSON(w, next)
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "Print sync server version and protocol as JSON")
 	healthCheck := flag.String("health-check", "", "Verify a running local server matches this executable")

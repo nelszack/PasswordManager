@@ -654,7 +654,7 @@ mod tests {
         assert!(outcome.incomplete);
         assert_eq!(outcome.report.breached[0].0.id, 1);
         assert_eq!(outcome.report.unchecked[0].id, 2);
-        let rendered = crate::client::presentation::audit(&outcome.report);
+        let rendered = crate::client::presentation::audit(Default::default(), &outcome.report);
         assert!(
             rendered.contains("Found in known breaches (1):"),
             "{rendered}"

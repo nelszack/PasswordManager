@@ -141,6 +141,13 @@ impl VaultSession {
             Self::Unlocked(live) => Some(&live.vault),
         }
     }
+    /// The cached credentials of the unlocked vault, for reading only.
+    pub(crate) fn credentials(&self) -> Option<&VaultCredentials> {
+        match self {
+            Self::Locked => None,
+            Self::Unlocked(live) => Some(&live.credentials),
+        }
+    }
     fn pin_key(&self) -> Option<([u8; 16], &[u8; 32])> {
         match self {
             Self::Unlocked(live) => match &live.credentials {
