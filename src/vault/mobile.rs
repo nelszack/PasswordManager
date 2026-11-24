@@ -1754,6 +1754,51 @@ mod sync_tests;
 mod tests {
     use super::test_support::*;
 
+    /// The Android app writes request JSON by hand (VaultApplication.kt and
+    /// VaultCommands.kt). Every operation name it sends must still exist here,
+    /// so a rename or removal fails this test instead of at runtime on a phone.
+    #[test]
+    fn android_app_sends_only_known_operations() {
+        let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("android/app/src/main/java/dev/nelszack/passwordmanager");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&sources).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "kt") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (call, tag) in [
+                ("request(", "op"),
+                ("transfer(", "op"),
+                ("command(", "operation"),
+            ] {
+                for (start, _) in text.match_indices(call) {
+                    let rest = text[start + call.len()..].trim_start();
+                    let Some(literal) = rest.strip_prefix('"') else {
+                        continue;
+                    };
+                    let name = &literal[..literal.find('"').unwrap()];
+                    let error = if tag == "op" {
+                        serde_json::from_value::<Request>(json!({ tag: name })).err()
+                    } else {
+                        serde_json::from_value::<ServerCommand>(json!({ tag: name })).err()
+                    };
+                    assert!(
+                        !error.is_some_and(|e| e.to_string().contains("unknown variant")),
+                        "{} sends unknown {tag} {name:?}",
+                        path.display()
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 40,
+            "found only {checked} operations in the Android sources"
+        );
+    }
+
     #[test]
     fn waiting_for_a_background_sync_ends_at_the_lock_signal() {
         use super::*;
