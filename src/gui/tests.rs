@@ -41,6 +41,22 @@ fn item() -> ItemDetail {
     }
 }
 
+/// A plain login row for list, filter and selection tests.
+pub(super) fn summary(id: usize) -> ItemSummary {
+    ItemSummary {
+        tags: vec![],
+        favorite: false,
+        id,
+        revision: 1,
+        name: format!("Item {id}"),
+        username: None,
+        kind: ItemKind::Login,
+        urls: vec![],
+        has_totp: false,
+        has_duo: false,
+    }
+}
+
 pub(super) fn server_reply(response: RpcResponse) -> Reply {
     Reply::Server {
         response: Box::new(response),
@@ -2183,23 +2199,16 @@ fn favorite_toggle_sends_a_request_without_opening_the_editor() {
 #[test]
 fn tag_and_favorite_filters_narrow_the_item_list() {
     let mut app = unlocked();
-    let summary = |id: usize, tags: &[&str], favorite: bool| ItemSummary {
+    let tagged = |id: usize, tags: &[&str], favorite: bool| ItemSummary {
         tags: tags.iter().map(|t| (*t).into()).collect(),
         favorite,
-        id,
-        revision: 1,
-        name: format!("Item {id}"),
-        username: None,
-        kind: ItemKind::Login,
-        urls: vec![],
-        has_totp: false,
-        has_duo: false,
+        ..summary(id)
     };
     app.query.clear();
     app.replace_items(vec![
-        summary(1, &["Work"], true),
-        summary(2, &["work", "Home"], false),
-        summary(3, &[], false),
+        tagged(1, &["Work"], true),
+        tagged(2, &["work", "Home"], false),
+        tagged(3, &[], false),
     ]);
     assert_eq!(app.matching_items().len(), 3);
     let _ = app.update(Message::FilterTag(Some("WORK".into())));
@@ -2230,18 +2239,6 @@ fn tag_and_favorite_filters_narrow_the_item_list() {
 #[test]
 fn adjacent_selection_follows_list_order_and_stops_at_the_ends() {
     let mut app = unlocked();
-    let summary = |id: usize| ItemSummary {
-        tags: vec![],
-        favorite: false,
-        id,
-        revision: 1,
-        name: format!("Item {id}"),
-        username: None,
-        kind: ItemKind::Login,
-        urls: vec![],
-        has_totp: false,
-        has_duo: false,
-    };
     app.query.clear();
     app.replace_items(vec![summary(1), summary(2), summary(3)]);
     app.item = None;
@@ -2369,18 +2366,6 @@ fn bulk_trash_confirms_then_changes_each_selected_item_in_turn() {
     let mut app = unlocked();
     app.editor = Editor::Closed;
     app.query.clear();
-    let summary = |id: usize| ItemSummary {
-        tags: vec![],
-        favorite: false,
-        id,
-        revision: 1,
-        name: format!("Item {id}"),
-        username: None,
-        kind: ItemKind::Login,
-        urls: vec![],
-        has_totp: false,
-        has_duo: false,
-    };
     app.replace_items(vec![summary(1), summary(2), summary(3)]);
     let _ = app.update(Message::ToggleSelecting);
     let _ = app.update(Message::SelectItem(1));

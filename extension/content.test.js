@@ -115,11 +115,31 @@ async function contentEnvironment(t) {
     settle,
     prompts: () =>
       messages.filter((message) => message.action === "openCredentialPrompt"),
+    remembered: () =>
+      messages.filter((message) => message.action === "setPendingCredentials"),
+    // Delivers a runtime message to every listener; "ignored" when none answers.
+    ask(message, sender = { id: "extension-id" }) {
+      return new Promise((resolve) => {
+        let answered = false;
+        for (const listener of runtimeListeners) {
+          if (listener(message, sender, resolve) === true) answered = true;
+        }
+        if (!answered) resolve("ignored");
+      });
+    },
     type(input, value) {
       input.value = value;
       document.dispatch("input", {
         target: input,
         composedPath: () => [input],
+      });
+    },
+    press(input, key = "Enter", event = {}) {
+      document.dispatch("keydown", {
+        key,
+        target: input,
+        composedPath: () => [input],
+        ...event,
       });
     },
     click(element, event = {}) {
@@ -169,6 +189,7 @@ test("other buttons prompt only once the page leaves the password step", async (
     "unchanged",
     "type toggled",
     "removed",
+    "removed after a slow sign-in request",
     "cleared",
     "hidden",
     "swapped for a text copy",
@@ -182,6 +203,10 @@ test("other buttons prompt only once the page leaves the password step", async (
       assert.equal(env.prompts().length, 0, "nothing opens at click time");
       if (scenario === "type toggled") env.password.type = "text";
       if (scenario === "removed") env.password.remove();
+      if (scenario === "removed after a slow sign-in request") {
+        await env.advance(1500);
+        env.password.remove();
+      }
       if (scenario === "cleared") env.password.value = "";
       if (scenario === "hidden") env.password.hiddenForTest = true;
       if (scenario === "swapped for a text copy") {
@@ -191,31 +216,14 @@ test("other buttons prompt only once the page leaves the password step", async (
         env.password.remove();
       }
       await env.advance(1000);
-      const expected = ["removed", "cleared", "hidden"].includes(scenario)
-        ? 1
-        : 0;
+      const expected = ["unchanged", "type toggled", "swapped for a text copy"].includes(scenario)
+        ? 0
+        : 1;
       assert.equal(env.prompts().length, expected);
       // The snapshot was captured before the page's handler changed the field.
       if (expected) assert.equal(env.prompts()[0].password, "secret");
     });
   }
-});
-
-test("Enter in a credential field prompts at once", async (t) => {
-  const env = await contentEnvironment(t);
-  env.type(env.username, "alice@example.com");
-  env.type(env.password, "secret");
-  env.document.dispatch("keydown", {
-    key: "Enter",
-    target: env.password,
-    composedPath: () => [env.password],
-  });
-  await env.settle();
-  assert.equal(env.prompts().length, 1);
-  const remembered = env.messages.filter(
-    (message) => message.action === "setPendingCredentials",
-  );
-  assert.equal(remembered.at(-1).pending.username, "alice@example.com");
 });
 
 test("buttons outside the password's form prompt only once the page leaves the password step", async (t) => {
@@ -234,10 +242,7 @@ test("buttons outside the password's form prompt only once the page leaves the p
       await env.advance(1000);
       const expected = scenario === "form-less login continue" ? 1 : 0;
       assert.equal(env.prompts().length, expected);
-      const remembered = env.messages.filter(
-        (message) => message.action === "setPendingCredentials",
-      );
-      assert.equal(remembered.at(-1).pending.username, "alice@example.com");
+      assert.equal(env.remembered().at(-1).pending.username, "alice@example.com");
     });
   }
 });
@@ -288,17 +293,8 @@ test("untrusted, composing, extension-owned and non-credential events are ignore
   env.type(env.username, "alice@example.com");
   env.type(env.password, "secret");
   env.click(env.submit, { isTrusted: false });
-  env.document.dispatch("keydown", {
-    key: "Enter",
-    isComposing: true,
-    target: env.password,
-    composedPath: () => [env.password],
-  });
-  env.document.dispatch("keydown", {
-    key: "a",
-    target: env.password,
-    composedPath: () => [env.password],
-  });
+  env.press(env.password, "Enter", { isComposing: true });
+  env.press(env.password, "a");
   const host = env.username.nextElementSibling;
   assert.equal(
     host.localName,
@@ -451,14 +447,7 @@ test("the fill shortcut opens the login picker only from the extension in the fo
 test("the toolbar popup fills the top frame's login form only through a claimed token", async (t) => {
   const env = await contentEnvironment(t);
   env.dom.flushFrames();
-  const ask = (message, sender = { id: "extension-id" }) =>
-    new Promise((resolve) => {
-      let answered = false;
-      for (const listener of env.chrome.runtime._listeners) {
-        if (listener(message, sender, (value) => resolve(value)) === true) answered = true;
-      }
-      if (!answered) resolve("ignored");
-    });
+  const { ask } = env;
   assert.equal(await ask({ action: "pmPopupFill", token: "t" }, { id: "other-extension" }), "ignored");
   assert.equal(await ask({ action: "pmPopupFill", token: 5 }), "ignored");
   const filled = await ask({ action: "pmPopupFill", token: "t" });
@@ -529,11 +518,7 @@ test("a change-password form with a mismatched confirmation never prompts", asyn
   env.type(form.next, "new-secret");
   env.type(form.confirm, "new-secre");
   env.click(form.save);
-  env.document.dispatch("keydown", {
-    key: "Enter",
-    target: form.confirm,
-    composedPath: () => [form.confirm],
-  });
+  env.press(form.confirm);
   await env.advance(5000);
   assert.equal(env.prompts().length, 0);
   // Fixing the typo and saving again still prompts.
@@ -543,29 +528,25 @@ test("a change-password form with a mismatched confirmation never prompts", asyn
   assert.equal(env.prompts().length, 1);
 });
 
-test("Enter in a new-password field prompts at once", async (t) => {
-  const env = await contentEnvironment(t);
-  const form = changePasswordForm(env, { current: false });
-  env.type(form.next, "new-secret");
-  env.type(form.confirm, "new-secret");
-  env.document.dispatch("keydown", {
-    key: "Enter",
-    target: form.confirm,
-    composedPath: () => [form.confirm],
+test("Enter in a credential field prompts at once", async (t) => {
+  await t.test("sign-in password", async (t) => {
+    const env = await contentEnvironment(t);
+    env.type(env.username, "alice@example.com");
+    env.type(env.password, "secret");
+    env.press(env.password);
+    await env.settle();
+    assert.deepEqual(env.prompts().map(({ password }) => password), ["secret"]);
+    assert.equal(env.remembered().at(-1).pending.username, "alice@example.com");
   });
-  await env.settle();
-  assert.deepEqual(env.prompts().map(({ password }) => password), ["new-secret"]);
-});
-
-test("a login step that leaves the password step within a few seconds still prompts", async (t) => {
-  const env = await contentEnvironment(t);
-  env.type(env.username, "alice@example.com");
-  env.type(env.password, "secret");
-  env.click(env.next);
-  await env.advance(1500);
-  env.password.remove();
-  await env.advance(1000);
-  assert.equal(env.prompts().length, 1);
+  await t.test("new-password confirmation", async (t) => {
+    const env = await contentEnvironment(t);
+    const form = changePasswordForm(env, { current: false });
+    env.type(form.next, "new-secret");
+    env.type(form.confirm, "new-secret");
+    env.press(form.confirm);
+    await env.settle();
+    assert.deepEqual(env.prompts().map(({ password }) => password), ["new-secret"]);
+  });
 });
 
 test("the toolbar popup fills a same-origin embedded frame only when asked for embedded frames", async (t) => {
@@ -573,14 +554,7 @@ test("the toolbar popup fills a same-origin embedded frame only when asked for e
   env.dom.flushFrames();
   env.dom.window.location.origin = "https://login.example";
   env.dom.window.top = {};
-  const ask = (message) =>
-    new Promise((resolve) => {
-      let answered = false;
-      for (const listener of env.chrome.runtime._listeners) {
-        if (listener(message, { id: "extension-id" }, (value) => resolve(value)) === true) answered = true;
-      }
-      if (!answered) resolve("ignored");
-    });
+  const { ask } = env;
   assert.equal(await ask({ action: "pmPopupFill", token: "t" }), "ignored", "first ask goes to the top frame");
   assert.equal(
     await ask({ action: "pmPopupFill", token: "t", embedded: true, origin: "https://other.example" }),
@@ -607,10 +581,7 @@ test("a top frame without a login form says so for the embedded-frame fallback",
   const env = await contentEnvironment(t);
   env.form.remove();
   env.dom.flushFrames();
-  const answer = await new Promise((resolve) => {
-    for (const listener of env.chrome.runtime._listeners)
-      listener({ action: "pmPopupFill", token: "t" }, { id: "extension-id" }, resolve);
-  });
+  const answer = await env.ask({ action: "pmPopupFill", token: "t" });
   assert.equal(answer.noForm, true);
   assert.match(answer.error, /No sign-in form/);
 });

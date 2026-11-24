@@ -327,16 +327,10 @@ fn rendered_screens_fit_supported_windows() {
         app.connection.session = Some("synthetic-session".into());
         app.items = (1..=3)
             .map(|id| ItemSummary {
-                tags: vec![],
-                favorite: false,
-                id,
-                revision: 1,
                 name: format!("Example account {id}"),
                 username: Some("alice@example.test".into()),
-                kind: ItemKind::Login,
                 urls: vec!["https://example.test".into()],
-                has_totp: false,
-                has_duo: false,
+                ..tests::summary(id)
             })
             .collect();
         render(&app, "items", width, 800, scale);
@@ -394,14 +388,11 @@ fn main_screens_render_in_dark_and_high_contrast_themes() {
             .map(|id| ItemSummary {
                 tags: vec!["work".into()],
                 favorite: id == 1,
-                id,
-                revision: 1,
                 name: format!("Example account {id}"),
                 username: Some("alice@example.test".into()),
-                kind: ItemKind::Login,
                 urls: vec!["https://example.test".into()],
                 has_totp: id == 2,
-                has_duo: false,
+                ..tests::summary(id)
             })
             .collect();
         render(&app, &format!("{prefix}-items"), 1060, 800, 1.0);
@@ -476,16 +467,10 @@ fn large_synthetic_vault_search_finds_metadata_without_hiding_advanced_search() 
     app.connection.session = Some("synthetic-session".into());
     app.items = (0..2000)
         .map(|id| ItemSummary {
-            tags: vec![],
-            favorite: false,
-            id: id + 1,
-            revision: 1,
             name: format!("Account {id:04}"),
             username: Some(format!("user{id}@example.test")),
-            kind: ItemKind::Login,
             urls: vec![format!("https://site{id}.example.test")],
-            has_totp: false,
-            has_duo: false,
+            ..tests::summary(id + 1)
         })
         .collect();
     let started = Instant::now();
@@ -509,16 +494,8 @@ fn tool_search_trash_and_audit_pages_bound_widgets_and_keep_item_identity() {
     use password_manager::vault::{AuditLabel, AuditReport, ItemPage, TrashPage, TrashSummary};
     let items: Vec<_> = (0..103)
         .map(|id| ItemSummary {
-            tags: vec![],
-            favorite: false,
-            id,
-            revision: 1,
             name: format!("Paged item {id:03}"),
-            username: None,
-            kind: ItemKind::Login,
-            urls: vec![],
-            has_totp: false,
-            has_duo: false,
+            ..tests::summary(id)
         })
         .collect();
     let label = |item: &ItemSummary| AuditLabel {

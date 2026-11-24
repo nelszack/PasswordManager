@@ -1051,63 +1051,6 @@ impl Drop for ServerGuard {
 }
 
 #[test]
-fn invalid_generator_input_exits_with_cli_error() {
-    let output = pm()
-        .args(["genpass", "--length", "0", "--no-copy"])
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value '0'"));
-}
-
-#[test]
-fn local_commands_honor_json_and_quiet_output() {
-    let root = tempfile::tempdir().unwrap();
-    let json = isolated_pm(root.path())
-        .args([
-            "--json",
-            "genpass",
-            "--length",
-            "8",
-            "--no-copy",
-            "--no-stats",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        json.status.success(),
-        "{}",
-        String::from_utf8_lossy(&json.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(value["ok"], true);
-    assert!(!value["data"]["password"].as_str().unwrap().is_empty());
-    assert!(value["data"]["score"].is_u64());
-
-    let quiet = isolated_pm(root.path())
-        .args(["--quiet", "passcheck", "--password", "test-password"])
-        .output()
-        .unwrap();
-    assert!(quiet.status.success());
-    assert!(quiet.stdout.is_empty());
-    assert!(quiet.stderr.is_empty());
-}
-
-#[test]
-fn unavailable_server_returns_a_stable_failure_exit_code() {
-    let root = tempfile::tempdir().unwrap();
-    let output = run(root.path(), unused_port(), &["status"]);
-    assert_eq!(output.status.code(), Some(1));
-    // With no vault yet, the message points to `pm new` instead of `pm unlock`.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("No vault yet") || stderr.contains("Server is not running"),
-        "{stderr}"
-    );
-}
-
-#[test]
 fn config_and_completion_commands_persist_in_an_isolated_home() {
     let root = tempfile::tempdir().unwrap();
     let updated = isolated_pm(root.path())

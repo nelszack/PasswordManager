@@ -301,18 +301,24 @@ fn add_login(flow: &mut Flow, name: &str, username: &str, password: &str) {
     );
 }
 
+/// A new vault holding one login, "Maple Mail", which is left open.
+fn vault_with_mail() -> Flow {
+    let mut flow = Flow::start();
+    create_vault(&mut flow);
+    flow.expect_shows("Add your first item");
+    add_login(
+        &mut flow,
+        "Maple Mail",
+        "alice@example.test",
+        "synthetic-mail-1",
+    );
+    flow
+}
+
 #[test]
 fn create_a_vault_add_items_and_find_them() {
     sandboxed("create_a_vault_add_items_and_find_them", || {
-        let mut flow = Flow::start();
-        create_vault(&mut flow);
-        flow.expect_shows("Add your first item");
-        add_login(
-            &mut flow,
-            "Maple Mail",
-            "alice@example.test",
-            "synthetic-mail-1",
-        );
+        let mut flow = vault_with_mail();
         add_login(&mut flow, "Code Garden", "alice", "synthetic-code-1");
         flow.expect_shows("Maple Mail");
         flow.expect_shows("Code Garden");
@@ -338,14 +344,7 @@ fn create_a_vault_add_items_and_find_them() {
 #[test]
 fn edit_lock_and_unlock_keep_the_change() {
     sandboxed("edit_lock_and_unlock_keep_the_change", || {
-        let mut flow = Flow::start();
-        create_vault(&mut flow);
-        add_login(
-            &mut flow,
-            "Maple Mail",
-            "alice@example.test",
-            "synthetic-mail-1",
-        );
+        let mut flow = vault_with_mail();
         flow.click("Edit item");
         flow.send(Message::Username("bob@example.test".into()));
         flow.click("Save item");
@@ -380,14 +379,7 @@ fn edit_lock_and_unlock_keep_the_change() {
 #[test]
 fn trash_and_undo_restore_an_item() {
     sandboxed("trash_and_undo_restore_an_item", || {
-        let mut flow = Flow::start();
-        create_vault(&mut flow);
-        add_login(
-            &mut flow,
-            "Maple Mail",
-            "alice@example.test",
-            "synthetic-mail-1",
-        );
+        let mut flow = vault_with_mail();
         flow.click("Move to trash…");
         flow.click("Move to trash");
         assert!(flow.item_names().is_empty(), "{}", flow.app.notice);
@@ -402,14 +394,7 @@ fn an_edit_that_races_another_client_is_kept_for_review() {
         "an_edit_that_races_another_client_is_kept_for_review",
         || {
             use password_manager::types::{EntryChanges, EntryUpdate, Target, TypedUpdate};
-            let mut flow = Flow::start();
-            create_vault(&mut flow);
-            add_login(
-                &mut flow,
-                "Maple Mail",
-                "alice@example.test",
-                "synthetic-mail-1",
-            );
+            let mut flow = vault_with_mail();
             let id = flow.app.item.as_ref().unwrap().id;
             flow.click("Edit item");
             flow.send(Message::Username("bob@example.test".into()));

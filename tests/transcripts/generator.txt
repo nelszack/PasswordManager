@@ -2,6 +2,11 @@
 $ pm --json genpass --no-copy --no-stats --length 0
 ? 2
 {"argument":null,"code":2,"command":null,"error":"Invalid command arguments. Run `pm --help` for usage.","kind":"ValueValidation","ok":false}
+$ pm genpass --no-copy --length 0
+? 2
+! error: invalid value '0' for '--length <LENGTH>': 0 is not in 8..=255
+!
+! For more information, try '--help'.
 $ pm --json genpass --no-copy --no-stats --length 300
 ? 2
 {"argument":null,"code":2,"command":null,"error":"Invalid command arguments. Run `pm --help` for usage.","kind":"ValueValidation","ok":false}
@@ -27,3 +32,5 @@ $ pm --json --password-stdin passcheck
 < correct-horse-battery-staple-synthetic-9
 ? 0
 {"data":{"rating":"Strong","score":4},"ok":true}
+$ pm --quiet passcheck --password test-password
+? 0

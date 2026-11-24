@@ -357,24 +357,11 @@ fn mutation_responses_preserve_precommit_and_committed_durability_states() {
         (1, ResponseCode::Failure, "before"),
         (2, ResponseCode::Durability, "after"),
     ] {
-        let command = ServerCommand::Update(TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(1),
-                update: EntryChanges::default(),
-                password: Some("after".into()),
-            },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-            add_tags: vec![],
-            remove_tags: vec![],
-            clear_tags: false,
-            favorite: None,
-        });
+        let command = ServerCommand::Update(TypedUpdate::from(EntryUpdate {
+            target: Target::Id(1),
+            update: EntryChanges::default(),
+            password: Some("after".into()),
+        }));
         let outcome = crate::vault::with_write_fault(fault, || {
             execute_command(state.clone(), command, &mut session)
         });
@@ -393,27 +380,14 @@ fn mutation_responses_preserve_precommit_and_committed_durability_states() {
     // The final committed key remains usable for a subsequent durable mutation.
     let result = execute_command(
         state,
-        ServerCommand::Update(TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(1),
-                update: EntryChanges {
-                    name: Some("Updated".into()),
-                    ..Default::default()
-                },
-                password: None,
+        ServerCommand::Update(TypedUpdate::from(EntryUpdate {
+            target: Target::Id(1),
+            update: EntryChanges {
+                name: Some("Updated".into()),
+                ..Default::default()
             },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-            add_tags: vec![],
-            remove_tags: vec![],
-            clear_tags: false,
-            favorite: None,
-        }),
+            password: None,
+        })),
         &mut session,
     );
     assert_eq!(result.responses[0].code, 0);
@@ -726,27 +700,14 @@ async fn expected_revisions_prevent_overlapping_editor_writes() {
     let revision = vault.revision(1).unwrap();
     let worker = test_worker(session(vault), &state);
     let update = |name: &str| {
-        ServerCommand::Update(TypedUpdate {
-            entry: EntryUpdate {
-                target: Target::Id(1),
-                update: EntryChanges {
-                    name: Some(name.into()),
-                    ..Default::default()
-                },
-                password: None,
+        ServerCommand::Update(TypedUpdate::from(EntryUpdate {
+            target: Target::Id(1),
+            update: EntryChanges {
+                name: Some(name.into()),
+                ..Default::default()
             },
-            kind: None,
-            add_url: vec![],
-            remove_url: vec![],
-            clear_urls: false,
-            set_fields: vec![],
-            remove_fields: vec![],
-            clear_fields: false,
-            add_tags: vec![],
-            remove_tags: vec![],
-            clear_tags: false,
-            favorite: None,
-        })
+            password: None,
+        }))
     };
     let first = RequestEnvelope::new(update("First"))
         .with_operation(Some("editor-one".into()), Some(revision));
