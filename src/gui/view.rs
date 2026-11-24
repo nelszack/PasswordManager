@@ -1405,13 +1405,7 @@ fn attachments_section<'a>(app: &'a App, item: &'a ItemDetail) -> Element<'a, Me
 /// choices always match what is in the vault.
 fn tag_filters(app: &App) -> Element<'_, Message> {
     const ALL: &str = "All tags";
-    let mut tags: Vec<String> = Vec::new();
-    for tag in app.items.iter().flat_map(|item| &item.tags) {
-        if !tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-            tags.push(tag.clone());
-        }
-    }
-    tags.sort_by_key(|tag| tag.to_lowercase());
+    let tags = app.available_tags();
     let favorites = checkbox(app.ui.favorites_only)
         .label("Favorites only")
         .on_toggle(Message::FilterFavorites);
@@ -1419,7 +1413,8 @@ fn tag_filters(app: &App) -> Element<'_, Message> {
         return favorites.into();
     }
     let mut choices = vec![ALL.to_owned()];
-    choices.extend(tags);
+    choices.extend(tags.iter().cloned());
+    drop(tags);
     let selected = app.ui.tag.clone().unwrap_or_else(|| ALL.into());
     row![
         pick_list(choices, Some(selected), |choice| Message::FilterTag(

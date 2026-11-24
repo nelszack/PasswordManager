@@ -12,8 +12,47 @@ pub const MAX_ATTACHMENT_NAME_BYTES: usize = 255;
 pub(crate) struct Attachment {
     pub name: String,
     pub added: Timestamp,
+    /// Wiped by its own drop once no live or staged copy refers to it.
     #[serde(with = "raw_bytes")]
-    pub data: Vec<u8>,
+    #[zeroize(skip)]
+    pub data: AttachmentBytes,
+}
+
+/// Attachment content shared between the live vault and the staged copy of an
+/// item, so editing a field does not duplicate (and later wipe) every file on
+/// the item. The content is immutable; the last reference wipes it.
+#[derive(Clone)]
+pub(crate) struct AttachmentBytes(std::sync::Arc<Zeroizing<Vec<u8>>>);
+
+impl AttachmentBytes {
+    pub(crate) fn new(bytes: Zeroizing<Vec<u8>>) -> Self {
+        Self(std::sync::Arc::new(bytes))
+    }
+}
+
+impl From<Vec<u8>> for AttachmentBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::new(Zeroizing::new(bytes))
+    }
+}
+
+impl std::ops::Deref for AttachmentBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for AttachmentBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PartialEq for AttachmentBytes {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0[..] == other.0[..]
+    }
 }
 
 impl std::fmt::Debug for Attachment {
@@ -38,13 +77,23 @@ impl Attachment {
 /// MessagePack `bin` encoding: a plain `Vec<u8>` would be written as an array
 /// of integers, nearly doubling the size of binary content.
 mod raw_bytes {
+    use super::AttachmentBytes;
     use serde::{Deserializer, Serializer, de};
 
-    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        value: &AttachmentBytes,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(value)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<AttachmentBytes, D::Error> {
+        bytes(deserializer).map(AttachmentBytes::from)
+    }
+
+    fn bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
         struct Bytes;
         impl<'de> de::Visitor<'de> for Bytes {
             type Value = Vec<u8>;
@@ -180,7 +229,7 @@ impl Vault {
             item.attachments.push(Attachment {
                 name,
                 added: now.clone(),
-                data: data.to_vec(),
+                data: AttachmentBytes::new(data),
             });
             item.entry.modified = now;
             Ok((true, ()))
@@ -210,7 +259,7 @@ impl Vault {
         name: &str,
     ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         Ok(Zeroizing::new(
-            self.require_target(target)?.attachment(name)?.data.clone(),
+            self.require_target(target)?.attachment(name)?.data.to_vec(),
         ))
     }
 

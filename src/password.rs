@@ -147,7 +147,12 @@ pub fn generated_password_output(
 
 /// zxcvbn score (0–4) and its plain-language rating, for strength meters.
 pub fn strength_rating(pass: &str) -> (u8, &'static str) {
-    match zxcvbn(pass, &[]).score() {
+    rating(zxcvbn(pass, &[]).score())
+}
+
+/// The display rating for an already computed score.
+pub fn rating(score: Score) -> (u8, &'static str) {
+    match score {
         Score::Zero => (0, "Very weak"),
         Score::One => (1, "Weak"),
         Score::Two => (2, "Fair"),

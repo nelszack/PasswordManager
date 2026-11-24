@@ -154,13 +154,18 @@ impl App {
             }
             Message::Master(password) => {
                 self.ui.unlock_error = None;
+                // Validation and the meter share one strength estimate per keystroke.
+                let score = std::cell::OnceCell::new();
+                let scored =
+                    || *score.get_or_init(|| zxcvbn::zxcvbn(password.expose(), &[]).score());
                 self.ui.master_error = if self.connection.creating {
-                    password_manager::encryption::validate_new_password(password.expose()).err()
+                    password_manager::encryption::check_new_password(password.expose(), scored)
+                        .err()
                 } else {
                     None
                 };
                 self.ui.master_strength = (self.connection.creating && !password.is_empty())
-                    .then(|| password_manager::password::strength_rating(password.expose()));
+                    .then(|| password_manager::password::rating(scored()));
                 if self.ui.suggested_master.as_ref() != Some(&password) {
                     self.ui.suggested_master = None;
                 }

@@ -79,10 +79,20 @@ pub(crate) fn with_test_kdf_parameters<T>(
 
 /// Shared policy for new vault credentials, including desktop form feedback.
 pub fn validate_new_password(password: &str) -> Result<(), &'static str> {
+    check_new_password(password, || zxcvbn::zxcvbn(password, &[]).score())
+}
+
+/// [`validate_new_password`] with a strength score the caller may already
+/// have, so live feedback scores each keystroke once. `score` runs only for
+/// passwords long enough to need it.
+pub fn check_new_password(
+    password: &str,
+    score: impl FnOnce() -> zxcvbn::Score,
+) -> Result<(), &'static str> {
     if password.chars().count() < 14 {
         return Err("master passwords must contain at least 14 characters");
     }
-    if zxcvbn::zxcvbn(password, &[]).score() <= zxcvbn::Score::Two {
+    if score() <= zxcvbn::Score::Two {
         return Err(
             "master password is too predictable; use a unique generated password or passphrase",
         );
@@ -105,11 +115,12 @@ pub fn try_prompt_for_confirmed_password(
     let (first, second) = (first.as_str(), second.as_str());
     if crate::prompt::from_stdin() {
         // Scripts supply the value once; validation failures cannot be retried.
-        let value = crate::prompt::hidden(first, label)?;
+        // Wrapped at once so a rejected value is wiped too.
+        let mut value = Zeroizing::new(crate::prompt::hidden(first, label)?);
         if require_minimum {
             validate_new_password(&value).map_err(|error| format!("{error}."))?;
         }
-        return Ok(value);
+        return Ok(std::mem::take(&mut *value));
     }
     loop {
         let mut p1 = Zeroizing::new(crate::prompt::hidden(first, label)?);
