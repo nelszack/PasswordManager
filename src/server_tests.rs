@@ -1514,6 +1514,78 @@ async fn status_subscribers_receive_lock_changes_and_end_when_the_client_leaves(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_host_streams_pushed_status_until_the_browser_closes_the_port() {
+    use std::io::Write;
+    // Collects frames; the second flush fails, as writing to a closed port does.
+    struct Port {
+        bytes: Vec<u8>,
+        flushes: usize,
+        flushed: std::sync::mpsc::Sender<()>,
+    }
+    impl Write for Port {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            let _ = self.flushed.send(());
+            if self.flushes >= 2 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(())
+        }
+    }
+    let state = test_connection_state();
+    let worker = test_worker(session(sample_vault()), &state);
+    let (client, _root, _accepted) = serve_authenticated_clients(&state, worker.clone()).await;
+    let (flushed, first) = std::sync::mpsc::channel();
+    let host = tokio::task::spawn_blocking(move || {
+        let payload =
+            serde_json::to_vec(&serde_json::json!({ "id": 7, "action": "statusEvents" })).unwrap();
+        let mut input = (payload.len() as u32).to_ne_bytes().to_vec();
+        input.extend_from_slice(&payload);
+        let mut port = Port {
+            bytes: Vec::new(),
+            flushes: 0,
+            flushed,
+        };
+        let result = crate::native_messaging::run_with_io(
+            &client,
+            &mut std::io::Cursor::new(input),
+            &mut port,
+        );
+        (result, port.bytes)
+    });
+    tokio::task::spawn_blocking(move || first.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("initial status is forwarded");
+    worker.with_session(|live| live.lock()).await.unwrap();
+    let (result, bytes) = tokio::time::timeout(Duration::from_secs(5), host)
+        .await
+        .expect("the lock is pushed and a closed port ends the host")
+        .unwrap();
+    assert!(result.is_ok(), "a closed port is a normal end: {result:?}");
+    let mut frames = std::io::Cursor::new(bytes);
+    let mut read = || {
+        let mut length = [0u8; 4];
+        std::io::Read::read_exact(&mut frames, &mut length).unwrap();
+        let mut frame = vec![0u8; u32::from_ne_bytes(length) as usize];
+        std::io::Read::read_exact(&mut frames, &mut frame).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&frame).unwrap()
+    };
+    let (unlocked, locked) = (read(), read());
+    for frame in [&unlocked, &locked] {
+        assert_eq!(frame["id"], 7);
+        assert_eq!(frame["success"], true);
+    }
+    assert_eq!(unlocked["data"]["locked"], false);
+    assert!(unlocked["sessionId"].is_string());
+    assert_eq!(locked["data"]["locked"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_subscriptions_are_bounded_and_refused_ones_report_a_failure() {
     let state = test_connection_state();
     let worker = test_worker(VaultSession::Locked, &state);

@@ -166,3 +166,44 @@ test("recent status reuses a fresh result and refreshes a stale one", async () =
     await service.recent(10_000);
     assert.equal(calls.requests, 2);
 });
+
+test("open views follow pushed status, fall back to polling, and retry a failed stream later", async () => {
+    let onConnect, clock = 0, polled = 0, locked = true, subscriptions = [];
+    const intervals = new Map(), messages = [];
+    const event = capture => ({ addListener: capture || (() => {}) });
+    const service = status.create({ chrome: {
+        runtime: { onInstalled: event(), onStartup: event(), onConnect: event(fn => onConnect = fn), sendMessage(m) { messages.push(m); } },
+        alarms: { create() {}, onAlarm: event() },
+        action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setTitle() {} }, storage: { local: { set() {} } }
+    }, nativeRequest: async () => { polled++; return { success: true, nativeVersion: "0.1.0", protocolVersion: 1, data: { locked, version: "0.1.0", warning: null } }; },
+        subscribeStatus(handlers) { const s = { ...handlers, closed: false, close() { s.closed = true; } }; subscriptions.push(s); return s; },
+        state, version: "0.1.0", protocolVersion: 1, now: () => clock, invalidate() {}, cleanupExpired() {},
+        setInterval(fn) { intervals.set(1, fn); return 1; }, clearInterval(id) { intervals.delete(id); }
+    });
+    const pushed = locked => ({ success: true, nativeVersion: "0.1.0", protocolVersion: 1, data: { locked, version: "0.1.0", warning: null } });
+    let disconnect;
+    onConnect({ name: "pm-ui", onDisconnect: event(fn => disconnect = fn) });
+    assert.equal(subscriptions.length, 1);
+    assert.equal(intervals.size, 0, "a live stream needs no polling");
+    // A push that lands while the opening poll is in flight wins over it.
+    subscriptions[0].onStatus(pushed(false));
+    await new Promise(setImmediate);
+    assert.equal(messages.at(-1).status.locked, false);
+    assert.equal(polled, 1);
+    // A stream that ends after delivering falls back to polling and resubscribes once running.
+    subscriptions[0].onEnd({ error: "stopped", received: 1 });
+    assert.equal(intervals.size, 1);
+    await intervals.get(1)(); await new Promise(setImmediate);
+    assert.equal(subscriptions.length, 2);
+    assert.equal(intervals.size, 0);
+    // A stream that never delivers (an older host) waits before the next attempt.
+    subscriptions[1].onEnd({ error: "unsupported", received: 0 });
+    await intervals.get(1)(); await new Promise(setImmediate);
+    assert.equal(subscriptions.length, 2, "no immediate retry");
+    clock = 30_000;
+    await intervals.get(1)(); await new Promise(setImmediate);
+    assert.equal(subscriptions.length, 3);
+    disconnect();
+    assert.ok(subscriptions[2].closed);
+    assert.equal(intervals.size, 0);
+});

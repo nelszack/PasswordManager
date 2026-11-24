@@ -241,3 +241,37 @@ test("unknown operation outcomes require an explicit acknowledgement and pending
     assert.equal(env.bridge.unresolved().length, 0);
     assert.equal(env.ports[0].requests.length, 1, "acknowledgement does not replay the original mutation");
 });
+
+test("pushed status uses its own port, validates each record and reports why it ended", async () => {
+    const env = environment();
+    const version = require("./command_contract.js").protocolVersion;
+    const records = [], ends = [];
+    const listen = () => env.bridge.subscribeStatus({ onStatus: r => records.push(r), onEnd: e => ends.push(e) });
+    await assert.rejects(env.bridge.request("statusEvents"), /Unsupported native operation/);
+    listen();
+    const [port] = env.ports;
+    const { id, action } = port.requests[0];
+    assert.equal(action, "statusEvents");
+    const status = { locked: false, version: "0.1.0", warning: null };
+    port.receive({ id, protocolVersion: version, success: true, data: status });
+    port.receive({ id, protocolVersion: version, success: true, data: { ...status, locked: true } });
+    assert.deepEqual(records.map(r => r.data.locked), [false, true]);
+    port.disconnect();
+    assert.deepEqual(ends, [{ error: "Status subscription ended", received: 2 }]);
+    // An older host cannot parse the action and answers with ID 0.
+    listen();
+    env.ports[1].receive({ id: 0, protocolVersion: version, success: false, error: "invalid request" });
+    assert.deepEqual(ends[1], { error: "Native host does not support status events", received: 0 });
+    // A server that refuses the subscription ends it with its reason.
+    listen();
+    const refused = env.ports[2].requests[0].id;
+    env.ports[2].receive({ id: refused, protocolVersion: version, success: false, error: "Too many status subscribers" });
+    assert.deepEqual(ends[2], { error: "Too many status subscribers", received: 0 });
+    // Closing on purpose is not an unexpected end.
+    const handle = listen();
+    handle.close();
+    env.ports[3].disconnect();
+    assert.equal(ends.length, 3);
+    assert.equal(records.length, 2);
+    assert.equal(env.invalidations(), 0);
+});
