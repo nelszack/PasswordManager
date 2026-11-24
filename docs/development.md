@@ -479,6 +479,10 @@ job installs the app and test APKs on an API 34 emulator and runs
 its own process, including the emulator-only `MobileIntegrationTest`, plus
 `MobileRedesignTest` in light and dark with screenshots. The screenshots and
 per-class logs are uploaded as the `android-instrumentation` artifact. The
+script keeps the emulator awake and unlocked, and runs a failed class once more
+in a fresh process. A class that passes only on that retry is reported as flaky
+in a job warning, with its first log kept as `NAME.attempt1.txt`; a class that
+fails twice fails the job. The
 script refuses to run on anything but an emulator; locally, start one and run
 `ANDROID_SERIAL=emulator-5554 scripts/android_instrumentation.sh DIR`, where DIR
 holds both APKs from the same build.
