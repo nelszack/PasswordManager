@@ -221,7 +221,7 @@ async fn displayed_trash_ids_select_the_same_items_for_restore_and_purge() {
     let result = worker
         .execute(state.clone(), RequestEnvelope::new(ServerCommand::Trash))
         .await;
-    let listing = crate::client::render_response(&result.response().payload);
+    let listing = crate::client::render_response(Default::default(), &result.response().payload);
     let ids: Vec<usize> = listing
         .lines()
         .filter_map(|line| line.strip_prefix('#'))

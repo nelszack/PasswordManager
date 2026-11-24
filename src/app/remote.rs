@@ -183,6 +183,14 @@ pub(super) async fn run(
                         .map(|id| format!("Undo with `pm restore --id {id}`."))),
                 _ => None,
             };
+            let reveal_notes = matches!(
+                command,
+                CliCommands::Get {
+                    reveal_secrets: true,
+                    ..
+                }
+            );
+            let console = &console.revealing_notes(reveal_notes);
             let command = prepare_command(command, conf, console);
             if let Err(code) =
                 console.send_command_with_hint(client, command, empty_hint.as_deref())
@@ -655,7 +663,6 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             field,
             copy,
         } => {
-            password_manager::client::presentation::reveal_notes(reveal_secrets);
             if let Some(name) = field {
                 if copy {
                     ServerCommand::GetField {
