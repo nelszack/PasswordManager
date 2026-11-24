@@ -332,6 +332,31 @@ mod engine_tests {
         url: String,
         vault: Mutex<(Vault, VaultCredentials)>,
     }
+    impl crate::operations::VaultHost for Host {
+        fn with_session<T: Send + 'static>(
+            &self,
+            _: Option<String>,
+            apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, VaultError>
+            + Send
+            + 'static,
+        ) -> impl std::future::Future<Output = Result<Result<T, VaultError>, String>> + Send
+        {
+            let mut guard = self.vault.lock().unwrap();
+            let (vault, credentials) = &mut *guard;
+            let result = apply(vault, credentials);
+            async move { Ok(result) }
+        }
+        fn staleness(&self, _: Option<String>, _: Option<u64>) -> crate::operations::Stale {
+            std::sync::Arc::new(|| false)
+        }
+        fn blocking<T: Send + 'static>(
+            &self,
+            work: impl FnOnce() -> T + Send + 'static,
+        ) -> crate::operations::Blocking<T> {
+            let result = work();
+            Box::pin(async move { Some(result) })
+        }
+    }
     impl SyncHost for Host {
         fn client(&self) -> impl std::future::Future<Output = Result<CloudClient, String>> + Send {
             let client = CloudClient::with_token(&self.url, Zeroizing::new("1".repeat(64)));
@@ -349,16 +374,6 @@ mod engine_tests {
                 })
             });
             async move { snapshot }
-        }
-        fn with_unlocked<T: Send + 'static>(
-            &self,
-            _: String,
-            apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
-        ) -> impl std::future::Future<Output = Result<T, String>> + Send {
-            let mut guard = self.vault.lock().unwrap();
-            let (vault, credentials) = &mut *guard;
-            let result = apply(vault, credentials);
-            async move { result }
         }
         fn directory(&self) -> std::path::PathBuf {
             std::env::temp_dir()

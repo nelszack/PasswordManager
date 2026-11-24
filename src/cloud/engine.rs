@@ -7,7 +7,8 @@ use super::{
     Resolution, Uploaded, binding, digest, install_download, save_binding,
 };
 use crate::file::read_bounded_file;
-use crate::vault::{Vault, VaultCredentials};
+use crate::operations::VaultHost;
+use crate::vault::{Vault, VaultCredentials, VaultError};
 use std::{
     future::Future,
     path::{Path, PathBuf},
@@ -23,17 +24,40 @@ pub(crate) struct Snapshot {
     pub state: Option<Binding>,
 }
 
-pub(crate) trait SyncHost: Sync {
+impl Snapshot {
+    /// The open `vault`'s encrypted file and checkpoint for unlock `session`.
+    pub(crate) fn of(vault: &Vault, session: String) -> Result<Self, String> {
+        let path = vault.sync_path()?;
+        let state = binding(&path)?;
+        let mut bytes = read_bounded_file(&path, MAX_BYTES).map_err(|e| e.to_string())?;
+        Ok(Self {
+            id: hex::encode(vault.vault_id()),
+            session,
+            bytes: std::mem::take(&mut *bytes),
+            state,
+            path,
+        })
+    }
+}
+
+pub(crate) trait SyncHost: VaultHost {
     fn client(&self) -> impl Future<Output = Result<CloudClient, String>> + Send;
     fn snapshot(&self) -> impl Future<Output = Result<Snapshot, String>> + Send;
-    /// Runs `apply` on the unlocked vault only while `session` is still open.
-    fn with_unlocked<T: Send + 'static>(
-        &self,
-        session: String,
-        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
-    ) -> impl Future<Output = Result<T, String>> + Send;
     /// Where downloads and recovery copies are installed.
     fn directory(&self) -> PathBuf;
+}
+
+/// Runs `apply` on the host's unlocked vault only while `session` is still open.
+async fn with_unlocked<T: Send + 'static>(
+    host: &impl SyncHost,
+    session: String,
+    apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    host.with_session(Some(session), move |vault, credentials| {
+        apply(vault, credentials).map_err(VaultError::Persistence)
+    })
+    .await?
+    .map_err(|error| error.to_string())
 }
 
 /// How a sync treats a vault that has no checkpoint yet.
@@ -277,18 +301,17 @@ pub(crate) async fn sync_checked<H: SyncHost>(
     state.digest = Some(digest(&bytes));
     let path = snap.path;
     let unchanged = local_digest.clone();
-    let applied = host
-        .with_unlocked(snap.session, move |vault, key| {
-            unchanged_since(&path, &unchanged, checkpoint.as_ref())
-                .map_err(|_| "Local vault changed during download; both copies preserved")?;
-            // A snapshot that cannot be applied stays unapplicable until it changes.
-            if let Err(error) = vault.apply_cloud(key, &bytes) {
-                return Ok(Err(error));
-            }
-            save_binding(&path, &state)?;
-            Ok(Ok("Downloaded and applied cloud changes".to_owned()))
-        })
-        .await?;
+    let applied = with_unlocked(host, snap.session, move |vault, key| {
+        unchanged_since(&path, &unchanged, checkpoint.as_ref())
+            .map_err(|_| "Local vault changed during download; both copies preserved")?;
+        // A snapshot that cannot be applied stays unapplicable until it changes.
+        if let Err(error) = vault.apply_cloud(key, &bytes) {
+            return Ok(Err(error));
+        }
+        save_binding(&path, &state)?;
+        Ok(Ok("Downloaded and applied cloud changes".to_owned()))
+    })
+    .await?;
     applied.map_err(|message| stuck(Some(&version), message))
 }
 
@@ -359,7 +382,8 @@ pub(crate) async fn set_enabled<H: SyncHost>(
         None => new_binding(&host.client().await?.url, &snap.id, enabled),
     };
     let saved = state.clone();
-    host.with_unlocked(
+    with_unlocked(
+        host,
         snap.session,
         move |_: &mut Vault, _: &mut VaultCredentials| {
             unchanged_since(&snap.path, &digest(&snap.bytes), snap.state.as_ref())?;
@@ -440,7 +464,7 @@ pub(crate) async fn review<H: SyncHost>(
     let (snap, url, version, bytes) = fetch_for_review(host, expected).await?;
     let token = review_token(&snap, &url, &version, &bytes);
     let local_digest = digest(&snap.bytes);
-    host.with_unlocked(snap.session, move |vault, credentials| {
+    with_unlocked(host, snap.session, move |vault, credentials| {
         unchanged_since(&snap.path, &local_digest, snap.state.as_ref())?;
         let items = vault.cloud_conflicts(credentials, &bytes)?;
         Ok(ConflictReview { token, items })
@@ -469,46 +493,45 @@ pub(crate) async fn resolve<H: SyncHost>(
     let directory = host.directory();
     let local_digest = digest(&snap.bytes);
     let session = snap.session.clone();
-    let result = host
-        .with_unlocked(session, move |vault, credentials| {
-            unchanged_since(&snap.path, &local_digest, snap.state.as_ref())?;
-            let merged = vault.merge_cloud(credentials, &bytes, &resolution.choices)?;
-            // Preserve both complete encrypted snapshots, including history and
-            // trash, before committing any decision. Recovery copies never auto-sync.
-            let local_copy = install_download(
-                &directory,
-                "recovery-local-",
-                &url,
-                &snap.id,
-                None,
-                snap.bytes,
-                true,
-            )?;
-            let remote_digest = digest(&bytes);
-            let remote_copy = install_download(
-                &directory,
-                "recovery-cloud-",
-                &url,
-                &snap.id,
-                Some(version.clone()),
-                bytes,
-                true,
-            )?;
-            vault
-                .apply_prepared_cloud(credentials, merged)
-                .map_err(|error| error.to_string())?;
-            let mut state = snap.state.ok_or("Sync binding removed")?;
-            // The remote remains the upload's CAS base. A concurrent upload
-            // after review will cause normal sync to preserve both versions.
-            state.version = Some(version);
-            state.digest = Some(remote_digest);
-            save_binding(&snap.path, &state)?;
-            Ok(format!(
-                "Resolution saved. Encrypted recovery copies: {local_copy} (local), \
+    let result = with_unlocked(host, session, move |vault, credentials| {
+        unchanged_since(&snap.path, &local_digest, snap.state.as_ref())?;
+        let merged = vault.merge_cloud(credentials, &bytes, &resolution.choices)?;
+        // Preserve both complete encrypted snapshots, including history and
+        // trash, before committing any decision. Recovery copies never auto-sync.
+        let local_copy = install_download(
+            &directory,
+            "recovery-local-",
+            &url,
+            &snap.id,
+            None,
+            snap.bytes,
+            true,
+        )?;
+        let remote_digest = digest(&bytes);
+        let remote_copy = install_download(
+            &directory,
+            "recovery-cloud-",
+            &url,
+            &snap.id,
+            Some(version.clone()),
+            bytes,
+            true,
+        )?;
+        vault
+            .apply_prepared_cloud(credentials, merged)
+            .map_err(|error| error.to_string())?;
+        let mut state = snap.state.ok_or("Sync binding removed")?;
+        // The remote remains the upload's CAS base. A concurrent upload
+        // after review will cause normal sync to preserve both versions.
+        state.version = Some(version);
+        state.digest = Some(remote_digest);
+        save_binding(&snap.path, &state)?;
+        Ok(format!(
+            "Resolution saved. Encrypted recovery copies: {local_copy} (local), \
                  {remote_copy} (cloud)."
-            ))
-        })
-        .await?;
+        ))
+    })
+    .await?;
     Ok(match sync(host, expected, Bind::Existing).await {
         Ok(message) => Resolved {
             message: format!("{result}\n{message}"),

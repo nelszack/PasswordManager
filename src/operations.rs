@@ -22,16 +22,36 @@ pub(crate) enum Deferred {
     DuoEnrollment(Box<crate::vault::PreparedDuoEnrollment>),
 }
 
-/// Re-enters the session that started deferred work. Implementations must
-/// refuse if that session was locked or replaced in the meantime.
-pub(crate) trait SessionAccess: Sync {
-    fn with_unlocked<T: Send + 'static>(
+/// A vault owner (the desktop worker queue or the mobile vault mutex) that
+/// deferred work and cloud sync re-enter after running outside its lock.
+pub(crate) trait VaultHost: Sync {
+    /// Runs `apply` on the unlocked vault only while `session` is still the
+    /// open unlock. The outer error means it was locked, replaced, or stopped.
+    fn with_session<T: Send + 'static>(
         &self,
+        session: Option<String>,
         apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, crate::vault::VaultError>
         + Send
         + 'static,
     ) -> impl Future<Output = Result<Result<T, crate::vault::VaultError>, String>> + Send;
+
+    /// A predicate that turns true once `session` is no longer open or, when
+    /// given, the vault is no longer at `revision`. It never waits for the
+    /// owner, so long work can poll it.
+    fn staleness(&self, session: Option<String>, revision: Option<u64>) -> Stale;
+
+    /// Runs CPU-heavy work outside the owner; None if it could not run. The
+    /// future is boxed: an opaque one trips rustc's higher-ranked `Send` check
+    /// in the server's connection task.
+    fn blocking<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static)
+    -> Blocking<T>;
 }
+
+/// See [`VaultHost::blocking`].
+pub(crate) type Blocking<T> = std::pin::Pin<Box<dyn Future<Output = Option<T>> + Send>>;
+
+/// See [`VaultHost::staleness`].
+pub(crate) type Stale = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Commands that a vault-owning client (not a lifecycle manager) may run.
 pub(crate) fn expected_revision_matches(
@@ -936,9 +956,10 @@ pub(crate) fn authenticator_response(
     }
 }
 
-pub(crate) async fn finish_duo_enrollment(
+async fn finish_duo_enrollment(
     prepared: crate::vault::PreparedDuoEnrollment,
-    session: &impl SessionAccess,
+    host: &impl VaultHost,
+    session: Option<String>,
     reply: &mut Option<RpcResponse>,
 ) {
     let material = match prepared.enroll().await {
@@ -948,8 +969,10 @@ pub(crate) async fn finish_duo_enrollment(
             return;
         }
     };
-    let result = session
-        .with_unlocked(move |vault, key| vault.finish_duo_enrollment(&prepared, material, key))
+    let result = host
+        .with_session(session, move |vault, key| {
+            vault.finish_duo_enrollment(&prepared, material, key)
+        })
         .await;
     match result {
         Ok(Ok(output)) => respond_domain_result(Ok(output), reply),
@@ -964,7 +987,8 @@ pub(crate) async fn finish_duo_enrollment(
 
 pub(crate) async fn finish_duo(
     prepared: crate::vault::PreparedDuoPoll,
-    session: &impl SessionAccess,
+    host: &impl VaultHost,
+    session: Option<String>,
     reply: &mut Option<RpcResponse>,
 ) {
     let crate::vault::PreparedDuoPoll { request, review } = prepared;
@@ -975,8 +999,10 @@ pub(crate) async fn finish_duo(
             return;
         }
     };
-    let result = session
-        .with_unlocked(move |vault, key| vault.finish_duo_poll(&review, &body, key))
+    let result = host
+        .with_session(session, move |vault, key| {
+            vault.finish_duo_poll(&review, &body, key)
+        })
         .await;
     match result {
         Ok(Ok(crate::vault::DuoPollResult::Requests(output))) => {
@@ -994,18 +1020,71 @@ pub(crate) async fn finish_duo(
     }
 }
 
-/// Build a weak-password list after its strength scores were computed off the queue.
-pub(crate) async fn finish_weak_list(
-    filter: SearchFilter,
-    session: &impl SessionAccess,
+/// Completes deferred network or CPU work for the unlock `session` that
+/// started it. Results are discarded if that session was locked or replaced,
+/// and audits also if the vault changed meanwhile.
+pub(crate) async fn finish_deferred(
+    work: Deferred,
+    host: &impl VaultHost,
+    session: Option<String>,
     reply: &mut Option<RpcResponse>,
 ) {
-    match session
-        .with_unlocked(move |vault, _| vault.management_list(filter))
-        .await
-    {
-        Ok(result) => respond_result(result, ResponsePayload::ItemPage, reply),
-        Err(error) => respond_failure(&error, reply),
+    match work {
+        Deferred::None => {}
+        Deferred::Duo(prepared) => finish_duo(*prepared, host, session, reply).await,
+        Deferred::DuoEnrollment(prepared) => {
+            finish_duo_enrollment(*prepared, host, session, reply).await;
+        }
+        Deferred::Audit(pending, check_breaches) => {
+            // Check the captured session/revision between scores so locking and
+            // edits remain responsive.
+            let stale = host.staleness(session.clone(), Some(pending.revision));
+            let check = stale.clone();
+            // `ok()` keeps borrowed error types out of the blocking result.
+            let scored = host.blocking(move || pending.finish(|| check()).ok()).await;
+            let Some(Some(snapshot)) = scored else {
+                respond_conflict(
+                    "Vault changed or audit evaluation failed; run it again",
+                    reply,
+                );
+                return;
+            };
+            let audit = snapshot.audit(check_breaches).await;
+            // Breach lookups take network time; an edit or sync meanwhile would
+            // make this report describe passwords that are no longer stored.
+            if stale() {
+                respond_conflict("Vault changed while the audit ran; run it again", reply);
+                return;
+            }
+            let code = if audit.incomplete {
+                ResponseCode::Failure
+            } else {
+                ResponseCode::Success
+            };
+            respond_payload(code, ResponsePayload::Audit(audit.report), reply);
+        }
+        Deferred::WeakList(pending, filter) => {
+            // Edits during scoring only leave a few cold scores for the list
+            // to compute on the owner; a lock or switch discards the work.
+            let stale = host.staleness(session.clone(), None);
+            let scored = host
+                .blocking(move || pending.finish(|| stale()).is_ok())
+                .await;
+            if scored != Some(true) {
+                respond_conflict(
+                    "Vault was locked or changed while checking password strength; run it again",
+                    reply,
+                );
+                return;
+            }
+            match host
+                .with_session(session, move |vault, _| vault.management_list(*filter))
+                .await
+            {
+                Ok(result) => respond_result(result, ResponsePayload::ItemPage, reply),
+                Err(error) => respond_failure(&error, reply),
+            }
+        }
     }
 }
 

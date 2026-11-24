@@ -1057,7 +1057,7 @@ async fn duo_poll_preserves_session_through_async_completion_and_encrypted_deliv
     // Replace only the remote transport. Session capture, parsing, completion,
     // response encryption, and decoding use the production path.
     prepared.request = crate::duo::PreparedRequest::mock_get(&format!("http://{address}/requests"));
-    let result = finish_external_effect(result, worker, None).await;
+    let result = finish_external_effect(result, worker, Arc::default(), None).await;
     http.await.unwrap();
     let (mut client, mut server) = tcp_pair().await;
     let response_key = [17; 32];
@@ -1108,7 +1108,7 @@ async fn asynchronous_results_cannot_survive_a_lock_or_be_relabelled_with_a_new_
             .await
             .unwrap();
         assert_ne!(worker.session_id(), original_session);
-        let result = finish_external_effect(result, worker, None).await;
+        let result = finish_external_effect(result, worker, Arc::default(), None).await;
         assert!(result.reply.is_some());
         assert_eq!(result.response().code, ResponseCode::Conflict as i32);
         assert!(matches!(
@@ -1168,7 +1168,7 @@ async fn weak_lists_score_outside_the_vault_queue_and_reuse_cached_scores() {
         result.effect,
         CommandEffect::Deferred(crate::operations::Deferred::WeakList(..))
     ));
-    let result = finish_external_effect(result, worker.clone(), None).await;
+    let result = finish_external_effect(result, worker.clone(), Arc::default(), None).await;
     assert_eq!(result.response().code, ResponseCode::Success as i32);
     assert_eq!(ids(&result), vec![1, 3]);
 
@@ -1183,7 +1183,7 @@ async fn weak_lists_score_outside_the_vault_queue_and_reuse_cached_scores() {
     let fresh = test_worker(session(sample_vault()), &state);
     let result = fresh.execute(state, RequestEnvelope::new(weak())).await;
     fresh.with_session(|live| live.lock()).await.unwrap();
-    let result = finish_external_effect(result, fresh, None).await;
+    let result = finish_external_effect(result, fresh, Arc::default(), None).await;
     assert!(result.reply.is_some());
     assert_eq!(result.response().code, ResponseCode::Conflict as i32);
 }
@@ -1247,11 +1247,12 @@ async fn slow_duo_network_job_allows_lock_and_cannot_return_stale_review() {
     let handle = worker.clone();
     let pending = tokio::spawn(async move {
         let mut reply = None;
-        let started = StartedSession {
-            session: handle.session_id(),
+        let host = DesktopHost {
             worker: &handle,
+            stopping: Arc::default(),
         };
-        crate::operations::finish_duo(prepared, &started, &mut reply).await;
+        let session = handle.session_id();
+        crate::operations::finish_duo(prepared, &host, session, &mut reply).await;
         reply
     });
     tokio::time::timeout(Duration::from_secs(2), ready)

@@ -8,7 +8,7 @@ use crate::{
         Choice, CloudClient, Resolution,
         engine::{self, Bind, Snapshot, SyncHost},
     },
-    operations::{self, Deferred, SessionAccess},
+    operations::{self, Deferred, Stale, VaultHost},
     passkey::{self, Passkey, PasskeyIdentity},
     protocol::{ResponseCode, ResponsePayload, RpcResponse},
     secret::SecretString,
@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{
-        Mutex, MutexGuard, OnceLock, TryLockError,
+        Arc, Mutex, MutexGuard, OnceLock, TryLockError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -341,13 +341,14 @@ impl Default for Cancellation {
 }
 
 /// One request's view of the lock signal.
-struct Ticket<'a> {
-    flag: Option<&'a Cancellation>,
+#[derive(Clone, Copy)]
+struct Ticket {
+    flag: Option<&'static Cancellation>,
     generation: u64,
 }
 
-impl<'a> Ticket<'a> {
-    fn new(flag: Option<&'a Cancellation>) -> Self {
+impl Ticket {
+    fn new(flag: Option<&'static Cancellation>) -> Self {
         Self {
             flag,
             generation: flag.map_or(0, |f| f.generation.load(Ordering::SeqCst)),
@@ -384,7 +385,7 @@ impl<'a> Ticket<'a> {
 /// for sync, the file and checkpoint) they started from. Adapters must also
 /// signal [`Cancellation`] on background/screen lock.
 pub struct MobileVault {
-    state: Mutex<MobileState>,
+    state: Arc<Mutex<MobileState>>,
     /// Serializes sync-engine operations that write checkpoints or files.
     sync: Mutex<()>,
     cancellation: Option<&'static Cancellation>,
@@ -462,7 +463,7 @@ impl MobileVault {
             .map_err(|_| "Could not protect mobile storage")?;
         let settings = tools::MobileSettings::load(&directory)?;
         Ok(Self {
-            state: Mutex::new(MobileState {
+            state: Arc::new(Mutex::new(MobileState {
                 directory,
                 vault: None,
                 credentials: VaultCredentials::Locked,
@@ -472,7 +473,7 @@ impl MobileVault {
                 primary_unlock: false,
                 settings,
                 import_review: None,
-            }),
+            })),
             sync: Mutex::new(()),
             cancellation: None,
         })
@@ -496,7 +497,7 @@ impl MobileVault {
     /// signal, so a request from the app stops waiting at the lock signal or
     /// after [`SYNC_TURN_WAIT`] instead of blocking its request thread. A
     /// background sync (`patient`) waits for the turn however long it takes.
-    fn sync_turn(&self, ticket: &Ticket<'_>, patient: bool) -> Result<MutexGuard<'_, ()>, String> {
+    fn sync_turn(&self, ticket: &Ticket, patient: bool) -> Result<MutexGuard<'_, ()>, String> {
         let deadline = (!patient).then(|| Instant::now() + SYNC_TURN_WAIT);
         loop {
             match self.sync.try_lock() {
@@ -650,7 +651,7 @@ impl MobileVault {
 
     /// Routes network requests to handlers that release the vault between
     /// steps; everything else runs once under the vault mutex.
-    fn dispatch(&self, request: Request, ticket: &Ticket<'_>) -> Result<Value, String> {
+    fn dispatch(&self, request: Request, ticket: &Ticket) -> Result<Value, String> {
         match request {
             Request::Vault {
                 command,
@@ -680,7 +681,7 @@ impl MobileVault {
         }
     }
 
-    fn cloud_request(&self, request: Request, ticket: &Ticket<'_>) -> Result<Value, String> {
+    fn cloud_request(&self, request: Request, ticket: &Ticket) -> Result<Value, String> {
         match request {
             Request::CloudList { server, token } => {
                 let client = client(&server, token)?;
@@ -773,7 +774,7 @@ impl MobileVault {
     /// released and may re-enter only the session that prepared it.
     fn run_command(
         &self,
-        ticket: &Ticket<'_>,
+        ticket: &Ticket,
         command: ServerCommand,
         expected_revision: Option<u64>,
         confirmed: bool,
@@ -786,71 +787,19 @@ impl MobileVault {
         } = self
             .state()
             .prepare_command(command, expected_revision, confirmed)?;
-        match deferred {
-            Deferred::None => {}
-            Deferred::Audit(pending, check_breaches) => {
-                let revision = pending.revision;
-                match pending.finish(|| ticket.cancelled()) {
-                    Ok(snapshot) => {
-                        let audit = block_on(ticket, snapshot.audit(check_breaches))?;
-                        // A sync or edit while scoring or checking breaches
-                        // would leave this report describing old passwords.
-                        let current = {
-                            let state = self.state();
-                            state.session == session
-                                && state.vault.as_ref().map(Vault::vault_revision) == Some(revision)
-                        };
-                        if !current {
-                            operations::respond_conflict(
-                                "Vault changed while the audit ran; run it again",
-                                &mut reply,
-                            );
-                            return response_value(reply, existing_update);
-                        }
-                        let code = if audit.incomplete {
-                            ResponseCode::Failure
-                        } else {
-                            ResponseCode::Success
-                        };
-                        reply = Some(RpcResponse::new(code, ResponsePayload::Audit(audit.report)));
-                    }
-                    Err(_) => operations::respond_conflict(
-                        "Vault changed or audit evaluation failed; run it again",
-                        &mut reply,
-                    ),
-                }
-            }
-            Deferred::WeakList(pending, filter) => {
-                if pending.finish(|| ticket.cancelled()).is_err() {
-                    return Err("Password strength check was cancelled".into());
-                }
-                let host = self.host(session, None);
-                block_on(
-                    ticket,
-                    operations::finish_weak_list(*filter, &host, &mut reply),
-                )?;
-            }
-            Deferred::Duo(prepared) => {
-                let host = self.host(session, None);
-                block_on(ticket, operations::finish_duo(*prepared, &host, &mut reply))?;
-            }
-            Deferred::DuoEnrollment(prepared) => {
-                let host = self.host(session, None);
-                block_on(
-                    ticket,
-                    operations::finish_duo_enrollment(*prepared, &host, &mut reply),
-                )?;
-            }
-        }
+        let host = self.host(ticket, None);
+        block_on(
+            ticket,
+            operations::finish_deferred(deferred, &host, session, &mut reply),
+        )?;
         response_value(reply, existing_update)
     }
 
-    /// Lends the vault state to the shared sync engine or Duo completion for
-    /// one request; `session` is the unlock that request started in.
-    fn host(&self, session: Option<String>, client: Option<CloudClient>) -> MobileHost<'_> {
+    /// Lends the vault state to the shared sync engine or deferred work.
+    fn host(&self, ticket: &Ticket, client: Option<CloudClient>) -> MobileHost<'_> {
         MobileHost {
             directory: self.state().directory.clone(),
-            session,
+            ticket: *ticket,
             client,
             owner: &self.state,
         }
@@ -859,18 +808,17 @@ impl MobileVault {
     /// Runs one sync-engine operation; the app's lock signal aborts its network work.
     fn run_sync<T>(
         &self,
-        ticket: &Ticket<'_>,
+        ticket: &Ticket,
         client: Option<CloudClient>,
         operation: impl AsyncFnOnce(&MobileHost<'_>) -> Result<T, String>,
     ) -> Result<T, String> {
-        let session = self.state().session.clone();
-        let host = self.host(session, client);
+        let host = self.host(ticket, client);
         block_on(ticket, operation(&host))?
     }
 
     fn sync_status(
         &self,
-        ticket: &Ticket<'_>,
+        ticket: &Ticket,
         client: Option<CloudClient>,
         check: bool,
     ) -> Result<Value, String> {
@@ -1578,29 +1526,54 @@ fn response_value(reply: Option<RpcResponse>, existing_update: bool) -> Result<V
     }
 }
 
-/// Mobile host for the shared sync engine and Duo completion. Each step takes
+/// Mobile host for the shared sync engine and deferred work. Each step takes
 /// the vault mutex only for itself, so network transfers never hold it.
 struct MobileHost<'a> {
-    owner: &'a Mutex<MobileState>,
-    /// The unlock session this request started in.
-    session: Option<String>,
+    owner: &'a Arc<Mutex<MobileState>>,
+    /// The request's view of the app's lock signal.
+    ticket: Ticket,
     client: Option<CloudClient>,
     directory: PathBuf,
 }
 
-impl MobileHost<'_> {
-    /// Runs `apply` only if `session` is still the open unlock.
-    fn with_session<T>(
+impl VaultHost for MobileHost<'_> {
+    fn with_session<T: Send + 'static>(
         &self,
-        session: Option<&String>,
-        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> T,
-    ) -> Result<T, String> {
-        let mut owner = guard(self.owner);
-        if session.is_none() || owner.session.as_ref() != session {
-            return Err("Vault locked or switched; nothing was applied".into());
-        }
-        let (vault, credentials) = owner.unlocked()?;
-        Ok(apply(vault, credentials))
+        session: Option<String>,
+        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, VaultError> + Send + 'static,
+    ) -> impl std::future::Future<Output = Result<Result<T, VaultError>, String>> + Send {
+        let result = (|| {
+            let mut owner = guard(self.owner);
+            if session.is_none() || owner.session != session {
+                return Err(crate::server::SESSION_CHANGED.to_owned());
+            }
+            let (vault, credentials) = owner.unlocked()?;
+            Ok(apply(vault, credentials))
+        })();
+        async move { result }
+    }
+
+    fn staleness(&self, session: Option<String>, revision: Option<u64>) -> Stale {
+        let (owner, ticket) = (Arc::clone(self.owner), self.ticket);
+        Arc::new(move || {
+            if ticket.cancelled() || session.is_none() {
+                return true;
+            }
+            let owner = guard(&owner);
+            owner.session != session
+                || revision.is_some_and(|revision| {
+                    owner.vault.as_ref().map(Vault::vault_revision) != Some(revision)
+                })
+        })
+    }
+
+    /// Runs on the calling thread, which the app already keeps off its UI.
+    fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> operations::Blocking<T> {
+        let result = work();
+        Box::pin(async move { Some(result) })
     }
 }
 
@@ -1615,40 +1588,12 @@ impl SyncHost for MobileHost<'_> {
     fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot, String>> + Send {
         let snapshot = (|| {
             let owner = guard(self.owner);
-            let vault = owner.vault()?;
-            let path = vault.sync_path()?;
-            let mut bytes = crate::file::read_bounded_file(&path, crate::cloud::MAX_BYTES)
-                .map_err(|_| "Could not read local snapshot")?;
-            Ok(Snapshot {
-                id: hex::encode(vault.vault_id()),
-                session: owner.session.clone().ok_or(LOCKED)?,
-                state: crate::cloud::binding(&path)?,
-                bytes: std::mem::take(&mut *bytes),
-                path,
-            })
+            Snapshot::of(owner.vault()?, owner.session.clone().ok_or(LOCKED)?)
         })();
         async move { snapshot }
     }
-    fn with_unlocked<T: Send + 'static>(
-        &self,
-        session: String,
-        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, String> + Send + 'static,
-    ) -> impl std::future::Future<Output = Result<T, String>> + Send {
-        let result = self.with_session(Some(&session), apply).and_then(|r| r);
-        async move { result }
-    }
     fn directory(&self) -> PathBuf {
         self.directory.clone()
-    }
-}
-
-impl SessionAccess for MobileHost<'_> {
-    fn with_unlocked<T: Send + 'static>(
-        &self,
-        apply: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, VaultError> + Send + 'static,
-    ) -> impl std::future::Future<Output = Result<Result<T, VaultError>, String>> + Send {
-        let result = self.with_session(self.session.as_ref(), apply);
-        async move { result }
     }
 }
 
@@ -1669,10 +1614,7 @@ fn mobile_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
 }
 
 /// Runs network work on the shared runtime; the app's lock signal aborts it.
-fn block_on<T>(
-    ticket: &Ticket<'_>,
-    future: impl std::future::Future<Output = T>,
-) -> Result<T, String> {
+fn block_on<T>(ticket: &Ticket, future: impl std::future::Future<Output = T>) -> Result<T, String> {
     Ok(mobile_runtime()?.block_on(interruptible(ticket, future))?)
 }
 
@@ -1694,7 +1636,7 @@ pub fn wipe_response(value: &mut Value) {
 }
 
 async fn interruptible<T>(
-    ticket: &Ticket<'_>,
+    ticket: &Ticket,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, &'static str> {
     tokio::select! {

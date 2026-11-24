@@ -431,8 +431,8 @@ mod tests {
         assert!(!Ticket::new(Some(&CANCEL)).cancelled());
         // A waiter is woken by the signal itself, not by polling, and a
         // request that started before a signal stays cancelled after `lock`.
-        let flag = Cancellation::new();
-        let ticket = Ticket::new(Some(&flag));
+        let flag: &'static Cancellation = Box::leak(Box::new(Cancellation::new()));
+        let ticket = Ticket::new(Some(flag));
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(10));
@@ -449,7 +449,7 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(5));
         });
         assert!(ticket.cancelled());
-        assert!(!Ticket::new(Some(&flag)).cancelled());
+        assert!(!Ticket::new(Some(flag)).cancelled());
     }
     #[test]
     fn deleting_a_vault_removes_its_sync_settings_and_rekey_copies_can_be_removed() {
