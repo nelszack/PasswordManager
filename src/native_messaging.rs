@@ -845,15 +845,15 @@ fn handle_request_with_launcher(
 }
 
 fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, String> {
-    match request.action.as_str() {
-        "status" => Ok(ServerCommand::Status),
-        "operationStatus" => Ok(ServerCommand::OperationStatus(
+    match request.action {
+        NativeAction::Status => Ok(ServerCommand::Status),
+        NativeAction::OperationStatus => Ok(ServerCommand::OperationStatus(
             request.operation_id.clone().ok_or("missing operation ID")?,
         )),
-        "duoRequests" => Ok(ServerCommand::Duo(DuoCommand::Requests {
+        NativeAction::DuoRequests => Ok(ServerCommand::Duo(DuoCommand::Requests {
             target: Target::Id(item_id(request)?),
         })),
-        "duoRespond" => {
+        NativeAction::DuoRespond => {
             let target = Target::Id(item_id(request)?);
             let id = request
                 .request_id
@@ -886,18 +886,18 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 code: code.expose().to_owned().into(),
             }))
         }
-        "getAutofillItems" => Ok(ServerCommand::BrowserAutofill),
-        "getLoginItems" => Ok(ServerCommand::BrowserLogins(required(
+        NativeAction::GetAutofillItems => Ok(ServerCommand::BrowserAutofill),
+        NativeAction::GetLoginItems => Ok(ServerCommand::BrowserLogins(required(
             request.domain.take(),
             "domain",
             2048,
         )?)),
-        "getDuoItems" => Ok(ServerCommand::BrowserDuoItems(required(
+        NativeAction::GetDuoItems => Ok(ServerCommand::BrowserDuoItems(required(
             request.domain.take(),
             "domain",
             2048,
         )?)),
-        "checkSavedLogin" => Ok(ServerCommand::BrowserLoginSaved {
+        NativeAction::CheckSavedLogin => Ok(ServerCommand::BrowserLoginSaved {
             domain: required(request.domain.take(), "domain", 2048)?,
             username: optional_text(request.username.take(), "username", 4096)?,
             password: required(
@@ -907,25 +907,25 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             )?
             .into(),
         }),
-        "getLoginItem" => Ok(ServerCommand::BrowserLogin {
+        NativeAction::GetLoginItem => Ok(ServerCommand::BrowserLogin {
             domain: required(request.domain.take(), "domain", 2048)?,
             id: request
                 .entry_id
                 .filter(|id| *id > 0)
                 .ok_or_else(|| "invalid entry ID".to_string())?,
         }),
-        "getAutofillItem" => Ok(ServerCommand::BrowserAutofillItem(
+        NativeAction::GetAutofillItem => Ok(ServerCommand::BrowserAutofillItem(
             request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
         )),
-        "getTotp" => Ok(ServerCommand::BrowserAuthenticatorData {
+        NativeAction::GetTotp => Ok(ServerCommand::BrowserAuthenticatorData {
             domain: required(request.domain.take(), "domain", 2048)?,
             id: request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
         }),
-        "saveCredentials" => Ok(ServerCommand::Add {
+        NativeAction::SaveCredentials => Ok(ServerCommand::Add {
             entry: crate::types::TypedEntry {
                 entry: PasswordEntry {
                     name: required(request.name.take(), "name", 4096)?,
@@ -948,7 +948,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             },
             copy_timeout: 0,
         }),
-        "updateCredentials" => {
+        NativeAction::UpdateCredentials => {
             // The page origin authorizes the browser selection; updating a
             // password must not replace the item's saved primary URL. A login
             // chosen for another site gains this site as an additional address.
@@ -978,8 +978,8 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             }
             Ok(ServerCommand::Update(update))
         }
-        "lock" => Ok(ServerCommand::Lock(true)),
-        "getPasskeys" => Ok(ServerCommand::BrowserPasskeys {
+        NativeAction::Lock => Ok(ServerCommand::Lock(true)),
+        NativeAction::GetPasskeys => Ok(ServerCommand::BrowserPasskeys {
             origin: required(request.domain.take(), "domain", 2048)?,
             request: required(
                 request.passkey_request.take(),
@@ -987,7 +987,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 64 * 1024,
             )?,
         }),
-        "createPasskey" => Ok(ServerCommand::BrowserPasskeyCreate {
+        NativeAction::CreatePasskey => Ok(ServerCommand::BrowserPasskeyCreate {
             origin: required(request.domain.take(), "domain", 2048)?,
             request: required(
                 request.passkey_request.take(),
@@ -997,10 +997,10 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             verification: request.verification_token.take(),
             verified: false,
         }),
-        "verifyPasskeyUser" => Ok(ServerCommand::PasskeyVerification {
+        NativeAction::VerifyPasskeyUser => Ok(ServerCommand::PasskeyVerification {
             origin: required(request.domain.take(), "domain", 2048)?,
         }),
-        "getPasskeyAssertion" => Ok(ServerCommand::BrowserPasskeyGet {
+        NativeAction::GetPasskeyAssertion => Ok(ServerCommand::BrowserPasskeyGet {
             origin: required(request.domain.take(), "domain", 2048)?,
             id: item_id(request)?,
             request: required(
@@ -1011,13 +1011,13 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             verification: request.verification_token.take(),
             verified: false,
         }),
-        "copyLoginValue" => Ok(ServerCommand::BrowserCopy {
+        NativeAction::CopyLoginValue => Ok(ServerCommand::BrowserCopy {
             domain: required(request.domain.take(), "domain", 2048)?,
             id: item_id(request)?,
             field: request.field.ok_or("missing copy field")?,
             timeout: clipboard_timeout(),
         }),
-        "searchItems" => Ok(ServerCommand::List(crate::types::SearchFilter {
+        NativeAction::SearchItems => Ok(ServerCommand::List(crate::types::SearchFilter {
             query: Some(required(request.query.take(), "query", 256)?),
             list: crate::types::ListOptions {
                 sort: crate::types::SortField::Name,
@@ -1025,12 +1025,12 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             },
             ..Default::default()
         })),
-        "copyItem" => Ok(ServerCommand::BrowserCopyItem {
+        NativeAction::CopyItem => Ok(ServerCommand::BrowserCopyItem {
             id: item_id(request)?,
             field: request.field.ok_or("missing copy field")?,
             timeout: clipboard_timeout(),
         }),
-        "copyGenerated" => Ok(ServerCommand::CopyGenerated {
+        NativeAction::CopyGenerated => Ok(ServerCommand::CopyGenerated {
             value: required(
                 request.password.take().map(SecretString::expose_owned),
                 "password",
@@ -1039,7 +1039,10 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             .into(),
             timeout: clipboard_timeout(),
         }),
-        _ => Err("unsupported native messaging action".to_string()),
+        // Answered by the host itself before a server command is built.
+        NativeAction::OpenDesktop | NativeAction::StatusEvents => {
+            Err("unsupported native messaging action".to_string())
+        }
     }
 }
 
