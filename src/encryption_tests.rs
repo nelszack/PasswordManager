@@ -200,7 +200,7 @@ fn key_file_round_trips_preserve_derivation_and_enforce_file_limits() {
             "{label}"
         );
         let plaintext = b"this is a test";
-        let encrypted = encrypt_file(&mut key_file(), plaintext);
+        let encrypted = try_encrypt_file_in_place(&mut key_file(), plaintext.to_vec()).unwrap();
         assert_eq!(
             decrypt_file(&mut key_file(), &encrypted)
                 .unwrap()
@@ -246,9 +246,9 @@ fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonc
     let plaintext = b"same plaintext";
     let mut first_session = VaultCredentials::from(PasswordType::Password("test123".into()));
     let mut second_session = VaultCredentials::from(PasswordType::Password("test123".into()));
-    let e1 = encrypt_file(&mut first_session, plaintext);
-    let e2 = encrypt_file(&mut second_session, plaintext);
-    let e3 = encrypt_file(&mut first_session, plaintext);
+    let e1 = try_encrypt_file_in_place(&mut first_session, plaintext.to_vec()).unwrap();
+    let e2 = try_encrypt_file_in_place(&mut second_session, plaintext.to_vec()).unwrap();
+    let e3 = try_encrypt_file_in_place(&mut first_session, plaintext.to_vec()).unwrap();
     const SALT_OFFSET: usize = 8 + 1 + 1 + 4 + 4 + 4;
     assert_ne!(
         &e1[SALT_OFFSET..SALT_OFFSET + SALT_LEN],
@@ -267,7 +267,7 @@ fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonc
         ("empty", Vec::new()),
         ("large", vec![0u8; 10000]),
     ] {
-        let encrypted = encrypt_file(&mut first_session, &plaintext);
+        let encrypted = try_encrypt_file_in_place(&mut first_session, plaintext.clone()).unwrap();
         for mut credential in [
             first_session.clone(),
             VaultCredentials::from(PasswordType::Password("test123".into())),
@@ -283,7 +283,7 @@ fn password_sessions_round_trip_boundaries_with_independent_salts_and_fresh_nonc
 #[test]
 fn decryption_rejects_wrong_credentials_invalid_headers_and_modified_ciphertext() {
     let mut pass = VaultCredentials::from(PasswordType::Password("test123".into()));
-    let encrypted = encrypt_file(&mut pass, b"sensitive vault data");
+    let encrypted = try_encrypt_file_in_place(&mut pass, b"sensitive vault data".to_vec()).unwrap();
     assert!(
         decrypt_file(
             &mut VaultCredentials::from(PasswordType::Password("wrong-password".into())),
@@ -337,7 +337,7 @@ fn parsed_header_matches_the_written_header_and_its_session() {
         iterations: 2,
         parallelism: 3,
     };
-    let encrypted = encrypt_file(&mut credentials, b"synthetic");
+    let encrypted = try_encrypt_file_in_place(&mut credentials, b"synthetic".to_vec()).unwrap();
     let header = VaultHeader::parse(&encrypted).unwrap();
     assert_eq!(header.kdf, KDF_ARGON2ID);
     assert_eq!(

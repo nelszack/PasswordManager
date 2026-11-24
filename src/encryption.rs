@@ -380,14 +380,6 @@ fn encryption_master(key_pass: &PasswordType, salt: &[u8]) -> Result<[u8; 32], S
     }
 }
 
-#[cfg(test)]
-pub fn try_encrypt_file(
-    key_pass: &mut VaultCredentials,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, String> {
-    try_encrypt_file_in_place(key_pass, plaintext.to_vec())
-}
-
 pub fn try_encrypt_file_in_place(
     key_pass: &mut VaultCredentials,
     plaintext: Vec<u8>,
@@ -506,11 +498,6 @@ pub(crate) fn try_encrypt_framed(
     }
     session_key.zeroize();
     Ok(std::mem::take(&mut *framed.into_inner()))
-}
-
-#[cfg(test)]
-pub fn encrypt_file(key_pass: &mut VaultCredentials, plaintext: &[u8]) -> Vec<u8> {
-    try_encrypt_file(key_pass, plaintext).expect("could not encrypt vault")
 }
 
 /// The authenticated vault header: magic, version, KDF parameters, salt, and

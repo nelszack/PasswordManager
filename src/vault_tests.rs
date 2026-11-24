@@ -1,5 +1,13 @@
 use super::import::{import_csv, import_json};
-use super::totp::{normalize_totp_configuration, parse_totp_configuration};
+use super::totp::{normalize_totp_configuration, parse_authenticator_configuration};
+
+/// The time-based generator the production parser stores for `value`.
+fn parse_totp_configuration(value: &str) -> Result<Totp, VaultError> {
+    match parse_authenticator_configuration(value)?.1 {
+        AuthenticatorState::Totp(totp) => Ok(totp),
+        AuthenticatorState::Hotp { .. } => panic!("expected a time-based authenticator"),
+    }
+}
 use super::*;
 use proptest::prelude::*;
 const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -166,7 +174,7 @@ fn stage_and_commit_keep_live_state_consistent_before_and_after_replacement() {
     assert!(failed.committed());
     assert_eq!(vault.get_secret(&Target::Id(1)).unwrap().as_str(), "after");
     assert_eq!(reopen(&vault).data, vault.data);
-    assert_eq!(vault.item_revision(1), Some(2));
+    assert_eq!(vault.revision(1), Some(2));
     assert_eq!(vault.vault_revision(), 1);
     write_vault(&vault, &mut credentials).unwrap();
     assert_eq!(reopen(&vault).data, vault.data);
@@ -204,8 +212,6 @@ fn revisions_change_only_for_touched_items_and_real_changes() {
         .unwrap();
     assert_eq!(vault.revision(1), Some(2));
     assert_eq!(vault.revision(2), Some(1));
-    assert!(vault.check_revision(1, 1).is_err());
-    assert!(vault.check_revision(1, 2).is_ok());
     assert_eq!(
         vault.target_revision(&Target::Name("first".into())),
         Some(2)
@@ -1599,7 +1605,7 @@ fn optimization_caches_preserve_unchanged_fields_and_refresh_sites() {
 fn batched_edits_commit_once_and_roll_back_together() {
     let (_dir, mut vault, mut key) = persisted();
     let before = vault.vault_revision();
-    let revision = vault.item_revision(1).unwrap();
+    let revision = vault.revision(1).unwrap();
     let rename = || {
         let mut change = update(1, "unused");
         change.entry.password = None;
@@ -1629,7 +1635,7 @@ fn batched_edits_commit_once_and_roll_back_together() {
             .unwrap()
     );
     assert_eq!(vault.vault_revision(), before + 1);
-    assert_eq!(vault.item_revision(1), Some(revision + 1));
+    assert_eq!(vault.revision(1), Some(revision + 1));
     let reopened = reopen(&vault);
     assert_eq!(reopened.item(1).unwrap().entry.name, "Batch name");
     assert_eq!(
@@ -1669,7 +1675,7 @@ fn batch_edits_resolve_initial_names_and_use_one_revision_increment() {
             .unwrap()
     );
     assert_eq!(vault.vault_revision(), MAX_ITEM_ID);
-    assert_eq!(vault.item_revision(1), Some(MAX_ITEM_ID));
+    assert_eq!(vault.revision(1), Some(MAX_ITEM_ID));
     assert_eq!(vault.item(1).unwrap().entry.name, "Renamed");
     assert_eq!(
         vault.item(1).unwrap().entry.password.expose(),

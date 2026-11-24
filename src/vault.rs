@@ -573,28 +573,11 @@ impl Vault {
     pub fn revision(&self, id: usize) -> Option<u64> {
         self.item(id).map(|i| i.revision)
     }
-    #[cfg(test)]
-    pub fn item_revision(&self, id: usize) -> Option<u64> {
-        self.revision(id)
-    }
     pub fn vault_id(&self) -> [u8; 16] {
         self.data.vault_id
     }
     pub fn vault_revision(&self) -> u64 {
         self.data.revision
-    }
-    #[cfg(test)]
-    pub fn check_revision(&self, id: usize, expected: u64) -> Result<(), VaultError> {
-        let revision = self
-            .revision(id)
-            .ok_or_else(|| VaultError::NotFound("item not found".into()))?;
-        if revision != expected {
-            Err(VaultError::Conflict(format!(
-                "item revision changed: expected {expected}, current {revision}"
-            )))
-        } else {
-            Ok(())
-        }
     }
 }
 struct MetadataUpdate<'a> {
