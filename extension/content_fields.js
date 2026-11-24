@@ -48,4 +48,4 @@ var PasswordManagerContentFields = (() => {
     return { inferCard, inferIdentity, normalize, customValue };
 })();
 
-if (typeof module !== "undefined") module.exports = PasswordManagerContentFields;
+module.exports = PasswordManagerContentFields;

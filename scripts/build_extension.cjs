@@ -26,4 +26,9 @@ function bundle(entryName, outputName) {
     } else fs.writeFileSync(target, output);
 
 }
+// Each browser entry point becomes one self-contained script.
 bundle("content_entry.js", "content_runtime.js");
+bundle("background.js", "background_runtime.js");
+for (const page of ["popup", "picker", "credential_prompt", "duo_prompt", "passkey_prompt"]) {
+    bundle(`${page}.js`, `${page}_runtime.js`);
+}

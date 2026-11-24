@@ -64,4 +64,4 @@ var PasswordManagerPickerState = (() => {
         failure, title, itemLabel, initial, status, rank, move };
 })();
 
-if (typeof module !== "undefined") module.exports = PasswordManagerPickerState;
+module.exports = PasswordManagerPickerState;

@@ -1,3 +1,7 @@
+"use strict";
+// Page entry; scripts/build_extension.cjs bundles it into credential_prompt_runtime.js.
+const PasswordManagerUiTransport = require("./ui_transport.js");
+require("./ui_session.js");
 const token = new URLSearchParams(location.search).get("token");
 const form = document.getElementById("credentials");
 const site = document.getElementById("site");

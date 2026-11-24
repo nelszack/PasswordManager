@@ -1,11 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadScript } = require("./test_harness.cjs");
+const { loadModule } = require("./test_harness.cjs");
 
 function transport(sendMessage, lastError) {
     const context = { chrome: { runtime: { sendMessage, lastError } } };
-    loadScript("ui_transport.js", context);
-    return context.PasswordManagerUiTransport;
+    return loadModule("ui_transport.js", context);
 }
 
 test("UI transport preserves uncertain outcomes and never retries a failed mutation", async () => {

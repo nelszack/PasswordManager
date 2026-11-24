@@ -1,8 +1,4 @@
-(function (root, factory) {
-    const api = factory();
-    root.PasswordManagerNativeProtocol = api;
-    if (typeof module === "object" && module.exports) module.exports = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     function validateResponse(response, expectedProtocolVersion, expectedOperationId) {
@@ -55,4 +51,4 @@
         return response.sessionId;
     }
     return { validateResponse, parseItems, sessionId };
-});
+})();

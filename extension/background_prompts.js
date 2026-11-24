@@ -14,11 +14,7 @@ const PasswordManagerBackgroundPrompts = {
         onLoginContext,
     }) {
         const pendingCredentialPrompts = new Map();
-        const credentialPromptWindows = (
-            typeof PasswordManagerDecisionWindows === "undefined"
-                ? require("./background_windows.js")
-                : PasswordManagerDecisionWindows
-        ).create({
+        const credentialPromptWindows = require("./background_windows.js").create({
             chrome,
             page: "credential_prompt.html",
             width: 400,
@@ -359,4 +355,4 @@ const PasswordManagerBackgroundPrompts = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPrompts;
+module.exports = PasswordManagerBackgroundPrompts;

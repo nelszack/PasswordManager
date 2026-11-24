@@ -7,7 +7,8 @@ const result = spawnSync(
         "--test",
         "--test-coverage-include=*.js",
         "--test-coverage-include-all",
-        "--test-coverage-exclude=content_runtime.js",
+        // Generated bundles repeat the authored modules measured below.
+        "--test-coverage-exclude=*_runtime.js",
         "--test-coverage-lines=58",
         "--test-coverage-branches=78",
         "*.test.js",

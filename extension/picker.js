@@ -1,3 +1,8 @@
+"use strict";
+// Page entry; scripts/build_extension.cjs bundles it into picker_runtime.js.
+const PasswordManagerUiTransport = require("./ui_transport.js");
+require("./ui_session.js");
+const PasswordManagerPickerState = require("./picker_state.js");
 const token = new URLSearchParams(location.search).get("token");
 const items = document.getElementById("items");
 const status = document.getElementById("status");

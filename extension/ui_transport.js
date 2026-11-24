@@ -25,4 +25,4 @@ var PasswordManagerUiTransport = (() => {
     }
     return { send, request };
 })();
-if (typeof module !== "undefined") module.exports = PasswordManagerUiTransport;
+module.exports = PasswordManagerUiTransport;

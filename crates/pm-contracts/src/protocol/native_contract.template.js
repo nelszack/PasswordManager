@@ -1,9 +1,5 @@
 // Generated from Rust native-operation policy; do not edit by hand.
-(function (root, factory) {
-    const api = factory();
-    root.PasswordManagerCommandContract = api;
-    if (typeof module === "object" && module.exports) module.exports = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
     const protocolVersion = __PROTOCOL_VERSION__;
     const operations = Object.freeze(__OPERATIONS__);
@@ -103,4 +99,4 @@
         return data;
     }
     return { protocolVersion, operations, itemProfiles, validateRequest, validateResult };
-});
+})();

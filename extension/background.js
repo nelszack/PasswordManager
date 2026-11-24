@@ -1,24 +1,22 @@
-// Chrome's service worker loads these here; Firefox's event page lists the same
-// scripts in its generated manifest and has no importScripts.
-if (typeof importScripts === "function") importScripts(
-    "command_contract.js",
-    "background_security.js",
-    "background_state.js",
-    "credential_prompt_state.js",
-    "native_protocol.js",
-    "pending_credentials.js",
-    "background_native.js",
-    "background_status.js",
-    "background_pending.js",
-    "background_windows.js",
-    "background_pickers.js",
-    "background_prompts.js",
-    "background_router.js",
-    "duo_detection.js",
-    "background_duo.js",
-    "background_passkeys.js",
-    "background_popup.js"
-);
+"use strict";
+// Service-worker entry. scripts/build_extension.cjs bundles it with its
+// dependencies into background_runtime.js, which both browsers load.
+const PasswordManagerCommandContract = require("./command_contract.js");
+const PasswordManagerSecurity = require("./background_security.js");
+const PasswordManagerBackgroundState = require("./background_state.js");
+const PasswordManagerCredentialPrompt = require("./credential_prompt_state.js");
+const PasswordManagerNativeProtocol = require("./native_protocol.js");
+const PasswordManagerPendingCredentials = require("./pending_credentials.js");
+const PasswordManagerBackgroundNative = require("./background_native.js");
+const PasswordManagerBackgroundStatus = require("./background_status.js");
+const PasswordManagerBackgroundPending = require("./background_pending.js");
+const PasswordManagerBackgroundPickers = require("./background_pickers.js");
+const PasswordManagerBackgroundPrompts = require("./background_prompts.js");
+const PasswordManagerBackgroundRouter = require("./background_router.js");
+const PasswordManagerDuoDetection = require("./duo_detection.js");
+const PasswordManagerBackgroundDuo = require("./background_duo.js");
+const PasswordManagerBackgroundPasskeys = require("./background_passkeys.js");
+const PasswordManagerBackgroundPopup = require("./background_popup.js");
 
 // Wire dependencies once; each service owns its maps and lifecycle rules.
 const native = PasswordManagerBackgroundNative.create({
@@ -158,3 +156,7 @@ chrome.windows.onRemoved.addListener(windowId => {
         pickers.windowRemoved(windowId);
 });
 status.start();
+
+// Browser tests reach these services from the worker console, as they did when
+// the worker ran as separate scripts. Only extension code shares this global.
+globalThis.passwordManagerWorker = { prompts, status };

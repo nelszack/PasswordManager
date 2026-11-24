@@ -3,7 +3,7 @@ const PasswordManagerBackgroundNative = {
     create({
         chrome,
         protocol,
-        contract = globalThis.PasswordManagerCommandContract,
+        contract = require("./command_contract.js"),
         onDisconnect,
         setTimeout,
         clearTimeout,
@@ -360,4 +360,4 @@ const PasswordManagerBackgroundNative = {
         };
     },
 };
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundNative;
+module.exports = PasswordManagerBackgroundNative;

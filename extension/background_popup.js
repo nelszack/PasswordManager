@@ -245,4 +245,4 @@ const PasswordManagerBackgroundPopup = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPopup;
+module.exports = PasswordManagerBackgroundPopup;

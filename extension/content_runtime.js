@@ -485,11 +485,7 @@ module.exports.create = function create({
 
 },
 "content_detection.js": (module, exports, require) => {
-(function (root, factory) {
-    const api = factory();
-    if (typeof module === "object" && module.exports) module.exports = api;
-    else root.PasswordManagerContentDetection = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     const USERNAME_HINT_RE = /user(name)?|login|e-?mail|account|sign-?in|auth|identif/i;
@@ -739,15 +735,11 @@ module.exports.create = function create({
         usernameCandidates,
         withVisibilityCache,
     };
-});
+})();
 
 },
 "form_submission.js": (module, exports, require) => {
-(function (root, factory) {
-    const api = factory();
-    if (typeof module === "object" && module.exports) module.exports = api;
-    else root.PasswordManagerFormSubmission = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     "use strict";
 
     // All submission sources share one document-wide decision lifecycle.
@@ -853,7 +845,7 @@ module.exports.create = function create({
     }
 
     return { createCredentialAttempt, createSubmissionCoordinator, scheduleCredentialAdvance };
-});
+})();
 
 },
 "content_bridge.js": (module, exports, require) => {
@@ -1456,7 +1448,7 @@ var PasswordManagerContentFields = (() => {
     return { inferCard, inferIdentity, normalize, customValue };
 })();
 
-if (typeof module !== "undefined") module.exports = PasswordManagerContentFields;
+module.exports = PasswordManagerContentFields;
 
 },
 "content_controls.js": (module, exports, require) => {
@@ -2070,7 +2062,7 @@ const PasswordManagerGenerator = (() => {
     }
     return { defaults, validate, generate, settingsForSite };
 })();
-if (typeof module !== "undefined") module.exports = PasswordManagerGenerator;
+module.exports = PasswordManagerGenerator;
 
 },
 "content_observer.js": (module, exports, require) => {
@@ -2399,11 +2391,7 @@ module.exports.create = function create({
 
 },
 "duo_detection.js": (module, exports, require) => {
-(function (root, factory) {
-    const api = factory();
-    if (typeof module === "object" && module.exports) module.exports = api;
-    else root.PasswordManagerDuoDetection = api;
-})(typeof globalThis === "object" ? globalThis : this, function () {
+module.exports = (function () {
     function duoOrigin(value) {
         try {
             const url = new URL(value);
@@ -2424,7 +2412,7 @@ module.exports.create = function create({
         return duoOrigin(url) && /push sent|check (?:your |the )?(?:phone|device)|open duo mobile/i.test(words);
     }
     return { duoOrigin, challenge };
-});
+})();
 
 }
 };

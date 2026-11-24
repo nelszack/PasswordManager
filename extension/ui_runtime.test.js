@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadScript } = require("./test_harness.cjs");
+const { loadModule } = require("./test_harness.cjs");
 
 class FakeElement {
     constructor(id = "") {
@@ -51,6 +51,7 @@ function environment(ids, responses, search = "") {
     const context = {
         document,
         location: { search },
+        URL,
         URLSearchParams,
         Error,
         Promise,
@@ -86,9 +87,9 @@ function environment(ids, responses, search = "") {
     };
 }
 
+// The worker lease is exercised by its own tests; pages here run without it.
 function execute(name, context) {
-    loadScript("ui_transport.js", context);
-    loadScript(name, context);
+    return loadModule(name, context, { "./ui_session.js": {} });
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -104,10 +105,7 @@ async function popupEnvironment(responses) {
         "genUppercase", "genDigits", "genAmbiguous", "genSeparator", "shortcuts",
         "vaultSearch", "vaultQuery", "vaultResults", "vaultEmpty", "reconnectBtn"
     ], responses);
-    env.context.PasswordManagerPopupState = require("./popup_state.js");
-    env.context.PasswordManagerGenerator = require("./password_generator.js");
-    env.context.PasswordManagerCommandContract = require("./command_contract.js");
-    execute("popup.js", env.context);
+    env.page = execute("popup.js", env.context);
     env.documentListeners.get("DOMContentLoaded")();
     await settle();
     return env;
@@ -149,7 +147,6 @@ async function pickerEnvironment(items, data = {}, search = "?token=picker-token
             topOrigin: "https://example.com", items, ...data },
         completeSecurePicker: { success: true }
     }, search);
-    env.context.PasswordManagerPickerState = require("./picker_state.js");
     execute("picker.js", env.context);
     await settle();
     return env;
@@ -560,10 +557,10 @@ test("popup searches the whole vault and copies results through the desktop serv
     await settle();
     assert.equal(env.elements.vaultSearch.hidden, false);
     env.elements.vaultQuery.value = "b";
-    await env.context.searchVault();
+    await env.page.searchVault();
     assert.equal(env.messages.some(message => message.action === "popupSearch"), false, "one letter does not search");
     env.elements.vaultQuery.value = "ba";
-    await env.context.searchVault();
+    await env.page.searchVault();
     assert.equal(env.elements.vaultResults.children.length, 2);
     assert.match(env.elements.vaultEmpty.textContent, /Showing 2 of 3/);
     const bankButtons = env.elements.vaultResults.children[0].children[1].children;
@@ -582,10 +579,10 @@ test("popup searches the whole vault and copies results through the desktop serv
     // Typed items use their own labels from the shared item profiles.
     assert.equal(env.elements.vaultResults.children[1].children[1].children[0].textContent, "Copy Wi-Fi password");
     responses.popupSearch = { success: true, total: 0, items: [] };
-    await env.context.searchVault();
+    await env.page.searchVault();
     assert.match(env.elements.vaultEmpty.textContent, /No items match/);
     responses.popupSearch = { success: false, error: "Search failed hard" };
-    await env.context.searchVault();
+    await env.page.searchVault();
     assert.match(env.elements.vaultEmpty.textContent, /Search failed hard/);
 });
 
@@ -606,7 +603,7 @@ test("popup handles lost connections, uncertain saves, and offline copying expli
 
     // A failed status check turns actions off instead of trusting the cached state.
     responses.getStatus = { success: false, error: "worker gone" };
-    await env.context.refreshStatus();
+    await env.page.refreshStatus();
     assert.equal(env.elements.statusText.innerText, "Reconnecting…");
     assert.equal(env.elements.siteSection.hidden, true);
     assert.equal(env.elements.vaultSearch.hidden, true);
@@ -641,7 +638,7 @@ test("popup clears an unsaved login on lock, marks stale searches, and reconnect
     // Unlocking again: typing marks earlier results stale until the new search answers.
     env.runtimeListener()({ action: "statusChanged", status: { native: true, running: true, locked: false } });
     env.elements.vaultQuery.value = "ba";
-    await env.context.searchVault();
+    await env.page.searchVault();
     assert.equal(env.elements.vaultResults.children.length, 1);
     env.elements.vaultQuery.value = "ban";
     await env.elements.vaultQuery.dispatch("input");

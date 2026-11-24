@@ -147,6 +147,7 @@ async function openPrompt(context, button) {
 async function observeAutomaticPrompts(context) {
     const worker = context.serviceWorkers()[0];
     await worker.evaluate(() => {
+        const { prompts } = globalThis.passwordManagerWorker;
         const open = prompts.open;
         prompts.open = async (...args) => {
             const result = await open(...args);
@@ -370,7 +371,7 @@ test.describe("extended credential flows", () => {
                 returnByValue: true
             });
             expect(submitted.result.value).toEqual({ active: false, submitted: "yes" });
-            await browser.context.serviceWorkers()[0].evaluate(() => status.refresh());
+            await browser.context.serviceWorkers()[0].evaluate(() => globalThis.passwordManagerWorker.status.refresh());
             expect(readLookups()).toHaveLength(before);
             expect(browser.context.pages().filter(p => p.url().includes("credential_prompt.html") && !p.isClosed())).toHaveLength(0);
         }

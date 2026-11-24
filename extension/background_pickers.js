@@ -2,11 +2,7 @@
 const PasswordManagerBackgroundPickers = {
     create({ chrome, security, protocol, nativeRequest, crypto, setTimeout, onLoginSelected }) {
         const pendingPickers = new Map();
-        const pickerWindows = (
-            typeof PasswordManagerDecisionWindows === "undefined"
-                ? require("./background_windows.js")
-                : PasswordManagerDecisionWindows
-        ).create({
+        const pickerWindows = require("./background_windows.js").create({
             chrome,
             page: "picker.html",
             width: 380,
@@ -359,4 +355,4 @@ const PasswordManagerBackgroundPickers = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPickers;
+module.exports = PasswordManagerBackgroundPickers;

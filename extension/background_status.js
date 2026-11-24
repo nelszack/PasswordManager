@@ -235,4 +235,4 @@ const PasswordManagerBackgroundStatus = {
     },
 };
 
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundStatus;
+module.exports = PasswordManagerBackgroundStatus;

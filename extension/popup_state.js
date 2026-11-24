@@ -124,4 +124,4 @@ var PasswordManagerPopupState = (() => {
     };
 })();
 
-if (typeof module !== "undefined") module.exports = PasswordManagerPopupState;
+module.exports = PasswordManagerPopupState;

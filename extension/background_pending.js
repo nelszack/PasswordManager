@@ -117,4 +117,4 @@ const PasswordManagerBackgroundPending = {
         return { set, consume, takeRemembered, cleanup };
     },
 };
-if (typeof module !== "undefined") module.exports = PasswordManagerBackgroundPending;
+module.exports = PasswordManagerBackgroundPending;
