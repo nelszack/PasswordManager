@@ -29,6 +29,7 @@ use std::{
 mod tools;
 
 const LOCKED: &str = "Vault is locked";
+const ITEM_CHANGED: &str = "Item changed since it was opened; reopen it before continuing";
 const INTERRUPTED: &str = "Operation interrupted; vault locked. A remote change may have \
                            completed; inspect before retrying";
 const SYNC_BUSY: &str = "A background sync is still running; try again shortly";
@@ -394,11 +395,10 @@ pub struct MobileVault {
 /// Everything that requires the vault mutex.
 struct MobileState {
     directory: PathBuf,
-    vault: Option<Vault>,
-    credentials: VaultCredentials,
+    /// The same locked/unlocked capability the desktop worker owns. Its
+    /// session ID keeps reviews and late network replies from crossing unlocks.
+    session: VaultSession,
     touched: Instant,
-    /// Identifies one unlock so reviews and late network replies cannot cross sessions.
-    session: Option<String>,
     /// Counts opened sessions, so a cancelled request locks only its own session.
     adoptions: u64,
     /// True only when unlocked with the original password or key file, not biometrics.
@@ -465,10 +465,8 @@ impl MobileVault {
         Ok(Self {
             state: Arc::new(Mutex::new(MobileState {
                 directory,
-                vault: None,
-                credentials: VaultCredentials::Locked,
+                session: VaultSession::Locked,
                 touched: Instant::now(),
-                session: None,
                 adoptions: 0,
                 primary_unlock: false,
                 settings,
@@ -839,32 +837,40 @@ const MISROUTED: &str = "Mobile request was routed incorrectly";
 
 impl MobileState {
     fn lock(&mut self) {
-        self.vault = None;
-        self.credentials.zeroize();
-        self.session = None;
+        self.session.lock();
         self.import_review = None;
         self.primary_unlock = false;
     }
 
-    /// Applies the idle timeout, then returns the open vault.
-    fn open(&mut self) -> Result<&mut Vault, String> {
+    /// Applies the idle timeout, then requires an open vault.
+    fn open(&mut self) -> Result<(), String> {
         if self.touched.elapsed() >= Duration::from_secs(self.settings.unlock_seconds) {
             self.lock();
         }
         self.touched = Instant::now();
-        self.vault.as_mut().ok_or_else(|| LOCKED.into())
+        self.vault().map(|_| ())
     }
 
     fn vault(&self) -> Result<&Vault, String> {
-        self.vault.as_ref().ok_or_else(|| LOCKED.into())
+        self.session.vault().ok_or_else(|| LOCKED.into())
     }
 
-    /// Borrows the vault and its credentials together for mutations.
-    fn unlocked(&mut self) -> Result<(&mut Vault, &mut VaultCredentials), String> {
-        match &mut self.vault {
-            Some(vault) => Ok((vault, &mut self.credentials)),
-            None => Err(LOCKED.into()),
-        }
+    /// Runs a mutation with the vault and its credentials. A change that leaves
+    /// the credentials unusable locks the session, as on the desktop.
+    fn with_unlocked<T>(
+        &mut self,
+        action: impl FnOnce(&mut Vault, &mut VaultCredentials) -> Result<T, VaultError>,
+    ) -> Result<T, String> {
+        self.session
+            .with_unlocked(action)
+            .map_err(|error| match error {
+                VaultError::Locked => LOCKED.into(),
+                error => error.to_string(),
+            })
+    }
+
+    fn session_id(&self) -> Option<String> {
+        self.session.session_id()
     }
 
     fn path(&self, name: &str) -> Result<PathBuf, String> {
@@ -887,19 +893,22 @@ impl MobileState {
         let (_, vault) = persistence::lookup_vault_in(&self.directory, &mut key, Some(name))
             .map_err(|e| e.to_string())?
             .ok_or("Vault not found")?;
-        self.adopt(vault, key, primary);
-        Ok(())
+        self.adopt(vault, key, primary).map_err(|e| e.to_string())
     }
 
     /// Replaces any open session with `vault`.
-    fn adopt(&mut self, vault: Vault, key: VaultCredentials, primary: bool) {
+    fn adopt(
+        &mut self,
+        vault: Vault,
+        key: VaultCredentials,
+        primary: bool,
+    ) -> Result<(), VaultError> {
         self.lock();
-        self.vault = Some(vault);
-        self.credentials = key;
+        self.session.install(vault, key)?;
         self.primary_unlock = primary;
-        self.session = Some(hex::encode(rand::random::<[u8; 16]>()));
         self.adoptions += 1;
         self.touched = Instant::now();
+        Ok(())
     }
 
     /// Writes a new, empty vault and opens it as a primary unlock.
@@ -912,7 +921,7 @@ impl MobileState {
         };
         vault.metadata.filename = name.clone();
         write_vault_with_key(&vault, &mut key)?;
-        self.adopt(vault, key, true);
+        self.adopt(vault, key, true)?;
         Ok(json!({ "vault": name }))
     }
 
@@ -1186,18 +1195,15 @@ impl MobileState {
                 data,
                 expected_revision,
             } => {
-                let (vault, credentials) = self.unlocked()?;
                 let target = Target::Id(id);
-                if let Some(expected) = expected_revision
-                    && vault.target_revision(&target) != Some(expected)
-                {
-                    return Err(
-                        "Item changed since it was opened; reopen it before continuing".into(),
-                    );
-                }
-                vault
-                    .add_attachment(&target, &name, data, credentials)
-                    .map_err(|e| e.to_string())?;
+                self.with_unlocked(|vault, credentials| {
+                    if let Some(expected) = expected_revision
+                        && vault.target_revision(&target) != Some(expected)
+                    {
+                        return Err(VaultError::Conflict(ITEM_CHANGED.into()));
+                    }
+                    vault.add_attachment(&target, &name, data, credentials)
+                })?;
                 Ok(json!({ "message": "Attachment added." }))
             }
             Request::AttachmentData { id, name } => {
@@ -1229,10 +1235,9 @@ impl MobileState {
             Request::DeleteVault { confirmed } => self.delete_vault(confirmed),
             Request::PurgeExpired => {
                 let days = self.settings.trash_days;
-                let (vault, credentials) = self.unlocked()?;
-                let removed = vault
-                    .purge_expired_trash(days, credentials)
-                    .map_err(|e| e.to_string())?;
+                let removed = self.with_unlocked(|vault, credentials| {
+                    vault.purge_expired_trash(days, credentials)
+                })?;
                 Ok(json!({ "removed": removed }))
             }
             _ => Err(MISROUTED.into()),
@@ -1253,30 +1258,31 @@ impl MobileState {
             return Err(error.into());
         }
         let history_limit = self.settings.history_limit;
-        let session = self.session.clone();
-        let (vault, credentials) = self.unlocked()?;
-        if let Some(required) = confirmation(vault, &command)
-            && !confirmed
-        {
-            command.zeroize();
-            return Err(required.into());
-        }
-        // Saving an item without changes succeeds, as the app has always shown.
-        let existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).ok().flatten().is_some());
-        if let Some(expected) = expected_revision
-            && !operations::expected_revision_matches(Some(vault), &command, expected)
-        {
-            command.zeroize();
-            return Err("Item changed since it was opened; reopen it before continuing".into());
-        }
-        let mut reply = None;
-        let deferred =
-            operations::execute_unlocked(&mut reply, command, vault, credentials, history_limit);
-        Ok(PreparedCommand {
-            reply,
-            deferred,
-            existing_update,
-            session,
+        let session = self.session_id();
+        self.with_unlocked(|vault, credentials| {
+            if let Some(required) = confirmation(vault, &command)
+                && !confirmed
+            {
+                command.zeroize();
+                return Err(VaultError::Validation(required.into()));
+            }
+            // Saving an item without changes succeeds, as the app has always shown.
+            let existing_update = matches!(&command, ServerCommand::Update(u) if vault.entry_id(&u.entry.target).ok().flatten().is_some());
+            if let Some(expected) = expected_revision
+                && !operations::expected_revision_matches(Some(vault), &command, expected)
+            {
+                command.zeroize();
+                return Err(VaultError::Conflict(ITEM_CHANGED.into()));
+            }
+            let mut reply = None;
+            let deferred =
+                operations::execute_unlocked(&mut reply, command, vault, credentials, history_limit);
+            Ok(PreparedCommand {
+                reply,
+                deferred,
+                existing_update,
+                session,
+            })
         })
     }
 
@@ -1315,7 +1321,8 @@ impl MobileState {
         let vault = self.vault()?;
         let encrypted = crate::file::read_bounded_file(&vault.sync_path()?, MAX_VAULT_BYTES)
             .map_err(|_| "Could not read vault")?;
-        let VaultCredentials::Session { encryption_key, .. } = &self.credentials else {
+        let Some(VaultCredentials::Session { encryption_key, .. }) = self.session.credentials()
+        else {
             return Err(LOCKED.into());
         };
         let mut material = Zeroizing::new(encryption_key.to_vec());
@@ -1328,7 +1335,7 @@ impl MobileState {
 
     /// IDs of logins with a password that may be filled for `origin`.
     fn login_ids(&self, origin: &str) -> Vec<usize> {
-        let Some(vault) = self.vault.as_ref() else {
+        let Some(vault) = self.session.vault() else {
             return vec![];
         };
         if origin.starts_with("https://") {
@@ -1343,7 +1350,7 @@ impl MobileState {
 
     /// Whether one item is a login matching `origin`, without scanning the vault.
     fn login_matches_id(&self, id: usize, origin: &str) -> bool {
-        self.vault.as_ref().is_some_and(|vault| {
+        self.session.vault().is_some_and(|vault| {
             vault
                 .item(id)
                 .is_some_and(|item| item.active() && login_matches(vault, item, origin))
@@ -1432,8 +1439,11 @@ impl MobileState {
     }
 
     fn save_passkey(&mut self, p: &Passkey) -> Result<(), String> {
-        let (vault, credentials) = self.unlocked()?;
-        vault.save_passkey(p, credentials)
+        self.with_unlocked(|vault, credentials| {
+            vault
+                .save_passkey(p, credentials)
+                .map_err(VaultError::Persistence)
+        })
     }
 }
 
@@ -1544,11 +1554,10 @@ impl VaultHost for MobileHost<'_> {
     ) -> impl std::future::Future<Output = Result<Result<T, VaultError>, String>> + Send {
         let result = (|| {
             let mut owner = guard(self.owner);
-            if session.is_none() || owner.session != session {
+            if session.is_none() || owner.session_id() != session {
                 return Err(crate::server::SESSION_CHANGED.to_owned());
             }
-            let (vault, credentials) = owner.unlocked()?;
-            Ok(apply(vault, credentials))
+            Ok(owner.session.with_unlocked(apply))
         })();
         async move { result }
     }
@@ -1560,9 +1569,9 @@ impl VaultHost for MobileHost<'_> {
                 return true;
             }
             let owner = guard(&owner);
-            owner.session != session
+            owner.session_id() != session
                 || revision.is_some_and(|revision| {
-                    owner.vault.as_ref().map(Vault::vault_revision) != Some(revision)
+                    owner.session.vault().map(Vault::vault_revision) != Some(revision)
                 })
         })
     }
@@ -1588,7 +1597,7 @@ impl SyncHost for MobileHost<'_> {
     fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot, String>> + Send {
         let snapshot = (|| {
             let owner = guard(self.owner);
-            Snapshot::of(owner.vault()?, owner.session.clone().ok_or(LOCKED)?)
+            Snapshot::of(owner.vault()?, owner.session_id().ok_or(LOCKED)?)
         })();
         async move { snapshot }
     }
@@ -1784,17 +1793,21 @@ mod tests {
         }
         {
             let mut state = api.state();
-            let vault = state.vault.as_mut().unwrap();
-            for id in [1, 2] {
-                vault.set_test_totp(
-                    id,
-                    "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
-                );
-            }
-            vault.set_test_totp(
-                3,
-                "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
-            );
+            state
+                .with_unlocked(|vault, _| {
+                    for id in [1, 2] {
+                        vault.set_test_totp(
+                            id,
+                            "otpauth://totp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                        );
+                    }
+                    vault.set_test_totp(
+                        3,
+                        "otpauth://hotp/Example?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&counter=0",
+                    );
+                    Ok(())
+                })
+                .unwrap();
         }
         let choices = api.call(r#"{"op":"otp_logins","origin":"https://accounts.example.com","hostname_only":true}"#).unwrap();
         assert_eq!(choices.as_array().unwrap().len(), 2);
@@ -2297,7 +2310,7 @@ mod tests {
             !raw.windows(b"private_key".len())
                 .any(|w| w == b"private_key")
         );
-        let mut key = api.state().credentials.clone();
+        let mut key = api.state().session.credentials().unwrap().clone();
         let plain = decrypt_file(&mut key, &raw).unwrap();
         let document = persistence::decode_document(&plain).unwrap();
         assert_eq!(document.items.len(), 1);
@@ -2308,8 +2321,7 @@ mod tests {
         assert!(api.state().save_passkey(&stored).is_err());
         assert!(
             api.state()
-                .vault
-                .as_ref()
+                .vault()
                 .unwrap()
                 .browser_logins("https://example.com")
                 .is_empty()
@@ -2322,8 +2334,7 @@ mod tests {
         );
         let export = temp.path().join("portable.json");
         api.state()
-            .vault
-            .as_ref()
+            .vault()
             .unwrap()
             .export(export.to_string_lossy().into_owned(), false)
             .unwrap();
@@ -2335,8 +2346,7 @@ mod tests {
         );
         assert!(
             api.state()
-                .vault
-                .as_ref()
+                .vault()
                 .unwrap()
                 .export(
                     temp.path().join("lossy.csv").to_string_lossy().into_owned(),
@@ -2346,8 +2356,7 @@ mod tests {
         );
         let backup = temp.path().join("vault.pmbackup");
         api.state()
-            .vault
-            .as_ref()
+            .vault()
             .unwrap()
             .encrypted_backup(
                 backup.to_string_lossy().into_owned(),
@@ -2387,7 +2396,6 @@ mod tests {
         // only when it is the passkey being used.
         {
             let mut state = api.state();
-            let (vault, credentials) = state.unlocked().unwrap();
             let damaged = TypedEntry {
                 entry: crate::types::PasswordEntry {
                     name: "Damaged passkey".into(),
@@ -2407,7 +2415,13 @@ mod tests {
                 tags: vec![],
                 favorite: false,
             };
-            assert!(vault.add_passkey_entry(damaged, credentials).unwrap());
+            assert!(
+                state
+                    .with_unlocked(
+                        |vault, credentials| vault.add_passkey_entry(damaged, credentials)
+                    )
+                    .unwrap()
+            );
         }
         let listed = api.call(r#"{"op":"passkeys"}"#).unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);

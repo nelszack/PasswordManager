@@ -241,25 +241,28 @@ impl MobileState {
                     .ok_or("Preview this import first")?,
             )
         };
-        let (vault, credentials) = self.unlocked()?;
-        if let Some(review) = review
-            && (review_token.as_deref() != Some(review.token.as_str())
-                || review.revision != vault.data.revision
-                || review.digest != digest
-                || review.conflicts != conflicts)
-        {
-            return Err("Import or vault changed; preview again".into());
-        }
-        let report = vault
-            .import_contents(contents, conflicts, preview, history_limit, credentials)
-            .map_err(|e| e.to_string())?;
+        let (report, revision) = self.with_unlocked(|vault, credentials| {
+            if let Some(review) = review
+                && (review_token.as_deref() != Some(review.token.as_str())
+                    || review.revision != vault.data.revision
+                    || review.digest != digest
+                    || review.conflicts != conflicts)
+            {
+                return Err(VaultError::Validation(
+                    "Import or vault changed; preview again".into(),
+                ));
+            }
+            let report =
+                vault.import_contents(contents, conflicts, preview, history_limit, credentials)?;
+            Ok((report, vault.data.revision))
+        })?;
         if !preview {
             return Ok(json!({ "report": report }));
         }
         let token = hex::encode(rand::random::<[u8; 32]>());
         self.import_review = Some(ImportReview {
             token: token.clone(),
-            revision: vault.data.revision,
+            revision,
             digest,
             conflicts,
         });
@@ -293,10 +296,10 @@ impl MobileState {
         ));
         let original = fs::read(&path).map_err(|_| "Could not read recovery snapshot")?;
         crate::cloud::write_private(&recovery, &original, false)?;
-        let (vault, credentials) = self.unlocked()?;
-        let result = vault.rekey_credentials(credentials, candidate);
+        let result = self
+            .with_unlocked(|vault, credentials| vault.rekey_credentials(credentials, candidate));
         self.lock();
-        result.map_err(|e| e.to_string())?;
+        result?;
         Ok(json!({ "locked": true }))
     }
 
@@ -426,7 +429,7 @@ mod tests {
         api.set_cancellation(&CANCEL);
         CANCEL.signal();
         assert!(api.call(r#"{"op":"status"}"#).is_err());
-        assert!(api.state().vault.is_none());
+        assert!(api.state().vault().is_err());
         request(&mut api, json!({"op":"lock"}));
         assert!(!Ticket::new(Some(&CANCEL)).cancelled());
         // A waiter is woken by the signal itself, not by polling, and a
