@@ -56,7 +56,7 @@ impl From<String> for Failure {
 }
 
 pub fn connect(client: &AuthenticatedClient) -> Result<Reply, Failure> {
-    server::start(client.port)?;
+    server::start(client.port).map_err(String::from)?;
     attach(client)
 }
 

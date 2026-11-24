@@ -165,16 +165,42 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-pub fn start(port: u16) -> Result<String, String> {
+/// Why the background server could not start.
+#[derive(Debug)]
+pub enum StartError {
+    /// Another process already listens on the server's address.
+    PortInUse(std::net::SocketAddr),
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PortInUse(address) => write!(f, "{address} is already in use by another process"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<StartError> for String {
+    fn from(error: StartError) -> Self {
+        error.to_string()
+    }
+}
+
+pub fn start(port: u16) -> Result<String, StartError> {
     if is_running(port) {
         return Ok("Server is already running.".to_string());
     }
     if std::net::TcpStream::connect_timeout(&server_addr(port), Duration::from_millis(250)).is_ok()
     {
-        return Err(format!(
-            "{} is already in use by another process",
-            server_addr(port)
-        ));
+        return Err(StartError::PortInUse(server_addr(port)));
     }
     // Provide an actionable startup error. The child acquires and holds the
     // authoritative lock itself, closing the race between this check and spawn.
@@ -200,7 +226,7 @@ pub fn start(port: u16) -> Result<String, String> {
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return Err(format!("failed to start background process: {error}")),
+        Err(error) => return Err(format!("failed to start background process: {error}").into()),
     };
     let pid = child.id();
     for _ in 0..20 {
@@ -209,20 +235,22 @@ pub fn start(port: u16) -> Result<String, String> {
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                return Err(format!("server exited during startup with {status}"));
+                return Err(format!("server exited during startup with {status}").into());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("could not verify server startup: {error}"));
+                return Err(format!("could not verify server startup: {error}").into());
             }
         }
     }
     if !is_running(port) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("server did not become ready within two seconds".to_string());
+        return Err("server did not become ready within two seconds"
+            .to_string()
+            .into());
     }
     std::thread::spawn(move || {
         let _ = child.wait();

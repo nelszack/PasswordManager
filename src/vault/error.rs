@@ -4,6 +4,8 @@ use std::fmt;
 #[derive(Debug, PartialEq, Eq)]
 pub enum VaultError {
     Locked,
+    /// Decryption failed: a wrong password or key, or modified contents.
+    WrongKey,
     NotFound(String),
     InvalidInput(String),
     Conflict(String),
@@ -17,6 +19,7 @@ impl fmt::Display for VaultError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Locked => f.write_str("vault is locked"),
+            Self::WrongKey => f.write_str("incorrect password/key or modified encrypted contents"),
             Self::NotFound(message)
             | Self::InvalidInput(message)
             | Self::Conflict(message)
@@ -52,7 +55,7 @@ impl VaultError {
             Self::Conflict(_) => Self::Conflict(message),
             Self::Persistence(_) => Self::Persistence(message),
             Self::Durability(_) => Self::Durability(message),
-            Self::Validation(_) => Self::Validation(message),
+            Self::Validation(_) | Self::WrongKey => Self::Validation(message),
         }
     }
 }

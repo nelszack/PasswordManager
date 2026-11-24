@@ -101,7 +101,9 @@ fn domain_code(error: &crate::vault::VaultError) -> ResponseCode {
     use crate::vault::VaultError;
     match error {
         VaultError::NotFound(_) => ResponseCode::NotFound,
-        VaultError::InvalidInput(_) | VaultError::Validation(_) => ResponseCode::InvalidInput,
+        VaultError::InvalidInput(_) | VaultError::Validation(_) | VaultError::WrongKey => {
+            ResponseCode::InvalidInput
+        }
         VaultError::Conflict(_) => ResponseCode::Conflict,
         VaultError::Locked | VaultError::Persistence(_) => ResponseCode::Failure,
         VaultError::Durability(_) => ResponseCode::Durability,

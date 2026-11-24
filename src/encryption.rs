@@ -100,12 +100,32 @@ pub fn check_new_password(
     Ok(())
 }
 
+/// Why a prompt for a new secret produced no value.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PromptFailure {
+    /// The password policy rejected a scripted value (invalid input).
+    Rejected(String),
+    /// The prompt could not run or read its input.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for PromptFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Unavailable(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Prompt twice for a new secret. `label` names it ("master password", "PIN").
 pub fn try_prompt_for_confirmed_password(
     label: &str,
     require_minimum: bool,
     retry: impl Fn(&str),
-) -> Result<String, String> {
+) -> Result<String, PromptFailure> {
+    let hidden = |prompt: &str, what: &str| {
+        crate::prompt::hidden(prompt, what).map_err(PromptFailure::Unavailable)
+    };
     let first = if require_minimum {
         format!("New {label} (14+ characters, hard to guess): ")
     } else {
@@ -116,24 +136,22 @@ pub fn try_prompt_for_confirmed_password(
     if crate::prompt::from_stdin() {
         // Scripts supply the value once; validation failures cannot be retried.
         // Wrapped at once so a rejected value is wiped too.
-        let mut value = Zeroizing::new(crate::prompt::hidden(first, label)?);
+        let mut value = Zeroizing::new(hidden(first, label)?);
         if require_minimum {
-            validate_new_password(&value).map_err(|error| format!("{error}."))?;
+            validate_new_password(&value)
+                .map_err(|error| PromptFailure::Rejected(format!("{error}.")))?;
         }
         return Ok(std::mem::take(&mut *value));
     }
     loop {
-        let mut p1 = Zeroizing::new(crate::prompt::hidden(first, label)?);
+        let mut p1 = Zeroizing::new(hidden(first, label)?);
         if require_minimum && let Err(error) = validate_new_password(&p1) {
             // Explain the rule immediately instead of after a second prompt.
             retry(&format!("{error}. Try again."));
             p1.zeroize();
             continue;
         }
-        let mut p2 = Zeroizing::new(crate::prompt::hidden(
-            second,
-            &format!("{label} confirmation"),
-        )?);
+        let mut p2 = Zeroizing::new(hidden(second, &format!("{label} confirmation"))?);
         if p1 == p2 {
             p2.zeroize();
             return Ok(std::mem::take(&mut *p1));

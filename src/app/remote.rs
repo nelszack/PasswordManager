@@ -2,7 +2,7 @@ use super::output::Output;
 use password_manager::{
     cli::{AttachmentCommands, BackupCommands, CliCommands, DeleteArgs, EntryArgs, TotpCommands},
     client, config,
-    encryption::try_prompt_for_confirmed_password,
+    encryption::{PromptFailure, try_prompt_for_confirmed_password},
     file::{resolve_key_path, resolve_new_key_path},
     password::generate_password as make_password,
     types::{
@@ -16,10 +16,13 @@ pub(super) fn confirmed_password(console: &Output, label: &str, require_minimum:
     try_prompt_for_confirmed_password(label, require_minimum, |message| {
         console.print_warning(message)
     })
-    .unwrap_or_else(|error| {
+    .unwrap_or_else(|failure| {
         // A rejected value is invalid input (2); a prompt that could not run is a failure (1).
-        let invalid = error.contains("must contain") || error.contains("too predictable");
-        console.exit_error(&error, if invalid { 2 } else { 1 })
+        let code = match failure {
+            PromptFailure::Rejected(_) => 2,
+            PromptFailure::Unavailable(_) => 1,
+        };
+        console.exit_error(&failure.to_string(), code)
     })
 }
 
