@@ -25,7 +25,7 @@
 - `src/passkey.rs` - ES256 WebAuthn construction and encrypted passkey-field validation
 - `crates/pm-mobile/` - JNI adapter and cancellation signal over the shared Rust vault library
 - `android/` - Native Kotlin app, secure autofill sheet, Android 14+ credential provider, Keystore integration, and isolated device fixtures
-- `src/secret.rs` - Redacted secret fields that wipe their contents on drop
+- `crates/pm-contracts/src/secret.rs` - Redacted secret fields that wipe their contents on drop
 - `src/encryption.rs` - Encryption/decryption utilities
 - `src/password.rs` - Password generation and strength checking
 - `src/cli.rs` - CLI argument parsing
@@ -35,7 +35,7 @@
 - `src/vault/sync.rs` - Authenticated application of downloaded snapshots on the vault owner
 - `sync-server/` - Independent Go snapshot server, device enrollment, quotas, and Linux service unit
 - `src/clipboard.rs` - Clipboard operations
-- `src/file.rs` - Shared platform exports for paths, vault discovery, private permissions, and atomic file writes
+- `crates/pm-platform/src/file.rs` - Paths, vault discovery, private permissions, and atomic file writes
 - `crates/pm-contracts/src/protocol.rs` and `crates/pm-contracts/src/protocol/` - Versioned typed requests, responses, receipts, and shared browser command policies
 - `src/lib.rs` - Shared production library used by the desktop/CLI, Android adapter, and fuzz harness
 - `docs/commands.html` - Browser-friendly CLI reference generated from Clap metadata
@@ -79,8 +79,9 @@ The Rust workspace separates reusable contracts and client infrastructure:
   on the contracts and filesystem adapters, without loading vault storage,
   password-strength analysis, HTTP services, the clipboard backend, or Iced.
 - `password_manager` composes the vault owner, persistence, integrations, CLI,
-  native host, and optional desktop. Existing module paths remain available as
-  compatibility exports, and the `pm` executable/launcher behavior is unchanged.
+  native host, and optional desktop. It re-exports the extracted crates under
+  their historical module names (`client`, `file`, `protocol`, `secret`,
+  `types`) from `src/lib.rs`, without separate shim files.
 - `pm-mobile` builds the JNI shared library with the root application's desktop
   feature disabled. Android owns a separate in-process `MobileVault`; it does
   not use `AuthenticatedClient` or run the desktop daemon on the phone.

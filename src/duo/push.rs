@@ -246,7 +246,7 @@ fn now() -> u64 {
     crate::clock::unix_seconds()
 }
 fn text(value: Option<&Value>) -> String {
-    crate::terminal::metadata(
+    pm_client::terminal_metadata(
         &value
             .and_then(Value::as_str)
             .unwrap_or_default()
