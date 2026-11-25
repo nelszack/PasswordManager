@@ -1,5 +1,6 @@
 package dev.nelszack.passwordmanager
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -12,6 +13,15 @@ private const val ROW_PAGE_SIZE = 50
 internal const val EXTRA_ADD_LOGIN_ORIGIN = "dev.nelszack.passwordmanager.ADD_LOGIN_ORIGIN"
 /** From an empty card or identity picker: open a new item of that type after unlocking. */
 internal const val EXTRA_ADD_ITEM_KIND = "dev.nelszack.passwordmanager.ADD_ITEM_KIND"
+/** Required with either add extra; see [AddRequestToken]. */
+internal const val EXTRA_ADD_REQUEST_TOKEN = "dev.nelszack.passwordmanager.ADD_REQUEST_TOKEN"
+
+/** Opens the vault app from the autofill sheet, authorized to carry an add request. */
+internal fun addRequestIntent(context: Context): Intent =
+    Intent(context, MainActivity::class.java)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        .putExtra(EXTRA_ADD_REQUEST_TOKEN, AddRequestToken.issue())
+
 /** Matches the vault's per-attachment limit. */
 private const val MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 
@@ -64,13 +74,19 @@ open class MainActivity : ManagementActivity() {
             "dev.nelszack.passwordmanager.SHORTCUT_SEARCH" -> pendingShortcut = "search"
             "dev.nelszack.passwordmanager.SHORTCUT_GENERATE" -> pendingShortcut = "generate"
         }
-        intent?.getStringExtra(EXTRA_ADD_ITEM_KIND)?.let { kind ->
-            intent.removeExtra(EXTRA_ADD_ITEM_KIND)
-            if (kind in setOf("payment-card", "identity")) pendingAddKind = kind
-        }
-        val origin = intent?.getStringExtra(EXTRA_ADD_LOGIN_ORIGIN) ?: return
+        if (intent == null) return
+        val kind = intent.getStringExtra(EXTRA_ADD_ITEM_KIND)
+        val origin = intent.getStringExtra(EXTRA_ADD_LOGIN_ORIGIN)
+        val token = intent.getStringExtra(EXTRA_ADD_REQUEST_TOKEN)
+        intent.removeExtra(EXTRA_ADD_ITEM_KIND)
         intent.removeExtra(EXTRA_ADD_LOGIN_ORIGIN)
-        if (origin.length <= 2048 && origin.none(Char::isISOControl)) pendingAddOrigin = origin
+        intent.removeExtra(EXTRA_ADD_REQUEST_TOKEN)
+        if (kind == null && origin == null) return
+        // This activity is exported; only this app's own autofill sheet may ask it to add an item.
+        if (!AddRequestToken.consume(token)) return
+        if (kind in setOf("payment-card", "identity")) pendingAddKind = kind
+        if (origin != null && origin.length <= 2048 && origin.none(Char::isISOControl))
+            pendingAddOrigin = origin
     }
 
     override fun onSessionLocked() {

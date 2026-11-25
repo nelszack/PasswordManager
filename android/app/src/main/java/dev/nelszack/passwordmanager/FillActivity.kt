@@ -161,11 +161,7 @@ class FillActivity : VaultActivity() {
             if (choices.length() == 0)
                 button(if (form.card) "Add a payment card" else "Add an identity") {
                     startActivity(
-                        android.content.Intent(this, MainActivity::class.java)
-                            .addFlags(
-                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                                    android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                            )
+                        addRequestIntent(this)
                             .putExtra(EXTRA_ADD_ITEM_KIND, if (form.card) "payment-card" else "identity")
                     )
                     finish()
@@ -261,12 +257,7 @@ class FillActivity : VaultActivity() {
                 if (!form.codeOnly)
                     button("Add a login for this site") {
                         startActivity(
-                            android.content.Intent(this, MainActivity::class.java)
-                                .addFlags(
-                                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                                        android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                                )
-                                .putExtra(EXTRA_ADD_LOGIN_ORIGIN, form.origin)
+                            addRequestIntent(this).putExtra(EXTRA_ADD_LOGIN_ORIGIN, form.origin)
                         )
                         finish()
                     }
