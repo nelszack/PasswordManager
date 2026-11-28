@@ -1,20 +1,9 @@
 use super::*;
 
-/// Schema 3 adds item organization (tags, favorites) and attachments. A vault
-/// that uses none of them is still written as schema 2, so older releases keep
-/// reading it; once one is used, older releases refuse the vault instead of
-/// silently discarding the new data on their next save.
+/// New saves always use schema 3. Schema 2 remains readable for existing
+/// vaults, encrypted backups, and synced snapshots.
 const DOCUMENT_VERSION: u16 = 3;
-const BASELINE_DOCUMENT_VERSION: u16 = 2;
-/// Whether this data is saved in the current (not the baseline) schema.
-pub(super) fn uses_current_schema(data: &VaultData) -> bool {
-    data.items.values().any(Item::needs_current_schema)
-}
-impl Item {
-    fn needs_current_schema(&self) -> bool {
-        self.metadata.uses_organization() || !self.attachments.is_empty()
-    }
-}
+const MIN_DOCUMENT_VERSION: u16 = 2;
 #[derive(Debug, Clone, PartialEq)]
 pub enum VaultStore {
     Detached,
@@ -73,7 +62,7 @@ struct ItemDocument {
     authenticator: Option<SecretString>,
     duo: Option<DuoCredentials>,
     lifecycle: Lifecycle,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     attachments: Vec<Attachment>,
 }
 #[derive(Serialize)]
@@ -86,7 +75,6 @@ struct ItemDocumentRef<'a> {
     authenticator: Option<&'a SecretString>,
     duo: Option<&'a DuoCredentials>,
     lifecycle: &'a Lifecycle,
-    #[serde(skip_serializing_if = "<[Attachment]>::is_empty")]
     attachments: &'a [Attachment],
 }
 /// Serialize the ordered overlay directly. No full-vault reference map or
@@ -184,21 +172,8 @@ fn write_document(
         .map_or((data.next_item_id, data.revision), |(staged, _)| {
             (staged.next_item_id, staged.revision)
         });
-    let current = data
-        .items
-        .values()
-        .chain(
-            overlay
-                .into_iter()
-                .flat_map(|(staged, _)| staged.items.values()),
-        )
-        .any(Item::needs_current_schema);
     let document = VaultDocumentRef {
-        schema_version: if current {
-            DOCUMENT_VERSION
-        } else {
-            BASELINE_DOCUMENT_VERSION
-        },
+        schema_version: DOCUMENT_VERSION,
         vault_id: data.vault_id,
         next_item_id,
         revision,
@@ -215,7 +190,7 @@ pub(super) fn decode_document(bytes: &[u8]) -> Result<VaultData, VaultError> {
     let document: VaultDocument = rmp_serde::from_slice(bytes).map_err(|e| {
         VaultError::Validation(format!("authenticated vault document is invalid: {e}"))
     })?;
-    if !(BASELINE_DOCUMENT_VERSION..=DOCUMENT_VERSION).contains(&document.schema_version) {
+    if !(MIN_DOCUMENT_VERSION..=DOCUMENT_VERSION).contains(&document.schema_version) {
         return Err(VaultError::Validation("unsupported vault document schema; export development vaults with their original binary".into()));
     }
     if document.vault_id == [0; 16] {

@@ -30,7 +30,7 @@ struct PortableItemRef<'a> {
     duo: Option<&'a DuoCredentials>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     tags: &'a [String],
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     favorite: bool,
     #[serde(skip_serializing_if = "ExportAttachments::is_empty")]
     attachments: ExportAttachments<'a>,

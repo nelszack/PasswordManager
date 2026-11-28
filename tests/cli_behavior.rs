@@ -418,7 +418,7 @@ fn dynamic_completion_suggests_file_paths() {
         vec!["unlock", "--key"],
         vec!["new", "--key"],
         vec!["rekey", "--key"],
-        vec!["delete", "--vault", "--key"],
+        vec!["vaults", "delete", "--key"],
         vec!["import", "--path"],
         vec!["import", "--new", "--key"],
         vec!["export", "--path"],
@@ -1186,7 +1186,7 @@ fn totp_watch_refreshes_codes_and_stops_when_the_vault_locks() {
                 command.arg("--json");
             }
             let watcher = command
-                .args(["totp", "show", "--entry-name", "watch", "--watch"])
+                .args(["totp", "show", "watch", "--watch"])
                 .stdout(Stdio::from(stdout_file.reopen().unwrap()))
                 .stderr(Stdio::from(stderr.try_clone().unwrap()))
                 .spawn_timeout("TOTP watch");
@@ -1328,11 +1328,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert!(viewed.status.success());
     assert!(String::from_utf8_lossy(&viewed.stdout).contains("example"));
 
-    let secret = run(
-        root.path(),
-        port,
-        &["get", "--entry-name", "example", "--password-only"],
-    );
+    let secret = run(root.path(), port, &["get", "example", "--password-only"]);
     assert!(secret.status.success());
     assert!(!secret.stdout.is_empty());
 
@@ -1341,7 +1337,6 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         port,
         &[
             "update",
-            "--entry-name",
             "example",
             "--username",
             "bob",
@@ -1357,11 +1352,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         String::from_utf8_lossy(&updated.stderr)
     );
 
-    let history = run(
-        root.path(),
-        port,
-        &["--json", "history", "--entry-name", "example"],
-    );
+    let history = run(root.path(), port, &["--json", "history", "example"]);
     assert!(history.status.success());
     let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
     assert_eq!(history["ok"], true);
@@ -1403,7 +1394,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert!(previewed.status.success());
 
     assert!(
-        run(root.path(), port, &["delete", "--entry-name", "example"])
+        run(root.path(), port, &["delete", "example"])
             .status
             .success()
     );
@@ -1426,18 +1417,10 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert!(imported.status.success());
     assert!(String::from_utf8_lossy(&run(root.path(), port, &["view"]).stdout).contains("bob"));
 
-    let hotp_watch = run(
-        root.path(),
-        port,
-        &["totp", "show", "--entry-name", "example", "--watch"],
-    );
+    let hotp_watch = run(root.path(), port, &["totp", "show", "example", "--watch"]);
     assert!(!hotp_watch.status.success());
     assert!(String::from_utf8_lossy(&hotp_watch.stderr).contains("time-based authenticator"));
-    let hotp = run(
-        root.path(),
-        port,
-        &["totp", "show", "--entry-name", "example"],
-    );
+    let hotp = run(root.path(), port, &["totp", "show", "example"]);
     assert!(
         hotp.status.success(),
         "{}",
@@ -1457,7 +1440,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
         (vec!["--reveal-secrets"], true),
         (vec!["--field", "RECOVERY-CODE"], true),
     ] {
-        let args: Vec<_> = ["--json", "get", "--entry-name", "example"]
+        let args: Vec<_> = ["--json", "get", "example"]
             .into_iter()
             .chain(flags)
             .collect();
@@ -1483,23 +1466,15 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     let public = run(
         root.path(),
         port,
-        &["get", "--entry-name", "example", "--field", "environment"],
+        &["get", "example", "--field", "environment"],
     );
     assert!(public.status.success());
     assert_eq!(String::from_utf8_lossy(&public.stdout).trim(), "production");
     for args in [
+        vec!["--json", "get", "example", "--field", "missing"],
         vec![
             "--json",
             "get",
-            "--entry-name",
-            "example",
-            "--field",
-            "missing",
-        ],
-        vec![
-            "--json",
-            "get",
-            "--entry-name",
             "example",
             "--field",
             "recovery-code",
@@ -1555,11 +1530,7 @@ fn executable_drives_a_key_vault_through_a_complete_lifecycle() {
     assert!(unlocked.status.success());
     assert!(String::from_utf8_lossy(&run(root.path(), port, &["view"]).stdout).contains("example"));
 
-    let hotp = run(
-        root.path(),
-        port,
-        &["totp", "show", "--entry-name", "example"],
-    );
+    let hotp = run(root.path(), port, &["totp", "show", "example"]);
     assert!(
         hotp.status.success(),
         "{}",
@@ -1614,11 +1585,10 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
         root.path(),
         port,
         &[
+            "vaults",
             "delete",
-            "--vault",
-            "--yes",
-            "--vault-file",
             &ids[1],
+            "--yes",
             "--key",
             keys[0].to_str().unwrap(),
         ],
@@ -1633,11 +1603,10 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
         root.path(),
         port,
         &[
+            "vaults",
             "delete",
-            "--vault",
-            "--yes",
-            "--vault-file",
             &ids[1],
+            "--yes",
             "--key",
             keys[1].to_str().unwrap(),
             "--keep-key",
@@ -1652,8 +1621,8 @@ fn deleting_a_selected_or_default_vault_preserves_other_vaults_and_shared_keys()
         root.path(),
         port,
         &[
+            "vaults",
             "delete",
-            "--vault",
             "--yes",
             "--key",
             keys[0].to_str().unwrap(),
@@ -1944,7 +1913,7 @@ fn permanent_deletion_requires_explicit_noninteractive_confirmation() {
     );
     for args in [
         vec!["purge", "--all"],
-        vec!["delete", "--vault", "--key", key.to_str().unwrap()],
+        vec!["vaults", "delete", "--key", key.to_str().unwrap()],
     ] {
         let refused = run(root.path(), port, &args);
         assert_eq!(refused.status.code(), Some(2));
@@ -1960,7 +1929,7 @@ fn permanent_deletion_requires_explicit_noninteractive_confirmation() {
         run(
             root.path(),
             port,
-            &["delete", "--vault", "--key", key.to_str().unwrap(), "--yes"]
+            &["vaults", "delete", "--key", key.to_str().unwrap(), "--yes"]
         )
         .status
         .success()

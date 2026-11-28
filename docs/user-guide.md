@@ -672,13 +672,10 @@ pm update --id 3 --add-tag finance --remove-tag old --favorite
 pm update --id 3 --clear-tags --unfavorite
 ```
 
-A vault that uses tags or favorites is saved in vault document schema 3. Older
-releases refuse to open it rather than silently discard the new data, so update
-every device (desktop, CLI, and Android) before relying on tags in a synced
-vault. The first save that needs the new schema says so once: the CLI prints a
-warning, the desktop app shows a banner until you dismiss it, and Android adds it
-to the save message. Removing every tag, favorite, and attachment returns the
-vault to the previous schema.
+New saves use vault document schema 3 on desktop, CLI, and Android, including
+vaults without tags, favorites, or attachments. Existing schema 2 vaults and
+encrypted backups remain readable; their next save uses schema 3. Update every
+device before saving a synced vault, because older releases cannot read schema 3.
 Sync conflict review lists tags and favorites as their own **organization** field.
 
 ### SSH agent
@@ -782,7 +779,7 @@ use **Add attachment…**, **Save as…**, or **Remove…** (which asks for
 confirmation). On Android, the item's details screen lists attachments; tap one to
 save a copy through the system file picker, or choose **Add attachment**.
 Portable JSON stores attachment content as base64; plaintext CSV omits it.
-A vault with attachments uses vault document schema 3, like tags.
+Vaults with attachments use vault document schema 3.
 
 The general search term matches any non-secret field. Field-specific filters are
 combined, so every supplied filter must match. Matching is case-insensitive.
@@ -806,8 +803,7 @@ pm get "github.com"
 
 Select an item by name (exact, or ignoring case when only one item matches) or
 with `--id ID` from `pm view`. When several items share a name, the command stops
-and lists their IDs instead of guessing. `--entry-name NAME` is an equivalent
-spelling of the positional name.
+and lists their IDs instead of guessing.
 
 `get` prints item details with the password (or card number, key, …) and secret
 custom fields hidden, using labels for the item's type. It never touches the
@@ -869,7 +865,7 @@ pm purge --id 1
 pm purge --all
 ```
 
-Permanent CLI deletion (`pm purge` and `pm delete --vault`) asks you to type
+Permanent CLI deletion (`pm purge` and `pm vaults delete`) asks you to type
 `yes` before continuing. In scripts or other noninteractive sessions, pass
 `--yes` explicitly. Ordinary item deletion still moves an item to recoverable trash.
 
@@ -888,22 +884,23 @@ To permanently delete an entire vault, supply its password or key:
 
 ```bash
 # Prompt for the vault's master password
-pm delete --vault
+pm vaults delete
 
 # Select a vault explicitly when multiple vaults exist
-pm delete --vault --vault-file VAULT_ID.enc
+pm vaults delete VAULT_ID.enc
 
 # Delete a key-based vault and its key file
-pm delete --vault --key ./keys/vault.key
+pm vaults delete --key ./keys/vault.key
 
 # Delete the vault but intentionally retain a shared or backup key
-pm delete --vault --key ./keys/vault.key --keep-key
+pm vaults delete --key ./keys/vault.key --keep-key
 ```
 
 Whole-vault deletion cannot be restored. A supplied key file is removed only
 after it has successfully opened the matching vault and that vault has been
-deleted. Deletion uses `--vault-file`, then the configured default vault, or the
-only vault when exactly one exists. It never searches vaults by password.
+deleted. Deletion uses the positional vault name or filename, then the configured
+default vault, or the only vault when exactly one exists. It never searches vaults
+by password.
 
 ### Password History
 

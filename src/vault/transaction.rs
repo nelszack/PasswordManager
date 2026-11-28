@@ -55,7 +55,6 @@ impl Vault {
                     .ok_or_else(|| VaultError::Conflict("item revision exhausted".into()))?;
             }
         }
-        let baseline = !persistence::uses_current_schema(&self.data);
         let write = self
             .store
             .commit_overlay(&self.data, &staged.data, &selected, key);
@@ -85,9 +84,6 @@ impl Vault {
             self.data.items.append(&mut staged.data.items);
             self.data.next_item_id = staged.data.next_item_id;
             self.data.revision = staged.data.revision;
-            if baseline && persistence::uses_current_schema(&self.data) {
-                self.metadata.schema_upgraded = true;
-            }
         }
         write?;
         Ok(result)

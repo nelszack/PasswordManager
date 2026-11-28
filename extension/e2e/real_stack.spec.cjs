@@ -99,12 +99,12 @@ test("the extension saves through the real native host into a temporary vault", 
     await expect.poll(() => prompt.isClosed()).toBe(true);
 
     const result = JSON.parse(runPm(
-        environment, "--json", "get", "--entry-name", "Real Native Entry"
+        environment, "--json", "get", "Real Native Entry"
     ));
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({ username: "real@example.com", urls: expect.arrayContaining([origin]) });
     const secret = JSON.parse(runPm(
-        environment, "--json", "get", "--entry-name", "Real Native Entry",
+        environment, "--json", "get", "Real Native Entry",
         "--password-only"
     ));
     expect(secret).toMatchObject({ ok: true, data: "real-native-password" });
@@ -124,7 +124,7 @@ test("the extension saves through the real native host into a temporary vault", 
     // Updating a password through the browser preserves the original URL,
     // including its path, and all additional URLs saved by the desktop/CLI.
     const savedUrl = `${origin}/saved-login`;
-    runPm(environment, "update", "--entry-name", "Real Native Entry",
+    runPm(environment, "update", "Real Native Entry",
         "--url", savedUrl, "--add-url", "https://alternate.example");
     await page.reload();
     await page.locator("#username").fill("real@example.com");
@@ -136,9 +136,9 @@ test("the extension saves through the real native host into a temporary vault", 
     const update = await updateOpened;
     await update.locator("#update").click();
     await expect.poll(() => update.isClosed()).toBe(true);
-    const updated = JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Real Native Entry"));
+    const updated = JSON.parse(runPm(environment, "--json", "get", "Real Native Entry"));
     expect(updated.data.urls).toEqual(expect.arrayContaining([savedUrl, "https://alternate.example"]));
-    expect(JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Real Native Entry", "--password-only")))
+    expect(JSON.parse(runPm(environment, "--json", "get", "Real Native Entry", "--password-only")))
         .toMatchObject({ ok: true, data: "real-updated-password" });
 
     const secondPickerOpened = browser.context.waitForEvent(
@@ -192,10 +192,10 @@ test("a new password can update a login saved for another address, adding this s
     await prompt.locator("#update").click();
     await expect.poll(() => prompt.isClosed()).toBe(true);
 
-    const updated = JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Old Address Login"));
+    const updated = JSON.parse(runPm(environment, "--json", "get", "Old Address Login"));
     expect(updated.data.urls).toEqual(expect.arrayContaining(["https://old.example.org/login", origin]));
     expect(updated.data.username).toBe("moved@example.com");
-    expect(JSON.parse(runPm(environment, "--json", "get", "--entry-name", "Old Address Login", "--password-only")))
+    expect(JSON.parse(runPm(environment, "--json", "get", "Old Address Login", "--password-only")))
         .toMatchObject({ ok: true, data: "moved-new-password" });
     const list = JSON.parse(runPm(environment, "--json", "list"));
     expect(list.data.length ?? list.data.items?.length).toBe(1);

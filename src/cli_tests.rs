@@ -52,7 +52,7 @@ fn delete_usage_names_one_target_and_update_generate_implies_password() {
         .unwrap()
         .render_usage()
         .to_string();
-    assert!(!usage.contains("--id <ID> --entry-name"), "{usage}");
+    assert!(usage.contains("<NAME|--id <ID>>"), "{usage}");
     assert!(Cli::try_parse_from(["pm", "update", "github", "--generate"]).is_ok());
     let cli = Cli::try_parse_from(["pm", "--password-stdin", "unlock", "--vault", "Work"]).unwrap();
     assert!(cli.password_stdin);
@@ -71,27 +71,27 @@ fn global_port_override_parses_and_rejects_zero() {
 
 #[test]
 fn test_get_selectors_parse_and_reject_vault_targets() {
-    for (selector, value, expected_id, expected_name) in [
-        ("--entry-name", "foo", None, Some("foo")),
-        ("--id", "3", Some(3), None),
+    for (args, expected_id, expected_name) in [
+        (vec!["pm", "get", "foo"], None, Some("foo")),
+        (vec!["pm", "get", "--id", "3"], Some(3), None),
     ] {
-        let cli = Cli::try_parse_from(["pm", "get", selector, value]).unwrap();
+        let cli = Cli::try_parse_from(args).unwrap();
         let Some(CliCommands::Get { target, .. }) = cli.command else {
             panic!("expected Get command");
         };
-        assert_eq!(target.id, expected_id, "{selector}");
-        assert_eq!(target.entry_name.as_deref(), expected_name, "{selector}");
+        assert_eq!(target.id, expected_id);
+        assert_eq!(target.item.as_deref(), expected_name);
     }
     assert!(Cli::try_parse_from(["pm", "get", "--vault", "--key", "k.bin"]).is_err());
 }
 
 #[test]
-fn test_delete_by_entry_name_parses_and_requires_a_target() {
-    let cli = Cli::try_parse_from(["pm", "delete", "--entry-name", "foo"]).unwrap();
+fn test_delete_by_name_parses_and_requires_a_target() {
+    let cli = Cli::try_parse_from(["pm", "delete", "foo"]).unwrap();
     match cli.command {
         Some(CliCommands::Delete(target)) => {
             assert_eq!(target.id, None);
-            assert_eq!(target.entry_name.as_deref(), Some("foo"));
+            assert_eq!(target.item.as_deref(), Some("foo"));
         }
         _ => panic!("expected Delete command"),
     }
@@ -102,8 +102,8 @@ fn test_delete_by_entry_name_parses_and_requires_a_target() {
 fn test_delete_vault_keep_key_requires_a_key_file() {
     let cli = Cli::try_parse_from([
         "pm",
+        "vaults",
         "delete",
-        "--vault",
         "--key",
         "./shared.key",
         "--keep-key",
@@ -111,9 +111,23 @@ fn test_delete_vault_keep_key_requires_a_key_file() {
     .unwrap();
     assert!(matches!(
         cli.command,
-        Some(CliCommands::Delete(DeleteArgs { keep_key: true, .. }))
+        Some(CliCommands::Vaults {
+            command: Some(VaultsCommand::Delete { keep_key: true, .. }),
+            ..
+        })
     ));
-    assert!(Cli::try_parse_from(["pm", "delete", "--vault", "--keep-key"]).is_err());
+    assert!(Cli::try_parse_from(["pm", "vaults", "delete", "--keep-key"]).is_err());
+}
+
+#[test]
+fn obsolete_cli_selectors_are_rejected() {
+    for args in [
+        vec!["pm", "delete", "--vault"],
+        vec!["pm", "delete", "--entry-name", "foo"],
+        vec!["pm", "get", "--entry-name", "foo"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
@@ -393,7 +407,6 @@ fn test_totp_commands_parse() {
         "pm",
         "totp",
         "show",
-        "--entry-name",
         "github",
         "--copy",
         "--copy-time",
@@ -412,7 +425,7 @@ fn test_totp_commands_parse() {
     ));
 
     assert!(Cli::try_parse_from(["pm", "totp", "show", "--id", "7", "--copy-time", "20"]).is_err());
-    for selector in [["--id", "7"], ["--entry-name", "work"]] {
+    for selector in [vec!["--id", "7"], vec!["work"]] {
         let watch =
             Cli::try_parse_from(["pm", "totp", "show"].into_iter().chain(selector).chain([
                 "--watch",
@@ -447,16 +460,7 @@ fn duo_enrollment_defaults_to_hotp_and_accepts_explicit_totp() {
             }
         })
     ));
-    let totp = Cli::try_parse_from([
-        "pm",
-        "totp",
-        "duo",
-        "--entry-name",
-        "work",
-        "--mode",
-        "totp",
-    ])
-    .unwrap();
+    let totp = Cli::try_parse_from(["pm", "totp", "duo", "work", "--mode", "totp"]).unwrap();
     assert!(matches!(
         totp.command,
         Some(CliCommands::Totp {
@@ -558,9 +562,7 @@ fn push_cli_requires_selected_entry_and_bounded_polling() {
     ] {
         assert!(Cli::try_parse_from(args).is_err());
     }
-    assert!(
-        Cli::try_parse_from(["pm", "duo", "watch", "--entry-name", "work", "--notify"]).is_ok()
-    );
+    assert!(Cli::try_parse_from(["pm", "duo", "watch", "work", "--notify"]).is_ok());
     let cli = Cli::try_parse_from([
         "pm",
         "duo",

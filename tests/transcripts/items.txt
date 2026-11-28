@@ -14,7 +14,6 @@ $ pm --password-stdin add --no-copy --name Example --username alice --url https:
 < synthetic-password-1
 ? 0
 Added "Example".
-! Warning: With tags, favorites, or attachments, older versions of the app can't open this vault; update other devices before they sync it.
 $ pm --password-stdin add --type secure-note --name "Wifi notes" --notes "router in hall closet"
 < synthetic note body
 ? 0
