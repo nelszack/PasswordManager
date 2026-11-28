@@ -478,29 +478,37 @@ impl App {
     /// The item after (or before) the selection in list order, moving the page
     /// along; the first or last item when nothing is selected.
     pub(super) fn adjacent_item(&mut self, next: bool) -> Option<usize> {
-        let order: Vec<usize> = {
+        let (position, id) = {
             let matching = self.matching_items();
-            let mut ids: Vec<usize> = matching.iter().map(|&index| self.items[index].id).collect();
-            if self.ui.reverse_items {
-                ids.reverse();
+            let len = matching.len();
+            // List position `p` shows matching[p], or matching[len - 1 - p] reversed.
+            let flip = |p: usize| {
+                if self.ui.reverse_items {
+                    len - 1 - p
+                } else {
+                    p
+                }
+            };
+            let current = self.item.as_ref().and_then(|item| {
+                matching
+                    .iter()
+                    .position(|&index| self.items[index].id == item.id)
+                    .map(flip)
+            });
+            let position = match (current, next) {
+                (Some(position), true) => (position + 1).min(len.checked_sub(1)?),
+                (Some(position), false) => position.saturating_sub(1),
+                (None, true) => 0,
+                (None, false) => len.checked_sub(1)?,
+            };
+            if current == Some(position) {
+                return None;
             }
-            ids
+            let id = (position < len).then(|| self.items[matching[flip(position)]].id);
+            (position, id)
         };
-        let current = self
-            .item
-            .as_ref()
-            .and_then(|item| order.iter().position(|id| *id == item.id));
-        let position = match (current, next) {
-            (Some(position), true) => (position + 1).min(order.len().checked_sub(1)?),
-            (Some(position), false) => position.saturating_sub(1),
-            (None, true) => 0,
-            (None, false) => order.len().checked_sub(1)?,
-        };
-        if current == Some(position) {
-            return None;
-        }
         self.ui.item_page = position / presentation::ITEM_PAGE_SIZE;
-        order.get(position).copied()
+        id
     }
 
     /// Queue the selected items for one bulk change, in list order.

@@ -53,6 +53,33 @@ enum class LoginRole {
 object Forms {
     class Rejected(val reason: String) : IllegalStateException(reason)
 
+    private val BROWSER_ADDRESS_BARS = setOf("url_bar", "mozac_browser_toolbar_url_view")
+
+    /**
+     * The website origin [node] and its children belong to. Also records the browser's own
+     * address bar text in [addresses]: framework webDomain drops the port, and only native
+     * browser chrome, never page HTML attributes, can supplement it with a full URL.
+     */
+    private fun visitOrigin(
+        node: AssistStructure.ViewNode,
+        packageName: String,
+        inheritedOrigin: String?,
+        addresses: MutableList<String>,
+    ): String? {
+        if (
+            node.idPackage == packageName &&
+                node.idEntry in BROWSER_ADDRESS_BARS &&
+                node.htmlInfo == null &&
+                !node.isFocused
+        ) {
+            node.text?.toString()?.takeIf { it.isNotBlank() }?.let(addresses::add)
+        }
+        return node.webDomain?.let { domain ->
+            val scheme = node.webScheme ?: throw Rejected("missing_website_scheme")
+            CallerIdentity.websiteOrigin("$scheme://$domain")
+        } ?: inheritedOrigin
+    }
+
     private val CARD_CODE = Regex("""\b(cvv2?|cvc2?|csc|cc-csc)\b|card[ _-]?(security|verification)""")
 
     /**
@@ -97,19 +124,7 @@ object Forms {
         val addresses = mutableListOf<String>()
         fun walk(node: AssistStructure.ViewNode, depth: Int = 0, inheritedOrigin: String? = null) {
             if (depth > 100 || fields.size > 200 || node.visibility != View.VISIBLE) return
-            if (
-                node.idPackage == packageName &&
-                    node.idEntry in setOf("url_bar", "mozac_browser_toolbar_url_view") &&
-                    node.htmlInfo == null &&
-                    !node.isFocused
-            ) {
-                node.text?.toString()?.takeIf { it.isNotBlank() }?.let(addresses::add)
-            }
-            val nodeOrigin =
-                node.webDomain?.let { domain ->
-                    val scheme = node.webScheme ?: throw Rejected("missing_website_scheme")
-                    CallerIdentity.websiteOrigin("$scheme://$domain")
-                } ?: inheritedOrigin
+            val nodeOrigin = visitOrigin(node, packageName, inheritedOrigin, addresses)
             val html = node.htmlInfo?.attributes?.associate { it.first to it.second }.orEmpty()
             val variation = node.inputType and InputType.TYPE_MASK_VARIATION
             val password =
@@ -193,21 +208,7 @@ object Forms {
         val addresses = mutableListOf<String>()
         fun walk(node: AssistStructure.ViewNode, depth: Int = 0, inheritedOrigin: String? = null) {
             if (depth > 100 || fields.size > 1000 || node.visibility != View.VISIBLE) return
-            // Framework webDomain drops the port. Only native browser chrome,
-            // never page HTML attributes, can supplement it with a full URL.
-            if (
-                node.idPackage == packageName &&
-                    node.idEntry in setOf("url_bar", "mozac_browser_toolbar_url_view") &&
-                    node.htmlInfo == null &&
-                    !node.isFocused
-            ) {
-                node.text?.toString()?.takeIf { it.isNotBlank() }?.let(addresses::add)
-            }
-            val nodeOrigin =
-                node.webDomain?.let { domain ->
-                    val scheme = node.webScheme ?: throw Rejected("missing_website_scheme")
-                    CallerIdentity.websiteOrigin("$scheme://$domain")
-                } ?: inheritedOrigin
+            val nodeOrigin = visitOrigin(node, packageName, inheritedOrigin, addresses)
             val html = node.htmlInfo?.attributes?.associate { it.first to it.second }.orEmpty()
             val hints =
                 listOfNotNull(

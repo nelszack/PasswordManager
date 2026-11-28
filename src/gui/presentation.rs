@@ -394,13 +394,25 @@ impl App {
             .chain(changes.items.iter().map(|item| item.id))
             .collect();
         self.items.retain(|item| !replaced.contains(&item.id));
-        for item in &changes.items {
-            let key = item.name.to_lowercase();
-            let index = self.items.partition_point(|existing| {
-                (&existing.name.to_lowercase(), existing.id) < (&key, item.id)
+        // Merge the changed items into the sorted list in one pass, rather
+        // than shifting the rest of the list once per inserted item.
+        let mut incoming: Vec<_> = changes
+            .items
+            .iter()
+            .map(|item| (item.name.to_lowercase(), item))
+            .collect();
+        incoming.sort_by(|(a, x), (b, y)| (a, x.id).cmp(&(b, y.id)));
+        let mut retained = std::mem::take(&mut self.items).into_iter();
+        let mut merged = Vec::with_capacity(retained.len() + incoming.len());
+        for (key, item) in &incoming {
+            let before = retained.as_slice().partition_point(|existing| {
+                (&existing.name.to_lowercase(), existing.id) < (key, item.id)
             });
-            self.items.insert(index, item.clone());
+            merged.extend(retained.by_ref().take(before));
+            merged.push((*item).clone());
         }
+        merged.extend(retained);
+        self.items = merged;
         self.ui.matching.get_mut().take();
         self.ui.tags.get_mut().take();
         for id in replaced {
@@ -620,6 +632,41 @@ mod tests {
         assert!(!app.ui.search_text.borrow().contains_key(&2));
         app.clear_vault();
         assert!(app.ui.search_text.borrow().is_empty());
+    }
+    #[test]
+    fn several_changed_items_merge_into_name_order() {
+        let mut app = crate::gui::tests::app();
+        let item = |id, name: &str| ItemSummary {
+            tags: vec![],
+            favorite: false,
+            id,
+            revision: 2,
+            name: name.into(),
+            username: None,
+            kind: ItemKind::Login,
+            urls: vec![],
+            has_totp: false,
+            has_duo: false,
+        };
+        app.replace_items(vec![item(1, "bravo"), item(2, "delta"), item(3, "Foxtrot")]);
+        app.items_revision = Some(1);
+        assert!(
+            app.apply_item_changes(&password_manager::vault::ItemChanges {
+                base_revision: 1,
+                revision: 2,
+                // Unsorted, replacing one item, and tying another on name.
+                items: vec![
+                    item(7, "golf"),
+                    item(2, "Alpha"),
+                    item(6, "Echo"),
+                    item(4, "Charlie"),
+                    item(5, "BRAVO"),
+                ],
+                removed: vec![3],
+            })
+        );
+        let order: Vec<_> = app.items.iter().map(|item| item.id).collect();
+        assert_eq!(order, [2, 1, 5, 4, 6, 7]);
     }
     #[test]
     fn cached_matches_follow_search_kind_refresh_and_lock() {

@@ -554,6 +554,83 @@ pub(super) fn external_json(
     Ok((items, losses))
 }
 
+/// Headers with a dedicated meaning; any other non-empty column is kept as a
+/// secret field. Primary-secret aliases are added per item kind.
+const KNOWN_CSV_COLUMNS: &[&str] = &[
+    "id",
+    "name",
+    "title",
+    "password",
+    "loginpassword",
+    "username",
+    "loginusername",
+    "login",
+    "url",
+    "website",
+    "loginuri",
+    "formactionorigin",
+    "notes",
+    "note",
+    "extra",
+    "comments",
+    "created",
+    "timecreated",
+    "modified",
+    "timemodified",
+    "timepasswordchanged",
+    "type",
+    "kind",
+    "totp",
+    "logintotp",
+    "folder",
+    "grouping",
+    "group",
+    "tags",
+    "favorite",
+    "fav",
+];
+
+/// The primary secret's column, and the columns left over to retain as
+/// secret fields, for one family of item kinds.
+struct KindColumns {
+    primary: Option<usize>,
+    extra: Vec<usize>,
+}
+
+fn kind_columns(headers: &[String], primary_aliases: &[&str]) -> KindColumns {
+    KindColumns {
+        primary: column(headers, primary_aliases),
+        extra: (0..headers.len())
+            .filter(|&i| {
+                let header = headers[i].as_str();
+                !KNOWN_CSV_COLUMNS.contains(&header) && !primary_aliases.contains(&header)
+            })
+            .collect(),
+    }
+}
+
+/// The first column whose normalized header is one of `aliases`.
+fn column(headers: &[String], aliases: &[&str]) -> Option<usize> {
+    headers
+        .iter()
+        .position(|header| aliases.contains(&header.as_str()))
+}
+
+/// A cell's untrimmed text, when it is non-empty.
+fn cell(row: &csv::StringRecord, column: Option<usize>) -> Option<&str> {
+    column
+        .and_then(|i| row.get(i))
+        .filter(|value| !value.is_empty())
+}
+
+/// A cell's trimmed text, when that is non-empty.
+fn trimmed(row: &csv::StringRecord, column: Option<usize>) -> Option<String> {
+    cell(row, column)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 pub(super) fn csv_with_losses(
     contents: &str,
     path: &str,
@@ -563,12 +640,32 @@ pub(super) fn csv_with_losses(
         .headers()
         .map_err(|e| format!("invalid CSV headers in {path:?}: {e}"))?
         .clone();
-    let headers: Vec<_> = reader
-        .headers()
-        .map_err(|e| format!("invalid CSV headers in {path:?}: {e}"))?
-        .iter()
-        .map(normalized_header)
-        .collect();
+    let headers: Vec<_> = source_headers.iter().map(normalized_header).collect();
+    // Resolve each field's column once, not once per row.
+    let kind_column = column(&headers, &["type", "kind"]);
+    let name_column = column(&headers, &["name", "title"]);
+    let name_url_column = column(&headers, &["url", "website", "loginuri"]);
+    let url_column = column(
+        &headers,
+        &["url", "website", "loginuri", "formactionorigin"],
+    );
+    let note_column = column(&headers, &["notes", "note", "extra", "comments"]);
+    let username_column = column(&headers, &["username", "loginusername", "login"]);
+    let created_column = column(&headers, &["created", "timecreated"]);
+    let modified_column = column(
+        &headers,
+        &["modified", "timemodified", "timepasswordchanged"],
+    );
+    let folder_column = column(&headers, &["folder", "grouping", "group"]);
+    let tags_column = column(&headers, &["tags"]);
+    let favorite_column = column(&headers, &["favorite", "fav"]);
+    let totp_column = column(&headers, &["totp", "logintotp"]);
+    let card_columns = kind_columns(
+        &headers,
+        &["password", "loginpassword", "number", "cardnumber"],
+    );
+    let ssh_columns = kind_columns(&headers, &["password", "loginpassword", "privatekey"]);
+    let other_columns = kind_columns(&headers, &["password", "loginpassword"]);
     let mut items = Vec::new();
     let mut losses = ImportLosses::default();
     for (position, row) in reader.records().enumerate() {
@@ -579,7 +676,7 @@ pub(super) fn csv_with_losses(
             ));
         }
         let row = row.map_err(|e| format!("invalid CSV data in {path:?}: {e}"))?;
-        let kind = match csv_field(&headers, &row, &["type", "kind"]).as_deref() {
+        let kind = match trimmed(&row, kind_column).as_deref() {
             None | Some("login") | Some("1") => ItemKind::Login,
             Some("note") | Some("secure-note") | Some("2") => ItemKind::SecureNote,
             Some("card") | Some("payment-card") | Some("3") => ItemKind::PaymentCard,
@@ -594,23 +691,18 @@ pub(super) fn csv_with_losses(
                 continue;
             }
         };
-        let name = csv_field(&headers, &row, &["name", "title"])
-            .or_else(|| csv_field(&headers, &row, &["url", "website", "loginuri"]))
+        let name = trimmed(&row, name_column)
+            .or_else(|| trimmed(&row, name_url_column))
             .ok_or_else(|| format!("source item {index} in {path:?} has no name or URL"))?;
-        let primary_aliases: &[&str] = match kind {
-            ItemKind::PaymentCard => &["password", "loginpassword", "number", "cardnumber"],
-            ItemKind::SshKey => &["password", "loginpassword", "privatekey"],
-            _ => &["password", "loginpassword"],
+        let columns = match kind {
+            ItemKind::PaymentCard => &card_columns,
+            ItemKind::SshKey => &ssh_columns,
+            _ => &other_columns,
         };
-        let note = headers
-            .iter()
-            .position(|h| ["notes", "note", "extra", "comments"].contains(&h.as_str()))
-            .and_then(|i| row.get(i))
-            .filter(|note| !note.is_empty())
-            .map(str::to_owned);
-        let mut password = headers
-            .iter()
-            .position(|h| primary_aliases.contains(&h.as_str()))
+        let note = cell(&row, note_column).map(str::to_owned);
+        // Unlike other cells, an empty password column still counts as present.
+        let mut password = columns
+            .primary
             .and_then(|i| row.get(i))
             .map(str::to_owned)
             .or_else(|| (kind == ItemKind::SecureNote).then(|| note.clone().unwrap_or_default()))
@@ -623,48 +715,33 @@ pub(super) fn csv_with_losses(
             id: 0,
             name,
             password: password.into(),
-            username: headers
-                .iter()
-                .position(|header| {
-                    ["username", "loginusername", "login"].contains(&header.as_str())
-                })
-                .and_then(|column| row.get(column))
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned),
-            url: csv_field(
-                &headers,
-                &row,
-                &["url", "website", "loginuri", "formactionorigin"],
-            ),
+            username: cell(&row, username_column).map(str::to_owned),
+            url: trimmed(&row, url_column),
             notes: note.map(Into::into),
             created: imported_timestamp(
-                csv_field(&headers, &row, &["created", "timecreated"]),
+                trimmed(&row, created_column),
                 index,
                 "creation timestamp",
                 &mut losses,
             ),
             modified: imported_timestamp(
-                csv_field(
-                    &headers,
-                    &row,
-                    &["modified", "timemodified", "timepasswordchanged"],
-                ),
+                trimmed(&row, modified_column),
                 index,
                 "modification timestamp",
                 &mut losses,
             ),
         });
         item.kind = kind;
-        if let Some(folder) = csv_field(&headers, &row, &["folder", "grouping", "group"]) {
+        if let Some(folder) = trimmed(&row, folder_column) {
             item.add_tag(&folder);
         }
-        for tag in csv_field(&headers, &row, &["tags"])
+        for tag in trimmed(&row, tags_column)
             .iter()
             .flat_map(|tags| tags.split([',', ';']))
         {
             item.add_tag(tag);
         }
-        item.favorite = csv_field(&headers, &row, &["favorite", "fav"])
+        item.favorite = trimmed(&row, favorite_column)
             .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "True" | "yes"));
         if kind == ItemKind::SecureNote
             && let Some(notes) = item
@@ -675,52 +752,9 @@ pub(super) fn csv_with_losses(
         {
             field(&mut item, "imported note", Some(notes.expose_owned()), true);
         }
-        totp(
-            &mut item,
-            csv_field(&headers, &row, &["totp", "logintotp"]),
-            index,
-            &mut losses,
-        );
-        for (column, header) in headers.iter().enumerate() {
-            if [
-                "id",
-                "name",
-                "title",
-                "password",
-                "loginpassword",
-                "username",
-                "loginusername",
-                "login",
-                "url",
-                "website",
-                "loginuri",
-                "formactionorigin",
-                "notes",
-                "note",
-                "extra",
-                "comments",
-                "created",
-                "timecreated",
-                "modified",
-                "timemodified",
-                "timepasswordchanged",
-                "type",
-                "kind",
-                "totp",
-                "logintotp",
-                "folder",
-                "grouping",
-                "group",
-                "tags",
-                "favorite",
-                "fav",
-            ]
-            .contains(&header.as_str())
-                || primary_aliases.contains(&header.as_str())
-            {
-                continue;
-            }
-            if let Some(value) = row.get(column).filter(|v| !v.is_empty()) {
+        totp(&mut item, trimmed(&row, totp_column), index, &mut losses);
+        for &column in &columns.extra {
+            if let Some(value) = cell(&row, Some(column)) {
                 // Unknown columns can contain arbitrary secrets. Retain them in
                 // encrypted secret fields rather than expose or discard them.
                 field(

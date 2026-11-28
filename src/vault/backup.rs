@@ -87,19 +87,7 @@ pub(super) fn decode_backup(
     let mut data = persistence::decode_document(&plaintext)?;
     data.vault_id = rand::random();
     let filename = format!("{}.enc", hex::encode(data.vault_id));
-    Ok(Vault {
-        data,
-        store: VaultStore::File {
-            directory,
-            filename: filename.clone(),
-        },
-        metadata: VaultMetadata {
-            filename,
-            duo_session: None,
-            changes: None,
-            schema_upgraded: false,
-        },
-    })
+    Ok(Vault::file(data, directory, filename))
 }
 
 #[cfg(test)]

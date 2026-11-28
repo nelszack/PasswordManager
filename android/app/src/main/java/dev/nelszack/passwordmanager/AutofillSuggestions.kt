@@ -81,53 +81,38 @@ internal object AutofillSuggestions {
                     putExtra("selection_token", token(form, selected))
                 }
             }
-        val dataset =
-            Dataset.Builder(Forms.presentation(context, "$title\n$subtitle"))
-                .setAuthentication(pending.intentSender)
-        // No secrets are given to the framework before the user taps a suggestion.
-        form.ids.forEach {
-            dataset.setValue(
-                it,
-                null,
-                java.util.regex.Pattern.compile(".*", java.util.regex.Pattern.DOTALL),
-            )
-        }
-        if (Build.VERSION.SDK_INT >= 30)
-            inlinePresentation(
-                    context,
-                    request.inlineSuggestionsRequest,
-                    index,
-                    pending,
-                    title,
-                    subtitle,
-                )
-                ?.let { dataset.setInlinePresentation(it) }
-        return dataset.build()
+        return authenticated(context, request, form.ids, index, pending, title, subtitle)
     }
 
     /** One suggestion that opens the card or identity chooser; it carries no values. */
     fun typedSuggestion(context: Context, request: FillRequest, form: TypedForm): Dataset {
         val pending = Forms.pending(context, "typed")
         val title = if (form.card) "Fill a saved card" else "Fill a saved identity"
+        return authenticated(context, request, form.ids, 0, pending, title, "Password Manager")
+    }
+
+    /** Matches any value, so a suggestion applies to its fields without holding their values. */
+    private val ANY_VALUE = java.util.regex.Pattern.compile(".*", java.util.regex.Pattern.DOTALL)
+
+    /**
+     * A suggestion for [ids] that opens [pending] when tapped. No secrets are given to the
+     * framework before the user taps a suggestion.
+     */
+    private fun authenticated(
+        context: Context,
+        request: FillRequest,
+        ids: Array<android.view.autofill.AutofillId>,
+        index: Int,
+        pending: PendingIntent,
+        title: String,
+        subtitle: String,
+    ): Dataset {
         val dataset =
-            Dataset.Builder(Forms.presentation(context, "$title\nPassword Manager"))
+            Dataset.Builder(Forms.presentation(context, "$title\n$subtitle"))
                 .setAuthentication(pending.intentSender)
-        form.ids.forEach {
-            dataset.setValue(
-                it,
-                null,
-                java.util.regex.Pattern.compile(".*", java.util.regex.Pattern.DOTALL),
-            )
-        }
+        ids.forEach { dataset.setValue(it, null, ANY_VALUE) }
         if (Build.VERSION.SDK_INT >= 30)
-            inlinePresentation(
-                    context,
-                    request.inlineSuggestionsRequest,
-                    0,
-                    pending,
-                    title,
-                    "Password Manager",
-                )
+            inlinePresentation(context, request.inlineSuggestionsRequest, index, pending, title, subtitle)
                 ?.let { dataset.setInlinePresentation(it) }
         return dataset.build()
     }

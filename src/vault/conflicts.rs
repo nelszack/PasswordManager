@@ -178,6 +178,13 @@ fn separate_ids(local: &VaultData, remote: &VaultData) -> Result<BTreeMap<ItemId
     Ok(separate)
 }
 fn compare(local: &VaultData, remote: &VaultData) -> Vec<ConflictItem> {
+    conflicts(local, remote).collect()
+}
+/// Each item that needs review, in ID order, built only as it is reached.
+fn conflicts<'a>(
+    local: &'a VaultData,
+    remote: &'a VaultData,
+) -> impl Iterator<Item = ConflictItem> + 'a {
     // A vault at the ID limit cannot add items; review it field by field.
     let separate = separate_ids(local, remote).unwrap_or_default();
     let ids: std::collections::BTreeSet<_> = local
@@ -186,43 +193,41 @@ fn compare(local: &VaultData, remote: &VaultData) -> Vec<ConflictItem> {
         .chain(remote.items.keys())
         .copied()
         .collect();
-    ids.into_iter()
-        .filter_map(|id| {
-            let a = local.items.get(&id);
-            let b = remote.items.get(&id);
-            if let Some(new_id) = separate.get(&id) {
-                // Informational: nothing to choose, both items are kept.
-                return Some(ConflictItem {
-                    id: id.0,
-                    local: label(a),
-                    remote: format!(
-                        "{} · separate item created independently; kept as item {}",
-                        label(b),
-                        new_id.0
-                    ),
-                    fields: vec![],
-                });
-            }
-            let fields = match (a, b) {
-                (Some(a), Some(b)) => fields(a, b),
-                _ => vec![ConflictField {
-                    field: "item".into(),
-                    local: label(a),
-                    remote: label(b),
-                }],
-            };
-            (!fields.is_empty()).then(|| ConflictItem {
+    ids.into_iter().filter_map(move |id| {
+        let a = local.items.get(&id);
+        let b = remote.items.get(&id);
+        if let Some(new_id) = separate.get(&id) {
+            // Informational: nothing to choose, both items are kept.
+            return Some(ConflictItem {
                 id: id.0,
                 local: label(a),
+                remote: format!(
+                    "{} · separate item created independently; kept as item {}",
+                    label(b),
+                    new_id.0
+                ),
+                fields: vec![],
+            });
+        }
+        let fields = match (a, b) {
+            (Some(a), Some(b)) => fields(a, b),
+            _ => vec![ConflictField {
+                field: "item".into(),
+                local: label(a),
                 remote: label(b),
-                fields,
-            })
+            }],
+        };
+        (!fields.is_empty()).then(|| ConflictItem {
+            id: id.0,
+            local: label(a),
+            remote: label(b),
+            fields,
         })
-        .collect()
+    })
 }
 /// Whether two snapshots hold the same reviewable contents.
 pub(super) fn equivalent(local: &VaultData, remote: &VaultData) -> bool {
-    compare(local, remote).is_empty()
+    conflicts(local, remote).next().is_none()
 }
 fn merge(local: &VaultData, remote: &VaultData, choices: &[Choice]) -> Result<VaultData, String> {
     let review = compare(local, remote);

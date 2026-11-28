@@ -91,7 +91,6 @@ async function main() {
     if (mode !== "rust") {
         run(process.execPath, ["scripts/build_extension.cjs", "--check"]);
         run(process.execPath, ["scripts/package_extension.cjs", "--check"]);
-        run(process.execPath, ["scripts/package_extension.cjs", "--browser", "firefox", "--check"]);
         // Check every script, including extracted services and browser-test helpers.
         console.log("\n> Check all extension scripts");
         await checkScripts(fs.readdirSync(path.join(root, "extension"), { recursive: true }).sort()

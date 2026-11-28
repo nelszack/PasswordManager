@@ -71,16 +71,6 @@ fn normalized_header(value: &str) -> String {
         .collect()
 }
 
-fn csv_field(headers: &[String], record: &csv::StringRecord, aliases: &[&str]) -> Option<String> {
-    headers
-        .iter()
-        .position(|header| aliases.contains(&header.as_str()))
-        .and_then(|index| record.get(index))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 #[cfg(any(test, feature = "fuzzing"))]
 pub(super) fn import_csv(contents: &str, path: &str) -> Result<Vec<ImportedItem>, String> {
     formats::csv_with_losses(contents, path).map(|(items, _)| items)

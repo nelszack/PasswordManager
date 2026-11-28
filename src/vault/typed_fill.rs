@@ -191,10 +191,8 @@ fn role_of(description: &str) -> Option<FieldRole> {
                 role,
             });
         }
-        if let Some((_, role)) = ANDROID_HINTS
-            .iter()
-            .find(|(hint, _)| *hint == alphanumeric(token))
-        {
+        let hint = alphanumeric(token);
+        if let Some((_, role)) = ANDROID_HINTS.iter().find(|(known, _)| *known == hint) {
             let kind = if role.starts_with("cc-") {
                 ItemKind::PaymentCard
             } else {

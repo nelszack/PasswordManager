@@ -354,6 +354,9 @@ impl ServerCommand {
             _ => None,
         }
     }
+    /// The item ID a command names directly. Unlike [`Self::revision_target`],
+    /// whose lookup only resolves active items, revision checks use this to
+    /// reach trashed items too, so the overlapping variants are intentional.
     pub fn target_id(&self) -> Option<usize> {
         let target = match self {
             Self::Update(update) => Some(&update.entry.target),
