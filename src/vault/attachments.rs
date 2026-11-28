@@ -381,7 +381,7 @@ mod tests {
             .unwrap();
         assert!(vault.attachment_data(&target, "recovery.pdf").is_err());
         let bytes = persistence::encode_document(&vault.data, None).unwrap();
-        assert_eq!(schema(&bytes), 2);
+        assert_eq!(schema(&bytes), 3);
     }
 
     #[test]

@@ -237,22 +237,14 @@ pub struct EntryMetadata {
     pub additional_urls: Vec<String>,
     pub password_changed: Option<Timestamp>,
     pub custom_fields: Vec<CustomField>,
-    /// Organization labels. Absent from documents that use none, so vaults
-    /// without tags or favorites stay readable by older releases.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Organization labels. Defaulted when reading schema 2 documents.
+    #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     #[zeroize(skip)]
     pub favorite: bool,
 }
-fn is_false(value: &bool) -> bool {
-    !*value
-}
 impl EntryMetadata {
-    /// Whether this record uses fields introduced by document schema 3.
-    fn uses_organization(&self) -> bool {
-        self.favorite || !self.tags.is_empty()
-    }
     pub(crate) fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|t| t.eq_ignore_ascii_case(tag.trim()))
     }
@@ -427,9 +419,6 @@ pub struct VaultMetadata {
     pub filename: String,
     pub(crate) duo_session: Option<[u8; 32]>,
     pub(crate) changes: Option<(u64, u64, Vec<usize>)>,
-    /// The last save moved this vault to a document schema older releases
-    /// cannot read; reported once, then cleared.
-    pub(crate) schema_upgraded: bool,
 }
 impl PartialEq for VaultMetadata {
     fn eq(&self, other: &Self) -> bool {
@@ -492,7 +481,6 @@ impl Vault {
                 filename,
                 duo_session: None,
                 changes: None,
-                schema_upgraded: false,
             },
         }
     }

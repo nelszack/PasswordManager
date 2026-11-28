@@ -16,7 +16,6 @@ Added "Example".
 $ pm attachment add Example --path notes/recovery.txt
 ? 0
 Attachment added.
-! Warning: With tags, favorites, or attachments, older versions of the app can't open this vault; update other devices before they sync it.
 $ pm get Example
 ? 0
 Name:               Example

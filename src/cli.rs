@@ -1061,7 +1061,7 @@ impl From<ListArgs> for ListOptions {
     ArgGroup::new("delete_target")
         .required(true)
         .multiple(false)
-        .args(["item", "id", "entry_name", "vault"])
+        .args(["item", "id"])
 ))]
 pub struct DeleteArgs {
     /// Name of the item to move to encrypted trash.
@@ -1070,24 +1070,6 @@ pub struct DeleteArgs {
     /// Item ID to move to encrypted trash.
     #[arg(long)]
     pub id: Option<usize>,
-    /// Item name to move to encrypted trash; same as the NAME argument.
-    #[arg(long, hide = true)]
-    pub entry_name: Option<String>,
-    /// Deprecated spelling of `pm vaults delete`.
-    #[arg(long, hide = true)]
-    pub vault: bool,
-    /// With the deprecated --vault: the vault to delete.
-    #[arg(long, requires = "vault", value_name = "NAME", hide = true)]
-    pub vault_file: Option<String>,
-    /// With the deprecated --vault: the vault's key file.
-    #[arg(long, requires = "vault", value_hint = ValueHint::FilePath, hide = true)]
-    pub key: Option<String>,
-    /// With the deprecated --vault: keep the key file.
-    #[arg(long, requires_all = ["vault", "key"], hide = true)]
-    pub keep_key: bool,
-    /// With the deprecated --vault: confirm without prompting.
-    #[arg(long, requires = "vault", hide = true)]
-    pub yes: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1270,7 +1252,7 @@ pub enum DuoCommands {
     ArgGroup::new("entry_selector")
         .required(true)
         .multiple(false)
-        .args(["item", "id", "entry_name"])
+        .args(["item", "id"])
 ))]
 pub struct EntryArgs {
     /// Item name. Matches exactly, or ignoring case when only one item matches.
@@ -1279,9 +1261,6 @@ pub struct EntryArgs {
     /// Select an item by its numeric ID (shown by `pm list`).
     #[arg(long)]
     pub id: Option<usize>,
-    /// Select an item by name; same as the NAME argument.
-    #[arg(long, hide = true)]
-    pub entry_name: Option<String>,
 }
 
 #[derive(Debug, Args)]

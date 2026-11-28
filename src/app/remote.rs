@@ -45,10 +45,10 @@ fn secret_label(kind: types::ItemKind) -> String {
 pub(super) fn target_type(target: EntryArgs) -> Target {
     if let Some(id) = target.id {
         Target::Id(id)
-    } else if let Some(name) = target.entry_name.or(target.item) {
+    } else if let Some(name) = target.item {
         Target::Name(name)
     } else {
-        unreachable!("clap requires a name, --id, or --entry-name")
+        unreachable!("clap requires a name or --id")
     }
 }
 
@@ -166,20 +166,15 @@ pub(super) async fn run(
             let suggest_for = match &command {
                 CliCommands::Get { target, .. }
                 | CliCommands::History { target }
-                | CliCommands::RestorePassword { target, .. } => {
-                    target.entry_name.clone().or(target.item.clone())
-                }
-                CliCommands::Update { target, .. } => {
-                    target.entry_name.clone().or(target.item.clone())
-                }
+                | CliCommands::RestorePassword { target, .. } => target.item.clone(),
+                CliCommands::Update { target, .. } => target.item.clone(),
                 _ => None,
             };
             // How to undo a move to trash, printed after it succeeds.
             let undo = match &command {
-                CliCommands::Delete(args) if !args.vault => args
-                    .entry_name
+                CliCommands::Delete(args) => args
+                    .item
                     .clone()
-                    .or(args.item.clone())
                     .map(|name| format!("Undo with `pm restore {name:?}`."))
                     .or(args
                         .id
@@ -459,19 +454,9 @@ fn prepare_command(command: CliCommands, conf: &config::Config, console: &Output
             }
         }
 
-        CliCommands::Delete(DeleteArgs {
-            item,
-            id,
-            entry_name,
-            vault,
-            vault_file,
-            key,
-            keep_key,
-            yes,
-        }) => match (id, entry_name.or(item), vault) {
-            (Some(i), None, _) => ServerCommand::Delete(Target::Id(i)),
-            (None, Some(n), _) => ServerCommand::Delete(Target::Name(n)),
-            (None, None, true) => delete_vault(vault_file, key, keep_key, yes, conf, console),
+        CliCommands::Delete(DeleteArgs { item, id }) => match (id, item) {
+            (Some(i), None) => ServerCommand::Delete(Target::Id(i)),
+            (None, Some(n)) => ServerCommand::Delete(Target::Name(n)),
             _ => unreachable!("clap requires exactly one delete target"),
         },
         CliCommands::Vaults {
@@ -876,7 +861,7 @@ fn confirm_export(yes: bool, path: &str, console: &Output) {
     }
 }
 
-/// Permanent whole-vault deletion (`pm vaults delete`, formerly `pm delete --vault`).
+/// Permanent whole-vault deletion (`pm vaults delete`).
 fn delete_vault(
     vault_file: Option<String>,
     key: Option<String>,

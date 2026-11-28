@@ -901,22 +901,15 @@ fn native_document_has_independent_schema_and_no_runtime_keys_or_paths() {
     vault.metadata.duo_session = Some([37; 32]);
     let bytes = persistence::encode_document(&vault.data, None).unwrap();
     let json: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
-    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["schema_version"], 3);
     assert!(json.get("vault_id").is_some());
-    for key in [
-        "filename",
-        "duo_session",
-        "review_key",
-        "keypass",
-        "tags",
-        "favorite",
-    ] {
+    for key in ["filename", "duo_session", "review_key", "keypass"] {
         assert!(!format!("{json:?}").contains(key));
     }
     assert_eq!(persistence::decode_document(&bytes).unwrap(), vault.data);
 }
 #[test]
-fn organization_upgrades_the_document_schema_and_round_trips() {
+fn organization_round_trips_without_changing_the_document_schema() {
     let mut vault = memory();
     let mut key = VaultCredentials::default();
     let mut entry = typed("Organized", None);
@@ -933,7 +926,7 @@ fn organization_upgrades_the_document_schema_and_round_trips() {
     assert_eq!(json["schema_version"], 3);
     assert_eq!(persistence::decode_document(&bytes).unwrap(), vault.data);
 
-    // Untagging everything returns the vault to the baseline schema.
+    // Removing organization keeps the current schema.
     let mut change = TypedUpdate::from(EntryUpdate {
         target: Target::Id(id),
         update: EntryChanges::default(),
@@ -948,7 +941,7 @@ fn organization_upgrades_the_document_schema_and_round_trips() {
     );
     let bytes = persistence::encode_document(&vault.data, None).unwrap();
     let json: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
-    assert_eq!(json["schema_version"], 2);
+    assert_eq!(json["schema_version"], 3);
 }
 #[test]
 fn tag_edits_filter_and_search() {
@@ -1738,50 +1731,35 @@ fn wiping_items_clears_entry_and_metadata_text() {
     assert!(vault.data.items.is_empty());
 }
 #[test]
-fn the_first_save_that_needs_the_new_schema_is_reported_once() {
-    let mut vault = memory();
-    let mut key = VaultCredentials::default();
-    assert!(
-        vault
-            .add_typed_entry(typed("Plain", None), &mut key)
-            .unwrap()
-    );
-    assert!(!vault.metadata.schema_upgraded);
-    let mut tagged = typed("Tagged", None);
-    tagged.tags = vec!["work".into()];
-    assert!(vault.add_typed_entry(tagged, &mut key).unwrap());
-    assert!(vault.metadata.schema_upgraded);
-    vault.metadata.schema_upgraded = false;
-    let mut more = typed("More", None);
-    more.favorite = true;
-    assert!(vault.add_typed_entry(more, &mut key).unwrap());
-    assert!(
-        !vault.metadata.schema_upgraded,
-        "already upgraded; not reported again"
-    );
-    let mut reply = None;
-    let mut another = typed("Another", None);
-    another.tags = vec!["x".into()];
-    let mut fresh = memory();
-    crate::operations::execute_unlocked(
-        &mut reply,
-        crate::types::ServerCommand::Add {
-            entry: another,
-            copy_timeout: 0,
-        },
-        &mut fresh,
-        &mut key,
-        10,
-    );
-    assert!(
-        reply
-            .unwrap()
-            .notice
-            .as_deref()
-            .is_some_and(|n| n.contains("older versions"))
-    );
-    assert!(
-        !fresh.metadata.schema_upgraded,
-        "the notice is delivered once"
-    );
+fn schema_two_documents_remain_readable_and_save_as_schema_three() {
+    let vault = memory();
+    let bytes = persistence::encode_document(&vault.data, None).unwrap();
+    let mut document: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+    document["schema_version"] = 2.into();
+    for item in document["items"].as_array_mut().unwrap() {
+        item.as_object_mut().unwrap().remove("attachments");
+        let metadata = item["metadata"].as_object_mut().unwrap();
+        metadata.remove("tags");
+        metadata.remove("favorite");
+    }
+    let bytes = rmp_serde::to_vec_named(&document).unwrap();
+    let data = persistence::decode_document(&bytes).unwrap();
+    assert_eq!(data, vault.data);
+
+    // Existing encrypted backups embed the same schema 2 document.
+    let directory = tempfile::tempdir().unwrap();
+    let mut backup = BACKUP_MAGIC.to_vec();
+    backup.push(2);
+    backup.extend(try_encrypt_file_in_place(&mut credentials(), bytes).unwrap());
+    let restored =
+        backup::decode_backup(&backup, &mut credentials(), directory.path().to_path_buf()).unwrap();
+    assert_eq!(restored.data.items, data.items);
+    assert_ne!(restored.data.vault_id, data.vault_id);
+
+    let saved = persistence::encode_document(&data, None).unwrap();
+    let saved: serde_json::Value = rmp_serde::from_slice(&saved).unwrap();
+    assert_eq!(saved["schema_version"], 3);
+    assert_eq!(saved["items"][0]["metadata"]["tags"], serde_json::json!([]));
+    assert_eq!(saved["items"][0]["metadata"]["favorite"], false);
+    assert_eq!(saved["items"][0]["attachments"], serde_json::json!([]));
 }

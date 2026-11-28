@@ -31,7 +31,7 @@ acceptance; see the [mobile acceptance matrix](mobile-implementation.md#mobile-f
 | Generator and strength check | `genpass`, `passcheck` | Generator | Tools → Password generator (also while locked) |
 | Encrypted backups | `backup` create/restore | Tools → Import, export & backups | Tools → Files & backups |
 | Import and export | `import` (preview, conflict policy, `--new`), `export` (JSON/CSV) | Tools → Import, export & backups | Tools → Files & backups (preview, conflict policy, JSON/CSV) |
-| Change credentials, delete vault | `rekey`, `delete --vault` | Tools → Vault security | Tools → Vault credentials |
+| Change credentials, delete vault | `rekey`, `vaults delete` | Tools → Vault security | Tools → Vault credentials |
 | Cloud sync | `sync` connect/vaults/pull [--copy]/enable/disable/status/check/conflicts/resolve/now | Settings → Sync | Settings → Cloud sync settings / download vault and Review sync conflicts; Tools → Sync controls |
 | Automatic background sync | `config --sync-automatic` | Settings → Sync checkbox | Syncs on open and after each change (no background service) |
 | Preferences | `config` | Settings | Settings → Mobile settings (separate device-local values) |

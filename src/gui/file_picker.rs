@@ -30,15 +30,10 @@ pub fn pick_workflow_file(serial: u64, field: Field, save: bool) -> Task<Message
         .then(move |picker| {
             Task::perform(
                 async move {
-                    let picker = picker.ok_or_else(|| {
-                        Failure::from("The file chooser needs an open window.".to_owned())
-                    })?;
-                    let path = picker
-                        .await
-                        .map(|file| selected_path(file.path()))
-                        .transpose()
-                        .map_err(Failure::from)?;
-                    Ok(Reply::PickedFile(field, path))
+                    Ok(Reply::PickedFile(
+                        field,
+                        chosen_path(picker, "file chooser").await?,
+                    ))
                 },
                 move |result| Message::Finished(serial, Job::PickFile(field), Arc::new(result)),
             )
@@ -71,14 +66,7 @@ pub fn pick_attachment(serial: u64, id: usize, save: Option<(usize, String)>) ->
         .then(move |picker| {
             Task::perform(
                 async move {
-                    let picker = picker.ok_or_else(|| {
-                        Failure::from("The file chooser needs an open window.".to_owned())
-                    })?;
-                    let path = picker
-                        .await
-                        .map(|file| selected_path(file.path()))
-                        .transpose()
-                        .map_err(Failure::from)?;
+                    let path = chosen_path(picker, "file chooser").await?;
                     Ok(Reply::AttachmentPath(path.map(|p| p.expose().to_owned())))
                 },
                 move |result| {
@@ -110,19 +98,27 @@ pub fn pick_key_file(serial: u64) -> Task<Message> {
         .then(move |picker| {
             Task::perform(
                 async move {
-                    let picker = picker.ok_or_else(|| {
-                        Failure::from("The key-file chooser needs an open window.".to_owned())
-                    })?;
-                    let selected = picker.await;
-                    selected
-                        .map(|file| selected_path(file.path()))
-                        .transpose()
+                    chosen_path(picker, "key-file chooser")
+                        .await
                         .map(Reply::KeyFile)
-                        .map_err(Failure::from)
                 },
                 move |result| Message::Finished(serial, Job::PickKey, Arc::new(result)),
             )
         })
+}
+
+/// Await a chooser opened on the window thread; `None` means no window was open.
+async fn chosen_path(
+    picker: Option<impl std::future::Future<Output = Option<rfd::FileHandle>>>,
+    chooser: &str,
+) -> Result<Option<SecretString>, Failure> {
+    let picker =
+        picker.ok_or_else(|| Failure::from(format!("The {chooser} needs an open window.")))?;
+    picker
+        .await
+        .map(|file| selected_path(file.path()))
+        .transpose()
+        .map_err(Failure::from)
 }
 
 fn selected_path(path: &Path) -> Result<SecretString, String> {

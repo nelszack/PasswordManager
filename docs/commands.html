@@ -315,7 +315,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-delete">
       <h2><code>pm delete</code></h2>
       <p>Move an item to the trash (&quot;Deleted items&quot;); `pm restore` brings it back</p>
-      <pre><code>Usage: pm delete &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;|--vault&gt;</code></pre>
+      <pre><code>Usage: pm delete &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Name of the item to move to encrypted trash</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Item ID to move to encrypted trash</dd>
@@ -324,7 +324,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-history">
       <h2><code>pm history</code></h2>
       <p>List an item&#39;s password history (saved earlier passwords)</p>
-      <pre><code>Usage: pm history &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm history &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -333,7 +333,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-restore-password">
       <h2><code>pm restore-password</code></h2>
       <p>Replace an item&#39;s current password with one of its saved revisions</p>
-      <pre><code>Usage: pm restore-password --revision &lt;REVISION&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm restore-password --revision &lt;REVISION&gt; &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -382,7 +382,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-totp-set">
       <h2><code>pm totp set</code></h2>
       <p>Store a Base32 TOTP secret or TOTP/HOTP otpauth URI using a hidden prompt</p>
-      <pre><code>Usage: pm totp set &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp set &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -391,7 +391,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-totp-duo">
       <h2><code>pm totp duo</code></h2>
       <p>Enroll a Duo activation link for passcodes using a hidden prompt</p>
-      <pre><code>Usage: pm totp duo [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp duo [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -401,7 +401,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-totp-show">
       <h2><code>pm totp show</code></h2>
       <p>Generate a TOTP code or consume and persist the next HOTP counter</p>
-      <pre><code>Usage: pm totp show [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp show [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -413,7 +413,7 @@ Preserves browser manifests and approved extension IDs. On Windows, fully close 
     <section class="command" id="pm-totp-remove">
       <h2><code>pm totp remove</code></h2>
       <p>Remove the authenticator configuration from an item</p>
-      <pre><code>Usage: pm totp remove &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm totp remove &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -429,7 +429,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-enroll">
       <h2><code>pm duo enroll</code></h2>
       <p>Enroll a fresh Duo link, keeping push credentials in the encrypted vault</p>
-      <pre><code>Usage: pm duo enroll [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo enroll [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -440,7 +440,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-requests">
       <h2><code>pm duo requests</code></h2>
       <p>Fetch pending requests for one enrolled device</p>
-      <pre><code>Usage: pm duo requests &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo requests &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -449,7 +449,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-watch">
       <h2><code>pm duo watch</code></h2>
       <p>Monitor pending requests; stop when the vault locks or with Ctrl+C</p>
-      <pre><code>Usage: pm duo watch [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo watch [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -461,7 +461,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-approve">
       <h2><code>pm duo approve</code></h2>
       <p>Review one request and confirm approval; prompt for a Verified Push code</p>
-      <pre><code>Usage: pm duo approve [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo approve [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -471,7 +471,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-deny">
       <h2><code>pm duo deny</code></h2>
       <p>Review one request and confirm denial</p>
-      <pre><code>Usage: pm duo deny [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo deny [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -481,7 +481,7 @@ Requires an unlocked vault. Push decisions do not advance the HOTP passcode coun
     <section class="command" id="pm-duo-remove">
       <h2><code>pm duo remove</code></h2>
       <p>Remove local push credentials; remove the device separately in Duo</p>
-      <pre><code>Usage: pm duo remove &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm duo remove &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -596,7 +596,7 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
     <section class="command" id="pm-update">
       <h2><code>pm update</code></h2>
       <p>Modify an existing item selected by stable ID or exact name</p>
-      <pre><code>Usage: pm update [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm update [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>--name &lt;NAME&gt;</code></dt><dd>Replace the item&#39;s display name</dd>
         <dt><code>--username &lt;USERNAME&gt;</code></dt><dd>Replace the username or secondary identifier; an empty value clears it</dd>
@@ -626,7 +626,7 @@ Atomically replaces ciphertext at the same vault filename. Existing external key
       <p>Display item details, or print its password with `--password-only`.
 
 Details hide the password (or card number, key, …) and secret custom fields. Add --copy to copy it with timed clipboard clearing, or --reveal-secrets to display secret custom fields.</p>
-      <pre><code>Usage: pm get [OPTIONS] &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm get [OPTIONS] &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -660,7 +660,7 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
     <section class="command" id="pm-attachment-add">
       <h2><code>pm attachment add</code></h2>
       <p>Store a copy of a file in the item</p>
-      <pre><code>Usage: pm attachment add [OPTIONS] --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm attachment add [OPTIONS] --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -671,7 +671,7 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
     <section class="command" id="pm-attachment-save">
       <h2><code>pm attachment save</code></h2>
       <p>Write an attachment to a new private file</p>
-      <pre><code>Usage: pm attachment save [OPTIONS] --name &lt;NAME&gt; --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm attachment save [OPTIONS] --name &lt;NAME&gt; --path &lt;PATH&gt; &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>
@@ -683,7 +683,7 @@ Attachments are stored encrypted inside the vault (5 MiB each, 25 MiB per vault)
     <section class="command" id="pm-attachment-remove">
       <h2><code>pm attachment remove</code></h2>
       <p>Delete an attachment from the item</p>
-      <pre><code>Usage: pm attachment remove --name &lt;NAME&gt; &lt;NAME|--id &lt;ID&gt;|--entry-name &lt;ENTRY_NAME&gt;&gt;</code></pre>
+      <pre><code>Usage: pm attachment remove --name &lt;NAME&gt; &lt;NAME|--id &lt;ID&gt;&gt;</code></pre>
       <dl class="flags">
         <dt><code>ITEM &lt;NAME&gt;</code></dt><dd>Item name. Matches exactly, or ignoring case when only one item matches</dd>
         <dt><code>--id &lt;ID&gt;</code></dt><dd>Select an item by its numeric ID (shown by `pm list`)</dd>

@@ -207,28 +207,6 @@ pub(crate) fn execute_unlocked(
     server_info: &mut VaultCredentials,
     password_history_limit: usize,
 ) -> Deferred {
-    let deferred = dispatch_unlocked(reply, msg, vault, server_info, password_history_limit);
-    if std::mem::take(&mut vault.metadata.schema_upgraded)
-        && let Some(response) = reply.as_mut().filter(|r| {
-            r.code == ResponseCode::Success as i32 || r.code == ResponseCode::Durability as i32
-        })
-    {
-        response.notice = Some(SCHEMA_UPGRADE_NOTICE.into());
-    }
-    deferred
-}
-
-/// Shown once, when a save first uses tags, favorites, or attachments.
-pub(crate) const SCHEMA_UPGRADE_NOTICE: &str = "With tags, favorites, or attachments, older versions of the app \
-     can't open this vault; update other devices before they sync it.";
-
-fn dispatch_unlocked(
-    reply: &mut Option<RpcResponse>,
-    msg: ServerCommand,
-    vault: &mut Vault,
-    server_info: &mut VaultCredentials,
-    password_history_limit: usize,
-) -> Deferred {
     match msg {
         msg @ (ServerCommand::Add { .. }
         | ServerCommand::Delete(..)

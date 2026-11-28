@@ -1463,8 +1463,6 @@ impl MobileState {
     }
 }
 
-/// Vault commands the app may send. Session lifecycle and file paths belong to
-/// the mobile requests above; clipboard copies belong to the app.
 /// An active login with a password whose saved app or website matches `origin`.
 fn login_matches(vault: &Vault, item: &Item, origin: &str) -> bool {
     if item.entry.password.is_empty() {
@@ -1481,6 +1479,8 @@ fn login_matches(vault: &Vault, item: &Item, origin: &str) -> bool {
     }
 }
 
+/// Vault commands the app may send. Session lifecycle and file paths belong to
+/// the mobile requests above; clipboard copies belong to the app.
 fn mobile_command(command: &ServerCommand) -> Result<(), &'static str> {
     use ServerCommand as C;
     let allowed = match command {

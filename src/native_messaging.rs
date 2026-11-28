@@ -898,7 +898,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             2048,
         )?)),
         NativeAction::CheckSavedLogin => Ok(ServerCommand::BrowserLoginSaved {
-            domain: required(request.domain.take(), "domain", 2048)?,
+            domain: domain(request)?,
             username: optional_text(request.username.take(), "username", 4096)?,
             password: required(
                 request.password.take().map(SecretString::expose_owned),
@@ -908,7 +908,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             .into(),
         }),
         NativeAction::GetLoginItem => Ok(ServerCommand::BrowserLogin {
-            domain: required(request.domain.take(), "domain", 2048)?,
+            domain: domain(request)?,
             id: request
                 .entry_id
                 .filter(|id| *id > 0)
@@ -920,7 +920,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                 .ok_or_else(|| "missing entry ID".to_string())?,
         )),
         NativeAction::GetTotp => Ok(ServerCommand::BrowserAuthenticatorData {
-            domain: required(request.domain.take(), "domain", 2048)?,
+            domain: domain(request)?,
             id: request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?,
@@ -936,7 +936,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
                         64 * 1024,
                     )?
                     .into(),
-                    url: Some(required(request.domain.take(), "domain", 2048)?),
+                    url: Some(domain(request)?),
                     notes: None,
                     copy: false,
                 },
@@ -952,7 +952,7 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
             // The page origin authorizes the browser selection; updating a
             // password must not replace the item's saved primary URL. A login
             // chosen for another site gains this site as an additional address.
-            let domain = required(request.domain.take(), "domain", 2048)?;
+            let domain = domain(request)?;
             let entry_id = request
                 .entry_id
                 .ok_or_else(|| "missing entry ID".to_string())?;
@@ -980,39 +980,27 @@ fn command_for_request(request: &mut NativeRequest) -> Result<ServerCommand, Str
         }
         NativeAction::Lock => Ok(ServerCommand::Lock(true)),
         NativeAction::GetPasskeys => Ok(ServerCommand::BrowserPasskeys {
-            origin: required(request.domain.take(), "domain", 2048)?,
-            request: required(
-                request.passkey_request.take(),
-                "WebAuthn request",
-                64 * 1024,
-            )?,
+            origin: domain(request)?,
+            request: passkey_request(request)?,
         }),
         NativeAction::CreatePasskey => Ok(ServerCommand::BrowserPasskeyCreate {
-            origin: required(request.domain.take(), "domain", 2048)?,
-            request: required(
-                request.passkey_request.take(),
-                "WebAuthn request",
-                64 * 1024,
-            )?,
+            origin: domain(request)?,
+            request: passkey_request(request)?,
             verification: request.verification_token.take(),
             verified: false,
         }),
         NativeAction::VerifyPasskeyUser => Ok(ServerCommand::PasskeyVerification {
-            origin: required(request.domain.take(), "domain", 2048)?,
+            origin: domain(request)?,
         }),
         NativeAction::GetPasskeyAssertion => Ok(ServerCommand::BrowserPasskeyGet {
-            origin: required(request.domain.take(), "domain", 2048)?,
+            origin: domain(request)?,
             id: item_id(request)?,
-            request: required(
-                request.passkey_request.take(),
-                "WebAuthn request",
-                64 * 1024,
-            )?,
+            request: passkey_request(request)?,
             verification: request.verification_token.take(),
             verified: false,
         }),
         NativeAction::CopyLoginValue => Ok(ServerCommand::BrowserCopy {
-            domain: required(request.domain.take(), "domain", 2048)?,
+            domain: domain(request)?,
             id: item_id(request)?,
             field: request.field.ok_or("missing copy field")?,
             timeout: clipboard_timeout(),
@@ -1056,6 +1044,19 @@ fn clipboard_timeout() -> u8 {
         .unwrap_or_default()
         .clipboard
         .timeout
+}
+
+/// The page origin a browser request applies to.
+fn domain(request: &mut NativeRequest) -> Result<String, String> {
+    required(request.domain.take(), "domain", 2048)
+}
+
+fn passkey_request(request: &mut NativeRequest) -> Result<String, String> {
+    required(
+        request.passkey_request.take(),
+        "WebAuthn request",
+        64 * 1024,
+    )
 }
 
 fn item_id(request: &NativeRequest) -> Result<usize, String> {
